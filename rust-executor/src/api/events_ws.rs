@@ -24,7 +24,7 @@
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification` + `perspectiveUuid` | perspective owner | Notification triggered   |
+//! | `notification-triggered`      | (inline)      | owner DID (lazy)       | Notification triggered               |
 //! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
@@ -306,18 +306,18 @@ pub(crate) async fn build_event_stream_for(
     let d_agent_updated = resolved_did.clone();
     let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
-    let d_notif = resolved_did.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
     // #881: "Resolve the DID after it becomes available"). Both auto-processor
-    // streams and the query-subscription stream share the same lazy cell —
-    // one resolution serves all three.
+    // streams, the query-subscription stream and the notification stream share
+    // the same lazy cell — one resolution serves all four.
     let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
     let d_query_sub = d_auto_processor.clone();
+    let d_notif = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -516,14 +516,35 @@ pub(crate) async fn build_event_stream_for(
         events::MESSAGE_RECEIVED,
         "message"
     );
-    let s_notif = did_stream!(
-        pubsub
+    // Owner-scoped like query subscriptions: the match was read as the
+    // notification's agent, so only their sessions get it. See
+    // [`matches_notification_owner`].
+    let s_notif = {
+        let rx = pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-            .await,
-        events::NOTIFICATION_TRIGGERED,
-        d_notif,
-        |msg: &str, did: Option<&str>| matches_notification_owner(msg, did, false)
-    );
+            .await;
+        let admin = is_admin;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = d_notif.clone();
+                async move {
+                    let current_did = did_cell.get();
+                    match result {
+                        Ok(ref msg)
+                            if matches_notification_owner(
+                                msg,
+                                current_did.as_deref(),
+                                admin,
+                            ) =>
+                        {
+                            Some(wrap_event(events::NOTIFICATION_TRIGGERED, msg))
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
     let s_exc = broadcast_stream_nested!(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
         events::EXCEPTION_OCCURRED,
@@ -886,13 +907,23 @@ pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) ->
         .is_some_and(|uuid| perspective_is_owned_by(&uuid, did))
 }
 
-/// Which sessions a `notification-triggered` event reaches.
+/// A `notification-triggered` event reaches the sessions of the agent the
+/// notification belongs to (`ownerDid`), and no other. Its trigger ran as
+/// that agent reads, so `triggerMatch` may hold rows from their Local graph;
+/// a co-owner of the perspective must not see it (#812 review). Same rule,
+/// and the same admin escape hatch, as [`matches_query_subscription_owner`].
 pub(crate) fn matches_notification_owner(
     msg: &str,
     current_did: Option<&str>,
-    _is_admin: bool,
+    is_admin: bool,
 ) -> bool {
-    matches_perspective_owner(msg, current_did)
+    matches_event_agent_with(
+        msg,
+        current_did,
+        is_admin,
+        "ownerDid",
+        perspective_is_owned_by,
+    )
 }
 
 /// A `query-subscription-update` reaches the session of the agent that
@@ -919,6 +950,19 @@ fn matches_query_subscription_owner_with(
     is_admin: bool,
     owned_check: impl Fn(&str, &str) -> bool,
 ) -> bool {
+    matches_event_agent_with(msg, current_did, is_admin, "subscriberDid", owned_check)
+}
+
+/// An event that names the one agent it is for under `agent_key` reaches
+/// that agent's sessions, if they still own the perspective. Admin
+/// credentials see everything; anything else fails closed.
+fn matches_event_agent_with(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+    agent_key: &str,
+    owned_check: impl Fn(&str, &str) -> bool,
+) -> bool {
     if is_admin {
         return true;
     }
@@ -929,9 +973,9 @@ fn matches_query_subscription_owner_with(
         Ok(serde_json::Value::Object(map)) => map,
         _ => return false,
     };
-    // The subscriber first: a string compare, so only the subscriber's own
-    // session reaches the ownership check and its perspective lock.
-    match map.get("subscriberDid") {
+    // The agent first: a string compare, so only that agent's own session
+    // reaches the ownership check and its perspective lock.
+    match map.get(agent_key) {
         Some(serde_json::Value::String(subscriber)) if subscriber == did => {}
         _ => return false,
     }
@@ -1599,6 +1643,7 @@ mod event_spec_tests {
                     perspective_id: p(),
                     trigger_match: "[]".into(),
                 },
+                owner_did: "did:x".into(),
             }),
             uuid_of(PerspectiveQuerySubscriptionFilter {
                 perspective_uuid: p(),

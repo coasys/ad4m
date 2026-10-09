@@ -4892,6 +4892,24 @@ impl PerspectiveInstance {
                 // Convert matches to JSON string
                 let trigger_match =
                     serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
+                // The trigger ran as the notification's agent, so only that
+                // agent may receive the match (see `matches_notification_owner`).
+                let owner = match &notification.user_email {
+                    Some(email) => AgentContext::for_user_email(email.clone()),
+                    None => AgentContext::main_agent(),
+                };
+                let owner_did = match did_for_context(&owner) {
+                    Ok(did) => did,
+                    Err(e) => {
+                        log::error!(
+                            "Notification {} in perspective {}: no DID for its owner {:?}: {e:#}",
+                            notification.id,
+                            uuid,
+                            notification.user_email
+                        );
+                        continue;
+                    }
+                };
 
                 let payload = NotificationTriggeredEvent {
                     perspective_uuid: uuid.clone(),
@@ -4900,6 +4918,7 @@ impl PerspectiveInstance {
                         perspective_id: uuid.clone(),
                         trigger_match,
                     },
+                    owner_did,
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();

@@ -549,6 +549,10 @@ pub struct TriggeredNotification {
 pub struct NotificationTriggeredEvent {
     pub perspective_uuid: String,
     pub notification: TriggeredNotification,
+    /// The agent the notification belongs to. The events socket delivers the
+    /// event to this agent's sessions only: the trigger ran as this agent
+    /// reads, so `trigger_match` may hold rows from their Local graph.
+    pub owner_did: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
