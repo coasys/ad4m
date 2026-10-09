@@ -432,7 +432,7 @@ pub struct PerspectiveMemoryStats {
 /// no JSON metadata is held here.
 #[derive(Clone)]
 struct ModelSubscriptionParams {
-    class_name: String,
+    classes: super::model_query::QueryClasses,
     query_json: String,
 }
 
@@ -3907,11 +3907,35 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// [`Self::model_query`] over one class or a union of classes (#1238).
+    pub async fn model_query_classes(
+        &self,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await
+    }
+
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
     async fn model_query_within(
         &self,
         class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_classes_within(&classes, query_json, shape_wait)
+            .await
+    }
+
+    /// [`Self::model_query_within`] over one class or a union of classes
+    /// (#1238, [`super::model_query::execute_union_query`]). Every class the
+    /// union names is waited for under the one budget, as an included class is.
+    pub(super) async fn model_query_classes_within(
+        &self,
+        classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
@@ -3934,9 +3958,15 @@ impl PerspectiveInstance {
         // its includes reach get whatever this wait leaves (see the retry
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
-        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
+        let mut shapes = Vec::new();
+        for class_name in classes.names() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            shapes.push((
+                class_name.clone(),
+                self.get_shape_or_wait(class_name, remaining).await?,
+            ));
+        }
         let resolver = self.shape_resolver();
-        let shape = resolver.get_shape(class_name)?;
 
         if let Some(filter) = produced_by_flow {
             let valid = super::flow_instance::produced::flow_valid_outputs(
@@ -3945,16 +3975,18 @@ impl PerspectiveInstance {
                 filter.state.as_deref(),
             )
             .await?;
-            // Only outputs committed as the queried class pass; see
+            // Only outputs committed as a queried class pass; see
             // `output_matches_class` for why conformance alone is not enough.
             let allowed: std::collections::BTreeSet<String> = valid
                 .into_iter()
                 .filter(|v| {
-                    super::flow_instance::produced::output_matches_class(
-                        &v.output,
-                        class_name,
-                        &shape.target_class,
-                    )
+                    shapes.iter().any(|(class_name, shape)| {
+                        super::flow_instance::produced::output_matches_class(
+                            &v.output,
+                            class_name,
+                            &shape.target_class,
+                        )
+                    })
                 })
                 .map(|v| v.output.id)
                 .collect();
@@ -3989,14 +4021,27 @@ impl PerspectiveInstance {
         // `get_shape_or_wait` does not wait there.
         let mut waited_for: HashSet<String> = HashSet::new();
         let result = loop {
-            let err = match super::model_query::execute_model_query(
-                &self.sparql_store,
-                shape.as_ref(),
-                &query_input,
-                &resolver,
-            )
-            .await
-            {
+            let run = match classes {
+                super::model_query::QueryClasses::One(_) => {
+                    super::model_query::execute_model_query(
+                        &self.sparql_store,
+                        shapes[0].1.as_ref(),
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+                super::model_query::QueryClasses::Union(names) => {
+                    super::model_query::execute_union_query(
+                        &self.sparql_store,
+                        names,
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+            };
+            let err = match run {
                 Ok(result) => break result,
                 Err(err) => err,
             };
@@ -5887,18 +5932,32 @@ impl PerspectiveInstance {
     /// registers a subscription, and runs the initial model query — all in one call.
     /// When link changes match the trigger predicates, `execute_model_query` is
     /// re-run in Rust and the updated results are pushed to the client.
+    ///
+    /// `classes` is one class or a union (#1238). A union is one subscription:
+    /// it re-runs when a diff touches the trigger set of any class it names.
     pub async fn model_subscribe_and_query(
         &self,
-        class_name: String,
+        classes: super::model_query::QueryClasses,
         query_json: String,
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json).await?;
+        let initial_result = self
+            .model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await?;
 
         // 2. Build trigger SPARQL from shape predicates resolved through the cache.
-        let trigger_predicates =
-            self.build_model_trigger_predicates(&class_name, Some(&query_json));
+        //    Each class contributes its own trigger set; the matcher below is
+        //    predicate-only, so the sets meet as their union.
+        let mut trigger_predicates: Vec<String> = classes
+            .names()
+            .iter()
+            .flat_map(|class_name| {
+                self.build_model_trigger_predicates(class_name, Some(&query_json))
+            })
+            .collect();
+        trigger_predicates.sort();
+        trigger_predicates.dedup();
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
@@ -5924,7 +5983,7 @@ impl PerspectiveInstance {
                 .iter()
                 .find(|(_, q)| {
                     if let Some(ref params) = q.model_query_params {
-                        params.class_name == class_name
+                        params.classes == classes
                             && params.query_json == query_json
                             && q.user_email == user_email
                     } else {
@@ -5960,7 +6019,7 @@ impl PerspectiveInstance {
             user_email,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
-                class_name,
+                classes,
                 query_json,
             }),
             holders: 1,
@@ -6161,7 +6220,11 @@ impl PerspectiveInstance {
                 // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
-                        .model_query_within(&params.class_name, &params.query_json, Duration::ZERO)
+                        .model_query_classes_within(
+                            &params.classes,
+                            &params.query_json,
+                            Duration::ZERO,
+                        )
                         .await
                     {
                         Ok(r) => r,

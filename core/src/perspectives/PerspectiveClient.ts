@@ -41,6 +41,11 @@ function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesR
     return finalResult as AllInstancesResult
 }
 
+/** The wire form of a model query's classes: `class_name` for one, `class_names` for a union. */
+function classParams(className: string | string[]): { class_name: string } | { class_names: string[] } {
+    return Array.isArray(className) ? { class_names: className } : { class_name: className }
+}
+
 export class PerspectiveClient {
     #apiClient: ApiClient
     #expressionClient?: ExpressionClient
@@ -156,9 +161,10 @@ export class PerspectiveClient {
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
+    /** `className` may name several classes: one query over their union (#1238). */
+    async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
+            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }
@@ -186,9 +192,9 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+    async modelSubscribe(uuid: string, className: string | string[], queryJson: string): Promise<{ subscriptionId: string, result: any }> {
         const response = await this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }
         )
         return {
             subscriptionId: response.subscription_id,

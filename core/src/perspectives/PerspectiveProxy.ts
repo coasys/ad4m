@@ -1030,11 +1030,13 @@ export class PerspectiveProxy {
      * triples (written by `addSdna`).  Callers no longer ship shape
      * metadata with the query; the perspective is the source of truth.
      *
-     * @param className - The model class name (e.g. "Recipe")
+     * @param className - The model class name (e.g. "Recipe"), or several: one
+     *   query over their union, whose rows carry `__subjectClass` and
+     *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
@@ -1103,11 +1105,11 @@ export class PerspectiveProxy {
      * The subscription reuses the same WS-RPC subscription channel as subscribeQuery().
      * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
      *
-     * @param className - The model class name
+     * @param className - The model class name, or several (same as modelQuery)
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
      * @returns Object with `subscriptionId` and initial `result`
      */
-    async modelSubscribe(className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+    async modelSubscribe(className: string | string[], queryJson: string): Promise<{ subscriptionId: string, result: any }> {
         return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
     }
 

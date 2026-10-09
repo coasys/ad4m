@@ -3864,3 +3864,112 @@ describe("ModelQueryBuilder subscribe ordering", () => {
     expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)", () => {
+  @Model({ name: "UnionTaskU" })
+  class UnionTaskU extends Ad4mModel {
+    @Flag({ through: "u://kind", value: "u://task" })
+    kind: string = "";
+    @Property({ through: "u://status" })
+    status: string = "";
+  }
+
+  @Model({ name: "UnionNoteU" })
+  class UnionNoteU extends Ad4mModel {
+    @Flag({ through: "u://kind", value: "u://note" })
+    kind: string = "";
+    @Property({ through: "u://body" })
+    body: string = "";
+  }
+
+  const rows = {
+    instances: [
+      { id: "u://t1", status: "open", __subjectClass: "UnionTaskU", __subjectClasses: ["UnionTaskU"] },
+      { id: "u://n1", body: "hi", __subjectClass: "UnionNoteU", __subjectClasses: ["UnionNoteU"] },
+      { id: "u://x", __subjectClass: "Other", __subjectClasses: ["Other"] },
+    ],
+    totalCount: 7,
+  };
+
+  it("sends every class name and builds each row as its own class", async () => {
+    const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
+    const results = await Ad4mModel.findAllOf(perspective, [UnionTaskU, UnionNoteU], {
+      where: { status: "open" },
+      order: { status: "DESC" },
+      limit: 2,
+      preferClasses: ["UnionNoteU"],
+    });
+
+    const [classNames, queryJson] = perspective.modelQuery.mock.calls[0];
+    expect(classNames).toEqual(["UnionTaskU", "UnionNoteU"]);
+    const sent = JSON.parse(queryJson);
+    expect(sent.where).toEqual({ status: "open" });
+    expect(sent.order).toEqual([["status", "DESC"]]);
+    expect(sent.limit).toBe(2);
+    expect(sent.preferClasses).toEqual(["UnionNoteU"]);
+
+    expect(results[0]).toBeInstanceOf(UnionTaskU);
+    expect((results[0] as UnionTaskU).status).toBe("open");
+    expect(results[1]).toBeInstanceOf(UnionNoteU);
+    // A class the caller did not list stays plain JSON.
+    expect(results[2]).not.toBeInstanceOf(Ad4mModel);
+  });
+
+  it("queryOf().count() reads the union's totalCount", async () => {
+    const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
+    const count = await Ad4mModel.queryOf(perspective, [UnionTaskU, UnionNoteU]).count();
+    expect(count).toBe(7);
+    expect(JSON.parse(perspective.modelQuery.mock.calls[0][1]).limit).toBe(0);
+  });
+
+  it("refuses a projection key the classes tag with different target classes", () => {
+    @Model({ name: "UnionCardU" })
+    class UnionCardU extends Ad4mModel {
+      @Property({ through: "u://title" })
+      title: string = "";
+    }
+    @Model({ name: "UnionWaypointU" })
+    class UnionWaypointU extends Ad4mModel {
+      @Property({ through: "u://x" })
+      x: string = "";
+    }
+    @Model({ name: "UnionPlacementU" })
+    class UnionPlacementU extends Ad4mModel {
+      @HasMany(() => UnionCardU, { through: "u://items" })
+      items: string[] = [];
+    }
+    @Model({ name: "UnionRouteU" })
+    class UnionRouteU extends Ad4mModel {
+      @HasMany(() => UnionWaypointU, { through: "u://items" })
+      items: string[] = [];
+    }
+    const include = { $items: { from: "items", where: { title: "a" } } } as any;
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionRouteU], { include }),
+    ).toThrow(/different target classes/);
+    // Same target on both: accepted.
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionPlacementU], { include }),
+    ).not.toThrow();
+  });
+
+  it("keeps a raw parent predicate and refuses a scope the classes resolve differently", () => {
+    const { queryJson } = Ad4mModel.prepareUnionQueryParams([UnionTaskU, UnionNoteU], {
+      parent: { id: "u://canvas", predicate: "u://item" },
+    });
+    expect(JSON.parse(queryJson).parent).toEqual({ id: "u://canvas", predicate: "u://item" });
+
+    @Model({ name: "UnionBoardU" })
+    class UnionBoardU extends Ad4mModel {
+      @HasMany(() => UnionTaskU, { through: "u://tasks" })
+      tasks: string[] = [];
+      @HasMany(() => UnionNoteU, { through: "u://notes" })
+      notes: string[] = [];
+    }
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionTaskU, UnionNoteU], {
+        parent: { id: "u://board", model: UnionBoardU },
+      }),
+    ).toThrow(/different predicates/);
+  });
+});
