@@ -5,6 +5,7 @@ import {
   authenticateAgent,
   createTestAgent,
   getJson,
+  openAuthenticatedWs,
   postJson,
   startTestServer,
   type TestServerHandle,
@@ -108,6 +109,28 @@ test("removed member can no longer re-authenticate without being re-added", asyn
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "remove", did: member.did }, adminToken);
 
     await assert.rejects(() => authenticateAgent(server.url, roomId, member));
+  });
+});
+
+test("removing a member closes their open WebSocket, so live diffs stop at once", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+    const socket = await openAuthenticatedWs(server.wsUrl, roomId, memberToken);
+    const closed = new Promise<number>((resolve) => socket.once("close", (code) => resolve(code)));
+
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "remove", did: member.did }, adminToken);
+
+    const code = await Promise.race([
+      closed,
+      new Promise<"open">((resolve) => setTimeout(() => resolve("open"), 2000)),
+    ]);
+    if (code === "open") socket.terminate();
+    assert.equal(code, 4005, "the removed member's socket must be closed with 4005");
   });
 });
 

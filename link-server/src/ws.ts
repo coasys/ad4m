@@ -262,6 +262,23 @@ export class WsManager {
     }
   }
 
+  /**
+   * Closes every socket a DID has open in a room (code 4005). Called when the
+   * DID leaves the ACL: revoking its sessions stops HTTP at once, but an open
+   * socket would otherwise keep receiving the room's diffs until it reconnects.
+   */
+  disconnectDid(roomId: string, did: string): void {
+    const conns = this.rooms.get(roomId)?.get(did);
+    if (!conns) return;
+    for (const conn of [...conns]) {
+      try {
+        conn.socket.close(4005, "removed from room");
+      } catch {
+        // already closing
+      }
+    }
+  }
+
   hasConnections(roomId: string): boolean {
     const room = this.rooms.get(roomId);
     return !!room && room.size > 0;
