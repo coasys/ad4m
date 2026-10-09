@@ -189,6 +189,12 @@ pub async fn run_flow_consensus_pass(
         // next pass an ordinary one, so an edge settling afterwards is not
         // missed. Invariant: no event flood on join; no missed events for
         // edges that settle after catch-up.
+        //
+        // On a co-owned perspective each owner catches up on their own (#1360).
+        // So if Bob's vote settles an edge before any pass ever ran for him on
+        // this instance, that pass is his catch-up and `accept_flow_proposal`
+        // returns no outcome for the edge. The edge is still settled and
+        // marked; only the report is missing.
         let first_pass_here = already_marked.is_empty()
             && match has_local_cache(perspective, &record.instance_uri).await {
                 Ok(cached) => !cached,

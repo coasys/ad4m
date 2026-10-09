@@ -1359,6 +1359,11 @@ impl SparqlStore {
     /// The graphs every agent shares: the default graph plus each named graph
     /// that isn't Local. `None` when the store holds no Local graph, so the
     /// read keeps its unscoped fast path.
+    ///
+    /// Known race (#812 review): this and [`Self::visible_scope`] decide on
+    /// the fast path before the query runs. If the first Local graph is
+    /// created in between, that one query reads every graph. The window is
+    /// one query wide; the graph index planned in #1317 removes it.
     pub fn shared_scope(&self) -> Result<Option<Vec<String>>, Error> {
         let named = self.named_graphs()?;
         if !named.iter().any(|g| is_local_graph(g)) {
@@ -1701,7 +1706,8 @@ impl SparqlStore {
     ///   agents' Local graphs. `None` when nothing is hidden, so the read keeps
     ///   its unscoped fast path.
     ///
-    /// `viewer: None` is the executor itself, which sees everything.
+    /// `viewer: None` is the executor itself, which sees everything. The
+    /// fast-path race noted on [`Self::shared_scope`] applies here too.
     pub fn visible_scope(
         &self,
         viewer: Option<&str>,
