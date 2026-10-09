@@ -573,14 +573,22 @@ impl Walk<'_> {
 
     /// An include whose members' class is not known (polymorphic, or a
     /// relation that declares no class): any predicate on a member, and any
-    /// relation from it, may be read.
+    /// relation from it, may be read. A member's typed relations are read
+    /// even without a sub-include: `hydrate_polymorphic` runs each member
+    /// class's query, which fills them through their conformance getters.
+    /// So a write on a node linked to a member by any predicate may change
+    /// the result.
+    ///
+    /// The cost: a write on a node outside the result reads all its links.
+    /// A class marker (a flag's value) is linked to every instance, so a
+    /// create re-runs when an instance of its class is in the result, or
+    /// when the class has more than [`MAX_NEIGHBOURS`] instances. That is
+    /// about `dev`'s behaviour for these subscriptions. Narrowing it to
+    /// the relation predicates of the registered classes would miss a
+    /// class registered after subscribing.
     fn unknown_members(&mut self, sub: &ModelQueryInput) {
         self.rules.near = Predicates::All;
-        if sub.include.as_ref().is_some_and(|i| !i.is_empty())
-            || sub.projections.as_ref().is_some_and(|p| !p.is_empty())
-        {
-            self.rules.via = Predicates::All;
-        }
+        self.rules.via = Predicates::All;
         if sub.where_clause.as_ref().is_some_and(has_quantifier) {
             self.rules.every_write = true;
         }
