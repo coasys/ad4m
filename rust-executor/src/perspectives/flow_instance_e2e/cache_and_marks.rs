@@ -727,3 +727,43 @@ async fn an_acting_call_records_the_new_state_for_the_perspectives_owner() {
         .unwrap();
     assert_eq!(alices.as_deref(), Some("scoped"), "Alice reads the new state");
 }
+
+/// The same for an accept: the `{n: 2}` edge another agent's co-signature
+/// settles is recorded for the perspective's owner before the call returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accept_records_the_new_state_for_the_perspectives_owner() {
+    use crate::perspectives::flow_instance::pass::local_cached_state;
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let email = format!("alice-owner-{}@e2e.test", uuid::Uuid::new_v4());
+    let alice = second_agent(&email);
+    let alice_did = crate::agent::did_for_context(&alice).unwrap();
+    let _multi_user = MultiUserForTest::enable(&[(&email, &alice_did)]);
+    let mut handle = f.perspective.persisted.lock().await.clone();
+    handle.owners = Some(vec![alice_did.clone()]);
+    f.perspective.update_from_handle(handle).await;
+    let instance = f.instance_uri.clone();
+    let alices = |f: &Fixture| {
+        let view = f.perspective.clone().for_viewer(alice_did.clone());
+        let instance = instance.clone();
+        async move { local_cached_state(&view, &instance).await.unwrap() }
+    };
+
+    let proposed = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the proposer");
+    assert_eq!(alices(&f).await.as_deref(), Some("identified"), "one vote short");
+
+    let bob = second_agent("bob-cosigner@e2e.test");
+    accept_flow_proposal(&mut f.perspective, &proposed.proposal_uri, &bob)
+        .await
+        .expect("Bob co-signs");
+    assert_eq!(alices(&f).await.as_deref(), Some("scoped"), "Alice reads the new state");
+}
