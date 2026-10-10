@@ -56,6 +56,13 @@ function requireAdmin(ctx: RouteContext) {
   };
 }
 
+/** Takes a DID out of a room: ACL row, sessions and open sockets, so access ends at once on every path. */
+export function removeMember(ctx: Pick<RouteContext, "db" | "auth" | "ws">, roomId: string, did: string): void {
+  ctx.db.removeAcl(roomId, did);
+  ctx.auth.revokeSessionsForDid(roomId, did);
+  ctx.ws.disconnectDid(roomId, did);
+}
+
 function rateLimitHook(limiter: SlidingWindowLimiter, keyOf: (request: FastifyRequest) => string) {
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const check = limiter.check(keyOf(request));
@@ -327,11 +334,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         if (body.did === claims.did) {
           return reply.code(400).send({ error: "admin cannot remove themselves from the ACL" });
         }
-        ctx.db.removeAcl(claims.roomId, body.did);
-        ctx.auth.revokeSessionsForDid(claims.roomId, body.did);
+        removeMember(ctx, claims.roomId, body.did);
       } else {
         ctx.db.addAcl(claims.roomId, body.did);
       }
+      ctx.db.recordAclChange(claims.roomId, body.did, body.action, claims.did, "room-admin");
 
       const acl = ctx.db.getAcl(claims.roomId);
       const room = ctx.db.getRoom(claims.roomId)!;

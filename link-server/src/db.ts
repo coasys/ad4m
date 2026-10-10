@@ -61,6 +61,17 @@ CREATE INDEX IF NOT EXISTS idx_links_room ON links(room_id);
 CREATE INDEX IF NOT EXISTS idx_diffs_room_seq ON diffs(room_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_acl_room ON acl(room_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_room_did ON sessions(room_id, did);
+-- Append-only record of ACL changes: who admitted or removed whom, and through which path.
+CREATE TABLE IF NOT EXISTS acl_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id TEXT NOT NULL,
+  did TEXT NOT NULL,
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acl_changes_room ON acl_changes(room_id, id);
 `;
 
 export interface RoomRow {
@@ -77,6 +88,17 @@ export interface AclRow {
   added_at: string;
   x25519_public_key: string | null;
   x25519_signature: string | null;
+}
+
+/** One row of the ACL audit trail. `source` is "operator" (actor = signed-in login) or "room-admin" (actor = admin DID). */
+export interface AclChangeRow {
+  id: number;
+  room_id: string;
+  did: string;
+  action: "add" | "remove";
+  actor: string;
+  source: "operator" | "room-admin";
+  at: string;
 }
 
 export interface LinkRow {
@@ -149,6 +171,10 @@ export class LinkServerDB {
   private prepareStatements() {
     return {
       getRoom: this.raw.prepare("SELECT * FROM rooms WHERE id = ?"),
+      listRooms: this.raw.prepare(
+        `SELECT r.*, (SELECT COUNT(*) FROM acl a WHERE a.room_id = r.id) AS member_count
+         FROM rooms r ORDER BY r.created_at DESC`
+      ),
       createRoom: this.raw.prepare(
         "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
       ),
@@ -165,6 +191,12 @@ export class LinkServerDB {
       ),
       getX25519: this.raw.prepare("SELECT x25519_public_key FROM acl WHERE room_id = ? AND did = ?"),
       transferAdmin: this.raw.prepare("UPDATE rooms SET admin_did = ? WHERE id = ?"),
+      recordAclChange: this.raw.prepare(
+        "INSERT INTO acl_changes (room_id, did, action, actor, source, at) VALUES (?, ?, ?, ?, ?, ?)"
+      ),
+      getAclChanges: this.raw.prepare(
+        "SELECT * FROM acl_changes WHERE room_id = ? ORDER BY id DESC LIMIT ?"
+      ),
 
       insertLink: this.raw.prepare(
         `INSERT OR IGNORE INTO links (room_id, link_hash, link_data, sequence)
@@ -244,6 +276,11 @@ export class LinkServerDB {
     return this.stmts.getRoom.get(roomId) as RoomRow | undefined;
   }
 
+  /** Every room with its ACL size, newest first. Operator listing only. */
+  listRooms(): Array<RoomRow & { member_count: number }> {
+    return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
+  }
+
   createRoom(roomId: string, adminDid: string): RoomRow {
     const createdAt = new Date().toISOString();
     this.stmts.createRoom.run(roomId, adminDid, createdAt, EMPTY_REVISION);
@@ -276,6 +313,21 @@ export class LinkServerDB {
 
   removeAcl(roomId: string, did: string): void {
     this.stmts.removeAcl.run(roomId, did);
+  }
+
+  recordAclChange(
+    roomId: string,
+    did: string,
+    action: AclChangeRow["action"],
+    actor: string,
+    source: AclChangeRow["source"]
+  ): void {
+    this.stmts.recordAclChange.run(roomId, did, action, actor, source, new Date().toISOString());
+  }
+
+  /** Newest first. */
+  getAclChanges(roomId: string, limit = 100): AclChangeRow[] {
+    return this.stmts.getAclChanges.all(roomId, limit) as AclChangeRow[];
   }
 
   setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string, x25519Signature?: string): void {

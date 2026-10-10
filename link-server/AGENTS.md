@@ -28,7 +28,8 @@ rate-limit.ts   sliding-window limiter, fully standalone
 telepresence.ts online/offline + grace-period timers; DOES NOT import ws.ts (returns state, caller broadcasts) to avoid a cycle
 ws.ts           WebSocket connection registry + telepresence message routing; imports auth.ts + telepresence.ts
 routes.ts       all HTTP handlers; imports everything above
-server.ts       composition root: builds db/auth/telepresence/ws, registers routes
+operator.ts     optional loopback-only operator app (admission UI + /api); shares db/auth/ws with routes.ts, page in operator-page.ts
+server.ts       composition root: builds db/auth/telepresence/ws, registers routes, builds the operator app when asked
 index.ts        CLI arg parsing, calls buildServer + app.listen
 ```
 
@@ -61,6 +62,14 @@ There's no dedicated "enable E2E" endpoint. **The first call to `POST /rooms/:ro
 **X25519 key derivation**: clients derive their X25519 keypair from their Ed25519 *signing capability* (sha256(sign(FIXED_MESSAGE))), NOT from direct Ed25519→X25519 Montgomery conversion, because the Deno sandbox never exposes the raw Ed25519 private key. The public key is sent during the DID auth challenge-response (step 2, `x25519PublicKey` field) and stored in the `acl` table's `x25519_public_key` column. The server never derives X25519 keys from DIDs.
 
 **WebSocket keepalive**: connections use a 30-second ping/pong heartbeat. Sockets that miss a pong get terminated. This prevents stale connections from accumulating on the server.
+
+### Operator listener
+
+`--operator-port` + `--operator-token-file` start a second Fastify app (`operator.ts`) on loopback. It lets the server operator list rooms and add/remove DIDs without the room admin's DID key. It is a separate app, not a route prefix, so the public port can never serve it. Any change to who can reach it must keep these properties, each covered by `tests/operator.test.ts`:
+- The token comes from a mode-600 file only (never argv/URL), and the request log never sees headers.
+- Every `/api` call carries the signed-in login (`X-Forwarded-User`, set by the proxy; trusted only because the listener is loopback). Every ACL change is stored in `acl_changes` with that login. The `/acl` route stores the admin DID.
+- Every POST carries an allowed `Origin` (or `Referer`), as a CSRF guard for the cookie sign-in.
+- Removal goes through `removeMember()` in `routes.ts` (ACL row, sessions and sockets together). The page script builds DOM with `textContent` only, because room ids and DIDs are client-chosen strings.
 
 ## Known gotchas
 
