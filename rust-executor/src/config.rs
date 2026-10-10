@@ -23,6 +23,15 @@ pub fn set_global_config(config: Ad4mConfig) {
 
 /// Get a clone of the global Ad4mConfig.
 /// Recovers from a poisoned mutex (see `set_global_config` for rationale).
+/// The admin credential the executor runs with, if a global config exists. Never panics.
+pub fn configured_admin_credential() -> Option<String> {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|config| config.admin_credential.clone())
+}
+
 pub fn get_global_config() -> Ad4mConfig {
     let global_config = GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     global_config
