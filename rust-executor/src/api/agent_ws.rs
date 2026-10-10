@@ -122,6 +122,52 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let did = params.require_str("did")?;
+    agent_by_did(&did).await
+}
+
+/// Most DIDs one `agent.byDIDs` call may name.
+pub(crate) const MAX_AGENTS_BY_DIDS: usize = 200;
+
+/// `agent.byDIDs { dids }` → one entry per input DID, in input order: the
+/// agent as `agent.byDid` returns it, or `null` when unknown or on error.
+/// Each distinct DID is looked up once. More than [`MAX_AGENTS_BY_DIDS`]
+/// DIDs → 400.
+async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY).map_err(WsRpcError::forbidden)?;
+
+    let body: AgentsByDidsRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.dids.len() > MAX_AGENTS_BY_DIDS {
+        return Err(WsRpcError::bad_request(format!(
+            "`dids` holds {} entries; the limit is {}",
+            body.dids.len(),
+            MAX_AGENTS_BY_DIDS
+        )));
+    }
+
+    let mut unique: Vec<&str> = Vec::new();
+    for did in &body.dids {
+        if !unique.contains(&did.as_str()) {
+            unique.push(did);
+        }
+    }
+    let found = futures::future::join_all(unique.iter().map(|did| agent_by_did(did))).await;
+    let by_did: std::collections::HashMap<&str, Value> = unique
+        .into_iter()
+        .zip(found)
+        .map(|(did, r)| (did, r.unwrap_or(Value::Null)))
+        .collect();
+    Ok(Value::Array(
+        body.dids
+            .iter()
+            .map(|did| by_did[did.as_str()].clone())
+            .collect(),
+    ))
+}
+
+/// Shared body of `agent.byDid` and `agent.byDIDs`.
+async fn agent_by_did(did: &str) -> Result<Value, WsRpcError> {
+    let did = did.to_string();
 
     // Check if DID matches main agent
     let did_match = {
@@ -863,6 +909,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
         .read();
     map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
+        .read();
+    map.method::<AgentsByDidsRequest, Vec<Option<Agent>>>("agent.byDIDs", get_agents_by_dids)
         .read();
     map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)

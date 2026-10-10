@@ -11,6 +11,7 @@ import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
+import type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 import type { AiAddModelParams } from "./AiAddModelParams";
 import type { AiAddTaskParams } from "./AiAddTaskParams";
 import type { AiDiscoverModelsParams } from "./AiDiscoverModelsParams";
@@ -80,12 +81,14 @@ import type { PerspectiveAddSdnaParams } from "./PerspectiveAddSdnaParams";
 import type { PerspectiveAddSdnaResult } from "./PerspectiveAddSdnaResult";
 import type { PerspectiveCommitBatchParams } from "./PerspectiveCommitBatchParams";
 import type { PerspectiveCreateSubjectParams } from "./PerspectiveCreateSubjectParams";
+import type { PerspectiveDiscardBatchParams } from "./PerspectiveDiscardBatchParams";
 import type { PerspectiveEvaluateGettersParams } from "./PerspectiveEvaluateGettersParams";
 import type { PerspectiveExecuteCommandsParams } from "./PerspectiveExecuteCommandsParams";
 import type { PerspectiveExpression } from "./PerspectiveExpression";
 import type { PerspectiveFlowProposalParams } from "./PerspectiveFlowProposalParams";
 import type { PerspectiveFlowReceiptVerdict } from "./PerspectiveFlowReceiptVerdict";
 import type { PerspectiveFlowValidOutputsParams } from "./PerspectiveFlowValidOutputsParams";
+import type { PerspectiveGetAllShaclParams } from "./PerspectiveGetAllShaclParams";
 import type { PerspectiveGetSubjectDataParams } from "./PerspectiveGetSubjectDataParams";
 import type { PerspectiveHandle } from "./PerspectiveHandle";
 import type { PerspectiveLinkDiff } from "./PerspectiveLinkDiff";
@@ -161,6 +164,7 @@ import type { VerifySignatureRequest } from "./VerifySignatureRequest";
 export interface RpcMethods {
   "agent.addEntanglementProofs": { params: AgentAddEntanglementProofsParams; result: Array<EntanglementProof> };
   "agent.addTrustedAgents": { params: TrustedAgentsWrapper; result: Array<string> };
+  "agent.byDIDs": { params: AgentsByDidsRequest; result: Array<Agent | null> };
   "agent.byDid": { params: AgentByDidParams; result: Agent | null };
   "agent.deleteEntanglementProofs": { params: EntanglementProofsWrapper; result: Array<EntanglementProof> };
   "agent.deleteTrustedAgents": { params: TrustedAgentsWrapper; result: Array<string> };
@@ -239,13 +243,14 @@ export interface RpcMethods {
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };
   "perspective.createBatch": { params: PerspectiveUuidParams; result: string };
   "perspective.createSubject": { params: PerspectiveCreateSubjectParams; result: boolean };
+  "perspective.discardBatch": { params: PerspectiveDiscardBatchParams; result: boolean };
   "perspective.disposeQuery": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
   "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
   "perspective.flowValidOutputs": { params: PerspectiveFlowValidOutputsParams; result: Array<ValidOutput> };
   "perspective.get": { params: PerspectiveUuidParams; result: PerspectiveHandle | null };
-  "perspective.getAllShacl": { params: PerspectiveUuidParams; result: Array<PerspectiveNamedShacl> };
+  "perspective.getAllShacl": { params: PerspectiveGetAllShaclParams; result: Array<PerspectiveNamedShacl> };
   "perspective.getShacl": { params: PerspectiveShaclNameParams; result: PerspectiveShacl | null };
   "perspective.getShaclNames": { params: PerspectiveUuidParams; result: Array<string> };
   "perspective.getShaclTargetClass": { params: PerspectiveShaclNameParams; result: string | null };
@@ -334,6 +339,7 @@ export type RpcMethod = keyof RpcMethods;
 
 /** Idempotent reads: the client resends one once after a reconnect. */
 export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "agent.byDIDs",
   "agent.byDid",
   "agent.entanglementProofPreflight",
   "agent.get",
