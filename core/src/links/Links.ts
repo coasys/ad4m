@@ -1,16 +1,13 @@
-import { Field, InputType, ObjectType } from "type-graphql";
 import { ExpressionGeneric, ExpressionGenericInput } from '../expression/Expression';
-import { LinkStatus } from "../perspectives/PerspectiveProxy";
-
-@ObjectType()
+import type { DecoratedLinkExpression } from "../generated/api/DecoratedLinkExpression";
+import type { LinkExpression as WireLinkExpression } from "../generated/api/LinkExpression";
+import type { LinkExpressionInput as WireLinkExpressionInput } from "../generated/api/LinkExpressionInput";
+import type { LinkMutations as WireLinkMutations } from "../generated/api/LinkMutations";
+import type { LinkStatus as WireLinkStatus } from "../generated/api/LinkStatus";
+import type { PerspectiveLinkDiff } from "../generated/api/PerspectiveLinkDiff";
 export class Link {
-    @Field()
     source: string;
-    
-    @Field()
     target: string;
-    
-    @Field({nullable: true})
     predicate?: string;
 
     constructor(obj) {
@@ -19,42 +16,31 @@ export class Link {
         this.predicate = obj.predicate ? obj.predicate : ''
     }
 }
-
-@InputType()
 export class LinkMutations {
-    @Field(type => [LinkInput])
     additions: LinkInput[];
-
-    @Field(type => [LinkExpressionInput])
     removals: LinkExpressionInput[];
 }
-@ObjectType()
 export class LinkExpressionMutations {
-    @Field(type => [LinkExpression])
     additions: LinkExpression[];
-
-    @Field(type => [LinkExpression])
     removals: LinkExpression[];
 
     constructor(additions: LinkExpression[], removals: LinkExpression[]) {
         this.additions = additions
         this.removals = removals
     }
-}
 
-@InputType()
+    static fromWire(diff: PerspectiveLinkDiff): LinkExpressionMutations {
+        return new LinkExpressionMutations(
+            diff.additions.map(LinkExpression.fromWire),
+            diff.removals.map(LinkExpression.fromWire),
+        )
+    }
+}
 export class LinkInput {
-    @Field()
     source: string;
-    
-    @Field()
     target: string;
-    
-    @Field({nullable: true})
     predicate?: string;
 }
-
-@ObjectType()
 export class LinkExpression extends ExpressionGeneric(Link) {
     hash(): number {
         const mash = JSON.stringify(this.data, Object.keys(this.data).sort()) +
@@ -67,18 +53,46 @@ export class LinkExpression extends ExpressionGeneric(Link) {
         }
         return hash;
     }
+    status?: WireLinkStatus;
 
-    @Field({ nullable: true, defaultValue: 'shared' })
-    status?: LinkStatus;
+    /** Build a LinkExpression (with `hash()`) from the executor's wire shape. */
+    static fromWire(wire: WireLinkExpression | DecoratedLinkExpression): LinkExpression {
+        const link = new LinkExpression(wire.author, wire.timestamp, wire.data, wire.proof)
+        if (wire.status) link.status = wire.status
+        return link
+    }
 };
-
-@InputType()
 export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {
     hash: () => number;
-
-    @Field({ nullable: true, defaultValue: 'shared' })
-    status?: LinkStatus;
+    status?: WireLinkStatus;
 };
+
+export function linkExpressionToWire(link: LinkExpression): WireLinkExpression {
+    return {
+        author: link.author,
+        timestamp: link.timestamp,
+        data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate ?? null },
+        proof: { key: link.proof.key, signature: link.proof.signature },
+        status: link.status ?? null,
+    }
+}
+
+export function linkExpressionInputToWire(link: LinkExpressionInput): WireLinkExpressionInput {
+    return {
+        author: link.author,
+        timestamp: link.timestamp,
+        data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate },
+        proof: { key: link.proof.key, signature: link.proof.signature, valid: link.proof.valid, invalid: link.proof.invalid },
+        status: link.status,
+    }
+}
+
+export function linkMutationsToWire(mutations: LinkMutations): WireLinkMutations {
+    return {
+        additions: mutations.additions,
+        removals: mutations.removals.map(linkExpressionInputToWire),
+    }
+}
 
 export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
     return l1.author == l2.author &&
@@ -91,13 +105,8 @@ export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
 export function isLink(l: any): boolean {
     return l && l.source && l.target
 }
-
-@ObjectType()
 export class LinkExpressionUpdated {
-    @Field(type => LinkExpression)
     oldLink: LinkExpression;
-
-    @Field(type => LinkExpression)
     newLink: LinkExpression;
 
     constructor(oldLink: LinkExpression, newLink: LinkExpression) {

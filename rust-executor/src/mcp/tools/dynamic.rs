@@ -5,11 +5,11 @@
 //! not just hardcoded tool sets.
 
 use super::Ad4mMcpHandler;
-use crate::graphql::graphql_types::{LinkQuery, LinkStatus};
 use crate::mcp::shacl::{self, ShaclProperty};
 use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::perspectives::{all_perspectives, get_perspective};
 use crate::types::Link;
+use crate::types::{LinkQuery, LinkStatus};
 use rmcp::model::{CallToolResult, Content, Tool};
 use rmcp::ErrorData;
 use serde_json::json;
@@ -416,20 +416,7 @@ impl Ad4mMcpHandler {
         // expression_address is optional - generate random if not provided
         let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
             Some(addr) if !addr.is_empty() => addr.to_string(),
-            _ => {
-                // Generate random 24-character alphanumeric string
-                let random_id: String = (0..24)
-                    .map(|_| {
-                        let idx = rand::random::<u8>() % 36;
-                        if idx < 10 {
-                            (b'0' + idx) as char
-                        } else {
-                            (b'a' + idx - 10) as char
-                        }
-                    })
-                    .collect();
-                format!("literal://string:{}", random_id)
-            }
+            _ => super::instances::generate_instance_uri(),
         };
 
         // Check for optional parent parameter
@@ -491,18 +478,8 @@ impl Ad4mMcpHandler {
             Ok(_) => {
                 // If parent is provided, add as child
                 if let Some(parent_addr) = parent {
-                    // Only encode if not already a URI — avoids double-encoding
-                    // values like "literal://string:abc" into "literal://string:literal%3A..."
-                    let parent_encoded = if parent_addr.contains("://") {
-                        parent_addr.clone()
-                    } else {
-                        Self::encode_literal(&parent_addr)
-                    };
-                    let child_encoded = if expression_address.contains("://") {
-                        expression_address.clone()
-                    } else {
-                        Self::encode_literal(&expression_address)
-                    };
+                    let parent_encoded = Self::wrap_bare_as_literal(&parent_addr);
+                    let child_encoded = Self::wrap_bare_as_literal(&expression_address);
 
                     let link = Link {
                         source: parent_encoded,
@@ -677,11 +654,7 @@ impl Ad4mMcpHandler {
         };
 
         // First get all children of the parent via ad4m://has_child
-        let parent_encoded = if parent.contains("://") {
-            parent.clone()
-        } else {
-            Self::encode_literal(&parent)
-        };
+        let parent_encoded = Self::wrap_bare_as_literal(&parent);
         let child_links = match perspective
             .get_links(&LinkQuery {
                 source: Some(parent_encoded),
@@ -868,6 +841,7 @@ impl Ad4mMcpHandler {
                         let raw = links[0].data.target.clone();
                         Some(
                             raw.strip_prefix("literal://string:")
+                                .or_else(|| raw.strip_prefix("literal:string:"))
                                 .unwrap_or(&raw)
                                 .to_string(),
                         )
@@ -875,60 +849,48 @@ impl Ad4mMcpHandler {
                     _ => None,
                 };
 
-                // If a getter is available for a collection, use SurrealQL for
-                // conformance-filtered results instead of naive get_links
-                if is_collection {
-                    if let Some(ref getter_expr) = getter {
-                        // Execute the conformance getter via SurrealQL.
-                        // The getter uses 'Base' as placeholder — we already have the
-                        // expression_address which is the node URI.
-                        let safe_addr = expression_address.replace('\'', "\\'");
-                        let query_str = getter_expr.replace("Base", &format!("'{}'", safe_addr));
-                        let full_query = format!(
-                            "SELECT ({}) AS value FROM node WHERE uri = '{}'",
-                            query_str, safe_addr
-                        );
-                        match perspective.surreal_query(full_query).await {
-                            Ok(results) => {
-                                let items: Vec<serde_json::Value> = results
-                                    .into_iter()
-                                    .filter_map(|row| row.get("value").cloned())
-                                    .flat_map(|v| match v {
-                                        serde_json::Value::Array(arr) => arr,
-                                        other => vec![other],
-                                    })
-                                    .filter(|v| {
-                                        !v.is_null()
-                                            && v.as_str() != Some("None")
-                                            && v.as_str() != Some("")
+                // If a getter exists, execute it as SPARQL
+                if let Some(getter_query) = getter {
+                    let sparql =
+                        getter_query.replace("<Base>", &format!("<{}>", expression_address));
+                    match perspective.sparql_query(sparql) {
+                        Ok(result_json) => {
+                            if let Ok(rows) = serde_json::from_str::<
+                                Vec<serde_json::Map<String, serde_json::Value>>,
+                            >(&result_json)
+                            {
+                                let values: Vec<String> = rows
+                                    .iter()
+                                    .filter_map(|r| {
+                                        r.get("target")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
                                     })
                                     .collect();
-                                data.insert(prop_name.clone(), serde_json::Value::Array(items));
-                            }
-                            Err(_) => {
-                                // Fall back to naive get_links on SurrealQL error
-                                let value_links = match perspective
-                                    .get_links(&LinkQuery {
-                                        source: Some(expression_address.clone()),
-                                        predicate: Some(predicate.clone()),
-                                        ..Default::default()
-                                    })
-                                    .await
-                                {
-                                    Ok(links) => links,
-                                    Err(_) => continue,
-                                };
-                                let items: Vec<String> =
-                                    value_links.iter().map(|l| l.data.target.clone()).collect();
-                                data.insert(
-                                    prop_name,
-                                    serde_json::Value::Array(
-                                        items.into_iter().map(serde_json::Value::String).collect(),
-                                    ),
-                                );
+                                if is_collection {
+                                    data.insert(
+                                        prop_name,
+                                        serde_json::Value::Array(
+                                            values
+                                                .into_iter()
+                                                .map(serde_json::Value::String)
+                                                .collect(),
+                                        ),
+                                    );
+                                } else if let Some(val) = values.first() {
+                                    data.insert(
+                                        prop_name,
+                                        serde_json::Value::String(Self::resolve_literal_value(val)),
+                                    );
+                                }
                             }
                         }
-                    } else {
+                        Err(e) => {
+                            log::warn!("Failed to execute getter SPARQL for {}: {}", prop_name, e);
+                        }
+                    }
+                } else if is_collection {
+                    {
                         let value_links = match perspective
                             .get_links(&LinkQuery {
                                 source: Some(expression_address.clone()),
@@ -948,46 +910,6 @@ impl Ad4mMcpHandler {
                                 items.into_iter().map(serde_json::Value::String).collect(),
                             ),
                         );
-                    }
-                } else if let Some(ref getter_expr) = getter {
-                    // Scalar with a getter — execute via SurrealQL
-                    let safe_addr = expression_address.replace('\'', "\\'");
-                    let query_str = getter_expr.replace("Base", &format!("'{}'", safe_addr));
-                    let full_query = format!(
-                        "SELECT ({}) AS value FROM node WHERE uri = '{}'",
-                        query_str, safe_addr
-                    );
-                    match perspective.surreal_query(full_query).await {
-                        Ok(results) => {
-                            if let Some(row) = results.first() {
-                                if let Some(val) = row.get("value") {
-                                    if !val.is_null()
-                                        && val.as_str() != Some("None")
-                                        && val.as_str() != Some("")
-                                    {
-                                        data.insert(prop_name, val.clone());
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Fall back to get_links
-                            let value_links = match perspective
-                                .get_links(&LinkQuery {
-                                    source: Some(expression_address.clone()),
-                                    predicate: Some(predicate.clone()),
-                                    ..Default::default()
-                                })
-                                .await
-                            {
-                                Ok(links) => links,
-                                Err(_) => continue,
-                            };
-                            if let Some(link) = value_links.first() {
-                                let value = Self::resolve_literal_value(&link.data.target);
-                                data.insert(prop_name, serde_json::Value::String(value));
-                            }
-                        }
                     }
                 } else {
                     let value_links = match perspective
@@ -1095,13 +1017,14 @@ impl Ad4mMcpHandler {
                 target,
             };
 
+            // Written directly, not through the property's setter action, so
+            // `ad4m://local` has to be resolved from the shape here.
+            let status =
+                crate::mcp::shacl::resolve_property_link_status(&perspective, class_name, key)
+                    .await;
+
             if let Err(e) = perspective
-                .add_link(
-                    link,
-                    LinkStatus::Shared,
-                    Some(batch_id.clone()),
-                    &agent_context,
-                )
+                .add_link(link, status, Some(batch_id.clone()), &agent_context)
                 .await
             {
                 return format!("Error adding '{}' link (batch abandoned): {}", key, e);
@@ -1259,13 +1182,15 @@ impl Ad4mMcpHandler {
             target,
         };
 
+        let status = crate::mcp::shacl::resolve_property_link_status(
+            &perspective,
+            class_name,
+            property_name,
+        )
+        .await;
+
         if let Err(e) = perspective
-            .add_link(
-                link,
-                LinkStatus::Shared,
-                Some(batch_id.clone()),
-                &agent_context,
-            )
+            .add_link(link, status, Some(batch_id.clone()), &agent_context)
             .await
         {
             return format!(
@@ -1386,8 +1311,15 @@ impl Ad4mMcpHandler {
             target,
         };
 
+        let status = crate::mcp::shacl::resolve_property_link_status(
+            &perspective,
+            class_name,
+            collection_name,
+        )
+        .await;
+
         match perspective
-            .add_link(link, LinkStatus::Shared, None, &agent_context)
+            .add_link(link, status, None, &agent_context)
             .await
         {
             Ok(_) => serde_json::to_string_pretty(&json!({
@@ -1434,11 +1366,7 @@ impl Ad4mMcpHandler {
         };
 
         // Find and remove the link with matching target
-        let target = if value.starts_with("literal://") || value.contains("://") {
-            value.clone()
-        } else {
-            Self::encode_literal(&value)
-        };
+        let target = Self::wrap_bare_as_literal(&value);
 
         match perspective
             .get_links(&LinkQuery {
@@ -1498,20 +1426,10 @@ mod tests {
         }
     }
 
-    // Test the auth_status logic directly without needing full MCP handler
-    #[tokio::test]
-    async fn test_auth_status_unauthenticated() {
-        let ctx = TestAuthContext::new(None);
-        let token = ctx.get_auth_token().await;
-
-        // Simulate auth_status logic
-        let result = match token {
-            Some(t) if !t.is_empty() => "authenticated",
-            _ => "not_authenticated",
-        };
-
-        assert_eq!(result, "not_authenticated");
-    }
+    // `test_auth_status_unauthenticated` used to live here. It re-implemented the
+    // match inside the test body and asserted against its own copy, so no change to
+    // the real tool could ever fail it. The real answer function is now tested
+    // directly in `mcp::tools::auth::auth_status_tests`.
 
     #[tokio::test]
     async fn test_auth_token_stores_value() {

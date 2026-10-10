@@ -1,0 +1,740 @@
+import { buildSPARQLQuery, buildPaginationSubquery, hasJsOnlyWhereFilters, looksLikeUri, valueToLiteralIri } from './query-sparql';
+import { Literal } from '../Literal';
+import { buildWhereCondition } from './query-utils';
+
+// Minimal stubs for ModelMetadata
+const emptyMetadata: any = { properties: {}, relations: {} };
+
+// Metadata with a deterministic-literal property (`name`), a signed-envelope
+// property (`category`, `resolveLanguage: "literal"`), and another
+// deterministic-literal property with an initial value (`description`).
+const richMetadata: any = {
+  properties: {
+    name: {
+      name: 'name',
+      predicate: 'flux://name',
+      required: true,
+    },
+    category: {
+      name: 'category',
+      predicate: 'flux://category',
+      required: true,
+      resolveLanguage: 'literal',  // envelope → expression URI stored
+    },
+    description: {
+      name: 'description',
+      predicate: 'flux://description',
+      initial: 'literal://string:empty',
+    },
+  },
+  relations: {},
+};
+
+const emptyRelations: any = {};
+
+describe('hasJsOnlyWhereFilters', () => {
+  it('returns false when no where clause', () => {
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, undefined)).toBe(false);
+  });
+
+  it('returns false when where has literal-stored property with equality filter (pushed to SPARQL)', () => {
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { name: 'Pasta' })).toBe(false);
+  });
+
+  it('returns true when where has literal-stored property with comparison operator', () => {
+    // gt/lt/gte/lte/between/contains remain JS-only
+    const meta: any = { properties: { rating: { name: 'rating', predicate: 'flux://rating', required: true } }, relations: {} };
+    expect(hasJsOnlyWhereFilters(meta, emptyRelations, { rating: { gt: 5 } })).toBe(true);
+  });
+
+  it('returns false when where only has non-literal property filter', () => {
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { category: 'some://uri' })).toBe(false);
+  });
+
+  it('returns true when where has author filter', () => {
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { author: 'did:key:abc' })).toBe(true);
+  });
+
+  it('returns true when where has timestamp filter', () => {
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, { timestamp: { gt: 100 } })).toBe(true);
+  });
+
+  it('returns true for belongsToOne reverse relation', () => {
+    const relMeta: any = { parent: { kind: 'belongsToOne', predicate: 'flux://parent' } };
+    const meta: any = { properties: { parent: { name: 'parent', predicate: 'flux://parent' } }, relations: {} };
+    expect(hasJsOnlyWhereFilters(meta, relMeta, { parent: 'some://id' })).toBe(true);
+  });
+});
+
+describe('buildSPARQLQuery — SPARQL-level pagination via subquery', () => {
+  const modelClass: any = {};
+
+  it('includes LIMIT/OFFSET in a pagination subquery when query has them and no JS-only filters', () => {
+    const query = { limit: 10, offset: 0, where: { category: 'some://uri' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // SPARQL should contain LIMIT inside the pagination subquery
+    expect(sparql).toContain('LIMIT 10');
+    // The outer query should still exist
+    expect(sparql).toContain('SELECT ?source ?predicate ?target');
+    // Should have a subquery pattern
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+  });
+
+  it('does NOT include LIMIT/OFFSET when JS-only where filters exist', () => {
+    // author is a JS-only filter
+    const query = { limit: 10, offset: 0, where: { author: 'did:key:abc' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+    expect(sparql).not.toContain('OFFSET');
+  });
+});
+
+
+describe('buildSPARQLQuery — parse_literal push-down filters', () => {
+  const modelClass: any = {};
+
+  it('generates parse_literal FILTER for equality on literal property', () => {
+    const query = { where: { name: 'Alice' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<ad4m://fn/parse_literal>');
+    expect(sparql).toContain('STR(<ad4m://fn/parse_literal>(?wTarget_name)) = "Alice"');
+  });
+
+  it('generates parse_literal IN FILTER for array on literal property', () => {
+    const query = { where: { name: ['Alice', 'Bob'] } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('STR(<ad4m://fn/parse_literal>(?wTarget_name)) IN ("Alice", "Bob")');
+  });
+
+  it('generates parse_literal NOT FILTER for not condition', () => {
+    const query = { where: { name: { not: 'deleted' } } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('STR(<ad4m://fn/parse_literal>(?wTarget_name)) != "deleted"');
+  });
+
+  it('does NOT use parse_literal for comparison operators (gt/lt)', () => {
+    const meta: any = {
+      properties: {
+        rating: { name: 'rating', predicate: 'flux://rating', required: true },
+      },
+      relations: {},
+    };
+    const query = { where: { rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+    expect(sparql).toContain('?wTarget_cmp_rating');
+  });
+
+  it('does NOT use parse_literal for non-literal properties', () => {
+    const query = { where: { category: 'some://uri' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+    expect(sparql).toContain('<some://uri>');
+  });
+});
+
+describe('buildSPARQLQuery — structural correctness', () => {
+  const modelClass: any = {};
+
+  it('generates valid SPARQL with parent filter', () => {
+    const query = {
+      limit: 50,
+      offset: 0,
+      parent: { id: 'flux://channel-123', predicate: 'flux://has_message' },
+      where: { category: 'some://uri' },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<flux://channel-123>');
+    // SPARQL-level pagination via subquery
+    expect(sparql).toContain('LIMIT 50');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+  });
+
+  it('rejects injection attempts through where clause IRI values', () => {
+    const query = {
+      where: { category: 'some://uri"> . } UNION { SELECT * WHERE { ?s ?p ?o' },
+    };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects angle brackets in IRI values', () => {
+    const query = { where: { category: 'foo<bar>' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects curly braces in IRI values', () => {
+    const query = { where: { category: 'foo{bar}' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects spaces in IRI values', () => {
+    const query = { where: { category: 'foo bar' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('rejects double quotes in IRI values', () => {
+    const query = { where: { category: 'foo"bar' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('Invalid IRI component');
+  });
+
+  it('allows valid URIs through iri()', () => {
+    const query = { where: { category: 'https://example.com/category/food' } };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .not.toThrow();
+  });
+});
+
+describe('buildSPARQLQuery — NOT with array push-down', () => {
+  const modelClass: any = {};
+
+  it('generates NOT IN filter for NOT with array of values', () => {
+    const query = { where: { name: { not: ['deleted', 'archived'] } } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // Should use NOT IN with parse_literal for literal properties
+    expect(sparql).toContain('NOT IN');
+    expect(sparql).toContain('"deleted"');
+    expect(sparql).toContain('"archived"');
+  });
+});
+
+describe('buildSPARQLQuery — mixed push-down + JS-only', () => {
+  const modelClass: any = {};
+  const mixedMeta: any = {
+    properties: {
+      name: { name: 'name', predicate: 'flux://name', required: true },
+      rating: { name: 'rating', predicate: 'flux://rating', required: true },
+    },
+    relations: {},
+  };
+
+  it('pushes equality to SPARQL but keeps gt as JS-only', () => {
+    const query = { where: { name: 'Alice', rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(mixedMeta, emptyRelations, query, modelClass);
+    // name equality should be pushed to SPARQL
+    expect(sparql).toContain('parse_literal');
+    expect(sparql).toContain('Alice');
+    // hasJsOnlyWhereFilters should return true because of rating.gt
+    expect(hasJsOnlyWhereFilters(mixedMeta, emptyRelations, query.where)).toBe(true);
+  });
+});
+
+describe('buildSPARQLQuery — non-literal and flag properties', () => {
+  const modelClass: any = {};
+
+  it('does NOT use parse_literal for envelope (resolveLanguage: "literal") properties', () => {
+    // Envelope properties store signed expression URIs in the target position,
+    // not raw literals — the value comparison happens on the unwrapped inner
+    // data via a different code path (Rust `parse_literal_fn`), not by the JS
+    // WHERE builder emitting a `<ad4m://fn/parse_literal>` filter here.
+    const meta: any = {
+      properties: {
+        avatar: { name: 'avatar', predicate: 'flux://avatar', required: true, resolveLanguage: 'literal' },
+      },
+      relations: {},
+    };
+    const query = { where: { avatar: 'https://example.com/pic.jpg' } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+  });
+
+  it('does NOT use parse_literal for flag properties', () => {
+    const meta: any = {
+      properties: {
+        isPublic: { name: 'isPublic', predicate: 'flux://isPublic', flag: true, initial: 'flux://true' },
+      },
+      relations: {},
+    };
+    const query = { where: { isPublic: 'flux://true' } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('parse_literal');
+  });
+});
+
+describe('buildSPARQLQuery — IRI correctness', () => {
+  const modelClass: any = {};
+
+  it('uses <ad4m://fn/parse_literal> IRI, not invalid fn::parse_literal namespaced form', () => {
+    const query = { where: { name: 'test' } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<ad4m://fn/parse_literal>');
+    expect(sparql).not.toContain('fn::parse_literal');
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// SPARQL-level pagination (LIMIT/OFFSET in generated queries)
+// ──────────────────────────────────────────────────────────
+
+describe('SPARQL-level pagination', () => {
+  const modelClass: any = {};
+
+  it('includes LIMIT in SPARQL when query specifies limit', () => {
+    const query = { limit: 30 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 30');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+  });
+
+  it('includes OFFSET in SPARQL when query specifies offset > 0', () => {
+    const query = { limit: 20, offset: 40 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 20');
+    expect(sparql).toContain('OFFSET 40');
+  });
+
+  it('does NOT include OFFSET when offset is 0', () => {
+    const query = { limit: 10, offset: 0 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('LIMIT 10');
+    expect(sparql).not.toContain('OFFSET');
+  });
+
+  it('includes ORDER BY in subquery when query.order is specified', () => {
+    const query = { limit: 10, order: { name: 'DESC' as const } };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('ORDER BY DESC(');
+    expect(sparql).toContain('LIMIT 10');
+  });
+
+  it('does NOT default to ORDER BY timestamp when paginating without explicit order', () => {
+    const query = { limit: 30 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('ORDER BY');
+    expect(sparql).not.toContain('pg_minTs');
+  });
+
+  it('does NOT push pagination to SPARQL when JS-only where filters exist (author)', () => {
+    const query = { limit: 10, where: { author: 'did:key:abc' } };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+    expect(sparql).not.toContain('OFFSET');
+  });
+
+  it('does NOT push pagination to SPARQL when JS-only where filters exist (gt operator)', () => {
+    const meta: any = {
+      properties: {
+        rating: { name: 'rating', predicate: 'flux://rating', required: true },
+      },
+      relations: {},
+    };
+    const query = { limit: 10, where: { rating: { gt: 5 } } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+  });
+
+  it('wraps pagination in a subquery (outer SELECT fetches all links for the page)', () => {
+    const query = { limit: 5, offset: 10 };
+    const sparql = buildSPARQLQuery(emptyMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('SELECT ?source ?predicate ?target ?author ?timestamp');
+    expect(sparql).toContain('SELECT DISTINCT ?source');
+    expect(sparql).toContain('LIMIT 5');
+    expect(sparql).toContain('OFFSET 10');
+  });
+});
+
+describe('buildSPARQLQuery — set-difference patterns', () => {
+  const modelClass: any = {};
+
+  // Subgroups are grandchildren of channels (channel → conversation → subgroup).
+  // Never assume direct child relationships in set-difference queries.
+  // A global EXISTS pattern (no parent scoping) should match items regardless of depth.
+  it('generates global EXISTS without parent scoping when no parent filter', () => {
+    const meta: any = {
+      properties: {
+        status: { name: 'status', predicate: 'flux://status', required: true },
+      },
+      relations: {},
+    };
+    const query = { where: { status: 'active' } };
+    const sparql = buildSPARQLQuery(meta, emptyRelations, query, modelClass);
+    // Without a parent filter, the query should not scope to any specific parent
+    // This ensures grandchildren (items at any depth) are matched
+    expect(sparql).not.toContain('flux://has_child');
+    expect(sparql).toContain('SELECT ?source ?predicate ?target');
+  });
+});
+
+describe('buildSPARQLQuery — RDF 1.2 reifier patterns', () => {
+  const modelClass: any = {};
+
+  it('uses rdf:reifies instead of GRAPH for link metadata', () => {
+    const query = { limit: 10 };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>');
+    expect(sparql).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<(');
+    expect(sparql).toContain('?_reifier');
+    expect(sparql).not.toContain('GRAPH');
+    expect(sparql).not.toContain('?linkGraph');
+  });
+
+  it('binds author and timestamp on the reifier node', () => {
+    const query = {};
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('?_reifier <ad4m://ontology/author> ?author');
+    expect(sparql).toContain('?_reifier <ad4m://ontology/timestamp> ?timestamp');
+  });
+
+});
+
+// ──────────────────────────────────────────────────────────
+// OR / AND / NOT logical combinators
+// ──────────────────────────────────────────────────────────
+
+describe('hasJsOnlyWhereFilters — OR/AND/NOT combinators', () => {
+  // buildSPARQLWhereFilters never emits a SPARQL translation for OR/AND/NOT
+  // regardless of what their branches contain (see the comment there), so
+  // hasJsOnlyWhereFilters must treat their mere presence as JS-only —
+  // otherwise SPARQL-level LIMIT/OFFSET would run before the combinator
+  // filter itself is ever applied.
+
+  it('returns true for OR even when every branch is SPARQL-pushable', () => {
+    const where = {
+      OR: [
+        { category: 'some://uri' },
+        { category: 'other://uri' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for OR when a branch contains a JS-only filter', () => {
+    const where = {
+      OR: [
+        { category: 'some://uri' },
+        { author: 'did:key:abc' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for OR when a branch contains a contains operator', () => {
+    const where = {
+      OR: [
+        { name: { contains: 'foo' } },
+        { description: { contains: 'foo' } },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for AND even when every branch is SPARQL-pushable', () => {
+    const where = {
+      AND: [
+        { category: 'some://uri' },
+        { category: 'other://uri' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for AND when a branch contains a JS-only filter', () => {
+    const where = {
+      AND: [
+        { category: 'some://uri' },
+        { name: { gt: 5 } },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for NOT even when the negated clause is SPARQL-pushable', () => {
+    const where = { NOT: { category: 'some://uri' } };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for NOT when the negated clause contains a JS-only filter', () => {
+    const where = { NOT: { author: 'did:key:abc' } };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+
+  it('returns true for nested OR inside OR', () => {
+    const where = {
+      OR: [
+        { OR: [{ author: 'did:key:abc' }] },
+        { category: 'some://uri' },
+      ],
+    };
+    expect(hasJsOnlyWhereFilters(richMetadata, emptyRelations, where)).toBe(true);
+  });
+});
+
+describe('buildSPARQLQuery — OR/AND/NOT not emitted as SPARQL (handled Rust-side)', () => {
+  const modelClass: any = {};
+
+  it('does not emit OR key as a SPARQL triple pattern', () => {
+    const query = {
+      where: {
+        OR: [
+          { name: 'Alice' },
+          { name: 'Bob' },
+        ],
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    // OR should not appear as a predicate in the SPARQL
+    expect(sparql).not.toContain('"OR"');
+    expect(sparql).not.toContain('<OR>');
+    // Valid SPARQL structure still present
+    expect(sparql).toContain('SELECT ?source ?predicate ?target');
+  });
+
+  it('does not emit AND or NOT as SPARQL patterns', () => {
+    const query = {
+      where: {
+        AND: [{ category: 'some://uri' }],
+        NOT: { category: 'other://uri' },
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('"AND"');
+    expect(sparql).not.toContain('"NOT"');
+  });
+
+  it('does NOT include LIMIT when OR contains JS-only filters', () => {
+    // OR with contains → hasJsOnlyWhereFilters true → no SPARQL pagination
+    const query = {
+      limit: 10,
+      where: {
+        OR: [
+          { name: { contains: 'foo' } },
+          { description: { contains: 'foo' } },
+        ],
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+  });
+
+  it('does NOT include LIMIT when OR branches are all SPARQL-pushable', () => {
+    // Even though both OR branches are simple non-literal equality, the OR
+    // combinator itself is never translated into a SPARQL FILTER (see
+    // buildSPARQLWhereFilters), so pushing LIMIT down would cap the
+    // candidate set before the combinator is applied.
+    const query = {
+      limit: 5,
+      where: {
+        OR: [
+          { category: 'some://uri' },
+          { category: 'other://uri' },
+        ],
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).not.toContain('LIMIT');
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// valueToLiteralIri — object/array encoding parity with Rust
+// ──────────────────────────────────────────────────────────
+
+describe('valueToLiteralIri', () => {
+  it('encodes plain objects as literal:json:* and round-trips', () => {
+    const url = valueToLiteralIri({ a: 1 });
+    expect(url.startsWith('literal:json:')).toBe(true);
+    // Regression: previously fell through to String(value) → "[object Object]"
+    expect(url).not.toContain('object%20Object');
+    expect(Literal.fromUrl(url).get()).toEqual({ a: 1 });
+  });
+
+  it('encodes arrays as literal:json:* and round-trips', () => {
+    const url = valueToLiteralIri([1, 2, 3]);
+    expect(url.startsWith('literal:json:')).toBe(true);
+    // Regression: previously stringified to "1,2,3"
+    expect(url).not.toBe('literal:string:1%2C2%2C3');
+    expect(Literal.fromUrl(url).get()).toEqual([1, 2, 3]);
+  });
+
+  it('encodes nested objects and round-trips', () => {
+    const url = valueToLiteralIri({ nested: { b: 2 } });
+    expect(url.startsWith('literal:json:')).toBe(true);
+    expect(Literal.fromUrl(url).get()).toEqual({ nested: { b: 2 } });
+  });
+
+  it('preserves string encoding (non-URI)', () => {
+    const url = valueToLiteralIri('hello world');
+    expect(url).toBe('literal:string:hello%20world');
+    expect(Literal.fromUrl(url).get()).toBe('hello world');
+  });
+
+  it('returns URI-like strings unchanged', () => {
+    expect(valueToLiteralIri('https://example.com/thing')).toBe('https://example.com/thing');
+  });
+
+  it('encodes numbers as literal:number:*', () => {
+    const url = valueToLiteralIri(42);
+    expect(url).toBe('literal:number:42');
+    expect(Literal.fromUrl(url).get()).toBe(42);
+  });
+
+  it('encodes booleans as literal:boolean:*', () => {
+    const url = valueToLiteralIri(true);
+    expect(url).toBe('literal:boolean:true');
+    expect(Literal.fromUrl(url).get()).toBe(true);
+  });
+
+  it('encodes null via the String() fallthrough as literal:string:null', () => {
+    // `null` is `typeof 'object'` in JS, but `Literal.from(null).toUrl()`
+    // throws on the empty-literal check, so the `value !== null` guard
+    // deliberately keeps `null` on the historical fallthrough path.
+    const url = valueToLiteralIri(null);
+    expect(url).toBe('literal:string:null');
+    expect(Literal.fromUrl(url).get()).toBe('null');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// looksLikeUri — shared write-side predicate that MUST agree with the
+// Rust-side `is_safe_iri_target` / `looks_like_absolute_iri`. See the
+// doc comment on `looksLikeUri` for why drift produces silent no-match
+// reads (PR #874).
+// ---------------------------------------------------------------------------
+describe('looksLikeUri', () => {
+  it('accepts well-formed absolute IRIs', () => {
+    expect(looksLikeUri('did:key:z6Mk123')).toBe(true);
+    expect(looksLikeUri('literal:string:hello')).toBe(true);
+    expect(looksLikeUri('http://example.com/foo')).toBe(true);
+  });
+
+  it('rejects scheme-lookalike prose that would fail Rust validate_iri', () => {
+    expect(looksLikeUri('Note: buy milk')).toBe(false);
+    expect(looksLikeUri('Re: standup')).toBe(false);
+    expect(looksLikeUri('TODO: fix this')).toBe(false);
+  });
+
+  it('rejects control chars, whitespace, and SPARQL-breaking chars', () => {
+    expect(looksLikeUri('tag:2025:new\nline')).toBe(false);
+    expect(looksLikeUri('tag:2025:tab\there')).toBe(false);
+    expect(looksLikeUri('http://example.com/foo bar')).toBe(false);
+    expect(looksLikeUri('foo:<bar>')).toBe(false);
+    expect(looksLikeUri('foo:{bar}')).toBe(false);
+    expect(looksLikeUri('foo:"quoted')).toBe(false);
+  });
+
+  it('rejects non-IRI shapes', () => {
+    expect(looksLikeUri('just plain text')).toBe(false);
+    expect(looksLikeUri('42')).toBe(false);
+    expect(looksLikeUri(':no-scheme')).toBe(false);
+    expect(looksLikeUri('1abc:foo')).toBe(false);
+  });
+});
+
+describe('buildSPARQLQuery — traverse scope', () => {
+  const modelClass: any = {};
+
+  it('binds every anchor and emits a path for transitive', () => {
+    const query = {
+      parent: {
+        ids: ['flux://a', 'flux://b'],
+        predicate: 'flux://has_message',
+        transitive: true,
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('VALUES ?_anchor { <flux://a> <flux://b> }');
+    expect(sparql).toContain('?_anchor <flux://has_message>+ ?source');
+  });
+
+  it('refuses limitPerAnchor, which only the executor can apply', () => {
+    const query = {
+      parent: {
+        ids: 'flux://a',
+        predicate: 'flux://has_message',
+        limitPerAnchor: 5,
+      },
+    };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('limitPerAnchor');
+  });
+
+  it('refuses levels, which only the executor can walk', () => {
+    const query = {
+      parent: {
+        ids: 'flux://a',
+        predicate: 'flux://has_message',
+        levels: [10, 5],
+      },
+    };
+    // Silently ignoring `levels` would return one unbounded level where a
+    // bounded walk was asked for — a wrong answer that looks like a right one.
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('levels');
+  });
+});
+
+describe('where `eq` and per-link `author` (#1114)', () => {
+  const modelClass: any = {};
+  const roleMetadata: any = {
+    properties: {
+      agent: { name: 'agent', predicate: 'test://agent', required: false },
+      computed: { name: 'computed', predicate: '', getter: 'SELECT ?t WHERE { ?t ?p ?o }' },
+    },
+    relations: {
+      reviews: { name: 'reviews', predicate: 'test://review' },
+      derived: { name: 'derived', predicate: '', getter: 'SELECT ?t WHERE { ?t ?p ?o }' },
+    },
+  };
+
+  it('treats `{ eq: X }` as the bare value', () => {
+    const bare = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: 'Alice' } }, modelClass);
+    const eq = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: { eq: 'Alice' } } }, modelClass);
+    expect(eq).toBe(bare);
+    const bareIn = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: ['Alice', 'Bob'] } }, modelClass);
+    const eqIn = buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: { eq: ['Alice', 'Bob'] } } }, modelClass);
+    expect(eqIn).toBe(bareIn);
+  });
+
+  it('refuses `eq` beside another operator', () => {
+    expect(() =>
+      buildSPARQLQuery(richMetadata, emptyRelations, { where: { name: { eq: 'a', not: 'b' } } as any }, modelClass),
+    ).toThrow(/`eq` cannot be combined/);
+  });
+
+  it('refuses a nested author, at any depth', () => {
+    for (const where of [
+      { agent: { eq: 'did:a', author: 'did:admin' } },
+      { agent: { author: ['did:admin', 'did:lead'] } },
+      { OR: [{ agent: { eq: 'did:a', author: { not: 'did:m' } } }] },
+      { NOT: { agent: { eq: 'did:a', author: 'did:admin' } } },
+    ]) {
+      expect(() => buildSPARQLQuery(roleMetadata, emptyRelations, { where } as any, modelClass)).toThrow(
+        /per-link `author`/,
+      );
+    }
+  });
+
+  it('refuses a side-by-side author beside a link-backed property', () => {
+    expect(() =>
+      buildSPARQLQuery(roleMetadata, emptyRelations, { where: { agent: 'did:a', author: 'did:admin' } }, modelClass),
+    ).toThrow(/`author` beside `agent`/);
+  });
+
+  it('refuses a side-by-side author beside a relation, which is link-backed too', () => {
+    expect(() =>
+      buildSPARQLQuery(roleMetadata, emptyRelations, { where: { reviews: 'test://r1', author: 'did:admin' } } as any, modelClass),
+    ).toThrow(/`author` beside `reviews`/);
+  });
+
+  it('keeps a bare author, including beside a getter or timestamp', () => {
+    for (const where of [
+      { author: 'did:admin' },
+      { author: { not: ['did:m'] } },
+      { computed: 'x', author: 'did:admin' },
+      { derived: 'x', author: 'did:admin' },
+      { timestamp: { gt: 0 }, author: 'did:admin' },
+    ]) {
+      expect(() => buildSPARQLQuery(roleMetadata, emptyRelations, { where } as any, modelClass)).not.toThrow();
+    }
+  });
+
+  it('getter where compilation unwraps `eq` and refuses a nested author', () => {
+    expect(buildWhereCondition('test://p', { eq: 'x' } as any)).toBe(buildWhereCondition('test://p', 'x'));
+    expect(() => buildWhereCondition('test://p', { eq: 'x', author: 'did:a' } as any)).toThrow(/per-link/);
+  });
+});

@@ -24,17 +24,20 @@ Unlike the Launcher which provides a GUI, the executor is designed for command-l
 
 The executor uses a secure authentication handshake system. When a client attempts to connect, the executor generates a random number that must be used to complete the authentication. This number is printed in the executor's logs.
 
-For automated scenarios where manual authentication is impractical, you can provide an admin credential that bypasses the handshake:
+`run` requires an admin credential. Whoever presents it has every capability and skips the handshake, which is how scripts, CI pipelines and management UIs (the Launcher generates one on each start) talk to the executor. Pass it through the environment, so it does not show up in `ps` or the shell history:
 
 ```bash
-ad4m-executor run --admin-credential your-secret-here
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"
+ad4m-executor run
 ```
 
-This is particularly useful for:
-- Scripts managing the executor
-- CI/CD pipelines
-- Integration testing
-- Management UIs (the Launcher uses this internally)
+Without a credential, or with an empty one, `run` exits with an error naming both ways out. For tests and local development there is an explicit opt-out:
+
+```bash
+ad4m-executor run --insecure-no-admin-credential   # or AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true
+```
+
+In that mode an empty token is the operator on a loopback-bound API: any client that can reach the executor's loopback port, including a proxy or tunnel on the same host that sets no forwarding header, has full admin access. On a network-bound API (`--localhost false`, or TLS) a caller with no token is anonymous. Never use it on an executor other users or other machines can reach.
 
 ### Configuration Parameters
 
@@ -43,18 +46,28 @@ The executor supports various configuration parameters to customize its behavior
 ```bash
 # Basic configuration
 ad4m-executor run \
-  --gql-port 12000 \           # Main GraphQL API port (default: 4000)
-  --admin-credential secret \   # Bypass authentication handshake
-  --app-data-path ./data \     # Custom data directory (default: ~/.ad4m)
-  --run-dapp-server true       # Run the DApp server (default: false)
+  --port 12000 \
+  --app-data-path ./data \
+  --run-dapp-server true
+# --port: API port (default: 12000)
+# AD4M_ADMIN_CREDENTIAL (or --admin-credential): required, see above
+# --app-data-path: Custom data directory (default: ~/.ad4m)
+# --run-dapp-server: Run the DApp server (default: false)
 
 # Holochain-related configuration
-  --hc-admin-port 1234 \       # Holochain admin interface port (default: 1234)
-  --hc-app-port 8888 \         # Holochain app interface port (default: 8888)
-  --hc-use-bootstrap true \    # Use bootstrap service (default: true)
-  --hc-use-proxy true \        # Use proxy for Holochain (default: true)
-  --hc-proxy-url url \         # Custom proxy URL
-  --hc-bootstrap-url url       # Custom bootstrap URL
+ad4m-executor run \
+  --hc-admin-port 1234 \
+  --hc-app-port 8888 \
+  --hc-use-bootstrap true \
+  --hc-use-proxy true \
+  --hc-proxy-url url \
+  --hc-bootstrap-url url
+# --hc-admin-port: Holochain admin interface port (default: 1234)
+# --hc-app-port: Holochain app interface port (default: 8888)
+# --hc-use-bootstrap: Use bootstrap service (default: true)
+# --hc-use-proxy: Use proxy for Holochain (default: true)
+# --hc-proxy-url: Custom proxy URL
+# --hc-bootstrap-url: Custom bootstrap URL
 ```
 
 ### Running Multiple Executors
@@ -62,18 +75,23 @@ ad4m-executor run \
 For development and testing, you might want to run multiple AD4M executors on the same machine. Here's how to configure two executors to run simultaneously:
 
 ```bash
+# Both need AD4M_ADMIN_CREDENTIAL in the environment (see above)
 # First executor (default ports)
 ad4m-executor run
 
 # Second executor (custom ports)
 ad4m-executor run \
-  --gql-port 14000 \           # Different GraphQL port
-  --hc-admin-port 2234 \       # Different Holochain admin port
-  --hc-app-port 9888 \         # Different Holochain app port
-  --app-data-path ~/.ad4m2     # Separate data directory
+  --port 14000 \
+  --hc-admin-port 2234 \
+  --hc-app-port 9888 \
+  --app-data-path ~/.ad4m2
+# --port: Different API port
+# --hc-admin-port: Different Holochain admin port
+# --hc-app-port: Different Holochain app port
+# --app-data-path: Separate data directory
 ```
 
-When connecting to the second executor with the client, specify the custom GraphQL port:
+When connecting to the second executor with the client, specify the custom port:
 
 ```bash
 ad4m --executor-url http://localhost:14000 agent me
@@ -87,8 +105,9 @@ ad4m-executor init
 ```
 This creates the necessary directory structure and configuration in `~/.ad4m`.
 
-2. Start the executor:
+2. Start the executor with an admin credential:
 ```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"
 ad4m-executor run
 ```
 

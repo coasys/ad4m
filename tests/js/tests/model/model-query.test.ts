@@ -45,7 +45,7 @@ import {
 } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
-import { wipePerspective, sleep } from "../../utils/utils.js";
+import { wipePerspective } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag, TestReaction, TestChannel } from "./models.js";
 
 describe("Ad4mModel — Query API", function () {
@@ -431,6 +431,85 @@ describe("Ad4mModel — Query API", function () {
     expect(aEntries[1].viewCount as any as number).to.equal(2);
   });
 
+  it("order: { $commentCount: 'DESC' } sorts by a projection count (with limit)", async () => {
+    // p1: 0 comments, p2: 2 comments, p3: 1 comment
+    const c1 = await TestComment.create(perspective, { body: "on beta 1" });
+    const c2 = await TestComment.create(perspective, { body: "on beta 2" });
+    const c3 = await TestComment.create(perspective, { body: "on gamma" });
+    await p2.addComments(c1.id);
+    await p2.addComments(c2.id);
+    await p3.addComments(c3.id);
+
+    const results = await TestPost.findAll(perspective, {
+      where: { id: [p1.id, p2.id, p3.id] },
+      include: { $commentCount: { from: "comments", count: true } },
+      order: { $commentCount: "DESC" },
+      limit: 10,
+    });
+    expect(results).to.have.length(3);
+    const ids = results.map((r) => r.id);
+    expect(ids).to.deep.equal([p2.id, p3.id, p1.id]);
+    const counts = results.map((r) => (r as any).$commentCount as number);
+    expect(counts).to.deep.equal([2, 1, 0]);
+  });
+
+  it("order: { $commentCount: 'ASC' } sorts by a projection count ascending (with limit)", async () => {
+    const c1 = await TestComment.create(perspective, { body: "on beta 1" });
+    const c2 = await TestComment.create(perspective, { body: "on beta 2" });
+    const c3 = await TestComment.create(perspective, { body: "on gamma" });
+    await p2.addComments(c1.id);
+    await p2.addComments(c2.id);
+    await p3.addComments(c3.id);
+
+    const results = await TestPost.findAll(perspective, {
+      where: { id: [p1.id, p2.id, p3.id] },
+      include: { $commentCount: { from: "comments", count: true } },
+      order: { $commentCount: "ASC" },
+      limit: 10,
+    });
+    expect(results).to.have.length(3);
+    const ids = results.map((r) => r.id);
+    expect(ids).to.deep.equal([p1.id, p3.id, p2.id]);
+  });
+
+  it("order: { 'pinnedComment.body': 'ASC' } sorts by a relation-property dotted path (with limit)", async () => {
+    // Sorting by a nested relation property isn't yet reflected in TypedOrder,
+    // so this needs an `as any` escape hatch even though the executor supports it.
+    const cZ = await TestComment.create(perspective, { body: "Zebra" });
+    const cA = await TestComment.create(perspective, { body: "Alpha" });
+    const cM = await TestComment.create(perspective, { body: "Middle" });
+    await p1.addPinnedComment(cZ.id);
+    await p2.addPinnedComment(cA.id);
+    await p3.addPinnedComment(cM.id);
+
+    const results = await TestPost.findAll(perspective, {
+      where: { id: [p1.id, p2.id, p3.id] },
+      order: { "pinnedComment.body": "ASC" } as any,
+      limit: 10,
+    });
+    expect(results).to.have.length(3);
+    const ids = results.map((r) => r.id);
+    expect(ids).to.deep.equal([p2.id, p3.id, p1.id]);
+  });
+
+  it("order: { 'pinnedComment.body': 'DESC' } sorts by a relation-property dotted path descending (with limit)", async () => {
+    const cZ = await TestComment.create(perspective, { body: "Zebra" });
+    const cA = await TestComment.create(perspective, { body: "Alpha" });
+    const cM = await TestComment.create(perspective, { body: "Middle" });
+    await p1.addPinnedComment(cZ.id);
+    await p2.addPinnedComment(cA.id);
+    await p3.addPinnedComment(cM.id);
+
+    const results = await TestPost.findAll(perspective, {
+      where: { id: [p1.id, p2.id, p3.id] },
+      order: { "pinnedComment.body": "DESC" } as any,
+      limit: 10,
+    });
+    expect(results).to.have.length(3);
+    const ids = results.map((r) => r.id);
+    expect(ids).to.deep.equal([p1.id, p3.id, p2.id]);
+  });
+
   // ── 6. limit / offset ──────────────────────────────────────────────────────
 
   it("findAll() with limit returns at most that many results", async () => {
@@ -472,7 +551,7 @@ describe("Ad4mModel — Query API", function () {
 
   it("findOne() returns null when no instance matches", async () => {
     const missing = await TestPost.findOne(perspective, {
-      where: { id: "literal://string:no-such-id" },
+      where: { id: "literal:string:no-such-id" },
     });
     expect(missing).to.be.null;
   });

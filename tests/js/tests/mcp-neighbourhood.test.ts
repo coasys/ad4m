@@ -14,13 +14,12 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, killByPorts } from "../utils/utils";
+import { startExecutor, pollUntil, stopChildProcess } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch';
 import { mcpHttpRequest, callMcpTool, initializeMcp } from './mcp-utils';
 
-//@ts-ignore
-global.fetch = fetch;
+// Keep Node's native fetch for REST client calls. The node-fetch override here
+// breaks web-stream/EventSource expectations used by the REST/MCP stack.
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -35,7 +34,7 @@ const __dirname = path.dirname(__filename);
 const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
 const MCP_PORT = 3003;
 const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
-const GQL_PORT = 15800;
+const API_PORT = 15800;
 const HC_ADMIN_PORT = 15801;
 const HC_APP_PORT = 15802;
 const ADMIN_CREDENTIAL = "mcp-neighbourhood-test-secret";
@@ -62,7 +61,7 @@ describe("MCP Neighbourhood Integration Tests", function () {
 
         executorProcess = await startExecutor(
             appDataPath, bootstrapSeedPath,
-            GQL_PORT, HC_ADMIN_PORT, HC_APP_PORT,
+            API_PORT, HC_ADMIN_PORT, HC_APP_PORT,
             true,               // languageLanguageOnly
             ADMIN_CREDENTIAL,
             undefined, undefined, undefined,
@@ -70,20 +69,25 @@ describe("MCP Neighbourhood Integration Tests", function () {
             MCP_PORT,
         );
 
-        await sleep(3000);
-
-        const adminClient = new Ad4mClient(apolloClient(GQL_PORT, ADMIN_CREDENTIAL), false);
+        // Poll until the server answers, then generate once: generate() is
+        // not idempotent, so retrying it could only fail with "already exists".
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${API_PORT}`, ADMIN_CREDENTIAL);
+        await pollUntil(async () => {
+            await adminClient.agent.status();
+            return true;
+        }, { timeoutMs: 15000, label: "executor API ready" });
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated");
     });
 
     after(async () => {
         if (executorProcess) {
-            executorProcess.kill('SIGTERM');
-            await sleep(1000);
-            if (!executorProcess.killed) executorProcess.kill('SIGKILL');
+            await stopChildProcess(executorProcess);
         }
-        killByPorts([GQL_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
+        // No killByPorts here: lsof includes this process's own client
+        // connections, so it would SIGTERM mocha itself (exit 143).
+        // cleanup.js between test files handles residual ports, and mocha
+        // runs with --exit, so no process.exit() that would hide failures.
     });
 
     // ========================================================================
@@ -107,10 +111,12 @@ describe("MCP Neighbourhood Integration Tests", function () {
         });
 
         it("should authenticate via request_capability + generate_jwt", async function() {
+            // Admin credential in the Authorization header: since #851-3 the
+            // inline code is only auto-permitted for authenticated callers.
             const capResult = await callMcpTool(MCP_BASE_URL, "request_capability", {
                 app_name: "Neighbourhood Test",
                 app_desc: "MCP neighbourhood integration test"
-            }, mcpSessionId);
+            }, mcpSessionId, { Authorization: `Bearer ${ADMIN_CREDENTIAL}` });
             expect(capResult.request_id).to.be.a('string');
             expect(capResult.code).to.be.a('string');
             console.log("Got capability request_id:", capResult.request_id);

@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-launcher"
-version = "0.13.0-test-1"
+version = "0.13.0-test-interpretation-2"
 description = "Administration of ad4m services"
 authors = ["Kaichao Sun"]
 license = ""
@@ -30,7 +30,6 @@ open = "2.0.1"
 sysinfo = "0.29.7"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 uuid = { version = "0.8", features = ["v4"] }
-localtunnel-client = "0.0.12"
 tokio = { version = "1.19.2", features = ["full"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 remove_dir_all = "0.7.0"
@@ -59,6 +58,9 @@ keyring = "2.3"
 base64 = "0.21"
 rand = "0.8"
 lazy_static = "1.4"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
 
 [features]
 # by default Tauri runs in production mode

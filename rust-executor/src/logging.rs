@@ -55,7 +55,6 @@ pub fn get_default_log_config() -> std::collections::HashMap<String, String> {
     defaults.insert("holochain".to_string(), "warn".to_string());
     defaults.insert("wasmer_compiler_cranelift".to_string(), "warn".to_string());
     defaults.insert("rust_executor".to_string(), "info".to_string());
-    defaults.insert("warp".to_string(), "info".to_string());
     defaults.insert("warp::server".to_string(), "info".to_string());
     defaults
 }
@@ -178,4 +177,30 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
 
     *initialized = true;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config file's `log_config` sets levels over the defaults: a crate
+    /// it does not name keeps its default level.
+    #[test]
+    fn a_log_config_keeps_the_default_levels_it_does_not_set() {
+        let overrides = [("rust_executor".to_string(), "debug".to_string())].into();
+        let mut rust_log: Vec<String> = build_rust_log_from_config(&overrides)
+            .split(',')
+            .map(String::from)
+            .collect();
+        rust_log.sort();
+        assert_eq!(
+            rust_log,
+            [
+                "holochain=warn",
+                "rust_executor=debug",
+                "warp::server=info",
+                "wasmer_compiler_cranelift=warn"
+            ]
+        );
+    }
 }

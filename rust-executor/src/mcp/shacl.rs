@@ -1,14 +1,18 @@
 //! SHACL class parsing for MCP tool generation
 //!
 //! Extracts subject class definitions from SHACL links in perspectives,
-//! providing typed structures for generating dynamic MCP tools.
+//! providing typed structures for generating dynamic MCP tools.  Reads
+//! through the perspective's `shape_cache` (`PerspectiveInstance::get_shape`)
+//! so both the MCP path and the model_query path resolve the same
+//! `ModelShape` instance for any given class.
 
-use crate::graphql::graphql_types::LinkQuery;
+use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::{LinkQuery, LinkStatus};
 
 /// A SHACL subject class with its properties and metadata.
 ///
-/// Contains enough information to construct SurrealQL subscription queries
+/// Contains enough information to construct SPARQL subscription queries
 /// and generate dynamic MCP tools without hardcoding type-specific predicates.
 #[derive(Debug, Clone)]
 pub struct ShaclClass {
@@ -42,16 +46,30 @@ pub struct ShaclProperty {
     pub max_count: Option<u32>,
     /// Node kind (e.g., "sh://IRI", "sh://Literal")
     pub node_kind: Option<String>,
-    /// Pre-computed SurrealQL getter expression for reading this property/relation.
+    /// Pre-computed getter expression for reading this property/relation.
     /// For relations with a target model, this encodes conformance filtering.
     pub getter: Option<String>,
     /// Target SHACL node shape URI (sh:class). When present, linked nodes
     /// must conform to this shape, enabling typed construction.
     pub class: Option<String>,
-    /// Language address for resolving property values (ad4m://resolveLanguage).
-    /// When set, values should be passed through `expression_create` on this language
-    /// instead of being encoded as raw `literal://string:` URIs.
+    /// Sole selector of storage mode (`ad4m://resolveLanguage`):
+    ///   - `None`             → deterministic typed literal (fast path).
+    ///   - `Some("literal")`  → signed envelope on the built-in literal
+    ///                          language.
+    ///   - `Some(<addr>)`     → expression on that custom language.
     pub resolve_language: Option<String>,
+    /// Natural-language hint describing this property (or relation's) meaning.
+    /// Read back from the `ad4m://interpretation_hint` link on the property
+    /// node. Steers the harness LLM's tool descriptions — for a relation, this
+    /// is what makes `basedOn` mean "which prior beliefs did this intention
+    /// derive from" instead of just "some link". `None` when the SDNA
+    /// declared no hint on this property.
+    pub interpretation_hint: Option<String>,
+    /// `ad4m://local` — links written for this property get
+    /// `LinkStatus::Local`: they stay in this executor's store and are never
+    /// gossiped to the neighbourhood. `false` (shared) unless the property
+    /// shape declares otherwise.
+    pub local: bool,
 }
 
 impl ShaclClass {
@@ -105,9 +123,10 @@ impl ShaclProperty {
     }
 }
 
-/// Load all SHACL subject classes from a perspective.
-/// Reuses PerspectiveInstance::get_subject_classes_from_shacl() for class discovery,
-/// then enriches with property metadata from SHACL links.
+/// Load all SHACL subject classes from a perspective by going through the
+/// perspective's shape cache.  Each class is parsed from SHACL once and
+/// memoized, so repeated MCP tool generation runs are O(class count) rather
+/// than O(class count × predicate count) against the store.
 pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> {
     let class_names = match perspective.get_subject_classes_from_shacl().await {
         Ok(names) => names,
@@ -116,45 +135,22 @@ pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> 
 
     let mut classes = Vec::new();
     for class_name in class_names {
-        let (properties, shape_uri) =
-            load_class_properties_with_uri(perspective, &class_name).await;
-        let all_predicates = properties
-            .iter()
-            .filter_map(|p| p.predicate.clone())
-            .collect();
-        classes.push(ShaclClass {
-            name_lower: class_name.to_lowercase(),
-            name: class_name,
-            properties,
-            shape_uri,
-            all_predicates,
-        });
+        if let Some(c) = load_class(perspective, &class_name).await {
+            classes.push(c);
+        }
     }
 
     classes
 }
 
-/// Load a single class by name from a perspective
+/// Load a single class by name from a perspective through the shape cache.
+/// Returns `None` if no SHACL shape is stored for `class_name`.
 pub async fn load_class(perspective: &PerspectiveInstance, class_name: &str) -> Option<ShaclClass> {
-    let (properties, shape_uri) = load_class_properties_with_uri(perspective, class_name).await;
-    if properties.is_empty() {
-        // Fall back to full scan
-        let classes = load_classes(perspective).await;
-        return classes
-            .into_iter()
-            .find(|c| c.name.to_lowercase() == class_name.to_lowercase());
-    }
-    let all_predicates = properties
-        .iter()
-        .filter_map(|p| p.predicate.clone())
-        .collect();
-    Some(ShaclClass {
-        name_lower: class_name.to_lowercase(),
-        name: class_name.to_string(),
-        properties,
-        shape_uri,
-        all_predicates,
-    })
+    let shape = match perspective.get_shape(class_name) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    Some(shape_to_shacl_class(class_name, &shape))
 }
 
 /// Extract property information from a SHACL shape (convenience wrapper)
@@ -167,6 +163,74 @@ pub async fn load_class_properties(
         .0
 }
 
+/// Translate a `ModelShape` (the canonical in-memory representation derived
+/// from SHACL triples) into the MCP-facing `ShaclClass` shape.  Adapter only:
+/// the fields are a subset of what `ModelShape` carries.
+fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
+    let properties: Vec<ShaclProperty> = shape
+        .properties
+        .iter()
+        .map(|p| {
+            let datatype = p.datatype.clone();
+            let is_collection = p.is_collection;
+            let node_kind = if shape.include_relations.iter().any(|r| r.name == p.name) {
+                Some("sh://IRI".to_string())
+            } else {
+                None
+            };
+            let min_count = if p.is_required { Some(1u32) } else { None };
+            // `ShaclProperty.class` is the typed-relation node-shape URI
+            // (e.g. `ns://UserShape`).  Prefer the original `sh:class` IRI
+            // captured during SHACL parsing so MCP consumers receive the
+            // full URI, falling back to the bare class name only when the
+            // writer did not emit a `sh:class` for the relation.
+            let class_uri = shape
+                .include_relations
+                .iter()
+                .find(|r| r.name == p.name)
+                .map(|r| {
+                    if !r.target_class_uri.is_empty() {
+                        r.target_class_uri.clone()
+                    } else {
+                        r.target_class_name.clone()
+                    }
+                })
+                .filter(|s| !s.is_empty());
+            ShaclProperty {
+                name: p.name.clone(),
+                is_collection,
+                predicate: if p.predicate.is_empty() {
+                    None
+                } else {
+                    Some(p.predicate.clone())
+                },
+                datatype,
+                min_count,
+                max_count: None,
+                node_kind,
+                getter: p.getter.clone(),
+                class: class_uri,
+                resolve_language: p.resolve_language.clone(),
+                interpretation_hint: p.interpretation_hint.clone(),
+                local: p.local,
+            }
+        })
+        .collect();
+
+    let all_predicates = properties
+        .iter()
+        .filter_map(|p| p.predicate.clone())
+        .collect();
+
+    ShaclClass {
+        name_lower: class_name.to_lowercase(),
+        name: class_name.to_string(),
+        properties,
+        shape_uri: Some(shape.shape_uri.clone()),
+        all_predicates,
+    }
+}
+
 /// Extract property information from a SHACL shape, also returning the shape URI
 pub async fn load_class_properties_with_uri(
     perspective: &PerspectiveInstance,
@@ -175,8 +239,8 @@ pub async fn load_class_properties_with_uri(
     // Try both URL-encoded and raw formats (Flux uses raw, Rust Literal encodes)
     let encoded = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
         .to_url()
-        .unwrap_or_else(|_| format!("literal://string:shacl://{}", class_name));
-    let raw = format!("literal://string:shacl://{}", class_name);
+        .unwrap_or_else(|_| format!("literal:string:shacl://{}", class_name));
+    let raw = format!("literal:string:shacl://{}", class_name);
     let mut shape_links = match perspective
         .get_links(&LinkQuery {
             source: Some(encoded),
@@ -327,6 +391,7 @@ pub async fn load_class_properties_with_uri(
                 let raw = links[0].data.target.clone();
                 Some(
                     raw.strip_prefix("literal://string:")
+                        .or_else(|| raw.strip_prefix("literal:string:"))
                         .unwrap_or(&raw)
                         .to_string(),
                 )
@@ -347,7 +412,7 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
-        // Get resolve language (ad4m://resolveLanguage)
+        // Get resolveLanguage (ad4m://resolveLanguage) — the general language selector.
         let resolve_language = match perspective
             .get_links(&LinkQuery {
                 source: Some(prop_uri.clone()),
@@ -358,17 +423,59 @@ pub async fn load_class_properties_with_uri(
         {
             Ok(links) if !links.is_empty() => {
                 let target = &links[0].data.target;
-                let prefix = "literal://string:";
-                if target.starts_with(prefix) {
-                    let encoded_value = &target[prefix.len()..];
-                    urlencoding::decode(encoded_value)
-                        .ok()
-                        .map(|v| v.to_string())
-                } else {
-                    Some(target.clone())
-                }
+                let val = target
+                    .strip_prefix("literal://string:")
+                    .or_else(|| target.strip_prefix("literal:string:"))
+                    .unwrap_or(target);
+                let decoded = urlencoding::decode(val).unwrap_or_default();
+                Some(decoded.to_string())
             }
             _ => None,
+        };
+
+        // Interpretation hint (ad4m://interpretation_hint) — natural-language
+        // meaning for this property/relation, used by the harness's tool
+        // schema generation to explain what a predicate is for.
+        let interpretation_hint = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("ad4m://interpretation_hint".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => {
+                let target = &links[0].data.target;
+                let raw = target
+                    .strip_prefix("literal://string:")
+                    .or_else(|| target.strip_prefix("literal:string:"))
+                    .unwrap_or(target);
+                Some(urlencoding::decode(raw).unwrap_or_default().to_string())
+            }
+            _ => None,
+        };
+
+        // `ad4m://local` — executor-private storage for this property's
+        // links. Read here as well as in `load_shape`, because this
+        // link-walking path is what the dynamic per-class tools resolve
+        // against; missing it would leave them writing Shared links for a
+        // property the shape declares local.
+        let local = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("ad4m://local".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => links[0]
+                .data
+                .target
+                .rsplit(':')
+                .next()
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            _ => false,
         };
 
         properties.push(ShaclProperty {
@@ -382,6 +489,8 @@ pub async fn load_class_properties_with_uri(
             getter,
             class: class_uri,
             resolve_language,
+            interpretation_hint,
+            local,
         });
     }
 
@@ -464,10 +573,54 @@ pub async fn resolve_property_predicate(
     ))
 }
 
-/// Resolve a property's resolve_language for a given class.
-/// Returns `Ok(Some(language))` if the property has a resolve language,
-/// or `Err` if the class/property is not found.
-/// Matching is case-insensitive because dynamic tool names are lowercased.
+/// Resolve the [`LinkStatus`] a property's links must be written with.
+///
+/// `ad4m://local` on the property shape → [`LinkStatus::Local`] (kept in this
+/// executor's store, never gossiped); everything else → [`LinkStatus::Shared`].
+///
+/// The write paths that run the class's declared SHACL actions get this from
+/// the action's own `local` field inside `execute_commands`. The MCP paths
+/// that bypass those actions and write links directly — collection add, the
+/// collection arrays of `instance_create`, the dynamic per-class tools — have
+/// no action to read, so they resolve the status here instead. Without it a
+/// `local` collection would be written Shared by exactly those tools while its
+/// scalar siblings stayed Local.
+///
+/// An unknown class or property resolves to `Shared`. That default is *not*
+/// justified by "never withhold data" — for a privacy-adjacent flag the safe
+/// failure is the opposite one: withholding is recoverable, gossiping a value
+/// the class declared executor-private is not.
+///
+/// It is sound here only because the branch is unreachable in practice: every
+/// caller resolves the property's predicate from the same class SHACL first and
+/// aborts on failure, so reaching this function at all means the class and
+/// property exist. If that precondition ever stops holding, propagate the
+/// lookup failure instead of widening the default.
+pub async fn resolve_property_link_status(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    property_name: &str,
+) -> LinkStatus {
+    let properties = load_class_properties(perspective, class_name).await;
+    let prop_lower = property_name.to_lowercase();
+    let is_local = properties
+        .iter()
+        .find(|prop| prop.name == property_name || prop.name.to_lowercase() == prop_lower)
+        .map(|prop| prop.local)
+        .unwrap_or(false);
+    if is_local {
+        LinkStatus::Local
+    } else {
+        LinkStatus::Shared
+    }
+}
+
+/// Resolve a property's resolve_language (the general expression-language
+/// selector) for a given class. Returns `Ok(Some(language))` if set, `Ok(None)`
+/// if the property exists but has no resolve language, or `Err` if the
+/// class/property is not found. Matching is case-insensitive because dynamic
+/// tool names are lowercased.
+#[allow(dead_code)]
 pub async fn resolve_property_resolve_language(
     perspective: &PerspectiveInstance,
     class_name: &str,

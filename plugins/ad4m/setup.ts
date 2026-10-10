@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { generateRandomPassphrase } from "./config";
+import { generateRandomPassphrase, isLoopbackEndpoint } from "./config";
 import {
   findExecutorBinary,
   isExecutorRunning,
@@ -18,6 +18,89 @@ import {
 const SEPARATOR = "══════════════════════════════════════════";
 
 /**
+ * Explain why the capability handshake produced no JWT.
+ *
+ * Two causes reach the same code path and need opposite actions from the
+ * operator, so the message has to distinguish them:
+ *
+ * - **The executor is locked.** Its keys live in memory only, so this is the
+ *   normal state after every restart. `request_capability` cannot be confirmed
+ *   and no login of any kind can succeed until someone calls `unlockAgent`.
+ *   Pasting a JWT does not help — the node would reject it too.
+ * - **The handshake ran but was not confirmed**, or the node refused it. Here
+ *   a manually obtained JWT *is* the fix.
+ *
+ * The observed failure (Marvin, 2026-09-09) was the first case reported as the
+ * second: setup said "obtain a JWT token manually" against a locked node, the
+ * operator hand-edited a token into the config, and the token was not the
+ * problem. `auth_status` already reports `executor_locked` in every branch, so
+ * the cause is one call away — this function only decides what to say about it.
+ *
+ * A third case is not a cause but an absence: `auth_status` may itself have
+ * failed, in which case we do not know whether the node is locked. That is
+ * reported as its own line rather than folded into the not-locked branch —
+ * "we checked and you are fine" and "we could not check" must not read alike.
+ *
+ * Pure so it can be tested without a node: callers pass what the two tools
+ * returned, and get back the lines to print and the placeholder the config
+ * snippet should carry. The placeholder is part of the same decision: printing
+ * `<paste-your-jwt-here>` directly under "a JWT will not help" contradicts the
+ * warning, and skimming past the warning is exactly how this failure was
+ * reached in the first place.
+ *
+ * @param capData    - `request_capability` result, or undefined if it failed.
+ * @param statusData - `auth_status` result, or undefined if that call failed too.
+ */
+export function explainCapabilityFailure(input: {
+  capData?: any;
+  statusData?: any;
+}): { lines: string[]; tokenPlaceholder: string } {
+  const { capData, statusData } = input;
+
+  if (statusData?.executor_locked === true) {
+    return {
+      lines: [
+        "Could not complete auth: the executor is LOCKED, not misconfigured.",
+        statusData.message ??
+          "No login can succeed until the executor's operator calls unlockAgent.",
+        // The action is stated here, not borrowed from `statusData.message`: an
+        // older executor may answer with a terser message, and the operator
+        // still has to be told which call unlocks the node.
+        "A JWT will not help here — a locked node rejects it too. Have the " +
+          "executor's operator call unlockAgent, then run `openclaw ad4m-setup` " +
+          "again.",
+      ],
+      // Not a JWT prompt: the snippet is still worth printing for its shape,
+      // but the field the reader copies must not invite the wrong remedy.
+      tokenPlaceholder: "<unlock the executor first, then re-run ad4m-setup>",
+    };
+  }
+
+  // Not locked, or we could not find out. The handshake itself is the suspect.
+  const lines = [
+    capData?.request_id
+      ? "Could not complete auth: the capability request was issued but never " +
+        "confirmed on the executor."
+      : "Could not complete auth: the executor did not issue a capability request.",
+  ];
+  if (typeof capData?.error === "string") {
+    lines.push(`Executor said: ${capData.error}`);
+  }
+  if (statusData === undefined || statusData === null) {
+    lines.push(
+      "Note: `auth_status` did not answer either, so the executor's lock state " +
+        "is unknown. If it is locked, no token will work until its operator " +
+        "calls unlockAgent — check that before pasting anything.",
+    );
+  }
+  lines.push(
+    "Confirm the verification code in your AD4M executor and re-run " +
+      "`openclaw ad4m-setup`, or paste a JWT obtained from the executor below.",
+  );
+  return { lines, tokenPlaceholder: "<paste-your-jwt-here>" };
+}
+
+/**
  * First-run setup flow.
  *
  * Invoked via the `openclaw ad4m-setup` CLI command (registered through
@@ -28,13 +111,13 @@ const SEPARATOR = "════════════════════�
  * @param openclawConfig - The full OpenClaw config object (provides hooks.token)
  * @param logger         - Plugin logger
  * @param endpoint       - MCP endpoint URL
- * @param executorWsUrl  - GraphQL WebSocket URL
+ * @param executorUrl    - Executor URL
  */
 export async function runSetup(
   openclawConfig: any,
   logger: any,
   endpoint: string = "http://localhost:3001/mcp",
-  executorWsUrl: string = "ws://localhost:12000/graphql",
+  executorUrl: string = "http://localhost:12000",
 ): Promise<void> {
   logger.info("[ad4m-setup] Starting first-run setup...");
 
@@ -54,6 +137,20 @@ export async function runSetup(
     logger.warn("[ad4m-setup] Could not read OpenClaw hooks config");
   }
 
+  // ── Options from plugin config ──
+  const pluginCfg = openclawConfig?.plugins?.entries?.ad4m?.config ?? {};
+  const runHolochain = pluginCfg.runHolochain !== false; // default true
+  // Multi-user external: the assistant provisions its OWN user (distinct DID)
+  // via signup/login rather than a capability against the node's base agent.
+  const multiUser = pluginCfg.multiUser === true;
+  const agentEmail = pluginCfg.email || `openclaw-${generateRandomPassphrase(8)}@agent.local`;
+  // Password resolves env var → config field → interactive stdin (setup only).
+  // Never generated: a randomly-generated password would be persisted nowhere
+  // and the user could never log in again after the first JWT expires.
+  const agentPassword = multiUser
+    ? await resolveMultiUserPassword(logger, pluginCfg.password)
+    : undefined;
+
   // ── Step 2: Find binary ──
   const binaryPath = findExecutorBinary();
   if (binaryPath) {
@@ -65,25 +162,30 @@ export async function runSetup(
   }
 
   // ── Step 3: Check if executor is already running ──
-  // Derive the GraphQL HTTP URL from the WS URL so both probes use the same port
-  const graphqlHttpUrl = executorWsUrl
-    .replace(/^ws(s?):/, "http$1:")
-    .replace(/\/$/, "");
-  const running = await isExecutorRunning(endpoint, 3000, graphqlHttpUrl);
+  const running = await isExecutorRunning(endpoint, 3000, executorUrl);
+
+  // Asking for a remote node and silently getting a local one is the worst
+  // outcome here: managed mode downloads ~60MB and hands back a localhost
+  // config, and nothing in the output says the node you named never answered.
+  if (!running && !isLoopbackEndpoint(endpoint)) {
+    logger.warn(
+      `[ad4m-setup] ${endpoint} did not answer, so this is NOT external mode. ` +
+        `Setting up a local managed executor instead. If you meant to connect to ` +
+        `that node, stop here and check it is running and reachable.`,
+    );
+  }
 
   // ── Branch routing ──
 
   if (running) {
     // Branch B: Executor already running
-    // If detected via GraphQL (MCP disabled), pass the GraphQL URL so
-    // external-mode can use Ad4mClient instead of MCP for auth.
-    await setupExternalMode(logger, endpoint, wakeToken, running, executorWsUrl);
+    await setupExternalMode(logger, endpoint, wakeToken, running, executorUrl, multiUser, agentEmail, agentPassword);
   } else if (binaryPath) {
     // Branch A: No running executor, binary found
-    await setupManagedMode(logger, binaryPath, endpoint, executorWsUrl, wakeToken);
+    await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken, runHolochain);
   } else {
     // Branch C: No binary, no executor — try to download, then set up managed mode
-    await setupWithDownload(logger, endpoint, executorWsUrl, wakeToken);
+    await setupWithDownload(logger, endpoint, executorUrl, wakeToken, runHolochain);
   }
 }
 
@@ -95,8 +197,9 @@ async function setupManagedMode(
   logger: any,
   binaryPath: string,
   endpoint: string,
-  executorWsUrl: string,
+  executorUrl: string,
   wakeToken?: string,
+  runHolochain: boolean = true,
 ): Promise<void> {
   logger.info("[ad4m-setup] Setting up managed mode...");
 
@@ -131,8 +234,11 @@ async function setupManagedMode(
     adminCredential,
     logger,
     endpoint,
-    executorWsUrl,
+    executorUrl,
     binaryPath,
+    undefined,
+    undefined,
+    runHolochain,
   );
 
   if (!startResult) {
@@ -160,7 +266,7 @@ async function setupManagedMode(
 
   // Executor spawned — generate agent
   const agentResult = await ensureAgentReady(
-    executorWsUrl,
+    executorUrl,
     adminCredential,
     logger,
     agentPassphrase,
@@ -194,14 +300,17 @@ async function setupExternalMode(
   logger: any,
   endpoint: string,
   wakeToken?: string,
-  detectedVia: "mcp" | "graphql" = "mcp",
-  executorWsUrl: string = "ws://localhost:12000/graphql",
+  detectedVia: "mcp" | "http" = "mcp",
+  executorUrl: string = "http://localhost:12000",
+  multiUser: boolean = false,
+  email?: string,
+  password?: string,
 ): Promise<void> {
-  if (detectedVia === "graphql") {
-    // Executor found via GraphQL (MCP is disabled / not available).
-    // Use Ad4mClient over GraphQL WS to request capabilities.
+  if (detectedVia === "http") {
+    // Executor found via HTTP (MCP is disabled / not available).
+    // Use Ad4mClient API to request capabilities.
     logger.info(
-      `[ad4m-setup] Found a running AD4M executor via GraphQL at ${executorWsUrl}. ` +
+      `[ad4m-setup] Found a running AD4M executor via REST at ${executorUrl}. ` +
         "MCP does not appear to be enabled.",
     );
     logger.info(
@@ -209,17 +318,17 @@ async function setupExternalMode(
     );
 
     try {
-      await setupExternalModeViaGraphQL(logger, executorWsUrl, wakeToken);
+      await setupExternalModeViaHttp(logger, executorUrl, wakeToken);
       return;
     } catch (e: any) {
       logger.error(
-        `[ad4m-setup] GraphQL auth flow failed: ${e.message}`,
+        `[ad4m-setup] HTTP auth flow failed: ${e.message}`,
       );
       if (e.stack) {
         logger.error(`[ad4m-setup] Stack: ${e.stack}`);
       }
       printConfigSnippet(logger, "external", {
-        executorWsUrl,
+        executorUrl,
         token: "<paste-your-jwt-here>",
         wakeToken,
       });
@@ -240,6 +349,78 @@ async function setupExternalMode(
   try {
     // Initialize MCP session (no auth needed)
     const initResp = await mcpInitialize(endpoint);
+
+    // Multi-user node: provision the assistant's OWN user identity (distinct DID)
+    // via signup + login, rather than a capability against the node's base agent.
+    if (multiUser && email && password) {
+      logger.info(`[ad4m-setup] Multi-user node — provisioning own identity (${email})...`);
+      // mcpCallTool returns a JSON-RPC error as result text rather than throwing,
+      // so inspect the result — the catch alone only sees transport failures.
+      // Did *this* run create the account? If so the node has just emailed a
+      // `signup`-typed code, and that is the one to verify with.
+      let justSignedUp = false;
+      try {
+        const signupResult = await mcpCallTool(endpoint, "signup", { email, password }, initResp.sessionId);
+        const signupData = extractMcpResultData(signupResult);
+        if (signupData?.error) {
+          logger.info(`[ad4m-setup] signup: ${signupData.error} (user may already exist — continuing to login)`);
+        } else if (signupData?.success) {
+          justSignedUp = true;
+        }
+      } catch (e: any) {
+        logger.info(`[ad4m-setup] signup failed (transport): ${e.message} (continuing to login)`);
+      }
+      const loginResult = await mcpCallTool(
+        endpoint,
+        "login_email",
+        { email, password },
+        initResp.sessionId,
+      );
+      const loginData = extractMcpResultData(loginResult);
+      const userToken = loginData?.token ?? loginData?.jwt;
+      if (userToken) {
+        logger.info(`[ad4m-setup] Logged in as ${email}; own user identity ready.`);
+        printConfigSnippet(logger, "external", {
+          mcpEndpoint: endpoint,
+          token: userToken,
+          email,
+          multiUser: "true",
+          wakeToken,
+        });
+        return;
+      }
+      // login_email returned no token — the node enforces SMTP-backed email
+      // verification. Fall back to the code-verification flow: get a code to
+      // the inbox, read it (interactive prompt / /dev/tty), exchange it for a
+      // JWT. A brand-new account has to complete *signup* verification first;
+      // only fall back to a login code if that produced nothing.
+      let verifiedToken: string | null = null;
+      if (justSignedUp) {
+        verifiedToken = await loginViaEmailVerification(
+          logger,
+          endpoint,
+          email,
+          initResp.sessionId,
+          undefined,
+          "signup",
+        );
+      }
+      if (!verifiedToken) {
+        verifiedToken = await loginViaEmailVerification(logger, endpoint, email, initResp.sessionId);
+      }
+      if (verifiedToken) {
+        logger.info(`[ad4m-setup] Verified ${email} via email code; own user identity ready.`);
+        printConfigSnippet(logger, "external", {
+          mcpEndpoint: endpoint,
+          token: verifiedToken,
+          email,
+          multiUser: "true",
+          wakeToken,
+        });
+        return;
+      }
+      logger.warn("[ad4m-setup] Multi-user login returned no token; falling back to the capability flow.");
+    }
 
     // Request capabilities
     const capResult = await mcpCallTool(
@@ -282,14 +463,18 @@ async function setupExternalMode(
       }
     }
 
-    // JWT auth failed
-    logger.warn(
-      "[ad4m-setup] Could not complete auth automatically. " +
-        "Please obtain a JWT token manually from your executor.",
+    // JWT auth failed. Ask the node why before telling the operator what to do:
+    // the two causes need opposite actions, and the old message named neither.
+    const statusData = extractMcpResultData(
+      await mcpCallTool(endpoint, "auth_status", {}, initResp.sessionId),
     );
+    const failure = explainCapabilityFailure({ capData, statusData });
+    for (const line of failure.lines) {
+      logger.warn(`[ad4m-setup] ${line}`);
+    }
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
-      token: "<paste-your-jwt-here>",
+      token: failure.tokenPlaceholder,
       wakeToken,
     });
   } catch (e: any) {
@@ -320,54 +505,122 @@ function promptUser(question: string): Promise<string> {
 }
 
 /**
- * External-mode auth flow using Ad4mClient over GraphQL WebSocket.
- * Used when the executor is detected via GraphQL (MCP disabled).
+ * Resolve the multi-user password without persisting it. Checks, in order:
+ *   1. `AD4M_PASSWORD` env var
+ *   2. `pluginCfg.password` (backwards-compat escape hatch; warns)
+ *   3. Interactive stdin prompt (only when a TTY is attached)
+ *
+ * Returns `undefined` when no source is available — callers should skip the
+ * multi-user login path and fall through to the capability flow.
+ */
+async function resolveMultiUserPassword(
+  logger: any,
+  configPassword?: string,
+): Promise<string | undefined> {
+  const envPass = process.env.AD4M_PASSWORD;
+  if (envPass) {
+    logger.info("[ad4m-setup] Using multi-user password from AD4M_PASSWORD env var.");
+    return envPass;
+  }
+  if (configPassword) {
+    logger.warn(
+      "[ad4m-setup] plugin config contains a plaintext `password` — this is discouraged. " +
+        "Prefer the AD4M_PASSWORD env var so the secret is not stored on disk.",
+    );
+    return configPassword;
+  }
+  if (process.stdin.isTTY) {
+    logger.info("[ad4m-setup] No AD4M_PASSWORD env var found; prompting on stdin.");
+    const entered = await promptUser(
+      "[ad4m-setup] Enter password for the multi-user account (blank to skip): ",
+    );
+    return entered || undefined;
+  }
+  logger.warn(
+    "[ad4m-setup] Multi-user mode requested but no password available " +
+      "(AD4M_PASSWORD unset and stdin is not a TTY). " +
+      "Skipping login; falling back to the capability-request flow.",
+  );
+  return undefined;
+}
+
+/**
+ * External-mode auth flow using Ad4mClient over HTTP.
+ * Used when the executor is detected via HTTP (MCP disabled).
  *
  * Flow:
  * 1. requestCapability → returns requestId, launcher shows 6-digit code
  * 2. User enters the 6-digit code from the launcher UI
  * 3. generateJwt(requestId, code) → returns JWT
  */
-async function setupExternalModeViaGraphQL(
+/**
+ * Email-verification fallback for multi-user login. Used when a node enforces
+ * SMTP-backed email verification, so `login_email` alone returns no token: the
+ * plugin gets a code to the user's inbox, reads it, and exchanges it for a JWT
+ * via `verify_email_code`. `readCode` defaults to an interactive prompt; tests
+ * inject a fixed reader. Returns the JWT, or null when no token results.
+ *
+ * `verificationType` picks which code the user is being asked for, and has to
+ * match the one the executor issued — `verify_and_login` looks the code up by
+ * (email, type). `signup` already emailed a `signup` code, so that branch must
+ * not request a second, `login`-typed one; a plain login does need the
+ * `request_login_verification` round-trip first.
+ */
+export async function loginViaEmailVerification(
   logger: any,
-  executorWsUrl: string,
+  endpoint: string,
+  email: string,
+  sessionId: string,
+  readCode: () => Promise<string> = () =>
+    promptUser("[ad4m-setup] Enter the 6-digit code from your email (blank to skip): "),
+  verificationType: "signup" | "login" = "login",
+): Promise<string | null> {
+  if (verificationType === "login") {
+    try {
+      // Trigger the verification email (best-effort — the user already signed up).
+      await mcpCallTool(endpoint, "request_login_verification", { email }, sessionId);
+    } catch (e: any) {
+      logger.info(`[ad4m-setup] request_login_verification: ${e.message}`);
+    }
+    logger.info("[ad4m-setup] A verification code has been sent to your email (if the node has SMTP configured).");
+  } else {
+    logger.info("[ad4m-setup] signup sent a verification code to your email (if the node has SMTP configured).");
+  }
+  const code = await readCode();
+  if (!code) {
+    logger.info("[ad4m-setup] No code entered — skipping email-verification login.");
+    return null;
+  }
+  // The parameter is `verification_type`; a bare `type` is silently not the
+  // field the tool reads, and the call fails on the missing required field.
+  const verifyResult = await mcpCallTool(
+    endpoint,
+    "verify_email_code",
+    { email, code, verification_type: verificationType },
+    sessionId,
+  );
+  const verifyData = extractMcpResultData(verifyResult);
+  const token = verifyData?.token ?? verifyData?.jwt ?? null;
+  if (!token) {
+    logger.warn(`[ad4m-setup] verify_email_code failed: ${JSON.stringify(verifyData?.error ?? verifyData)}`);
+  }
+  return token;
+}
+
+async function setupExternalModeViaHttp(
+  logger: any,
+  executorUrl: string,
   wakeToken?: string,
 ): Promise<void> {
   const { Ad4mClient } = require("@coasys/ad4m");
-  const { ApolloClient, InMemoryCache } = require("@apollo/client/core");
-  const { GraphQLWsLink } = require("@apollo/client/link/subscriptions");
-  const { createClient } = require("graphql-ws");
-  const WebSocket = require("ws");
 
-  logger.info(`[ad4m-setup] Creating GraphQL WS client for ${executorWsUrl}...`);
-  const wsClient = createClient({
-    url: executorWsUrl,
-    webSocketImpl: WebSocket,
-    on: {
-      connected: () => logger.info("[ad4m-setup] WebSocket connected"),
-      closed: (event: any) => logger.warn(`[ad4m-setup] WebSocket closed: ${JSON.stringify(event)}`),
-      error: (err: any) => logger.error(`[ad4m-setup] WebSocket error: ${err?.message ?? JSON.stringify(err)}`),
-    },
-  });
-  const link = new GraphQLWsLink(wsClient);
-  const apollo = new ApolloClient({
-    link,
-    cache: new InMemoryCache(),
-    defaultOptions: { query: { fetchPolicy: "no-cache" } },
-  });
+  logger.info(`[ad4m-setup] Creating API client for ${executorUrl}...`);
 
   try {
-    // Pass subscribe=false to avoid triggering GraphQL subscriptions
-    // before auth is complete (those would fail with capability errors).
-    logger.info("[ad4m-setup] Creating Ad4mClient (subscribe=false)...");
-    const client = new Ad4mClient(apollo, false);
+    const client = new Ad4mClient(executorUrl);
     logger.info("[ad4m-setup] Ad4mClient created successfully");
 
     // Step 1: Request capability — triggers the verification popup in the launcher
-    // Use a plain object rather than `new AuthInfoInput()` — the GraphQL
-    // mutation only needs the correct field names in the variables, and
-    // constructing the class without its positional args can leave fields
-    // undefined depending on how type-graphql decorators serialise.
     const authInfo = {
       appName: "OpenClaw AD4M Plugin",
       appDesc: "OpenClaw agent plugin for AD4M neighbourhoods",
@@ -377,7 +630,7 @@ async function setupExternalModeViaGraphQL(
       ],
     };
 
-    logger.info("[ad4m-setup] Sending requestCapability mutation...");
+    logger.info("[ad4m-setup] Sending requestCapability...");
     logger.info(`[ad4m-setup] authInfo: ${JSON.stringify(authInfo)}`);
     const requestId = await client.agent.requestCapability(authInfo);
 
@@ -422,7 +675,7 @@ async function setupExternalModeViaGraphQL(
     if (!code) {
       logger.warn("[ad4m-setup] No code entered. Setup cancelled.");
       printConfigSnippet(logger, "external", {
-        executorWsUrl,
+        executorUrl,
         token: "<paste-your-jwt-here>",
         wakeToken,
       });
@@ -430,14 +683,14 @@ async function setupExternalModeViaGraphQL(
     }
 
     // Step 3: Generate JWT using requestId + user-provided code
-    logger.info(`[ad4m-setup] Sending generateJwt mutation...`);
+    logger.info(`[ad4m-setup] Sending generateJwt...`);
     const jwt = await client.agent.generateJwt(requestId, code);
     logger.info(`[ad4m-setup] generateJwt returned: ${jwt ? `token (${jwt.length} chars)` : "null/empty"}`);
 
     if (jwt) {
-      logger.info("[ad4m-setup] JWT obtained successfully via GraphQL!");
+      logger.info("[ad4m-setup] JWT obtained successfully!");
       printConfigSnippet(logger, "external", {
-        executorWsUrl,
+        executorUrl,
         token: jwt,
         wakeToken,
       });
@@ -447,13 +700,19 @@ async function setupExternalModeViaGraphQL(
           "Please try running setup again or obtain a JWT manually.",
       );
       printConfigSnippet(logger, "external", {
-        executorWsUrl,
+        executorUrl,
         token: "<paste-your-jwt-here>",
         wakeToken,
       });
     }
-  } finally {
-    wsClient.dispose();
+  } catch (e: any) {
+    logger.error(`[ad4m-setup] HTTP auth flow failed: ${e.message}`);
+    if (e.stack) logger.error(`[ad4m-setup] Stack: ${e.stack}`);
+    printConfigSnippet(logger, "external", {
+      executorUrl,
+      token: "<paste-your-jwt-here>",
+      wakeToken,
+    });
   }
 }
 
@@ -464,8 +723,9 @@ async function setupExternalModeViaGraphQL(
 async function setupWithDownload(
   logger: any,
   endpoint: string,
-  executorWsUrl: string,
+  executorUrl: string,
   wakeToken?: string,
+  runHolochain: boolean = true,
 ): Promise<void> {
   logger.info(
     "[ad4m-setup] No ad4m-executor binary found and no running executor detected.",
@@ -503,7 +763,7 @@ async function setupWithDownload(
   logger.info(`[ad4m-setup] Downloaded ad4m-executor to: ${binaryPath}`);
 
   // Continue with managed mode setup using the downloaded binary
-  await setupManagedMode(logger, binaryPath, endpoint, executorWsUrl, wakeToken);
+  await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken, runHolochain);
 }
 
 // ---------------------------------------------------------------------------
@@ -522,8 +782,10 @@ function printConfigSnippet(
     if (values.agentPassphrase) config.agentPassphrase = values.agentPassphrase;
   } else {
     if (values.mcpEndpoint) config.mcpEndpoint = values.mcpEndpoint;
-    if (values.executorWsUrl) config.executorWsUrl = values.executorWsUrl;
+    if (values.executorUrl) config.executorUrl = values.executorUrl;
     if (values.token) config.token = values.token;
+    if (values.multiUser) config.multiUser = true;
+    if (values.email) config.email = values.email;
   }
 
   if (values.wakeToken) config.wakeToken = values.wakeToken;
@@ -540,16 +802,154 @@ function printConfigSnippet(
   );
   logger.info(`[ad4m-setup]`);
 
-  const snippet = JSON.stringify(config, null, 2);
+  const snippet = JSON.stringify(redactForDisplay(config), null, 2);
   for (const line of snippet.split("\n")) {
     logger.info(`[ad4m-setup] ${line}`);
   }
 
   logger.info(`[ad4m-setup]`);
-  logger.info(`[ad4m-setup] one line for copy&paste: ${JSON.stringify(config)}`);
+
+  // The snippet above may hold a live credential — a JWT, the hooks wakeToken,
+  // or a real agent passphrase. We redact those ourselves before printing (see
+  // redactForDisplay) rather than relying on the logger to do it, because the
+  // logger's elision keys on the value's shape and misses some real secrets.
+  // The copyable copy goes to a 0600 file instead and we print the path. Only a
+  // snippet with nothing secret in it is safe to print as one copy-paste line.
+  if (hasLiveCredential(config)) {
+    const written = writeConfigSnippetFile(config);
+    if (written) {
+      logger.info(
+        `[ad4m-setup] Credentials above are redacted. The full config is in ` +
+          `${written} (mode 0600).`,
+      );
+      logger.info(
+        `[ad4m-setup] Copy its contents into openclaw.json under ` +
+          `plugins.entries["ad4m"].config, then delete the file.`,
+      );
+    } else {
+      logger.warn(
+        `[ad4m-setup] Credentials above are redacted and the full config could ` +
+          `not be written to disk. Re-run with OPENCLAW_CONFIG_PATH set, or ` +
+          `obtain a JWT from the executor yourself.`,
+      );
+    }
+  } else {
+    logger.info(
+      `[ad4m-setup] one line for copy&paste: ${JSON.stringify(config)}`,
+    );
+  }
+
   logger.info(`[ad4m-setup]`);
   logger.info(
     `[ad4m-setup] After adding the config, restart OpenClaw to activate the plugin.`,
   );
   logger.info(`[ad4m-setup] ${SEPARATOR}`);
+}
+
+/**
+ * The exact strings managed mode writes into `agentPassphrase` when it has no
+ * real passphrase to give. They are instructions, not secrets, and printing
+ * them is the point.
+ *
+ * Kept as literals rather than a bracket-shaped pattern deliberately. The
+ * placeholders are bracket-styled, so a user substituting their own passphrase
+ * may well keep the brackets — a shape test would then classify a real secret
+ * as a placeholder and print it. Only these two exact strings are safe.
+ */
+const PASSPHRASE_PLACEHOLDERS = [
+  "<enter-your-existing-passphrase>",
+  "<run setup again after fixing executor>",
+] as const;
+
+/**
+ * The exact strings this file writes into `token` when it has no real JWT to
+ * give. Instructions, not secrets — printing them is the point.
+ *
+ * Exact literals rather than a bracket-shaped pattern, for the same reason as
+ * PASSPHRASE_PLACEHOLDERS above: a shape test would classify a real credential
+ * that happens to keep the brackets as a placeholder, and print it.
+ */
+const TOKEN_PLACEHOLDERS = [
+  "<paste-your-jwt-here>",
+  "<unlock the executor first, then re-run ad4m-setup>",
+] as const;
+
+/** Keys whose values are credentials rather than settings. */
+const CREDENTIAL_KEYS = [
+  "token",
+  "wakeToken",
+  "password",
+  "agentPassphrase",
+] as const;
+
+const REDACTED = "<redacted — copy it from the 0600 file below>";
+
+/**
+ * A copy of the snippet with every live credential replaced by a fixed mask,
+ * for printing. Placeholders survive, because they are instructions.
+ *
+ * Why this exists rather than trusting the logger: the previous version printed
+ * the real snippet and relied on OpenClaw's logger to elide the secrets, and
+ * that assumption is false. Verified against a locked executor on 2026-09-14:
+ * the logger elided the harmless `token` PLACEHOLDER to `<unloc…tup>` while
+ * printing a real 48-char `wakeToken` in full. The elision is incidental to the
+ * value's shape, not keyed on whether it is secret, so a caller cannot rely on
+ * it for anything. We redact before handing the string over.
+ */
+export function redactForDisplay(
+  config: Record<string, any>,
+): Record<string, any> {
+  const shown: Record<string, any> = { ...config };
+  for (const key of CREDENTIAL_KEYS) {
+    const value = shown[key];
+    if (typeof value !== "string" || value.length === 0) continue;
+    const isPlaceholder =
+      (TOKEN_PLACEHOLDERS as readonly string[]).includes(value) ||
+      (PASSPHRASE_PLACEHOLDERS as readonly string[]).includes(value);
+    if (!isPlaceholder) shown[key] = REDACTED;
+  }
+  return shown;
+}
+
+/**
+ * Whether a config snippet carries a value that must not reach terminal
+ * scrollback.
+ */
+export function hasLiveCredential(config: Record<string, any>): boolean {
+  if (config.token || config.wakeToken || config.password) return true;
+  const passphrase = config.agentPassphrase;
+  return (
+    typeof passphrase === "string" &&
+    passphrase.length > 0 &&
+    !PASSPHRASE_PLACEHOLDERS.includes(passphrase as any)
+  );
+}
+
+/**
+ * Write the full config snippet — credentials included — to a 0600 file beside
+ * the OpenClaw config this run belongs to, and return its path.
+ *
+ * Returns null rather than throwing: a setup run that produced a working token
+ * should not fail because a directory was not writable.
+ */
+function writeConfigSnippetFile(config: Record<string, any>): string | null {
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  const dir =
+    (configPath && path.dirname(configPath)) ||
+    process.env.OPENCLAW_HOME ||
+    path.join(process.env.HOME || process.env.USERPROFILE || "", ".openclaw");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, "ad4m-setup-config.json");
+    fs.writeFileSync(filePath, JSON.stringify(config, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    // writeFileSync's mode is only applied when creating the file; an existing
+    // file from an earlier run keeps its old mode, so set it explicitly.
+    fs.chmodSync(filePath, 0o600);
+    return filePath;
+  } catch {
+    return null;
+  }
 }

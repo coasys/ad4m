@@ -14,6 +14,7 @@ import {
   Property,
   Flag,
   HasMany,
+  HasOne,
   Optional,
   buildConformanceFilter,
 } from "./decorators";
@@ -22,7 +23,7 @@ import {
   SHACLPropertyShape,
   ConformanceCondition,
 } from "../shacl/SHACLShape";
-import { compileWhereClause } from "./surreal-utils";
+import { compileWhereClause } from "./query-utils";
 
 // ============================================================================
 // Test models
@@ -65,7 +66,7 @@ class ParentWithRelations extends Ad4mModel {
   unfilteredItems: string[] = [];
 
   @HasMany({
-    getter: "(<-link[WHERE predicate = 'test://custom'].in.uri)",
+    getter: "SELECT ?target WHERE { ?target <test://custom> ?source . }",
   })
   customItems: string[] = [];
 }
@@ -93,12 +94,19 @@ describe("buildConformanceFilter()", () => {
     expect(reqCond!.predicate).toBe("test://name");
     expect(reqCond!.value).toBeUndefined();
 
-    // Getter string should be a SurrealQL expression
-    expect(result!.getter).toContain("->link[WHERE predicate =");
+    // Getter string should be a SPARQL expression
+    expect(result!.getter).toContain("SELECT ?target WHERE");
     expect(result!.getter).toContain("test://has_flagged");
     expect(result!.getter).toContain("test://type");
     expect(result!.getter).toContain("test://flagged_type");
     expect(result!.getter).toContain("test://name");
+    // Exact form: the executor's `verify_relation_getter` (rust-executor
+    // model_query/getters.rs) matches this prefix to add the #1113 proof
+    // filter, and `verify_relation_getter_rewrites_the_sdk_conformance_getter`
+    // holds the same string. Change both together.
+    expect(result!.getter).toBe(
+      "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . ?target <test://type> <test://flagged_type> . ?target <test://name> ?_v0 . }"
+    );
   });
 
   it("should return undefined for a target with no conformance conditions", () => {
@@ -130,7 +138,7 @@ describe("buildConformanceFilter()", () => {
       @Property({
         through: "test://computed",
         required: true,
-        getter: "(<-link[WHERE predicate = 'test://custom'].in.uri)[0]",
+        getter: "SELECT ?target WHERE { ?target <test://custom> ?source . } LIMIT 1",
       })
       computed: string = "";
     }
@@ -148,7 +156,7 @@ describe("buildConformanceFilter()", () => {
 // ============================================================================
 
 describe("SHACL shape getter serialization", () => {
-  const testGetter = "(->link[WHERE predicate = 'test://pred'].out[WHERE count(->link[WHERE predicate = 'test://type' AND out.uri = 'test://flag']) > 0].uri)";
+  const testGetter = "SELECT ?target WHERE { <Base> <test://pred> ?target . ?target <test://type> <test://flag> . }";
   const testConditions: ConformanceCondition[] = [
     { type: "flag", predicate: "test://type", value: "test://flag" },
     { type: "required", predicate: "test://name" },
@@ -170,7 +178,7 @@ describe("SHACL shape getter serialization", () => {
     // Verify getter link exists
     const getterLink = links.find(l => l.predicate === "ad4m://getter");
     expect(getterLink).toBeDefined();
-    expect(getterLink!.target).toBe(`literal://string:${testGetter}`);
+    expect(getterLink!.target).toBe(`literal:string:${testGetter}`);
 
     // Verify conditions link exists
     const conditionsLink = links.find(l => l.predicate === "ad4m://conformanceConditions");
@@ -270,11 +278,18 @@ describe("generateSHACL() relation getter population", () => {
   it("should use explicit getter when provided (ignoring auto-generation)", () => {
     const { shape } = (ParentWithRelations as any).generateSHACL();
 
-    // Getter-only relations have no predicate and are excluded from SHACL shapes
+    // Getter-only relations have no `through` predicate but must still
+    // appear in the SHACL shape so the executor can find the getter; the
+    // writer synthesises a deterministic IRI for `sh:path`.
     const customProp = shape.properties.find(
       (p: SHACLPropertyShape) => p.name === "customItems"
     );
-    expect(customProp).toBeUndefined();
+    expect(customProp).toBeDefined();
+    expect(customProp!.getter).toBe(
+      "SELECT ?target WHERE { ?target <test://custom> ?source . }"
+    );
+    expect(customProp!.path).toBeDefined();
+    expect(customProp!.path).toContain("ad4m://getter/");
   });
 
   it("should survive full round-trip: generateSHACL → toLinks → fromLinks", () => {
@@ -299,11 +314,15 @@ describe("generateSHACL() relation getter population", () => {
     expect(flaggedProp!.conformanceConditions).toBeDefined();
     expect(flaggedProp!.conformanceConditions!.length).toBeGreaterThan(0);
 
-    // The custom getter-only relation should NOT be in the SHACL shape
+    // Getter-only relations now round-trip too — the synthesised path
+    // lets the SHACL graph carry the entry through links/fromLinks.
     const customProp = reconstructed.properties.find(
       (p: SHACLPropertyShape) => p.name === "customItems"
     );
-    expect(customProp).toBeUndefined();
+    expect(customProp).toBeDefined();
+    expect(customProp!.getter).toBe(
+      "SELECT ?target WHERE { ?target <test://custom> ?source . }"
+    );
   });
 });
 
@@ -338,7 +357,7 @@ describe("Ad4mModel.getModelMetadata() relation filtering fields", () => {
 
     // Explicit getter provided via decorator (getter-only, no predicate)
     expect(metadata.relations.customItems.getter).toBe(
-      "(<-link[WHERE predicate = 'test://custom'].in.uri)"
+      "SELECT ?target WHERE { ?target <test://custom> ?source . }"
     );
     expect(metadata.relations.customItems.predicate).toBe("");
 
@@ -383,17 +402,44 @@ describe("Ad4mModel.getModelMetadata() relation filtering fields", () => {
 // ============================================================================
 
 describe("Relation decorator validation", () => {
-  it("should throw if both getter and target are provided", () => {
-    expect(() => {
-      @Model({ name: "InvalidGetterTarget" })
-      class _Invalid extends Ad4mModel {
-        @HasMany({
-          getter: "(<-link.in.uri)",
-          target: () => FlaggedTarget,
-        })
-        items: string[] = [];
-      }
-    }).toThrow(/getter.*target.*mutually exclusive/i);
+  it("accepts getter together with target, and keeps the getter verbatim", () => {
+    // `target` does two separable jobs — derive a conformance getter, and name
+    // the class values hydrate into. Only the first conflicts with an explicit
+    // getter, so the pair is legal and the explicit getter wins.
+    @Model({ name: "GetterWithTarget" })
+    class GetterWithTarget extends Ad4mModel {
+      @HasMany({
+        getter: "SELECT ?target WHERE { ?rel <we://src> <Base> . ?rel <we://tgt> ?target . }",
+        target: () => FlaggedTarget,
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (GetterWithTarget as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.getter).toBe(
+      "SELECT ?target WHERE { ?rel <we://src> <Base> . ?rel <we://tgt> ?target . }"
+    );
+  });
+
+  it("emits sh:class for a getter relation, so include has a shape to resolve", () => {
+    // Without a target class the executor resolves a shape named "" and the
+    // include fails — which is what made a custom traversal able to return only
+    // bare URIs.
+    @Model({ name: "GetterWithTargetClass" })
+    class GetterWithTargetClass extends Ad4mModel {
+      @HasMany({
+        getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+        target: () => FlaggedTarget,
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (GetterWithTargetClass as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.targetClassName).toBe("FlaggedTarget");
   });
 
   it("should throw if both getter and through are provided", () => {
@@ -401,7 +447,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "InvalidGetterThrough" })
       class _Invalid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
           through: "test://pred",
         })
         items: string[] = [];
@@ -414,7 +460,7 @@ describe("Relation decorator validation", () => {
       @Model({ name: "ValidGetterOnly" })
       class _Valid extends Ad4mModel {
         @HasMany({
-          getter: "(<-link.in.uri)",
+          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
         })
         items: string[] = [];
       }
@@ -545,17 +591,25 @@ describe("sh:class target shape reference", () => {
 // ============================================================================
 
 describe("where clause validation", () => {
-  it("should throw if both where and getter are provided", () => {
-    expect(() => {
-      @Model({ name: "InvalidWhereGetter" })
-      class _Invalid extends Ad4mModel {
-        @HasMany({
-          where: { status: "active" },
-          getter: "(<-link.in.uri)",
-        })
-        items: string[] = [];
-      }
-    }).toThrow(/where.*getter.*mutually exclusive/i);
+  it("accepts where alongside a getter, as a post-getter filter", () => {
+    // The executor applies where filters specifically to getter-backed
+    // relations (`apply_where_filter_to_relation`), so the runtime was built
+    // for this pairing; only the decorator refused it.
+    @Model({ name: "WhereWithGetter" })
+    class WhereWithGetter extends Ad4mModel {
+      @HasMany({
+        where: { status: "active" },
+        getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+        target: () => FlaggedTarget,
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (WhereWithGetter as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.whereFilter).toEqual({ status: "active" });
+    expect(rel.getter).toBe("SELECT ?target WHERE { ?target ?p <Base> . }");
   });
 
   it("should throw if both where and filter:false are provided", () => {
@@ -571,10 +625,136 @@ describe("where clause validation", () => {
       }
     }).toThrow(/where.*filter.*contradictory/i);
   });
+
+  it("should throw if both where and filter:false are provided on a getter relation", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterWhereFilterFalse" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+          target: () => FlaggedTarget,
+          where: { status: "active" },
+          filter: false,
+        })
+        items: string[] = [];
+      }
+    }).toThrow(/where.*filter.*contradictory/i);
+  });
+});
+
+describe("relation datatype vs target (#908)", () => {
+  const DATATYPE_TARGET = /datatype.*target.*mutually exclusive/i;
+
+  it("throws when an options object sets both datatype and target", () => {
+    expect(() => {
+      @Model({ name: "InvalidDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          through: "test://pred",
+          target: () => FlaggedTarget,
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws when the target-thunk shorthand is given a datatype", () => {
+    expect(() => {
+      @Model({ name: "InvalidDatatypeTargetShorthand" })
+      class _Invalid extends Ad4mModel {
+        @HasMany(() => FlaggedTarget, {
+          through: "test://pred",
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws on a getter relation that sets both", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+          target: () => FlaggedTarget,
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws on a to-one relation that sets both", () => {
+    expect(() => {
+      @Model({ name: "InvalidHasOneDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasOne(() => FlaggedTarget, {
+          through: "test://pred",
+          datatype: "xsd://string",
+        })
+        item: string = "";
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("keeps datatype with through as a literal relation", () => {
+    @Model({ name: "ValidDatatypeThrough" })
+    class ValidDatatypeThrough extends Ad4mModel {
+      @HasMany({ through: "test://pred", datatype: "xsd://string" })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidDatatypeThrough as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBe("xsd://string");
+    expect(rel.nodeKind).toBe("Literal");
+    expect(rel.class).toBeUndefined();
+  });
+
+  it("keeps datatype with getter as a literal relation", () => {
+    @Model({ name: "ValidDatatypeGetter" })
+    class ValidDatatypeGetter extends Ad4mModel {
+      @HasMany({
+        getter: "SELECT ?target WHERE { <Base> <test://pred> ?target . }",
+        datatype: "xsd://string",
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidDatatypeGetter as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBe("xsd://string");
+    expect(rel.nodeKind).toBe("Literal");
+  });
+
+  it("keeps target without datatype as an instance relation", () => {
+    @Model({ name: "ValidTargetOnly" })
+    class ValidTargetOnly extends Ad4mModel {
+      @HasMany(() => FlaggedTarget, { through: "test://pred" })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidTargetOnly as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBeUndefined();
+    expect(rel.nodeKind).toBe("IRI");
+    expect(rel.targetClassName).toBe("FlaggedTarget");
+  });
 });
 
 describe("where clause compilation", () => {
-  it("should compile where clause to SurrealQL getter", () => {
+  // Under the source-of-truth refactor the SHACL writer no longer inlines
+  // `where` conditions into the relation's SPARQL getter.  Instead it emits
+  // `ad4m://whereFilter` + `ad4m://wherePredicates` triples that the
+  // Rust executor evaluates as a post-getter pass at query time.  These
+  // tests assert that contract on the writer side.
+
+  it("should emit whereFilter and wherePredicates on the relation shape", () => {
     @Model({ name: "WhereTarget" })
     class WhereTarget extends Ad4mModel {
       @Property({ through: "test://status", required: true })
@@ -595,13 +775,11 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(itemsProp).toBeDefined();
-    expect(itemsProp!.getter).toBeDefined();
-    expect(itemsProp!.getter).toContain("test://has_item");
-    expect(itemsProp!.getter).toContain("test://status");
-    expect(itemsProp!.getter).toContain("active");
+    expect(itemsProp!.whereFilter).toEqual({ status: "active" });
+    expect(itemsProp!.wherePredicates).toEqual({ status: "test://status" });
   });
 
-  it("should use where clause instead of auto-derived conformance when both target and where are set", () => {
+  it("should set whereFilter alongside an auto-derived conformance getter when target is provided", () => {
     @Model({ name: "WhereOverrideParent" })
     class WhereOverrideParent extends Ad4mModel {
       @HasMany(() => FlaggedTarget, {
@@ -616,16 +794,15 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "flaggedItems"
     );
     expect(prop).toBeDefined();
+    // whereFilter / wherePredicates carry the post-getter filter; type
+    // filtering stays on the auto-derived conformance getter.
+    expect(prop!.whereFilter).toEqual({ name: "specific" });
+    expect(prop!.wherePredicates).toEqual({ name: "test://name" });
     expect(prop!.getter).toBeDefined();
-    // Should contain the where condition (name = specific)
-    expect(prop!.getter).toContain("test://name");
-    expect(prop!.getter).toContain("specific");
-    // Should NOT contain the auto-derived flag condition
-    // (where overrides auto-conformance)
-    expect(prop!.getter).not.toContain("test://flagged_type");
+    expect(prop!.getter).toContain("test://flagged_type");
   });
 
-  it("should compile where clause with not operator", () => {
+  it("should emit whereFilter with a not operator unchanged", () => {
     @Model({ name: "WhereNotTarget" })
     class WhereNotTarget extends Ad4mModel {
       @Property({ through: "test://status" })
@@ -646,13 +823,11 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    // Should contain a negation condition
-    expect(prop!.getter).toContain("test://status");
-    expect(prop!.getter).toContain("archived");
+    expect(prop!.whereFilter).toEqual({ status: { not: "archived" } });
+    expect(prop!.wherePredicates).toEqual({ status: "test://status" });
   });
 
-  it("should compile where clause with array values (IN)", () => {
+  it("should emit whereFilter with array (IN) values unchanged", () => {
     @Model({ name: "WhereArrayTarget" })
     class WhereArrayTarget extends Ad4mModel {
       @Property({ through: "test://category" })
@@ -673,13 +848,11 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("test://category");
-    expect(prop!.getter).toContain("food");
-    expect(prop!.getter).toContain("drink");
+    expect(prop!.whereFilter).toEqual({ category: ["food", "drink"] });
+    expect(prop!.wherePredicates).toEqual({ category: "test://category" });
   });
 
-  it("should compile where clause without target using raw predicate URIs", () => {
+  it("should emit whereFilter without wherePredicates when target metadata is absent", () => {
     @Model({ name: "WhereNoTargetParent" })
     class WhereNoTargetParent extends Ad4mModel {
       @HasMany({
@@ -694,12 +867,13 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("test://status");
-    expect(prop!.getter).toContain("active");
+    expect(prop!.whereFilter).toEqual({ "test://status": "active" });
+    // Without target metadata the writer cannot resolve property→predicate;
+    // the executor falls back to interpreting keys as raw IRIs.
+    expect(prop!.wherePredicates).toBeUndefined();
   });
 
-  it("should set both where-compiled getter and sh:class when target is present", () => {
+  it("should set both whereFilter and sh:class when target is present", () => {
     @Model({ name: "WherePlusClassParent" })
     class WherePlusClassParent extends Ad4mModel {
       @HasMany(() => FlaggedTarget, {
@@ -714,15 +888,12 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "flaggedItems"
     );
     expect(prop).toBeDefined();
-    // where-compiled getter
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("specific");
-    // sh:class still set (target is present)
+    expect(prop!.whereFilter).toEqual({ name: "specific" });
     expect(prop!.class).toBeDefined();
     expect(prop!.class).toContain("FlaggedTarget");
   });
 
-  it("should round-trip where-compiled getter through toLinks/fromLinks", () => {
+  it("should round-trip whereFilter and wherePredicates through toLinks/fromLinks", () => {
     @Model({ name: "WhereRoundTripTarget" })
     class WhereRoundTripTarget extends Ad4mModel {
       @Property({ through: "test://status", required: true })
@@ -749,9 +920,8 @@ describe("where clause compilation", () => {
       (p: SHACLPropertyShape) => p.name === "items"
     );
     expect(prop).toBeDefined();
-    expect(prop!.getter).toBeDefined();
-    expect(prop!.getter).toContain("test://status");
-    expect(prop!.getter).toContain("active");
+    expect(prop!.whereFilter).toEqual({ status: "active" });
+    expect(prop!.wherePredicates).toEqual({ status: "test://status" });
   });
 });
 
@@ -760,7 +930,7 @@ describe("where clause compilation", () => {
 // ============================================================================
 
 describe("compileWhereClause()", () => {
-  it("should compile simple equality to SurrealQL condition", () => {
+  it("should compile simple equality to SPARQL condition", () => {
     const conditions = compileWhereClause(
       { status: "active" },
       { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
@@ -776,7 +946,7 @@ describe("compileWhereClause()", () => {
       { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
     );
     expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("= 0");  // negation
+    expect(conditions[0]).toContain("NOT EXISTS");  // negation
     expect(conditions[0]).toContain("archived");
   });
 
@@ -799,5 +969,90 @@ describe("compileWhereClause()", () => {
     expect(conditions).toHaveLength(1);
     expect(conditions[0]).toContain("test://raw_pred");
     expect(conditions[0]).toContain("value");
+  });
+});
+
+// ============================================================================
+// readOnly relations
+// ============================================================================
+
+@Model({ name: "ReadOnlyRelations" })
+class ReadOnlyRelations extends Ad4mModel {
+  @HasMany({
+    through: "test://voted_by",
+    getter: "SELECT ?target WHERE { ?source <test://voted_by> ?target . }",
+    readOnly: true,
+  })
+  votedBy: string[] = [];
+
+  @HasMany({ through: "test://tags" })
+  tags: string[] = [];
+}
+
+describe("readOnly relations", () => {
+  const shape = () => (ReadOnlyRelations as any).generateSHACL().shape as SHACLShape;
+  const prop = (name: string) =>
+    shape().properties.find((p: SHACLPropertyShape) => p.name === name)!;
+
+  it("keep their predicate as the shape's path, so a subscription re-runs on it", () => {
+    expect(prop("votedBy").path).toBe("test://voted_by");
+    expect(prop("votedBy").getter).toContain("test://voted_by");
+  });
+
+  it("generate no adder or remover and are marked not writable", () => {
+    expect(prop("votedBy").adder).toBeUndefined();
+    expect(prop("votedBy").remover).toBeUndefined();
+    expect(prop("votedBy").writable).toBe(false);
+  });
+
+  it("get no add/remove/set methods", () => {
+    const instance = ReadOnlyRelations.prototype as any;
+    expect(instance.addVotedBy).toBeUndefined();
+    expect(instance.removeVotedBy).toBeUndefined();
+    expect(instance.setVotedBy).toBeUndefined();
+    expect(typeof instance.addTags).toBe("function");
+  });
+
+  it("leave an ordinary relation writable", () => {
+    expect(prop("tags").adder).toBeDefined();
+    expect(prop("tags").writable).not.toBe(false);
+  });
+});
+
+@Model({ name: "SavesReadOnly" })
+class SavesReadOnly extends Ad4mModel {
+  @HasMany({ through: "test://read_only", readOnly: true })
+  readOnlyLinks: string[] = ["test://a"];
+
+  @HasMany({ through: "test://writable" })
+  writableLinks: string[] = ["test://b"];
+}
+
+describe("readOnly relations when saving", () => {
+  it("are skipped by save() and create(), even without a getter", async () => {
+    const proto = SavesReadOnly.prototype as any;
+    const set = jest.spyOn(proto, "setRelationValues").mockResolvedValue(undefined);
+    const add = jest.spyOn(proto, "addRelationValue").mockResolvedValue(undefined);
+    try {
+      const instance = new SavesReadOnly({ uuid: "p" } as any, "test://instance");
+      await (instance as any).innerUpdate(true);
+
+      const touched = [...set.mock.calls, ...add.mock.calls].map((call) => call[0]);
+      expect(touched).toContain("writableLinks");
+      expect(touched).not.toContain("readOnlyLinks");
+    } finally {
+      set.mockRestore();
+      add.mockRestore();
+    }
+  });
+
+  it("refuse `through` with `getter` on @HasOne, where the getter would be dropped", () => {
+    expect(() => {
+      class Refused extends Ad4mModel {
+        @HasOne({ through: "test://one", getter: "SELECT ?target WHERE { ?source <test://one> ?target . }", readOnly: true })
+        one: string = "";
+      }
+      return Refused;
+    }).toThrow(/@HasOne.*through.*getter/);
   });
 });

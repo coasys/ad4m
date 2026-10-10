@@ -1,15 +1,12 @@
+use super::model_query::is_safe_iri_target;
+use super::model_query::load_shape_from_store;
+use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
-use crate::graphql::graphql_types::{
-    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
-    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
-    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
-    PerspectiveStateFilter,
-};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
@@ -26,7 +23,12 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
-use crate::surreal_service::SurrealDBService;
+use crate::types::{
+    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
+    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
+    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
+    PerspectiveStateFilter,
+};
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -35,16 +37,34 @@ use deno_core::error::AnyError;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use urlencoding;
+
+/// Tracks which predicates have changed since the last subscription check.
+#[derive(Debug, Clone)]
+enum ChangedPredicates {
+    /// No changes recorded yet (initial state)
+    NoneRecorded,
+    /// A predicate-less diff was seen — must check ALL subscriptions
+    CheckAll,
+    /// Only specific predicates changed
+    Specific(HashSet<String>),
+}
 use uuid;
 use uuid::Uuid;
+
+#[cfg(test)]
+#[path = "perspective_instance_subscription_tests.rs"]
+mod subscription_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -52,9 +72,221 @@ static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
 static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
+/// How long `model_query` will poll a shared perspective for a
+/// class's SHACL to arrive over p-diff-sync before erroring — see
+/// `PerspectiveInstance::get_shape_or_wait`. Deliberately shorter
+/// than the WS handler's `SPARQL_QUERY_TIMEOUT_SECS` (30s) so a run
+/// that spent most of its budget waiting still has headroom to
+/// execute the query itself before the outer WS timeout fires.
+/// Local-only perspectives never enter the wait path.
+const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
+}
+
+/// True iff any addition or removal in the diff carries a triple
+/// that would alter a class's stored SHACL definition:
+///   * the `ad4m://` housekeeping triples emitted by `add_sdna`
+///     (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://shape`),
+///   * a class-level `rdf://type ad4m://SubjectClass` marker (only
+///     that specific target — normal `rdf://type ns://SomeClass`
+///     application links must not flush the cache), or
+///   * any SHACL-vocabulary predicate (`sh://...`) which only
+///     appears on property-shape triples written by the SHACL
+///     writer, not on regular application data.
+///
+/// Used by `diff_from_link_language` to decide whether to
+/// invalidate the shape cache. The scan is one loop over
+/// (additions + removals) per inbound diff — cheap next to the
+/// SPARQL write. Kept intentionally narrow so that a chatty
+/// application (Flux message writes, etc.) doesn't churn the
+/// cache. `ad4m://resolveLanguage`, `getter`, `transform`,
+/// `interpretation_hint`, `identity` etc. also appear on live
+/// application data (a `@Property` decorator emits them onto every
+/// instance's property URI) and MUST NOT trigger invalidation.
+fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
+    let iter = diff.additions.iter().chain(diff.removals.iter());
+    for decorated in iter {
+        let predicate = decorated.data.predicate.as_deref().unwrap_or("");
+        if predicate.starts_with("sh://") {
+            return true;
+        }
+        match predicate {
+            "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => return true,
+            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn is_sparql_query(query: &str) -> bool {
+    let trimmed = query.trim();
+    // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
+    // false-positives on Prolog atoms like `base(X).`
+    let upper = trimmed.to_ascii_uppercase();
+    for keyword in &["SELECT", "ASK", "CONSTRUCT", "DESCRIBE", "PREFIX", "BASE"] {
+        if upper.starts_with(keyword) {
+            let rest = &trimmed[keyword.len()..];
+            if rest.is_empty()
+                || rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '<')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod inbound_touches_shacl_tests {
+    //! Regression guard for the shape-cache invalidation predicate. If
+    //! either the positive OR the negative set drifts, `diff_from_link_language`
+    //! either misses SHACL updates (stale cache) or thrashes the cache
+    //! on every application-data diff.
+    use super::*;
+    use crate::types::{DecoratedExpressionProof, LinkStatus};
+
+    fn link(source: &str, predicate: &str, target: &str) -> DecoratedLinkExpression {
+        DecoratedLinkExpression {
+            author: String::new(),
+            timestamp: String::new(),
+            data: Link {
+                source: source.into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            proof: DecoratedExpressionProof {
+                key: String::new(),
+                signature: String::new(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    fn diff(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+        DecoratedPerspectiveDiff {
+            additions,
+            removals: vec![],
+        }
+    }
+
+    #[test]
+    fn class_shape_assignment_triggers_invalidation() {
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ad4m://InterpretationRun",
+            "ad4m://shape",
+            "ad4m://InterpretationRunShape",
+        )])));
+    }
+
+    #[test]
+    fn sdna_housekeeping_triggers_invalidation() {
+        for predicate in ["ad4m://has_subject_class", "ad4m://sdna"] {
+            assert!(
+                inbound_touches_shacl(&diff(vec![link(
+                    "ad4m://perspective",
+                    predicate,
+                    "some-target"
+                )])),
+                "predicate `{predicate}` should invalidate"
+            );
+        }
+    }
+
+    #[test]
+    fn class_marker_rdf_type_triggers_invalidation() {
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ad4m://InterpretationRun",
+            "rdf://type",
+            "ad4m://SubjectClass",
+        )])));
+    }
+
+    #[test]
+    fn generic_rdf_type_on_application_data_does_not_invalidate() {
+        // A normal application instance's rdf://type link (e.g. a Flux
+        // message declaring its class) MUST NOT flush the cache — every
+        // message send would churn it.
+        assert!(!inbound_touches_shacl(&diff(vec![link(
+            "flux://message/abc",
+            "rdf://type",
+            "ns://Message",
+        )])));
+    }
+
+    #[test]
+    fn sh_vocabulary_triggers_invalidation() {
+        for predicate in [
+            "sh://property",
+            "sh://path",
+            "sh://datatype",
+            "sh://minCount",
+        ] {
+            assert!(
+                inbound_touches_shacl(&diff(vec![link(
+                    "ad4m://SomeShape.prop",
+                    predicate,
+                    "xsd:string"
+                )])),
+                "predicate `{predicate}` should invalidate"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_data_link_does_not_invalidate() {
+        // Application data — the common case, must not touch the cache.
+        assert!(!inbound_touches_shacl(&diff(vec![link(
+            "msg://hello",
+            "ns://body",
+            "literal:string:hi",
+        )])));
+    }
+
+    #[test]
+    fn ad4m_predicates_that_also_ride_application_data_do_not_invalidate() {
+        // `resolveLanguage`, `getter`, `interpretation_hint`, `identity`
+        // appear on live property URIs on real instances (a @Property
+        // decorator writes them per-instance). They must NOT invalidate
+        // the class-shape cache — the check keys off the SHACL writer's
+        // structural triples only.
+        for predicate in [
+            "ad4m://resolveLanguage",
+            "ad4m://getter",
+            "ad4m://interpretation_hint",
+            "ad4m://identity",
+            "ad4m://transform",
+        ] {
+            assert!(
+                !inbound_touches_shacl(&diff(vec![link(
+                    "flux://message/abc.body",
+                    predicate,
+                    "some-value"
+                )])),
+                "predicate `{predicate}` should NOT invalidate on plain instance data"
+            );
+        }
+    }
+
+    #[test]
+    fn removals_are_also_scanned() {
+        let mut diff = DecoratedPerspectiveDiff::default();
+        diff.removals.push(link(
+            "ad4m://InterpretationRun",
+            "ad4m://shape",
+            "ad4m://oldShape",
+        ));
+        assert!(inbound_touches_shacl(&diff));
+    }
+
+    #[test]
+    fn empty_diff_does_not_invalidate() {
+        assert!(!inbound_touches_shacl(&DecoratedPerspectiveDiff::default()));
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -142,9 +374,9 @@ pub struct PorpertyValue {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct SubjectClassOption {
     #[serde(rename = "className")]
-    class_name: Option<String>,
+    pub class_name: Option<String>,
     #[serde(rename = "query")]
-    query: Option<String>,
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -159,75 +391,309 @@ struct SubscribedQuery {
     last_result: String,
     last_keepalive: Instant,
     user_email: Option<String>,
+    /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
+    /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
+    predicates: HashSet<String>,
+    /// When set, this subscription was registered via `model_subscribe_and_query`.
+    /// On trigger, `execute_model_query` is called instead of re-running raw SPARQL.
+    model_query_params: Option<ModelSubscriptionParams>,
+    /// Number of subscribers currently holding this entry. `subscribe_and_query`
+    /// and `model_subscribe_and_query` hand the same id to every caller that
+    /// registers the same (query, user) pair, so one re-evaluation and one push
+    /// serve all of them. `dispose_query_subscription` releases one hold and
+    /// removes the entry only when the last holder is gone. Keepalive eviction
+    /// ignores this count: an entry nobody keeps alive is removed regardless.
+    holders: usize,
 }
 
+/// A batch with its creation timestamp, for timeout-based cleanup.
+struct TimestampedBatch {
+    diff: PerspectiveDiff,
+    created_at: Instant,
+}
+
+/// Maximum age of an uncommitted batch before it is automatically cleaned up.
+static BATCH_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
+/// Diagnostic stats for a single perspective's memory-relevant data structures.
+pub struct PerspectiveMemoryStats {
+    pub uuid: String,
+    pub name: String,
+    pub subscriptions: usize,
+    pub sub_result_bytes: usize,
+    pub batches: usize,
+    pub batch_links: usize,
+    pub quad_count: usize,
+}
+
+/// Parameters for a model query subscription. Stored alongside the trigger SPARQL
+/// so that `check_subscribed_queries` can re-execute the model query in Rust.
+/// Shape is resolved from the perspective's cache at each re-evaluation —
+/// no JSON metadata is held here.
 #[derive(Clone)]
-struct SurrealSubscribedQuery {
-    query: String,
-    last_result: String,
-    last_keepalive: Instant,
-    user_email: Option<String>,
+struct ModelSubscriptionParams {
+    class_name: String,
+    query_json: String,
+}
+
+/// Extract predicate IRIs from a SPARQL query by finding triple patterns.
+/// Returns an empty set if no fixed predicates are found (e.g. `?s ?p ?o`),
+/// which means the subscription should always be re-checked.
+///
+/// Also returns an empty set if a `GRAPH` pattern uses a variable predicate
+/// (e.g. `GRAPH ?g { ?source ?predicate ?target }`). Such patterns match links
+/// with ANY predicate, so we cannot narrow the subscription to a fixed set.
+/// Compiled regexes for SPARQL predicate extraction — compiled once, reused on every call.
+static RE_GRAPH_VAR_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"GRAPH\s+\?\w+\s*\{[^}]*(?:\?\w+|<[^>]+>)\s+(\?\w+)\s+(?:\?\w+|<[^>]+>)[^}]*\}",
+    )
+    .unwrap()
+});
+static RE_VAR_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+\?\w+\s+(?:\?\w+|<[^>]+>)\s*\.").unwrap()
+});
+static RE_IRI_PRED: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\?\w+|<[^>]+>)\s+(<[^>]+>)\s+(?:\?\w+|<[^>]+>)").unwrap()
+});
+
+fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
+    // Detect variable predicate inside GRAPH patterns:
+    // GRAPH ?var { ... ?var1 ?varPred ?var2 ... }
+    // This is the pattern our model queries use for fetching all links.
+    if RE_GRAPH_VAR_PRED.is_match(query) {
+        return HashSet::new();
+    }
+
+    // Detect variable predicate in regular triple patterns (e.g. ?source ?predicate ?target)
+    // When a query uses a variable predicate, it can match any predicate,
+    // so we must always re-check.
+    if RE_VAR_PRED.is_match(query) {
+        return HashSet::new();
+    }
+
+    let mut predicates = HashSet::new();
+    // Match triple patterns: (var|uri) <uri> (var|uri)
+    // The middle <uri> is the predicate
+    for cap in RE_IRI_PRED.captures_iter(query) {
+        let pred = cap[1].trim_matches(|c| c == '<' || c == '>');
+        predicates.insert(pred.to_string());
+    }
+    predicates
 }
 
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
+    /// Cached UUID — never changes after construction, avoids locking `persisted`.
+    pub uuid: String,
 
     pub created_from_join: bool,
     pub is_fast_polling: bool,
     pub retries: u32,
 
-    is_teardown: Arc<Mutex<bool>>,
+    pub(crate) is_teardown: Arc<AtomicBool>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
-    trigger_notification_check: Arc<Mutex<bool>>,
-    trigger_prolog_subscription_check: Arc<Mutex<bool>>,
-    trigger_surreal_subscription_check: Arc<Mutex<bool>>,
+    trigger_notification_check: Arc<AtomicBool>,
+    trigger_prolog_subscription_check: Arc<AtomicBool>,
+    /// Predicates of links changed since last subscription check.
+    changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
-    surreal_subscribed_queries: Arc<Mutex<HashMap<String, SurrealSubscribedQuery>>>,
-    batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
+    batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    // Each perspective has its own isolated SurrealDB instance
-    surreal_service: Arc<SurrealDBService>,
+    pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    /// In-memory cache of parsed `ModelShape` instances keyed by class name.
+    /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
+    /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
+    shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The one debounced flow consensus pass this perspective may have
+    /// queued for inbound neighbourhood links — see
+    /// `flow_instance::trigger`. A std mutex: held for a field swap, never
+    /// across an await.
+    pub(crate) flow_pass_queue:
+        Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
+    /// Test-only fault injection for [`Self::add_link_expression`] (#981).
+    /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
+    /// `0` means the *next* call returns an error instead of writing, then
+    /// resets to `-1` so later calls in the same test succeed normally; a
+    /// positive `n` counts down without failing until it reaches `0`. Lets a
+    /// test force a batch write to fail partway through — after a subject is
+    /// already staged, or after some of its collection links have landed —
+    /// without a real store fault, to assert `discard_batch` actually leaves
+    /// nothing behind.
+    #[cfg(test)]
+    fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
+    /// joined to a neighbourhood, so a test can exercise the cross-peer wait
+    /// without a running link language. Compiled out in non-test builds.
+    #[cfg(test)]
+    force_shape_sync_wait: Arc<AtomicBool>,
+}
+
+/// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
+/// lifetime of a single query.  On miss it parses SHACL from the perspective's
+/// store and memoizes the result.
+struct PerspectiveShapeResolver<'a> {
+    cache: &'a std::sync::RwLock<HashMap<String, Arc<ModelShape>>>,
+    store: &'a crate::perspectives::sparql_store::SparqlStore,
+}
+
+impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
+    fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
+        if let Some(shape) = self.cache.read().unwrap().get(class_name).cloned() {
+            return Ok(shape);
+        }
+        let shape = load_shape_from_store(self.store, class_name)?;
+        let arc = Arc::new(shape);
+        self.cache
+            .write()
+            .unwrap()
+            .insert(class_name.to_string(), arc.clone());
+        Ok(arc)
+    }
 }
 
 impl PerspectiveInstance {
-    pub fn new(
-        handle: PerspectiveHandle,
-        created_from_join: Option<bool>,
-        surreal_service: SurrealDBService,
-    ) -> Self {
-        // Each perspective gets its own isolated SurrealDB database
-        // The service is created by the caller in an async context
+    pub fn new(handle: PerspectiveHandle, created_from_join: Option<bool>) -> Self {
+        // Build per-perspective data path for persistent SPARQL store
+        let sparql_data_path = crate::perspectives::get_app_data_path().map(|base| {
+            let p = std::path::PathBuf::from(&base)
+                .join("perspectives")
+                .join(&handle.uuid);
+            p.to_string_lossy().to_string()
+        });
 
         PerspectiveInstance {
             persisted: Arc::new(Mutex::new(handle.clone())),
+            uuid: handle.uuid.clone(),
 
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
             retries: 0,
-            is_teardown: Arc::new(Mutex::new(false)),
+            is_teardown: Arc::new(AtomicBool::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
-            trigger_notification_check: Arc::new(Mutex::new(false)),
-            trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
-            trigger_surreal_subscription_check: Arc::new(Mutex::new(false)),
+            trigger_notification_check: Arc::new(AtomicBool::new(false)),
+            trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
+            changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
-            surreal_subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
-            // Initialize fallback sync tracking
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
-            // Each perspective gets its own isolated SurrealDB database
-            surreal_service: Arc::new(surreal_service),
+            sparql_store: Arc::new(
+                crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
+                    .expect("Failed to create per-perspective SPARQL service"),
+            ),
+            shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
+            #[cfg(test)]
+            fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Test seam (#981): make the *next* [`Self::add_link_expression`] call
+    /// fail instead of writing, then resume normal behaviour. `after_n_calls`
+    /// lets calls that must succeed first (e.g. staging the subject itself)
+    /// through before the induced failure — `0` fails immediately, `1` lets
+    /// one call through first, and so on. Never called from production code;
+    /// exists so a test can prove a partial batch write actually rolls back
+    /// rather than only reading the `discard_batch` call sites and trusting
+    /// they run. The backing field only exists in test builds (`cfg(test)`),
+    /// so this seam has zero footprint in production.
+    #[cfg(test)]
+    pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
+        self.fail_add_link_after
+            .store(after_n_calls, Ordering::SeqCst);
+    }
+
+    /// Look up a cached `ModelShape` for the given class name, loading it
+    /// from the perspective's SHACL triples on cache miss.  Returns an
+    /// `Arc<ModelShape>` shared across query and subscription re-evaluation.
+    pub fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
+        self.shape_resolver().get_shape(class_name)
+    }
+
+    /// Drop any cached `ModelShape` for `class_name`.  Called when SHACL is
+    /// (re-)written for the class so the next query re-parses fresh state.
+    pub fn invalidate_shape(&self, class_name: &str) {
+        self.shape_cache.write().unwrap().remove(class_name);
+    }
+
+    /// Like [`get_shape`], but for perspectives joined to a
+    /// neighbourhood (link language attached) it will poll for the
+    /// SHACL triples to arrive over p-diff-sync up to `budget`. Fixes
+    /// the cross-peer race where a peer that just joined a shared
+    /// perspective calls `findAll(ClassX)` before `ClassX`'s SDNA has
+    /// synced from the peer that registered it — the shape lives in
+    /// the shared graph, but it takes a moment to arrive.
+    ///
+    /// Local-only perspectives (no link language) behave identically
+    /// to `get_shape` — a missing class there is a genuine
+    /// caller bug, not a sync race, so we surface the error immediately.
+    pub async fn get_shape_or_wait(
+        &self,
+        class_name: &str,
+        budget: Duration,
+    ) -> Result<Arc<ModelShape>, AnyError> {
+        match self.get_shape(class_name) {
+            Ok(shape) => return Ok(shape),
+            Err(e) => {
+                if !self.shapes_may_still_sync().await {
+                    return Err(e);
+                }
+            }
+        }
+        let deadline = Instant::now() + budget;
+        let poll = Duration::from_millis(100);
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                // Keeps the original message as a prefix (callers match on
+                // it) and says a wait happened, so "addSdna first" is not
+                // read as the whole story by a peer whose shape is syncing.
+                return self.get_shape(class_name).map_err(|e| {
+                    if budget.is_zero() {
+                        e
+                    } else {
+                        anyhow!("{e} (waited {budget:?} for it to sync from a peer)")
+                    }
+                });
+            }
+            // Never sleep past the deadline: the caller's budget is shared.
+            sleep(poll.min(deadline - now)).await;
+            if let Ok(shape) = self.get_shape(class_name) {
+                return Ok(shape);
+            }
+        }
+    }
+
+    /// Whether a class missing from the store can still arrive from a peer:
+    /// true once the perspective has a link language.
+    async fn shapes_may_still_sync(&self) -> bool {
+        #[cfg(test)]
+        if self.force_shape_sync_wait.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.has_link_language().await
+    }
+
+    /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
+    /// query.  Used by `execute_model_query` for include recursion.
+    fn shape_resolver(&self) -> PerspectiveShapeResolver<'_> {
+        PerspectiveShapeResolver {
+            cache: &self.shape_cache,
+            store: &self.sparql_store,
         }
     }
 
@@ -238,50 +704,265 @@ impl PerspectiveInstance {
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
-            self.surreal_subscription_cleanup_loop(),
-            self.fallback_sync_loop()
+            self.fallback_sync_loop(),
+            self.auto_processor_supervisor(),
         );
+    }
+
+    /// Dispatch between single-user (one main-agent loop) and multi-user
+    /// (main-agent loop PLUS a per-online-managed-user loop) auto-processor
+    /// spawning.
+    ///
+    /// The main-agent loop always runs. In multi-user mode `elect_author`
+    /// walks the batch's message-order authors and returns `Other(managed-user)`
+    /// on any batch authored by a managed user, so the main-agent loop stands
+    /// down cheaply (no LLM call) and the winning managed user's own loop does
+    /// the interpretation with the correct provenance DID. When no managed
+    /// user is present as a batch author — e.g. the host itself posted, or
+    /// a JS integration test drives the perspective through the admin client
+    /// before any managed user comes online — the main-agent loop is the only
+    /// eligible processor and runs the pass itself. This keeps
+    /// `auto-processor.test.ts` (multi-user mode set, but no managed users
+    /// created) working without regressing the Marvin per-user attribution.
+    async fn auto_processor_supervisor(&self) {
+        if crate::user_management::is_multi_user_enabled() {
+            let _ = join!(
+                self.auto_processor_watch_loop(AgentContext::main_agent()),
+                self.managed_user_auto_processor_supervisor(),
+            );
+        } else {
+            self.auto_processor_watch_loop(AgentContext::main_agent())
+                .await;
+        }
+    }
+
+    /// Multi-user auto-processor spawn loop. Every supervisor tick it
+    /// re-computes the set of managed users whose `last_seen` falls inside
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (twice the `last_seen` write-throttle,
+    /// so active users do not flap — #1070), spawns a per-user
+    /// `auto_processor_watch_loop` for any newly-online user, and aborts the
+    /// loop of any user who has aged out. Users that go offline are cheap to
+    /// re-spawn on next activity, so the transient churn is bounded.
+    ///
+    /// Why per-user rather than a single main-agent loop:
+    ///   `elect_author` returns `Me` only when the loop's `AgentContext` DID
+    ///   is among the batch's authors. On a hosting node whose main agent is
+    ///   the host key, every managed user's utterance elects `Other(user)`
+    ///   forever and no pass ever runs — the exact symptom we hit on Marvin
+    ///   with James in a live call.
+    async fn managed_user_auto_processor_supervisor(&self) {
+        use crate::perspectives::auto_processor::watcher::{
+            select_online_managed_users, MANAGED_USER_ONLINE_WINDOW_S,
+        };
+        use std::collections::HashMap;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use tokio::task::JoinHandle;
+
+        /// How often the supervisor re-evaluates the online-user set. Short
+        /// enough that a user joining a call sees interpretation within
+        /// ~1 tick; long enough that we do not hammer the DB.
+        const SUPERVISOR_TICK_MS: u64 = 5_000;
+
+        let mut per_user_loops: HashMap<String, JoinHandle<()>> = HashMap::new();
+        let uuid = self.uuid.clone();
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            let now_s = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_secs() as i64,
+                Err(_) => {
+                    sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+                    continue;
+                }
+            };
+
+            let users_result =
+                Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string());
+            let user_tuples: Vec<(String, Option<i64>)> = match users_result {
+                Ok(users) => users
+                    .into_iter()
+                    .map(|u| (u.username, u.last_seen))
+                    .collect(),
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor supervisor `{uuid}`: could not list users ({e}); \
+                         retrying in {SUPERVISOR_TICK_MS}ms"
+                    );
+                    sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+                    continue;
+                }
+            };
+
+            let online =
+                select_online_managed_users(user_tuples, now_s, MANAGED_USER_ONLINE_WINDOW_S);
+            let online_set: std::collections::HashSet<&String> = online.iter().collect();
+
+            // Reap: drop entries for users who finished, aged out, or are no
+            // longer online. `handle.abort()` unwinds the loop's await points;
+            // `is_teardown` is not toggled by abort so the perspective stays
+            // healthy for other tasks.
+            per_user_loops.retain(|email, handle| {
+                if handle.is_finished() {
+                    log::debug!(
+                        "auto_processor supervisor `{uuid}`: loop for user `{email}` finished; \
+                         removing"
+                    );
+                    return false;
+                }
+                if !online_set.contains(email) {
+                    log::info!(
+                        "auto_processor supervisor `{uuid}`: user `{email}` aged out of \
+                         freshness window; aborting loop"
+                    );
+                    handle.abort();
+                    return false;
+                }
+                true
+            });
+
+            // Spawn loops for newly-online users. `for_user_email` is a pure
+            // constructor; DID / wallet resolution happens lazily inside the
+            // loop, so an email whose key never loaded still fails loudly
+            // there — not silently at spawn.
+            for email in online {
+                if per_user_loops.contains_key(&email) {
+                    continue;
+                }
+                let ctx = AgentContext::for_user_email(email.clone());
+                let this = self.clone();
+                let uuid_clone = uuid.clone();
+                let email_clone = email.clone();
+                let handle = tokio::spawn(async move {
+                    log::info!(
+                        "auto_processor supervisor `{uuid_clone}`: starting loop for user \
+                         `{email_clone}`"
+                    );
+                    this.auto_processor_watch_loop(ctx).await;
+                });
+                per_user_loops.insert(email, handle);
+            }
+
+            sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
+        }
+
+        // Teardown: abort every per-user loop deliberately. `is_teardown` is
+        // already visible to the child loops, but aborting is faster than
+        // waiting for their 500ms tick to observe it.
+        for (email, handle) in per_user_loops.drain() {
+            log::debug!(
+                "auto_processor supervisor `{uuid}`: teardown — aborting loop for `{email}`"
+            );
+            handle.abort();
+        }
     }
 
     pub async fn teardown_background_tasks(&self) {
-        *self.is_teardown.lock().await = true;
+        self.is_teardown.store(true, Ordering::Release);
     }
 
-    /// Sync existing links from Prolog to SurrealDB
-    /// This should be called once when a perspective is loaded from storage
-    pub async fn sync_existing_links_to_surreal(&self) -> Result<(), AnyError> {
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
+    /// Return diagnostic stats for this perspective's memory-relevant data structures.
+    pub async fn memory_diagnostics(&self) -> PerspectiveMemoryStats {
+        let (subscriptions, sub_result_bytes) = {
+            let subs = self.subscribed_queries.lock().await;
+            let count = subs.len();
+            let bytes: usize = subs
+                .values()
+                .map(|q| q.last_result.len() + q.query.len())
+                .sum();
+            (count, bytes)
         };
+        let (batches, batch_links) = {
+            let bs = self.batch_store.read().await;
+            let count = bs.len();
+            let links: usize = bs
+                .values()
+                .map(|b| b.diff.additions.len() + b.diff.removals.len())
+                .sum();
+            (count, links)
+        };
+        let quad_count = self.sparql_store.quad_count();
+        let name = self.persisted.lock().await.name.clone().unwrap_or_default();
 
-        log::info!(
-            "💾 SURREAL SYNC: Starting initial sync for perspective {}",
-            uuid
-        );
-        let sync_start = std::time::Instant::now();
-
-        // Get all links from storage (Prolog)
-        let all_links = self.get_links(&LinkQuery::default()).await?;
-        log::info!("💾 SURREAL SYNC: Found {} links to sync", all_links.len());
-
-        if all_links.is_empty() {
-            log::info!("💾 SURREAL SYNC: No links to sync");
-            return Ok(());
+        PerspectiveMemoryStats {
+            uuid: self.uuid.clone(),
+            name,
+            subscriptions,
+            sub_result_bytes,
+            batches,
+            batch_links,
+            quad_count,
         }
+    }
 
-        // Reload perspective in SurrealDB
-        self.surreal_service
-            .reload_perspective(&uuid, all_links)
-            .await?;
+    /// Synchronous version of memory_diagnostics for use from sync contexts
+    /// (e.g. when holding the sync PERSPECTIVES RwLock).
+    pub fn memory_diagnostics_sync(&self) -> PerspectiveMemoryStats {
+        let (subscriptions, sub_result_bytes) = {
+            let subs = self.subscribed_queries.blocking_lock();
+            let count = subs.len();
+            let bytes: usize = subs
+                .values()
+                .map(|q| q.last_result.len() + q.query.len())
+                .sum();
+            (count, bytes)
+        };
+        let (batches, batch_links) = {
+            let bs = self.batch_store.blocking_read();
+            let count = bs.len();
+            let links: usize = bs
+                .values()
+                .map(|b| b.diff.additions.len() + b.diff.removals.len())
+                .sum();
+            (count, links)
+        };
+        let quad_count = self.sparql_store.quad_count();
+        let name = self
+            .persisted
+            .blocking_lock()
+            .name
+            .clone()
+            .unwrap_or_default();
 
-        log::info!("💾 SURREAL SYNC: Completed in {:?}", sync_start.elapsed());
+        PerspectiveMemoryStats {
+            uuid: self.uuid.clone(),
+            name,
+            subscriptions,
+            sub_result_bytes,
+            batches,
+            batch_links,
+            quad_count,
+        }
+    }
+
+    /// Sync all existing links to the SPARQL (Oxigraph) store.
+    ///
+    /// Reloading the store replaces every triple in one shot, so any
+    /// `ModelShape` warmed before the reload may now reflect stale SHACL
+    /// metadata.  Flush the entire `shape_cache` so the next query
+    /// re-parses against the freshly-loaded triples.
+    pub fn sync_existing_links_to_sparql(
+        &self,
+        links: &[DecoratedLinkExpression],
+    ) -> Result<(), deno_core::anyhow::Error> {
+        let link_exprs: Vec<LinkExpression> = links
+            .iter()
+            .map(|l| {
+                let mut le = LinkExpression::from(l.clone());
+                // The rusqlite source always records a status, so `None` here
+                // is a legacy anomaly. Default it to Shared at this boundary
+                // rather than letting one odd row abort the whole boot-time
+                // rebuild (the store refuses status-less inserts).
+                le.status = le.status.or(Some(LinkStatus::Shared));
+                le
+            })
+            .collect();
+        self.sparql_store.reload(link_exprs)?;
+        self.shape_cache.write().unwrap().clear();
         Ok(())
     }
 
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             if self.link_language.read().await.is_none()
                 && self.persisted.lock().await.neighbourhood.is_some()
             {
@@ -326,7 +1007,7 @@ impl PerspectiveInstance {
                         };
 
                         log::info!(
-                            "🔍 Setting local agents for link language: {:?}",
+                            "Setting local agents for link language: {:?}",
                             agents_to_register
                         );
                         if let Err(e) = language.set_local_agents(agents_to_register).await {
@@ -357,14 +1038,37 @@ impl PerspectiveInstance {
                         break;
                     }
                     Ok(None) => {
+                        // Actively try to install the language on this tick.
+                        // `language_by_address` only CHECKS the loaded-runtimes
+                        // map; it does not trigger an install. Without the
+                        // retry call below, a perspective whose initial
+                        // install in `install_neighbourhood_with_context`
+                        // failed (e.g. the language language was still
+                        // warming up) would stay stuck in
+                        // LinkLanguageFailedToInstall forever, because
+                        // nothing in this loop ever re-attempted the install
+                        // — it just kept asking "is it loaded yet?" to a map
+                        // nothing was writing to.
                         log::debug!(
-                            "Link language {} not installed yet, retrying in 5 seconds",
-                            nh.data.link_language.clone()
+                            "Link language {} not installed yet, attempting install...",
+                            nh.data.link_language
                         );
-                        self.update_perspective_state_log_error(
-                            PerspectiveState::LinkLanguageFailedToInstall,
-                        )
-                        .await;
+                        if let Err(e) =
+                            LanguageController::install_language(nh.data.link_language.clone())
+                                .await
+                        {
+                            log::debug!(
+                                "ensure_link_language: install_language({}) failed, will retry in 5s: {}",
+                                nh.data.link_language, e
+                            );
+                            self.update_perspective_state_log_error(
+                                PerspectiveState::LinkLanguageFailedToInstall,
+                            )
+                            .await;
+                        }
+                        // Loop back around; the next tick will re-enter
+                        // language_by_address and either find the freshly
+                        // installed runtime or schedule another retry.
                     }
                     Err(e) => {
                         log::error!("Error when calling language_by_address: {:?}", e);
@@ -380,8 +1084,16 @@ impl PerspectiveInstance {
     }
 
     async fn nh_sync_loop(&self) {
-        let mut interval = time::interval(Duration::from_secs(3));
-        while !*self.is_teardown.lock().await {
+        // Exponential backoff on sync failure. A perspective whose link
+        // language is unreachable (e.g. Holochain timing out because the
+        // parent test long since finished) used to hammer sync() every 3
+        // seconds forever, piling zome calls onto HC for every leaked
+        // instance. Back off up to 5 minutes on repeated failure; reset
+        // to the base interval as soon as a sync succeeds.
+        const BASE_INTERVAL: Duration = Duration::from_secs(3);
+        const MAX_INTERVAL: Duration = Duration::from_secs(300);
+        let mut current_interval = BASE_INTERVAL;
+        while !self.is_teardown.load(Ordering::Acquire) {
             // Clone the link_language without holding the lock during sync
             let link_language_clone = {
                 let link_language_guard = self.link_language.read().await;
@@ -389,8 +1101,19 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
+                // If the loaded link language does not export a
+                // perspective-sync capability, the sync loop has nothing
+                // to do — mark the perspective synced and stop polling
+                // so we don't burn a task slot on a no-op tick forever.
+                if !link_language.has(crate::languages::capability::Capability::PerspectiveSync) {
+                    let _ = self
+                        .update_perspective_state(PerspectiveState::Synced)
+                        .await;
+                    return;
+                }
                 match link_language.sync().await {
                     Ok(_) => {
+                        current_interval = BASE_INTERVAL;
                         // Transition to Synced state on successful sync
                         let _ = self
                             .update_perspective_state(PerspectiveState::Synced)
@@ -398,6 +1121,8 @@ impl PerspectiveInstance {
                     }
                     Err(e) => {
                         log::error!("Error calling sync on link language: {:?}", e);
+                        current_interval =
+                            std::cmp::min(current_interval.saturating_mul(2), MAX_INTERVAL);
                         let _ = self
                             .update_perspective_state(
                                 PerspectiveState::LinkLanguageInstalledButNotSynced,
@@ -406,16 +1131,27 @@ impl PerspectiveInstance {
                     }
                 }
             }
-            interval.tick().await;
+            // Sleep in short slices so teardown is observed within ~1s
+            // even when the backoff interval is long.
+            let mut remaining = current_interval;
+            let slice = Duration::from_secs(1);
+            while remaining > Duration::from_millis(0) {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    return;
+                }
+                let step = std::cmp::min(slice, remaining);
+                sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
         }
     }
 
     async fn pending_diffs_loop(&self) {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         let mut interval = time::interval(Duration::from_millis(100));
         let mut last_diff_time = None;
 
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
 
             if self.has_link_language().await {
@@ -438,20 +1174,20 @@ impl PerspectiveInstance {
                 if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
                     if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
-                        log::info!("Committed diffs after reaching 10s maximum wait time");
+                        log::debug!("💾 committed diffs after reaching 10s maximum wait time");
                     }
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
                     if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
-                        log::info!("Committed diffs after 1s of inactivity");
+                        log::debug!("💾 committed diffs after 1s of inactivity");
                     }
                 // 3. We have collected more than 100 diffs
                 } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
                     && self.commit_pending_diffs().await.is_ok()
                 {
                     last_diff_time = None;
-                    log::info!("Committed diffs after collecting 100");
+                    log::debug!("💾 committed diffs after collecting 100");
                 }
             }
         }
@@ -470,7 +1206,7 @@ impl PerspectiveInstance {
     }
 
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
 
         let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
             db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))
@@ -483,19 +1219,27 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
-                log::info!("Committing {} pending diffs...", pending_ids.len());
+                log::debug!("💾 committing {} pending diffs...", pending_ids.len());
                 let commit_result = link_language.commit(pending_diffs).await;
                 match commit_result {
-                    Ok(Some(_)) => {
+                    // Spec §5.2 splits perspective-commit (write) from
+                    // perspective-sync (revision read), so a spec-compliant
+                    // flat language that implements only perspective-commit
+                    // returns Ok(None). Previously we treated Ok(None) as
+                    // an error and left the diffs pending forever, so any
+                    // language without a perspective-sync capability could
+                    // never drain its retry queue. The success signal for
+                    // the retry path is "commit didn't throw" — clear the
+                    // diffs regardless of whether a revision came back.
+                    Ok(_) => {
                         Ad4mDb::with_global_instance(|db| {
                             db.clear_pending_diffs(&uuid, pending_ids)
                         })?;
                         // Reset immediate commits counter after successful commit
                         self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
-                        log::info!("Successfully committed pending diffs");
+                        log::debug!("✅ 💾 successfully committed pending diffs");
                         Ok(())
                     }
-                    Ok(None) => Err(anyhow!("No diff returned from commit")),
                     Err(e) => Err(e),
                 }
             } else {
@@ -508,17 +1252,18 @@ impl PerspectiveInstance {
 
     async fn notification_check_loop(&self) {
         //log::debug!("Starting notification check loop for perspective {}", self.persisted.lock().await.uuid);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         let mut interval = time::interval(Duration::from_secs(5));
         let mut before = self.notification_trigger_snapshot().await;
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
-            let changed = *(self.trigger_notification_check.lock().await);
+            let changed = self
+                .trigger_notification_check
+                .swap(false, Ordering::AcqRel);
 
             if changed {
                 //log::debug!("Notification check loop triggered for perspective {}", uuid);
                 //let start = std::time::Instant::now();
-                *(self.trigger_notification_check.lock().await) = false;
                 //let snapshot_start = std::time::Instant::now();
 
                 let after = self.notification_trigger_snapshot().await;
@@ -542,7 +1287,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn ensure_public_links_are_shared(&self) -> bool {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
 
         // Clone link_language without holding the lock
         let link_language_clone = {
@@ -551,12 +1296,12 @@ impl PerspectiveInstance {
         };
 
         if let Some(mut link_language) = link_language_clone {
-            // Query SurrealDB instead of Rusqlite
-            let decorated_links = match self.surreal_service.get_all_links(&uuid).await {
+            // Query SPARQL store for all links
+            let decorated_links = match self.sparql_store.get_all_links() {
                 Ok(links) => links,
                 Err(e) => {
                     log::error!(
-                        "Failed to get links from SurrealDB in ensure_public_links_are_shared for perspective {}: {}",
+                        "Failed to get links from SPARQL store in ensure_public_links_are_shared for perspective {}: {}",
                         uuid, e
                     );
                     return false;
@@ -573,16 +1318,64 @@ impl PerspectiveInstance {
 
             local_links.retain(|(_, status)| status == &LinkStatus::Shared);
 
-            let remote_links = match link_language.current_revision().await {
-                Ok(Some(_)) => {
-                    link_language
-                        .render()
-                        .await
-                        .unwrap_or(None)
-                        .unwrap_or_default()
-                        .links
+            // `current_revision()` returns `Ok(None)` both when the link language
+            // genuinely has no committed revision yet AND when it lacks the
+            // `PerspectiveCurrentRevision` capability at all (see
+            // `Language::current_revision`) — the two cases are indistinguishable from
+            // the return value alone. Only trust `Ok(None)` as "nothing committed yet"
+            // when the capability is actually present; otherwise go straight to
+            // `render()`, which has its own capability check and safely reports
+            // "unavailable" as `Ok(None)` too.
+            //
+            // Any other non-success outcome (a transport/timeout error from either call,
+            // or an unexpected `Ok(None)` from `render()` despite a revision existing)
+            // means we don't actually know the remote state. Treating that the same as
+            // "remote is empty" — which the previous `.unwrap_or(None).unwrap_or_default()`
+            // did — makes every local shared link look "missing" below, so a single
+            // transient timeout resubmits the perspective's *entire* shared link set
+            // (SDNA included) as a fresh batch of creates. Bail out and let the caller's
+            // backoff loop retry once the link language is actually reachable again.
+            let has_revision_capability = link_language
+                .has(crate::languages::capability::Capability::PerspectiveCurrentRevision);
+
+            // `Ok(Some(_))` here just means "we're clear to call render()" — it's reached
+            // both when a revision genuinely exists and when we skip the check entirely
+            // because the capability isn't supported.
+            let known_revision = if has_revision_capability {
+                match link_language.current_revision().await {
+                    Ok(None) => None,
+                    Ok(Some(_)) => Some(()),
+                    Err(e) => {
+                        log::warn!(
+                            "ensure_public_links_are_shared: current_revision() failed for perspective {}: {:?} — skipping this sync attempt",
+                            uuid, e
+                        );
+                        return false;
+                    }
                 }
-                _ => vec![],
+            } else {
+                Some(())
+            };
+
+            let remote_links = match known_revision {
+                None => vec![],
+                Some(()) => match link_language.render().await {
+                    Ok(Some(rendered)) => rendered.links,
+                    Ok(None) => {
+                        log::warn!(
+                            "ensure_public_links_are_shared: render() returned no perspective for {} — skipping this sync attempt rather than risk resubmitting the whole shared link set",
+                            uuid
+                        );
+                        return false;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "ensure_public_links_are_shared: render() failed for perspective {}: {:?} — skipping this sync attempt",
+                            uuid, e
+                        );
+                        return false;
+                    }
+                },
             };
 
             let mut links_to_commit = Vec::new();
@@ -600,6 +1393,20 @@ impl PerspectiveInstance {
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
+
+                // Defensive check: a fallback sync should normally only ever need to commit
+                // a handful of links that failed to make it into a prior commit. If it's
+                // about to resubmit most or all of the perspective's shared links, that's a
+                // signal something upstream (e.g. a misread of the remote state) is wrong —
+                // log it loudly so a future regression like this one is caught immediately
+                // rather than only discoverable by manually auditing link counts later.
+                if links_count > 20 && links_count as f64 > local_links.len() as f64 * 0.5 {
+                    log::warn!(
+                        "ensure_public_links_are_shared: about to commit {} of {} local shared links for perspective {} — this looks like a full resync rather than a small catch-up, which usually indicates the remote state couldn't be read correctly",
+                        links_count, local_links.len(), uuid
+                    );
+                }
+
                 let result = link_language
                     .commit(PerspectiveDiff {
                         additions: links_to_commit,
@@ -635,9 +1442,9 @@ impl PerspectiveInstance {
                 .publish(
                     &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
                     &serde_json::to_string(&PerspectiveStateFilter {
+                        perspective_uuid: handle.uuid.clone(),
                         perspective: handle,
-                        state: serde_json::to_string(&state)
-                            .expect("must be able to serialze PerspectiveState"),
+                        state: state.clone(),
                     })
                     .unwrap(),
                 )
@@ -659,6 +1466,7 @@ impl PerspectiveInstance {
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
+            log::debug!("commit({}): skipping — no neighbourhood", handle.uuid);
             return Ok(());
         }
 
@@ -666,6 +1474,16 @@ impl PerspectiveInstance {
         let (_, pending_ids) =
             Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
                 .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+
+        log::debug!(
+            "commit({}): state={:?} link_language={} pending_ids={} adds={} removes={}",
+            handle.uuid,
+            handle.state,
+            self.has_link_language().await,
+            pending_ids.len(),
+            diff.additions.len(),
+            diff.removals.len(),
+        );
 
         let commit_result = if pending_ids.is_empty() {
             // No pending diffs, let's try
@@ -676,21 +1494,27 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
-                // Got Link Language reference
-                if link_language.current_revision().await?.is_some() {
-                    // Revision set, we are synced
-                    // we are in a healthy Neighbourhood state and should be able to commit
-                    // but let's make sure we're not DoS'ing the link language in bursts
-                    let mut immediate_commits_remaining =
-                        self.immediate_commits_remaining.lock().await;
-                    if *immediate_commits_remaining > 0 {
-                        *immediate_commits_remaining -= 1;
-                        link_language.commit(diff.clone()).await
-                    } else {
-                        Err(anyhow!("Debouncing commit burst"))
-                    }
+                // Spec §5.2 separates perspective-commit from perspective-sync,
+                // so a commit-only flat language has no meaningful notion of
+                // "current revision" — the previous `current_revision().is_some()`
+                // pre-check would always fail for such a language and force
+                // every commit through the pending-diffs retry queue, which is
+                // (a) slow and (b) architecturally wrong: the retry queue is
+                // for transient failures, not for gating healthy commits.
+                //
+                // Drop the pre-check. The DoS counter still throttles bursts
+                // independently, and link_language.commit() itself is the
+                // authoritative signal for whether the commit succeeded — if
+                // the underlying language isn't ready, it throws and the
+                // error path below queues the diff. Legacy languages that
+                // implement perspective-sync still behave correctly because
+                // they throw from commit() when not synced.
+                let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
+                if *immediate_commits_remaining > 0 {
+                    *immediate_commits_remaining -= 1;
+                    link_language.commit(diff.clone()).await
                 } else {
-                    Err(anyhow!("Link Language not synced"))
+                    Err(anyhow!("Debouncing commit burst"))
                 }
             } else {
                 Err(anyhow!("LinkLanguage not available"))
@@ -702,17 +1526,14 @@ impl PerspectiveInstance {
         let ok = match commit_result {
             Ok(Some(rev)) => {
                 if rev.trim().is_empty() {
-                    log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
-                    false
+                    log::warn!("LinkLanguage.commit returned an empty revision string; treating as success");
+                    true
                 } else {
-                    log::info!("Committed to revision: {}", rev);
+                    log::debug!("💾 committed to revision: {}", rev);
                     true
                 }
             }
-            Ok(None) => {
-                log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
-                false
-            }
+            Ok(None) => true,
             Err(e) => {
                 log::warn!(
                     "Error trying to commit diff: {:?}\nStoring in pending diffs for later",
@@ -794,6 +1615,20 @@ impl PerspectiveInstance {
             }
         }
 
+        // Links arriving from the link language are shared by definition, but
+        // the wire form usually carries `status: None`. Assign it explicitly
+        // here — the store refuses status-less inserts rather than defaulting.
+        let store_diff = PerspectiveDiff {
+            additions: unique_additions
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(LinkStatus::Shared);
+                    l
+                })
+                .collect(),
+            removals: unique_removals.clone(),
+        };
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: unique_additions
                 .iter()
@@ -805,11 +1640,29 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_diff).await?;
+        // Write to SPARQL store (primary storage for links)
+        self.persist_link_diff(&store_diff).await?;
+
+        // If any of the inbound links change a class's SHACL definition,
+        // drop that entry from the in-memory shape cache so the next
+        // `model_query` re-parses fresh state from the SPARQL store.
+        // Without this, a locally cached shape can shadow updates the
+        // remote registered (rename, added property, etc.); with it, a
+        // peer that has never registered a class locally still picks up
+        // the class the moment its SHACL arrives.
+        if inbound_touches_shacl(&decorated_diff) {
+            self.shape_cache.write().unwrap().clear();
+        }
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
+
+        // A peer's proposal, vote or flow-instance row changes what this
+        // replica's flow consensus pass would derive, and only that pass can
+        // update the (Local) cache and marks here — so queue one. Debounced
+        // and scoped; a no-op for diffs outside the flow vocabulary.
+        self.schedule_flow_consensus_pass(&decorated_diff);
+
         self.pubsub_publish_diff(decorated_diff).await;
 
         Ok(())
@@ -836,9 +1689,28 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        if let Some(ref email) = context.user_email {
+            crate::billing::check_compute_credits(email)?;
+        }
         link.validate()?;
         let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
-        self.add_link_expression(link_expr, status, batch_id).await
+        let result = self
+            .add_link_expression(link_expr, status, batch_id)
+            .await?;
+
+        if let Some(ref email) = context.user_email {
+            let uuid = self.uuid.clone();
+            if let Err(e) = crate::billing::bill_compute(
+                email,
+                crate::billing::get_link_write_rate(),
+                "link_write",
+                Some(&format!("1 link in perspective {}", uuid)),
+            ) {
+                log::warn!("Call exceeded compute credits (add_link): {:?}", e);
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn remove_link(
@@ -848,24 +1720,23 @@ impl PerspectiveInstance {
     ) -> Result<DecoratedLinkExpression, AnyError> {
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
-            let handle = self.persisted.lock().await.clone();
+            let _handle = self.persisted.lock().await.clone();
 
-            // Query SurrealDB instead of Rusqlite
+            // Query SPARQL store
             let decorated_link = self
-                .surreal_service
+                .sparql_store
                 .get_link(
-                    &handle.uuid,
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
                     &link_expression.data.target,
                     &link_expression.author,
                     &link_expression.timestamp,
-                )
-                .await?
+                )?
                 .ok_or(anyhow!("Link not found"))?;
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
@@ -874,32 +1745,27 @@ impl PerspectiveInstance {
             diff.removals.push(link_from_db.clone());
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
         } else {
-            let handle = self.persisted.lock().await.clone();
+            let _handle = self.persisted.lock().await.clone();
 
-            // Query SurrealDB instead of Rusqlite
-            if let Some(decorated_link) = self
-                .surreal_service
-                .get_link(
-                    &handle.uuid,
-                    &link_expression.data.source,
-                    link_expression.data.predicate.as_deref(),
-                    &link_expression.data.target,
-                    &link_expression.author,
-                    &link_expression.timestamp,
-                )
-                .await?
-            {
+            // Query SPARQL store
+            if let Some(decorated_link) = self.sparql_store.get_link(
+                &link_expression.data.source,
+                link_expression.data.predicate.as_deref(),
+                &link_expression.data.target,
+                &link_expression.author,
+                &link_expression.timestamp,
+            )? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
-                let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
+                let diff = PerspectiveDiff::from_removals(vec![link_from_db.clone()]);
                 let decorated_link_result =
                     DecoratedLinkExpression::from((link_from_db, status.clone()));
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
-                // Remove from SurrealDB (primary storage)
-                self.persist_link_diff(&decorated_diff).await?;
+                // Remove from SPARQL store (primary storage)
+                self.persist_link_diff(&diff).await?;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
@@ -918,6 +1784,11 @@ impl PerspectiveInstance {
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+        // Every write reaches here, local or synced, so this is where a local
+        // change to a flow definition queues the re-derivation that a synced
+        // one gets from `diff_from_link_language`. A no-op for anything else.
+        self.schedule_flow_pass_on_definition_change(&decorated_diff);
+
         // Get handle without holding lock during pubsub operations
         let handle = {
             let persisted_guard = self.persisted.lock().await;
@@ -1001,12 +1872,30 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        // Test seam (#981) — see `fail_add_link_after`'s doc comment. The
+        // field (and this check) only exist in test builds, so this is
+        // entirely compiled out in production.
+        #[cfg(test)]
+        match self.fail_add_link_after.load(Ordering::SeqCst) {
+            0 => {
+                self.fail_add_link_after.store(-1, Ordering::SeqCst);
+                return Err(anyhow!(
+                    "injected fault (test seam): add_link_expression failed"
+                ));
+            }
+            n if n > 0 => {
+                self.fail_add_link_after.store(n - 1, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+
         link_expression.data.validate()?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let mut link_expr = link_expression.clone();
             link_expr.status = Some(status.clone());
@@ -1018,15 +1907,17 @@ impl PerspectiveInstance {
             )));
         }
 
-        // Store link in SurrealDB (no longer using Rusqlite for links)
-        let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
+        // Store link in SPARQL store
+        let mut stored = link_expression.clone();
+        stored.status = Some(status.clone());
+        let diff = PerspectiveDiff::from_additions(vec![stored]);
         let decorated_link_expression =
             DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_perspective_diff).await?;
+        // Write to SPARQL store (primary storage for links)
+        self.persist_link_diff(&diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -1047,6 +1938,9 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        if let Some(ref email) = context.user_email {
+            crate::billing::check_compute_credits(email)?;
+        }
         for link in &links {
             link.validate()?;
         }
@@ -1058,9 +1952,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let mut decorated_expressions = Vec::new();
             for mut link_expr in link_expressions {
@@ -1078,18 +1973,44 @@ impl PerspectiveInstance {
                 .map(|l| DecoratedLinkExpression::from((l, status.clone())))
                 .collect::<Vec<DecoratedLinkExpression>>();
 
-            let perspective_diff = PerspectiveDiff::from_additions(link_expressions.clone());
+            let perspective_diff = PerspectiveDiff::from_additions(
+                link_expressions
+                    .into_iter()
+                    .map(|mut l| {
+                        l.status = Some(status.clone());
+                        l
+                    })
+                    .collect(),
+            );
             let decorated_perspective_diff =
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
-            // Write to SurrealDB (primary storage for links)
-            self.persist_link_diff(&decorated_perspective_diff).await?;
+            // Write to SPARQL store (primary storage for links)
+            self.persist_link_diff(&perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
+            }
+
+            // Bill for link writes
+            if let Some(ref email) = context.user_email {
+                let uuid = self.uuid.clone();
+                let link_count = decorated_link_expressions.len();
+                if let Err(e) = crate::billing::bill_compute(
+                    email,
+                    link_count as f64 * crate::billing::get_link_write_rate(),
+                    "link_write",
+                    Some(&format!("{} links in perspective {}", link_count, uuid)),
+                ) {
+                    log::warn!(
+                        "Call exceeded compute credits (add_links, count={}): {:?}",
+                        link_count,
+                        e
+                    );
+                }
             }
 
             Ok(decorated_link_expressions)
@@ -1102,6 +2023,11 @@ impl PerspectiveInstance {
         status: LinkStatus,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
+        if !mutations.additions.is_empty() {
+            if let Some(ref email) = context.user_email {
+                crate::billing::check_compute_credits(email)?;
+            }
+        }
         let addition_links: Vec<Link> = mutations.additions.into_iter().map(Link::from).collect();
         for link in &addition_links {
             link.validate()?;
@@ -1117,7 +2043,24 @@ impl PerspectiveInstance {
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
 
-        let diff = PerspectiveDiff::from(additions.clone(), removals.clone());
+        let store_diff = PerspectiveDiff::from(
+            additions
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(status.clone());
+                    l
+                })
+                .collect(),
+            removals
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(status.clone());
+                    l
+                })
+                .collect(),
+        );
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: additions
                 .into_iter()
@@ -1130,17 +2073,41 @@ impl PerspectiveInstance {
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_diff).await?;
+        // Write to SPARQL store (primary storage for links)
+        self.persist_link_diff(&store_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&diff);
+            self.spawn_commit_and_handle_error(&store_diff);
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
+
+        // Bill for additions only (removals are free)
+        let additions_count = decorated_diff.additions.len();
+        if additions_count > 0 {
+            if let Some(ref email) = context.user_email {
+                let uuid = self.uuid.clone();
+                if let Err(e) = crate::billing::bill_compute(
+                    email,
+                    additions_count as f64 * crate::billing::get_link_write_rate(),
+                    "link_write",
+                    Some(&format!(
+                        "{} additions in perspective {}",
+                        additions_count, uuid
+                    )),
+                ) {
+                    log::warn!(
+                        "Call exceeded compute credits (link_mutations, additions={}): {:?}",
+                        additions_count,
+                        e
+                    );
+                }
+            }
+        }
+
         Ok(decorated_diff)
     }
 
@@ -1151,20 +2118,19 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        if let Some(ref email) = context.user_email {
+            crate::billing::check_compute_credits(email)?;
+        }
         let handle = self.persisted.lock().await.clone();
 
-        // Query SurrealDB instead of Rusqlite
-        let decorated_link_option = self
-            .surreal_service
-            .get_link(
-                &handle.uuid,
-                &old_link.data.source,
-                old_link.data.predicate.as_deref(),
-                &old_link.data.target,
-                &old_link.author,
-                &old_link.timestamp,
-            )
-            .await?;
+        // Query SPARQL store
+        let decorated_link_option = self.sparql_store.get_link(
+            &old_link.data.source,
+            old_link.data.predicate.as_deref(),
+            &old_link.data.target,
+            &old_link.author,
+            &old_link.timestamp,
+        )?;
 
         let (_link, link_status) = match decorated_link_option {
             Some(decorated) => {
@@ -1190,9 +2156,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             diff.removals.push(old_link.clone());
             let mut new_link_expr = new_link_expression.clone();
@@ -1201,8 +2168,11 @@ impl PerspectiveInstance {
 
             Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
         } else {
-            let diff =
-                PerspectiveDiff::from(vec![new_link_expression.clone()], vec![old_link.clone()]);
+            let mut stored_new = new_link_expression.clone();
+            stored_new.status = Some(link_status.clone());
+            let mut stored_old = old_link.clone();
+            stored_old.status = Some(link_status.clone());
+            let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
             let decorated_old_link =
@@ -1212,11 +2182,15 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            // Write to SurrealDB (primary storage for links)
-            self.persist_link_diff(&decorated_diff).await?;
+            // Write to SPARQL store (primary storage for links)
+            self.persist_link_diff(&diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
+
+            // An update publishes its own topic rather than going through
+            // `pubsub_publish_diff`, so it queues the definition sweep here.
+            self.schedule_flow_pass_on_definition_change(&decorated_diff);
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
@@ -1257,6 +2231,19 @@ impl PerspectiveInstance {
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
             }
+
+            // Bill for the replacement link (1 addition; removal is free)
+            if let Some(ref email) = context.user_email {
+                if let Err(e) = crate::billing::bill_compute(
+                    email,
+                    crate::billing::get_link_write_rate(),
+                    "link_write",
+                    Some(&format!("1 link update in perspective {}", handle.uuid)),
+                ) {
+                    log::warn!("Call exceeded compute credits (update_link): {:?}", e);
+                }
+            }
+
             Ok(decorated_new_link_expression)
         }
     }
@@ -1266,24 +2253,19 @@ impl PerspectiveInstance {
         link_expressions: Vec<LinkExpression>,
         batch_id: Option<String>,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let handle = self.persisted.lock().await.clone();
+        let _handle = self.persisted.lock().await.clone();
 
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            // Query SurrealDB instead of Rusqlite
-            if let Some(decorated_link) = self
-                .surreal_service
-                .get_link(
-                    &handle.uuid,
-                    &link.data.source,
-                    link.data.predicate.as_deref(),
-                    &link.data.target,
-                    &link.author,
-                    &link.timestamp,
-                )
-                .await?
-            {
+            // Query SPARQL store
+            if let Some(decorated_link) = self.sparql_store.get_link(
+                &link.data.source,
+                link.data.predicate.as_deref(),
+                &link.data.target,
+                &link.author,
+                &link.timestamp,
+            )? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));
@@ -1297,9 +2279,10 @@ impl PerspectiveInstance {
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
-            let diff = batches
+            let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
+            let diff = &mut batch.diff;
 
             let decorated_links: Vec<_> = existing_links
                 .iter()
@@ -1313,6 +2296,7 @@ impl PerspectiveInstance {
         } else {
             // Split into links and statuses
             let (links, statuses): (Vec<_>, Vec<_>) = existing_links.into_iter().unzip();
+            let persist_diff = PerspectiveDiff::from_removals(links.clone());
 
             // Create decorated versions
             let decorated_links: Vec<DecoratedLinkExpression> = links
@@ -1323,8 +2307,8 @@ impl PerspectiveInstance {
 
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
-            // Remove from SurrealDB (primary storage)
-            self.persist_link_diff(&decorated_diff).await?;
+            // Remove from SPARQL store (primary storage)
+            self.persist_link_diff(&persist_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1355,20 +2339,16 @@ impl PerspectiveInstance {
     /// 2. Links with predicate == "ad4m://sdna" (SDNA code)
     async fn get_sdna_links_local(&self) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         // Query 1: Get all links from ad4m://self (SDNA declarations)
-        let self_links = self
-            .get_links_local(&LinkQuery {
-                source: Some("ad4m://self".to_string()),
-                ..Default::default()
-            })
-            .await?;
+        let self_links = self.get_links_local(&LinkQuery {
+            source: Some("ad4m://self".to_string()),
+            ..Default::default()
+        })?;
 
         // Query 2: Get all links with predicate ad4m://sdna (SDNA code)
-        let sdna_code_links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("ad4m://sdna".to_string()),
-                ..Default::default()
-            })
-            .await?;
+        let sdna_code_links = self.get_links_local(&LinkQuery {
+            predicate: Some("ad4m://sdna".to_string()),
+            ..Default::default()
+        })?;
 
         // Combine both result sets (using a HashSet to avoid duplicates)
         let mut seen = std::collections::HashSet::new();
@@ -1400,19 +2380,17 @@ impl PerspectiveInstance {
     /// The source of these links is the class URI (e.g., "recipe://Recipe")
     /// We extract the class name from the URI.
     pub async fn get_subject_classes_from_shacl(&self) -> Result<Vec<String>, AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         log::debug!(
             "🔶 get_subject_classes_from_shacl: uuid={}, Querying for SHACL class links",
             uuid
         );
         // Query for SHACL class definition links
-        let shacl_class_links = self
-            .get_links_local(&LinkQuery {
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
-                ..Default::default()
-            })
-            .await?;
+        let shacl_class_links = self.get_links_local(&LinkQuery {
+            predicate: Some("rdf://type".to_string()),
+            target: Some("ad4m://SubjectClass".to_string()),
+            ..Default::default()
+        })?;
         log::debug!(
             "🔶 get_subject_classes_from_shacl: Found {} links",
             shacl_class_links.len()
@@ -1454,107 +2432,61 @@ impl PerspectiveInstance {
         Ok(class_names)
     }
 
-    async fn get_links_local(
+    /// Query the SPARQL store for matching links, returning the decorated form
+    /// already cached in the store. Does NOT re-verify signatures — the
+    /// `proof.valid` flag was set on insert and persisted into RocksDB.
+    ///
+    /// Use this from query paths that just need to surface the link data.
+    /// Internal call sites that need the bare `LinkExpression` (e.g. to feed
+    /// Prolog) should use [`Self::get_links_local`] which unwraps for them.
+    fn get_links_local_decorated(
+        &self,
+        query: &LinkQuery,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        let from_date = query.from_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
+        let until_date = query.until_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
+
+        Ok(self.sparql_store.query_links(
+            query.source.as_deref(),
+            query.predicate.as_deref(),
+            query.target.as_deref(),
+            from_date.as_deref(),
+            until_date.as_deref(),
+            None, // limit is applied after sorting in get_links()
+        )?)
+    }
+
+    fn get_links_local(
         &self,
         query: &LinkQuery,
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
-
-        // Query SurrealDB instead of Rusqlite
-        let decorated_links =
-            if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
-                self.surreal_service.get_all_links(&uuid).await?
-            } else if let Some(source) = &query.source {
-                self.surreal_service
-                    .get_links_by_source(&uuid, source)
-                    .await?
-            } else if let Some(target) = &query.target {
-                self.surreal_service
-                    .get_links_by_target(&uuid, target)
-                    .await?
-            } else if let Some(predicate) = &query.predicate {
-                self.surreal_service
-                    .get_links_by_predicate(&uuid, predicate)
-                    .await?
-            } else {
-                vec![]
-            };
-
-        // Convert DecoratedLinkExpression to (LinkExpression, LinkStatus)
-        let mut result: Vec<(LinkExpression, LinkStatus)> = decorated_links
+        // Unwrap the decorated form into the (LinkExpression, LinkStatus)
+        // tuple format the legacy in-process callers (SDNA, Prolog facts)
+        // expect. No re-verification — we trust the stored `valid` flag.
+        let decorated_links = self.get_links_local_decorated(query)?;
+        Ok(decorated_links
             .into_iter()
             .map(|decorated| {
-                let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
-                (LinkExpression::from(decorated), status)
+                let status = decorated.status.clone().unwrap_or(LinkStatus::Shared);
+                let link_expr = LinkExpression {
+                    author: decorated.author,
+                    timestamp: decorated.timestamp,
+                    data: decorated.data,
+                    proof: ExpressionProof {
+                        key: decorated.proof.key,
+                        signature: decorated.proof.signature,
+                    },
+                    status: Some(status.clone()),
+                };
+                (link_expr, status)
             })
-            .collect();
-
-        if let Some(predicate) = &query.predicate {
-            result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
-            log::debug!(
-                "get_links_local: after predicate filter ({}): {} links",
-                predicate,
-                result.len()
-            );
-        }
-
-        if let Some(target) = &query.target {
-            result.retain(|(link, _status)| link.data.target == *target);
-            log::debug!(
-                "get_links_local: after target filter ({}): {} links",
-                target,
-                result.len()
-            );
-        }
-
-        if let Some(source) = &query.source {
-            result.retain(|(link, _status)| link.data.source == *source);
-            log::debug!(
-                "get_links_local: after source filter ({}): {} links",
-                source,
-                result.len()
-            );
-        }
-
-        let until_date: Option<chrono::DateTime<chrono::Utc>> =
-            query.until_date.clone().map(|d| d.into());
-        let from_date: Option<chrono::DateTime<chrono::Utc>> =
-            query.from_date.clone().map(|d| d.into());
-
-        if let Some(from_date) = &from_date {
-            result.retain(|(link, _)| {
-                let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
-                link_date >= *from_date
-            });
-        }
-
-        if let Some(until_date) = &until_date {
-            result.retain(|(link, _)| {
-                let link_date = DateTime::parse_from_rfc3339(&link.timestamp).unwrap();
-                link_date <= *until_date
-            });
-        }
-        /*
-
-        if let Some(limit) = query.limit {
-            let limit = limit as usize;
-            let result_length = result.len();
-            let start_limit = if from_date >= until_date {
-                result_length.saturating_sub(limit)
-            } else {
-                0
-            } as usize;
-
-            let end_limit = if from_date >= until_date {
-                result_length
-            } else {
-                limit.min(result_length)
-            } as usize;
-
-            result = result[..limit as usize].to_vec();
-        }
-        */
-        Ok(result)
+            .collect())
     }
 
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
@@ -1573,11 +2505,51 @@ impl PerspectiveInstance {
             }
         }
 
-        let mut links = self.get_links_local(&query).await?;
+        // When the caller supplies a `limit`, push it down into the store via
+        // a bounded top-N heap. This keeps memory at O(limit) regardless of
+        // how many links match — the previous materialise-sort-truncate path
+        // allocated the full Vec even for a 10-item page, which on large
+        // perspectives was a substantial regression in the same hot path this
+        // PR is trying to shrink.
+        //
+        // Otherwise (no limit) fall back to the in-memory sort path. We still
+        // pull the decorated form directly from the store so we don't pay the
+        // triple-materialisation tax described below.
+        if let Some(limit) = query.limit {
+            let from_date = query.from_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            let until_date = query.until_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+                query.source.as_deref(),
+                query.predicate.as_deref(),
+                query.target.as_deref(),
+                from_date.as_deref(),
+                until_date.as_deref(),
+                limit as usize,
+                reverse,
+            )?);
+        }
 
-        links.sort_by(|(a, _), (b, _)| {
-            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
-            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+        // No limit: pull the already-decorated form from the SPARQL store and
+        // sort in-place. Previously this path materialised Vec<...> three
+        // times: once as DecoratedLinkExpression in get_links_local_decorated,
+        // again as Vec<(LinkExpression, LinkStatus)> in get_links_local
+        // (unwrap), and a third time after sort by re-wrapping each pair via
+        // `DecoratedLinkExpression::from((link, status))` — which re-runs
+        // Ed25519 signature verification per link. For a 10K-link result
+        // that's ~30K extra small allocations + 10K crypto ops every call.
+        // The wind-tunnel S9 query path was the dominant remaining source of
+        // RSS growth; this collapses it to a single Vec.
+        let mut links = self.get_links_local_decorated(&query)?;
+
+        links.sort_by(|a, b| {
+            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
+            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap_or_default();
             if reverse {
                 b_time.cmp(&a_time)
             } else {
@@ -1585,15 +2557,7 @@ impl PerspectiveInstance {
             }
         });
 
-        if let Some(limit) = query.limit {
-            let limit = links.len().min(limit as usize);
-            links = links[..limit].to_vec();
-        }
-
-        Ok(links
-            .into_iter()
-            .map(|(link, status)| DecoratedLinkExpression::from((link.clone(), status)))
-            .collect())
+        Ok(links)
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
@@ -1601,15 +2565,194 @@ impl PerspectiveInstance {
     pub async fn add_sdna(
         &mut self,
         name: String,
-        mut sdna_code: String,
+        sdna_code: String,
         sdna_type: SdnaType,
         shacl_json: Option<String>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
-        //let mut added = false;
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
+        let is_flow = matches!(sdna_type, SdnaType::Flow);
+        // Validate before touching the store: see `add_sdna_inner`.
+        let shacl_links = shacl_json
+            .as_deref()
+            .map(|shacl| parse_shacl_to_links(shacl, &name))
+            .transpose()?;
+        let result = {
+            let mutex = self.sdna_change_mutex.clone();
+            let _guard = mutex.lock().await;
+            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
+                .await?
+        };
 
+        // A flow definition entering the perspective means callers will
+        // immediately try to read FlowInstance / FlowTransitionProposal rows.
+        // Register those two hard-wired runtime classes now, so `findAll`
+        // answers `[]` on a fresh perspective instead of "no SHACL shape
+        // stored" (#1007).
+        //
+        // This MUST be outside the `sdna_change_mutex` guard above, and the
+        // explicit block is what releases it. `ensure_flow_model_classes`
+        // reaches `ensure_subject_class`, which calls back into *this*
+        // function (`hardwired_class.rs:105`) — and `sdna_change_mutex` is a
+        // plain non-reentrant `tokio::sync::Mutex`, so re-entering it while
+        // held deadlocks. Calling from `add_sdna_inner` (the obvious seam,
+        // since it is the one path every caller funnels through) does exactly
+        // that: it hangs with no error, no panic and no CPU, and CI reports it
+        // only as "Root tests timed out". Boxing the future silences the
+        // compiler's E0733 but does nothing about the lock.
+        //
+        // `Box::pin` is still required here: the call is still recursive in
+        // *type* terms even though it no longer re-enters the lock.
+        if is_flow {
+            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
+                .await
+                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
+        }
+
+        Ok(result)
+    }
+
+    /// Remove every SHACL link associated with the given target-class URIs.
+    /// Called when refreshing an existing `SubjectClass` so old property
+    /// triples are not left behind to compete with the fresh shape.
+    ///
+    /// Walks the link graph produced by [`parse_shacl_to_links`]:
+    ///   target_class_uri
+    ///     ── rdf://type      ──▶ ad4m://SubjectClass
+    ///     ── ad4m://shape    ──▶ shape_uri
+    ///   shape_uri
+    ///     ── sh://property   ──▶ prop_shape_uri  (one per declared property)
+    ///     ── *other shape-level predicates*
+    ///   prop_shape_uri
+    ///     ── *property-level predicates*
+    async fn remove_subject_class_shacl_links(
+        &mut self,
+        target_class_uris: &[String],
+    ) -> Result<(), AnyError> {
+        let mut to_remove: Vec<LinkExpression> = Vec::new();
+
+        for target_class_uri in target_class_uris {
+            // 1. target_class_uri → rdf://type → ad4m://SubjectClass
+            //    and target_class_uri → ad4m://shape → shape_uri
+            let target_class_links = self.get_links_local(&LinkQuery {
+                source: Some(target_class_uri.clone()),
+                ..Default::default()
+            })?;
+
+            let shape_uris: Vec<String> = target_class_links
+                .iter()
+                .filter(|(link, _)| link.data.predicate.as_deref() == Some("ad4m://shape"))
+                .map(|(link, _)| link.data.target.clone())
+                .collect();
+
+            to_remove.extend(
+                target_class_links
+                    .into_iter()
+                    .filter(|(link, _)| {
+                        matches!(
+                            link.data.predicate.as_deref(),
+                            Some("rdf://type") | Some("ad4m://shape")
+                        )
+                    })
+                    .map(|(link, _)| link),
+            );
+
+            for shape_uri in &shape_uris {
+                let shape_links = self.get_links_local(&LinkQuery {
+                    source: Some(shape_uri.clone()),
+                    ..Default::default()
+                })?;
+
+                let prop_shape_uris: Vec<String> = shape_links
+                    .iter()
+                    .filter(|(link, _)| link.data.predicate.as_deref() == Some("sh://property"))
+                    .map(|(link, _)| link.data.target.clone())
+                    .collect();
+
+                to_remove.extend(shape_links.into_iter().map(|(link, _)| link));
+
+                for prop_shape_uri in prop_shape_uris {
+                    let prop_links = self.get_links_local(&LinkQuery {
+                        source: Some(prop_shape_uri),
+                        ..Default::default()
+                    })?;
+                    to_remove.extend(prop_links.into_iter().map(|(link, _)| link));
+                }
+            }
+        }
+
+        if !to_remove.is_empty() {
+            self.remove_links(to_remove, None).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
+    pub async fn add_sdna_batch(
+        &mut self,
+        entries: Vec<(String, String, SdnaType, Option<String>)>,
+        context: &AgentContext,
+    ) -> Result<Vec<bool>, AnyError> {
+        let any_flow = entries
+            .iter()
+            .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow));
+
+        // Parse every entry before writing any of them, so one invalid shape
+        // refuses the whole batch instead of leaving it half-applied.
+        let entries = entries
+            .into_iter()
+            .map(|(name, sdna_code, sdna_type, shacl_json)| {
+                let shacl_links = shacl_json
+                    .as_deref()
+                    .map(|shacl| parse_shacl_to_links(shacl, &name))
+                    .transpose()?;
+                Ok((name, sdna_code, sdna_type, shacl_links))
+            })
+            .collect::<Result<Vec<_>, AnyError>>()?;
+
+        let results = {
+            let mutex = self.sdna_change_mutex.clone();
+            let _guard = mutex.lock().await;
+
+            let mut results = Vec::with_capacity(entries.len());
+            for (name, sdna_code, sdna_type, shacl_links) in entries {
+                let result = self
+                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
+                    .await?;
+                results.push(result);
+            }
+            results
+        };
+
+        // Same rule as `add_sdna`: register the flow-runtime classes only after
+        // the guard is released, because doing so re-enters `add_sdna` and
+        // `sdna_change_mutex` is not reentrant. Once per batch rather than per
+        // entry — `ensure_subject_class` is idempotent, so the extra calls
+        // would be harmless, just wasted writes.
+        if any_flow {
+            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
+                .await
+                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
+        }
+
+        Ok(results)
+    }
+
+    /// Inner implementation of add_sdna without mutex acquisition.
+    ///
+    /// Takes the SHACL already parsed: the purge of an existing class's
+    /// SHACL and the `has_subject_class` / `sdna` writes below are shared
+    /// links, so a shape that `parse_shacl_to_links` refuses must be refused
+    /// before any of them run. Otherwise a rejected re-registration deletes
+    /// the class for every peer (#1348).
+    async fn add_sdna_inner(
+        &mut self,
+        name: String,
+        mut sdna_code: String,
+        sdna_type: SdnaType,
+        shacl_links: Option<Vec<Link>>,
+        context: &AgentContext,
+    ) -> Result<bool, AnyError> {
         let predicate = match sdna_type {
             SdnaType::SubjectClass => "ad4m://has_subject_class",
             SdnaType::Flow => "ad4m://has_flow",
@@ -1622,36 +2765,56 @@ impl PerspectiveInstance {
 
         let mut sdna_links: Vec<Link> = Vec::new();
 
-        // Check if SHACL definition already exists for this class BEFORE doing anything
+        // For SubjectClass refresh: if a class with this name already exists
+        // we must purge the prior SHACL graph before writing new triples.
+        // Without this, divergent old/new SHACL property triples coexist in
+        // the store and the loader produces non-deterministic shapes.
+        //
+        // When `shacl_links` is `None` and the class already exists, we
+        // preserve the historical no-op behaviour: nothing to refresh.
         if matches!(sdna_type, SdnaType::SubjectClass) {
             // Check for any existing SubjectClass with this name, regardless of namespace
             // We query by target (ad4m://SubjectClass) and then filter by class name
-            let all_class_links = self
-                .get_links_local(&LinkQuery {
-                    predicate: Some("rdf://type".to_string()),
-                    target: Some("ad4m://SubjectClass".to_string()),
-                    ..Default::default()
+            let all_class_links = self.get_links_local(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })?;
+
+            // Collect any existing class URIs that match this name
+            let existing_target_class_uris: Vec<String> = all_class_links
+                .iter()
+                .filter_map(|(link, _)| {
+                    let source = &link.data.source;
+                    let matches = source
+                        .split("://")
+                        .last()
+                        .and_then(|s| s.split('/').last())
+                        .map(|class_name| class_name == name)
+                        .unwrap_or(false);
+                    if matches {
+                        Some(source.clone())
+                    } else {
+                        None
+                    }
                 })
-                .await?;
+                .collect();
 
-            // Check if any existing class matches this name
-            let exists = all_class_links.iter().any(|(link, _)| {
-                // Extract class name from source URI (e.g., "flux://Channel" -> "Channel")
-                link.data
-                    .source
-                    .split("://")
-                    .last()
-                    .and_then(|s| s.split('/').last())
-                    .map(|class_name| class_name == name)
-                    .unwrap_or(false)
-            });
+            if !existing_target_class_uris.is_empty() {
+                if shacl_links.is_none() {
+                    log::info!(
+                        "Class '{}' SHACL definition already exists, skipping duplicate",
+                        name
+                    );
+                    return Ok(true);
+                }
 
-            if exists {
                 log::info!(
-                    "Class '{}' SHACL definition already exists, skipping duplicate",
+                    "Class '{}' already exists — refreshing SHACL definition",
                     name
                 );
-                return Ok(true);
+                self.remove_subject_class_shacl_links(&existing_target_class_uris)
+                    .await?;
             }
         }
 
@@ -1661,22 +2824,6 @@ impl PerspectiveInstance {
                 .expect("just initialized Literal couldn't be turned into URL");
         }
 
-        // let links = self
-        //     .get_links(&LinkQuery {
-        //         source: Some("ad4m://self".to_string()),
-        //         predicate: Some(predicate.to_string()),
-        //         target: Some(literal_name.clone()),
-        //         from_date: None,
-        //         until_date: None,
-        //         limit: None,
-        //     })
-        //     .await?;
-        // let author = agent::did();
-        // let links = links
-        //     .into_iter()
-        //     .filter(|l| l.author == author)
-        //     .collect::<Vec<DecoratedLinkExpression>>();
-        //if links.is_empty() {
         sdna_links.push(Link {
             source: "ad4m://self".to_string(),
             predicate: Some(predicate.to_string()),
@@ -1696,19 +2843,33 @@ impl PerspectiveInstance {
             .await?;
 
         // Handle SHACL links if SHACL JSON provided explicitly
-        if let Some(shacl) = shacl_json {
-            let shacl_links = parse_shacl_to_links(&shacl, &name)?;
+        if let Some(shacl_links) = shacl_links {
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
+            // SHACL just changed for this class — drop any cached shape so the
+            // next query re-parses against the fresh store state.
+            self.invalidate_shape(&name);
         }
 
-        //added = true;
-        //}
-        // Mutex guard is automatically dropped here
+        // A flow definition entering the perspective means callers will
+        // immediately try to read FlowTransitionProposal / FlowInstance rows.
+        // Register those two hard-wired runtime classes now so that findAll
+        // returns [] rather than an RPC 500 on a fresh perspective.
+        //
+        // NOTE: flow-runtime class registration deliberately does NOT happen
+        // here. This function runs while `sdna_change_mutex` is held, and
+        // registering those classes re-enters `add_sdna` — see the comment on
+        // `add_sdna`, which does it after releasing the guard.
+
         Ok(true)
     }
 
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
+        // Prolog engine pools are only used in Pooled mode
+        if PROLOG_MODE != PrologMode::Pooled {
+            return Ok(());
+        }
+
         // Get service reference and perspective data BEFORE acquiring write lock
         let service = get_prolog_service().await;
         let (uuid, owner_did, neighbourhood_author) = {
@@ -1815,12 +2976,7 @@ impl PerspectiveInstance {
         self.ensure_prolog_engine_pool().await?;
         log::trace!("🧠🔧 Engine pool ensured in {:?}", ensure_start.elapsed());
 
-        let uuid_start = std::time::Instant::now();
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-        log::trace!("🧠🔑 UUID retrieved in {:?}", uuid_start.elapsed());
+        let uuid = self.uuid.clone();
 
         let service_start = std::time::Instant::now();
         let service = get_prolog_service().await;
@@ -1834,8 +2990,11 @@ impl PerspectiveInstance {
             query
         };
 
+        // Only acquire the prolog read lock in Pooled mode where write locks
+        // are taken during fact updates. In other modes, no writes happen so
+        // the lock would only add contention without providing synchronization.
         let lock_start = std::time::Instant::now();
-        let _read_lock = if use_lock {
+        let _read_lock = if use_lock && PROLOG_MODE == PrologMode::Pooled {
             log::trace!("🧠🔒 Waiting for prolog_update_mutex read lock...");
             let guard = self.prolog_update_mutex.read().await;
             log::trace!(
@@ -1956,7 +3115,7 @@ impl PerspectiveInstance {
     /// Note: SdnaOnly mode doesn't use dirty flag - it compares SDNA links directly to avoid rebuilding on non-SDNA changes
     async fn mark_prolog_engine_dirty(&self) {
         if PROLOG_MODE == PrologMode::Simple {
-            let perspective_uuid = self.persisted.lock().await.uuid.clone();
+            let perspective_uuid = self.uuid.clone();
             get_prolog_service()
                 .await
                 .mark_dirty(&perspective_uuid)
@@ -2002,12 +3161,10 @@ impl PerspectiveInstance {
         // Fetch links based on mode
         let mut links: Vec<DecoratedLinkExpression> = match PROLOG_MODE {
             PrologMode::Simple => {
-                // Get all links for Simple mode
-                self.get_links_local(&LinkQuery::default())
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect()
+                // Get all links for Simple mode. Use the decorated form
+                // directly — re-running signature verification per link was
+                // hot in the wind tunnel.
+                self.get_links_local_decorated(&LinkQuery::default())?
             }
             PrologMode::SdnaOnly => {
                 // Get only SDNA links for SdnaOnly mode (efficient query)
@@ -2072,10 +3229,7 @@ impl PerspectiveInstance {
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
-                let perspective_uuid = {
-                    let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
-                };
+                let perspective_uuid = self.uuid.clone();
 
                 // Ensure the user-specific pool exists
                 self.ensure_prolog_engine_pool_for_context(context).await?;
@@ -2118,8 +3272,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -2143,10 +3297,7 @@ impl PerspectiveInstance {
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach with context
-                let perspective_uuid = {
-                    let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
-                };
+                let perspective_uuid = self.uuid.clone();
 
                 self.prolog_query_helper(
                     query,
@@ -2157,8 +3308,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -2192,12 +3343,7 @@ impl PerspectiveInstance {
                 };
 
                 // Get links for SDNA fact generation
-                let links = self
-                    .get_links_local(&LinkQuery::default())
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
+                let links = self.get_links_local_decorated(&LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -2292,12 +3438,7 @@ impl PerspectiveInstance {
                 });
 
                 // Get links for SDNA fact generation
-                let links = self
-                    .get_links_local(&LinkQuery::default())
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
+                let links = self.get_links_local_decorated(&LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -2354,10 +3495,7 @@ impl PerspectiveInstance {
             }
             PrologMode::Pooled => {
                 // In pooled mode, use per-context SDNA pool
-                let perspective_uuid = {
-                    let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
-                };
+                let perspective_uuid = self.uuid.clone();
 
                 // Ensure the user-specific pool exists
                 self.ensure_prolog_engine_pool_for_context(context).await?;
@@ -2379,6 +3517,11 @@ impl PerspectiveInstance {
         &self,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
+        // Prolog engine pools are only used in Pooled mode
+        if PROLOG_MODE != PrologMode::Pooled {
+            return Ok(());
+        }
+
         let (perspective_uuid, neighbourhood_author) = {
             let persisted_guard = self.persisted.lock().await;
             let neighbourhood_author = persisted_guard
@@ -2405,9 +3548,7 @@ impl PerspectiveInstance {
 
         // Initialize user pool with correct neighbourhood author for SDNA governance
         // This ensures users can see SDNA from both themselves and the neighbourhood creator
-        let links = self
-            .get_links(&crate::graphql::graphql_types::LinkQuery::default())
-            .await?;
+        let links = self.get_links(&crate::types::LinkQuery::default()).await?;
 
         service
             .update_perspective_links(
@@ -2438,158 +3579,542 @@ impl PerspectiveInstance {
         .await
     }
 
-    /// Executes a SurrealQL query against the perspective's SurrealDB cache
-    /// Returns results as JSON values for easy handling
-    ///
-    /// # Errors
-    /// Returns an error if the query fails to execute or contains invalid syntax.
-    /// Callers should handle errors appropriately rather than silently ignoring them.
-    pub async fn surreal_query(&self, query: String) -> Result<Vec<serde_json::Value>, AnyError> {
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
-        self.surreal_service
-            .query_links(&uuid, &query)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to execute SurrealDB query for perspective {}: {:?}",
-                    uuid,
-                    e
-                );
-                anyhow!("SurrealDB query failed for perspective {}: {}", uuid, e)
-            })
+    /// Execute a SPARQL query against this perspective's Oxigraph store.
+    /// This is the generic `perspective.querySparql` entrypoint — the query
+    /// text is caller-supplied, so it uses `query_arbitrary` rather than
+    /// `query` (no wire-format re-encoding of coincidentally-named
+    /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
+    pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query_arbitrary(&query)
     }
 
-    /// Executes a SurrealQL query for notifications with context injection
-    /// Auto-injects $agentDid and $perspectiveId variables before execution
-    pub async fn surreal_query_notification(
+    /// Resolve each URI to every subject class it is an instance of, most
+    /// specific first.
+    ///
+    /// The missing counterpart of `is_subject_instance`, which answers the same
+    /// question one class at a time. Callers wanting the class of an arbitrary
+    /// URI had to loop over every registered class asking that yes/no question —
+    /// one round trip per class, per URI. This answers a whole batch in two
+    /// queries.
+    ///
+    /// Membership is structural and therefore not exclusive — an instance
+    /// conforms to its parent classes too — so the answer is a list, ordered
+    /// most specific first. A caller that can only act on one takes the first.
+    ///
+    /// URIs that match no registered class are simply absent from the map.
+    pub fn subject_classes_of(
+        &self,
+        uris: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
+        let resolver = self.shape_resolver();
+        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+    }
+
+    /// Cancellation-aware async variant of [`Self::sparql_query`].
+    ///
+    /// Forwards to [`SparqlStore::query_cancellable`] — see that method
+    /// for the cancellation semantics (the eval is uncancellable on the
+    /// Oxigraph side, but the network reply + JSON serialisation are
+    /// short-circuited).
+    pub async fn sparql_query_cancellable(
         &self,
         query: String,
-        user_email: Option<String>,
-    ) -> Result<Vec<serde_json::Value>, AnyError> {
-        // Get context data without holding locks
-        let perspective_id = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
-        // Get agent DID for the specific user (main agent if user_email is None)
-        let agent_context = if let Some(email) = user_email {
-            crate::agent::AgentContext::for_user_email(email)
-        } else {
-            crate::agent::AgentContext::main_agent()
-        };
-        let agent_did = crate::agent::did_for_context(&agent_context)
-            .map_err(|e| anyhow!("Failed to get agent DID: {}", e))?;
-
-        // Inject context variables using string replacement instead of LET statements
-        // This ensures the SELECT query result is at index 0
-        let query_with_context = query
-            .replace("$agentDid", &format!("'{}'", agent_did))
-            .replace("$perspectiveId", &format!("'{}'", perspective_id));
-
-        log::debug!("🔔 Notification query original: {}", query);
-        log::debug!(
-            "🔔 Notification query with context (agentDid='{}', perspectiveId='{}'): {}",
-            agent_did,
-            perspective_id,
-            query_with_context
-        );
-
-        let results = self
-            .surreal_service
-            .query_links(&perspective_id, &query_with_context)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to execute notification query for perspective {}: {:?}",
-                    perspective_id,
-                    e
-                );
-                anyhow!(
-                    "Notification query failed for perspective {}: {}",
-                    perspective_id,
-                    e
-                )
-            })?;
-
-        log::debug!("🔔 Notification query results: {:?}", results);
-
-        Ok(results)
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query_cancellable(&query, cancel).await
     }
 
-    async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str) -> Result<(), anyhow::Error>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<(), anyhow::Error>>,
-    {
-        let mut attempts = 0;
-        let max_attempts = 5;
-        loop {
-            match op().await {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    let msg = format!("{}", e);
-                    if msg.contains("Failed to commit transaction due to a read or write conflict")
-                        && attempts < max_attempts
-                    {
-                        attempts += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempts)).await;
-                        continue;
-                    } else {
-                        log::warn!(
-                            "Failed to {} link in SurrealDB for perspective {}: {:?}",
-                            op_name,
-                            uuid,
-                            e
-                        );
-                        return Err(e);
-                    }
-                }
+    /// The ordering strategy declared for `(source, predicate)`, if any.
+    ///
+    /// Resolved by asking which classes this source is an instance of and
+    /// reading their shapes. Membership is not exclusive, so every conforming
+    /// class is scanned, most specific first, and the first declaration for this
+    /// predicate wins. Specificity still decides when several classes declare a
+    /// strategy — including the case where they disagree, which at least makes
+    /// the answer deterministic.
+    ///
+    /// Asking only the most specific class would make a declaration on a less
+    /// specific one invisible to the writer while the reader still honoured it:
+    /// [`hydration`](super::model_query::hydration) resolves ordering from
+    /// whatever shape the query came through. The setter would then write no
+    /// entries for a read that expects them, and the collection would fall back
+    /// to link timestamps — which, now that the diff deliberately preserves
+    /// them, no longer follow the assigned array. Overlapping classes over
+    /// shared links is ordinary social-DNA reuse, so that is a reachable way to
+    /// reintroduce exactly the scramble this feature exists to prevent.
+    ///
+    /// Classification counts the batch's staged links as well as the store's,
+    /// because a subject is *created* inside a batch: the constructor actions
+    /// that write its class flags and the setter that populates its collection
+    /// are staged together, and the store sees neither until commit. Asking the
+    /// store alone would answer "no class" for every ordered collection created
+    /// and populated in one save — which is the ordinary create path, and would
+    /// leave it with no ordering entries at all.
+    ///
+    /// Answering `None` — because the source is not a subject instance, or no
+    /// conforming class declares anything — is the ordinary case.
+    async fn ordering_strategy_for(
+        &self,
+        source: &str,
+        predicate: &str,
+        batch_id: Option<&str>,
+    ) -> Option<String> {
+        let pending = self.staged_triples_for(source, batch_id).await;
+        let resolver = self.shape_resolver();
+        let classes = super::subject_classes_of::subject_classes_of_with_pending(
+            &self.sparql_store,
+            &resolver,
+            &[source.to_string()],
+            &pending,
+        )
+        .ok()?;
+        for class_name in classes.get(source)? {
+            let Ok(shape) = self.get_shape(class_name) else {
+                continue;
+            };
+            let declared = shape
+                .properties
+                .iter()
+                .find(|p| p.predicate == predicate && p.ordering.is_some())
+                .and_then(|p| p.ordering.clone());
+            if declared.is_some() {
+                return declared;
             }
         }
+        None
     }
 
-    pub(crate) async fn persist_link_diff(
+    /// The `(source, predicate, target)` triples an open batch has staged for
+    /// `source`, for classifying a subject that does not exist in the store yet.
+    ///
+    /// Empty without a batch, which is every caller outside a transaction.
+    async fn staged_triples_for(
         &self,
-        diff: &DecoratedPerspectiveDiff,
-    ) -> Result<(), AnyError> {
-        // Get UUID
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
+        source: &str,
+        batch_id: Option<&str>,
+    ) -> Vec<(String, String, String)> {
+        let Some(bid) = batch_id else {
+            return Vec::new();
+        };
+        let batches = self.batch_store.read().await;
+        let Some(batch) = batches.get(bid) else {
+            return Vec::new();
+        };
+        batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source)
+            .filter_map(|l| {
+                l.data
+                    .predicate
+                    .as_ref()
+                    .map(|p| (l.data.source.clone(), p.clone(), l.data.target.clone()))
+            })
+            .collect()
+    }
+
+    /// Fold a batch's own pending work into a set of persisted links.
+    ///
+    /// [`Self::get_links`] reads the store, while a batched [`Self::add_links`]
+    /// or [`Self::remove_link`] writes only into the batch — so inside an
+    /// uncommitted batch the store still shows a collection as it stood before
+    /// the batch began. Anything that *diffs* a collection has to see the
+    /// batch's staged work too, or a second `save()` on the same relation in the
+    /// same batch computes its delta against stale membership and re-stages what
+    /// the first one already added. The ORM supports exactly that sequence: it
+    /// re-snapshots after a batched save so later saves diff against it.
+    ///
+    /// Returns `persisted` untouched when there is no batch, which is every
+    /// caller outside a transaction.
+    async fn links_including_batch(
+        &self,
+        persisted: Vec<DecoratedLinkExpression>,
+        source: &str,
+        predicate: Option<&str>,
+        batch_id: Option<&str>,
+    ) -> Vec<DecoratedLinkExpression> {
+        let Some(bid) = batch_id else {
+            return persisted;
+        };
+        let batches = self.batch_store.read().await;
+        let Some(batch) = batches.get(bid) else {
+            return persisted;
         };
 
-        // Update SurrealDB synchronously
+        let relevant = |l: &Link| {
+            l.source == source
+                && match predicate {
+                    Some(p) => l.predicate.as_deref() == Some(p),
+                    None => true,
+                }
+        };
+
+        // A target this batch has already removed is gone as far as the batch is
+        // concerned, even though the store still has it.
+        let removed: std::collections::HashSet<&str> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|e| relevant(&e.data))
+            .map(|e| e.data.target.as_str())
+            .collect();
+
+        let mut out: Vec<DecoratedLinkExpression> = persisted
+            .into_iter()
+            .filter(|l| !removed.contains(l.data.target.as_str()))
+            .collect();
+        let mut seen: std::collections::HashSet<String> =
+            out.iter().map(|l| l.data.target.clone()).collect();
+
+        for expr in batch.diff.additions.iter().filter(|e| relevant(&e.data)) {
+            if removed.contains(expr.data.target.as_str()) || !seen.insert(expr.data.target.clone())
+            {
+                continue;
+            }
+            let status = expr.status.clone().unwrap_or_default();
+            out.push(DecoratedLinkExpression::from((expr.clone(), status)));
+        }
+        out
+    }
+
+    /// Write the ordering entries that turn the collection's current order into
+    /// the desired one.
+    ///
+    /// Additive only: entries are never removed, and a removal writes nothing at
+    /// all — dropping the data link is the whole deletion, because the ordering
+    /// entries are position hints over a membership set the data links define.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_collection_ordering(
+        &mut self,
+        source: &str,
+        predicate: &str,
+        current_members: &[(String, String)],
+        desired: &[String],
+        status: LinkStatus,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let strategy_name = match self
+            .ordering_strategy_for(source, predicate, batch_id.as_deref())
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let strategy = match crate::perspectives::ordering::create_strategy(&strategy_name) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("ordering: {e}");
+                return Ok(());
+            }
+        };
+
+        let persisted_order_links = self
+            .get_links(&LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                target: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
+        // Entries this batch has already staged count as prior ordering: without
+        // them a second save in the batch sees no entries at all and takes the
+        // `generate_full` branch, restating the whole chain.
+        let existing_order_links = self
+            .links_including_batch(
+                persisted_order_links,
+                source,
+                Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE),
+                batch_id.as_deref(),
+            )
+            .await;
+        let targets: Vec<String> = existing_order_links
+            .iter()
+            .map(|l| l.data.target.clone())
+            .collect();
+        let current_entries =
+            crate::perspectives::ordering::parse_ordering_entries(&targets, predicate);
+
+        let agent_did = crate::agent::did();
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+
+        let entries = if current_entries.is_empty() {
+            // No prior ordering: the first save on an ordered collection, or one
+            // that was unordered until its SHACL said otherwise.
+            strategy.generate_full(desired, predicate, &agent_did, now_ms)
+        } else {
+            strategy
+                .diff(
+                    &current_entries,
+                    current_members,
+                    desired,
+                    predicate,
+                    &agent_did,
+                    now_ms,
+                )
+                .add
+        };
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let links: Vec<Link> = entries
+            .iter()
+            .filter_map(
+                |entry| match crate::perspectives::ordering::encode_ordering_entry(entry) {
+                    Ok(target) => Some(Link {
+                        source: source.to_string(),
+                        predicate: Some(
+                            crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                        ),
+                        target,
+                    }),
+                    Err(e) => {
+                        log::warn!("ordering: could not encode entry: {e}");
+                        None
+                    }
+                },
+            )
+            .collect();
+
+        if !links.is_empty() {
+            self.add_links(links, status, batch_id, context).await?;
+        }
+        Ok(())
+    }
+
+    /// Execute a model query — the executor-side replacement for
+    /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
+    ///
+    /// If the perspective is joined to a neighbourhood and `class_name`'s
+    /// SHACL has not yet synced from a remote peer, waits up to
+    /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
+    /// can query classes registered by another peer without racing
+    /// p-diff-sync (see [`get_shape_or_wait`]). The same budget, not a
+    /// fresh one, covers the classes the query's `include`s hydrate.
+    pub async fn model_query(
+        &self,
+        class_name: &str,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await
+    }
+
+    /// [`Self::model_query`] with the shape-wait budget as a parameter, so
+    /// tests can exercise its expiry without waiting the production 20 s.
+    async fn model_query_within(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
+            .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+
+        // `where.producedByFlow` is resolved here, not in the pipeline: it
+        // needs the perspective (receipts, flow catalogue) and signature
+        // verification, neither of which SPARQL or the post-hydration filter
+        // has. Extracted BEFORE the query runs and turned into an id
+        // constraint the store applies ahead of `limit`/`offset` — so a page
+        // of N is N *valid* outputs, never N rows later thinned. Malformed or
+        // mis-placed filters error rather than silently admit everything.
+        let produced_by_flow = super::model_query::take_produced_by_flow(&mut query_input)
+            .map_err(deno_core::anyhow::Error::msg)?;
+
+        // Cross-peer safety: on a shared perspective we may be asked about
+        // a class whose SHACL hasn't synced yet. Poll briefly rather than
+        // fail immediately. One budget covers the whole query: the classes
+        // its includes reach get whatever this wait leaves (see the retry
+        // around `execute_model_query` below).
+        let deadline = Instant::now() + shape_wait;
+        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
+        let resolver = self.shape_resolver();
+        let shape = resolver.get_shape(class_name)?;
+
+        if let Some(filter) = produced_by_flow {
+            let valid = super::flow_instance::produced::flow_valid_outputs(
+                self,
+                &filter.flow,
+                filter.state.as_deref(),
+            )
+            .await?;
+            // Only outputs committed as the queried class pass; see
+            // `output_matches_class` for why conformance alone is not enough.
+            let allowed: std::collections::BTreeSet<String> = valid
+                .into_iter()
+                .filter(|v| {
+                    super::flow_instance::produced::output_matches_class(
+                        &v.output,
+                        class_name,
+                        &shape.target_class,
+                    )
+                })
+                .map(|v| v.output.id)
+                .collect();
+            if !super::model_query::constrain_ids(&mut query_input, allowed)
+                .map_err(deno_core::anyhow::Error::msg)?
+            {
+                // No valid output survives; answer directly rather than
+                // handing the store an empty VALUES block.
+                return serde_json::to_string(&super::model_query::ModelQueryResult {
+                    instances: vec![],
+                    total_count: 0,
+                })
+                .map_err(|e| {
+                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+                });
+            }
+        }
+
+        // Include recursion resolves each target class through the plain,
+        // non-waiting resolver and fails on the first one not stored. A peer
+        // can hold the queried class's SHACL before an included one's (#909),
+        // so on a miss wait for that class with what is left of the budget
+        // and run the query again. Classes are only ever waited for when a
+        // hydration actually needs them. That holds only while the resolver
+        // call sites that drop a missing shape (`.ok()` / `None`) keep doing
+        // so: dotted `where`/`order` keys in `model_query/query.rs`,
+        // projections, `links.rs` and polymorphic includes. Switch one to `?`
+        // and its `MissingShape` reaches this loop, so that path waits too.
+        // Each class is waited for at most once: a class that
+        // goes missing again after its wait succeeded fails the query rather
+        // than looping. Local-only perspectives fail at once, as before —
+        // `get_shape_or_wait` does not wait there.
+        let mut waited_for: HashSet<String> = HashSet::new();
+        let result = loop {
+            let err = match super::model_query::execute_model_query(
+                &self.sparql_store,
+                shape.as_ref(),
+                &query_input,
+                &resolver,
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(err) => err,
+            };
+            let Some(missing) = err.downcast_ref::<super::model_query::MissingShape>() else {
+                return Err(err);
+            };
+            if !waited_for.insert(missing.class_name.clone()) {
+                return Err(err);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            self.get_shape_or_wait(&missing.class_name, remaining)
+                .await?;
+        };
+
+        serde_json::to_string(&result).map_err(|e| {
+            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+        })
+    }
+
+    /// Evaluate property getters for a batch of instances in-process.
+    ///
+    /// Returns a JSON string of `{ instanceId: { prop: value, ... } }`.
+    pub fn evaluate_getters(
+        &self,
+        class_name: &str,
+        instance_ids: &[String],
+        property_names: Option<&[String]>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let shape = self.get_shape(class_name)?;
+        let result = super::model_query::evaluate_getters_batch(
+            &self.sparql_store,
+            shape.as_ref(),
+            instance_ids,
+            property_names,
+        )?;
+
+        serde_json::to_string(&result).map_err(|e| {
+            deno_core::anyhow::anyhow!("Failed to serialize evaluate_getters result: {}", e)
+        })
+    }
+
+    pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
-        // Example: collection update removes [pasta, sauce, cheese], adds [pasta, sauce, cheese, garlic]
-        // Wrong order: add 4 links, then remove 3 -> only garlic remains
-        // Correct order: remove 3 old links, then add 4 new links -> all 4 remain
+        //
+        // Takes `PerspectiveDiff` (`LinkExpression`), not the decorated form.
+        // `proof.valid` is a read view; the store writes from the signed expression
+        // and computes the verdict itself. Callers decorate *after* persist for
+        // pubsub/prolog, rather than decorating and converting back here.
 
         // Removals first
         for removal in &diff.removals {
-            Self::retry_surreal_op(
-                || self.surreal_service.remove_link(&uuid, removal),
-                &uuid,
-                "remove",
-            )
-            .await?;
+            if let Err(e) = self.sparql_store.remove_link(removal) {
+                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
+            }
         }
         // Additions after
         for addition in &diff.additions {
-            Self::retry_surreal_op(
-                || self.surreal_service.add_link(&uuid, addition),
-                &uuid,
-                "add",
-            )
-            .await?;
+            if let Err(e) = self.sparql_store.add_link(addition) {
+                log::warn!("Failed to add link to SPARQL store: {:?}", e);
+            }
         }
+
+        // EXPERIMENT: removed per-write flush. The fix-branch added a flush
+        // call here to reclaim memtable memory, but flushing on EVERY single
+        // addLink creates one tiny SST file per write. Each SST file carries
+        // in-memory metadata (block cache + bloom filter + table cache entry),
+        // so 1 link/s writes for 5 minutes = 300 SST files = ~300 in-memory
+        // metadata entries that RocksDB keeps until compaction catches up.
+        // That accounts for the per-add retention seen in wind tunnel monitor
+        // phase (~124 KB/link vs ~4 KB/link during a burst seed).
+        //
+        // RocksDB auto-flushes memtables when they reach write_buffer_size
+        // (default 64 MB). For our workload (max ~16 KB/link), that's ~4000
+        // links before an auto-flush, which is plenty. If memtable pressure
+        // is a real concern in production it should be addressed via
+        // configuration (smaller write_buffer_size, more memtables) or a
+        // throttled background flush, not a per-write fsync.
+
         Ok(())
+    }
+
+    /// Record the predicates from a diff into `changed_predicates`.
+    /// `None` means "all predicates changed" (check everything).
+    async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
+        let mut changed = self.changed_predicates.lock().await;
+
+        // If already CheckAll, it's sticky — nothing to do
+        if matches!(*changed, ChangedPredicates::CheckAll) {
+            return;
+        }
+
+        // Collect predicates from the diff
+        let mut new_preds = HashSet::new();
+        let mut has_predicate_less = false;
+        for link in diff.additions.iter().chain(diff.removals.iter()) {
+            if let Some(ref pred) = link.data.predicate {
+                new_preds.insert(pred.clone());
+            } else {
+                has_predicate_less = true;
+                break;
+            }
+        }
+
+        if has_predicate_less {
+            *changed = ChangedPredicates::CheckAll;
+        } else {
+            match &mut *changed {
+                ChangedPredicates::NoneRecorded => {
+                    *changed = ChangedPredicates::Specific(new_preds);
+                }
+                ChangedPredicates::Specific(existing) => {
+                    existing.extend(new_preds);
+                }
+                ChangedPredicates::CheckAll => unreachable!(),
+            }
+        }
     }
 
     fn spawn_prolog_facts_update(
@@ -2606,12 +4131,24 @@ impl PerspectiveInstance {
                 || PROLOG_MODE == PrologMode::Simple
                 || PROLOG_MODE == PrologMode::SdnaOnly
             {
-                // Trigger notification, prolog subscription, and surreal subscription checks
-                *(self_clone.trigger_notification_check.lock().await) = true;
-                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
-                *(self_clone.trigger_surreal_subscription_check.lock().await) = true;
+                // Trigger notification, prolog subscription
+                self_clone
+                    .trigger_notification_check
+                    .store(true, Ordering::Release);
+                self_clone.record_changed_predicates(&diff).await;
+                self_clone
+                    .trigger_prolog_subscription_check
+                    .store(true, Ordering::Release);
 
-                self_clone.pubsub_publish_diff(diff).await;
+                // NOTE: pubsub_publish_diff is NOT called here.
+                // The synchronous caller (add_link_expression / link_mutations /
+                // diff_from_link_language) already published the same diff to
+                // PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED *before* spawning us.
+                // Republishing here delivered every link event TWICE to every
+                // WS subscriber (confirmed 2.0× delivery ratio in wind-tunnel
+                // S9) which doubled broadcast cost and was a UI/subscription
+                // re-evaluation footgun. Subscription re-evaluation is already
+                // gated by `trigger_prolog_subscription_check` + changed_predicates.
 
                 if let Some(sender) = completion_sender {
                     let _ = sender.send(());
@@ -2634,13 +4171,7 @@ impl PerspectiveInstance {
             }
             //log::info!("🔧 PROLOG UPDATE: Engine pool ensured in {:?}", ensure_pool_start.elapsed());
 
-            // Get UUID before acquiring write lock
-            //let uuid_start = std::time::Instant::now();
-            let uuid = {
-                let persisted_guard = self_clone.persisted.lock().await;
-                persisted_guard.uuid.clone()
-            };
-            //log::info!("🔧 PROLOG UPDATE: UUID retrieved in {:?}", uuid_start.elapsed());
+            let uuid = self_clone.uuid.clone();
 
             //let analysis_start = std::time::Instant::now();
             let fact_rebuild_needed = !diff.removals.is_empty()
@@ -2730,12 +4261,20 @@ impl PerspectiveInstance {
             };
 
             if did_update {
-                self_clone.pubsub_publish_diff(diff).await;
+                self_clone.record_changed_predicates(&diff).await;
+
+                // NOTE: pubsub_publish_diff is NOT called here (Pooled mode).
+                // Same reason as the Disabled/Simple/SdnaOnly branch above —
+                // the synchronous caller already published this diff once.
+                // Subscription re-evaluation runs from the trigger flags below.
 
                 // Trigger notification and subscription checks after prolog facts are updated
-                *(self_clone.trigger_notification_check.lock().await) = true;
-                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
-                *(self_clone.trigger_surreal_subscription_check.lock().await) = true;
+                self_clone
+                    .trigger_notification_check
+                    .store(true, Ordering::Release);
+                self_clone
+                    .trigger_prolog_subscription_check
+                    .store(true, Ordering::Release);
             }
 
             //log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
@@ -2757,11 +4296,7 @@ impl PerspectiveInstance {
     async fn calc_notification_trigger_matches(
         &self,
     ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
-        // Get UUID without holding lock during operations
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        let uuid = self.uuid.clone();
 
         let notifications = Self::all_notifications_for_perspective_id(uuid.clone())?;
         //log::info!("🔔 NOTIFICATIONS: Found {} notifications for perspective {}", notifications.len(), uuid);
@@ -2771,9 +4306,7 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        // Cache key must include both trigger and user_email since surreal_query_notification
-        // uses user_email to determine $agentDid substitution - otherwise users with identical
-        // triggers would incorrectly share cached results
+        // Cache key must include both trigger and user_email for deduplication
         let mut trigger_cache: HashMap<(String, Option<String>), Vec<serde_json::Value>> =
             HashMap::new();
 
@@ -2789,20 +4322,26 @@ impl PerspectiveInstance {
                 // Handle errors per-notification to prevent one user's DID failure from
                 // silencing all notifications. This can happen with orphaned notifications
                 // from deleted users or corrupted data.
-                match self
-                    .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
-                    .await
-                {
+                match {
+                    let query = n.trigger.clone();
+                    let result_json = self.sparql_store.query(&query);
+                    match result_json {
+                        Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
+                            .map_err(|e| anyhow::anyhow!(e)),
+                        Err(e) => Err(e),
+                    }
+                } {
                     Ok(matches) => {
                         trigger_cache.insert(cache_key, matches.clone());
                         result_map.insert(n.clone(), matches);
                     }
                     Err(e) => {
                         log::error!(
-                            "Failed to query notification for user {:?} in perspective {}: {:?}. Skipping this notification.",
+                            "Failed to query notification for user {:?} in perspective {}: {:?}. Query: {}. Skipping this notification.",
                             n.user_email,
                             uuid,
-                            e
+                            e,
+                            n.trigger
                         );
                         // Skip this notification but continue processing others
                     }
@@ -2868,10 +4407,13 @@ impl PerspectiveInstance {
                 let trigger_match =
                     serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
 
-                let payload = TriggeredNotification {
-                    notification: notification.clone(),
-                    perspective_id: uuid.clone(),
-                    trigger_match,
+                let payload = NotificationTriggeredEvent {
+                    perspective_uuid: uuid.clone(),
+                    notification: TriggeredNotification {
+                        notification: notification.clone(),
+                        perspective_id: uuid.clone(),
+                        trigger_match,
+                    },
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();
@@ -2894,7 +4436,8 @@ impl PerspectiveInstance {
                         .body(message.clone())
                         .send()
                         .await;
-                    log::info!("Notification webhook response: {:?}", res);
+                    // Response body can be large / contain PII — debug only.
+                    log::debug!("🪝 notification webhook response: {:?}", res);
                 }
             }
         }
@@ -2997,10 +4540,18 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Seconds a locally-managed multi-tenancy user's `last_seen` may lag before
+    /// we treat them as offline for telepresence. Mirrors the 5-minute window
+    /// `agent::capabilities` already uses to throttle last-seen updates.
+    const LOCAL_ONLINE_THRESHOLD_SECS: i64 = 300;
+
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
+        // Remote peers via the link language's telepresence adapter (when one is
+        // present — i.e. a real multi-executor neighbourhood).
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            Ok(link_language
+        let has_link_language = link_language_clone.is_some();
+        let mut agents: Vec<OnlineAgent> = if let Some(mut link_language) = link_language_clone {
+            link_language
                 .get_online_agents()
                 .await?
                 .into_iter()
@@ -3008,10 +4559,55 @@ impl PerspectiveInstance {
                     a.status.verify_signatures();
                     a
                 })
-                .collect())
+                .collect()
         } else {
-            Err(self.no_link_language_error().await)
+            Vec::new()
+        };
+
+        // Co-located multi-tenancy users: a neighbourhood's locally-managed
+        // participants are "online" when they've hit any authed API within the
+        // last-seen window — no Holochain round-trip needed. Mirrors
+        // `send_signal`'s local re-routing so telepresence is transparent across
+        // the multi-tenancy (one executor) vs. multi-executor boundary. This is
+        // the presence source the auto-processor's `elect_author` reads.
+        let handle = self.persisted.lock().await.clone();
+        if handle.shared_url.is_some() {
+            let owners: Vec<String> = handle.owners.clone().unwrap_or_default();
+            if !owners.is_empty() {
+                let now = chrono::Utc::now().timestamp();
+                let managed =
+                    Ad4mDb::with_global_instance(|db| db.list_users()).unwrap_or_default();
+                for user in managed {
+                    let recently_active = user
+                        .last_seen
+                        .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS);
+                    if recently_active
+                        && owners.contains(&user.did)
+                        && !agents.iter().any(|a| a.did == user.did)
+                    {
+                        agents.push(OnlineAgent {
+                            did: user.did,
+                            status: PerspectiveExpression::default(),
+                        });
+                    }
+                }
+            }
         }
+
+        // Stay strictly additive: preserve the historical "no telepresence
+        // source" error whenever there's no link language AND we found no
+        // locally-online managed users. Callers (notably the auto-processor
+        // watcher) rely on that error to fall through to their claim-based path
+        // rather than reading an empty set as "everyone is offline". We only
+        // diverge from the old link-language passthrough when we actually have
+        // co-located managed users to report. (A link language that returns an
+        // empty set is a genuine "nobody online" and stays `Ok(vec![])`, as
+        // before.)
+        if agents.is_empty() && !has_link_language {
+            return Err(self.no_link_language_error().await);
+        }
+
+        Ok(agents)
     }
 
     pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
@@ -3050,6 +4646,7 @@ impl PerspectiveInstance {
                     .publish(
                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective_uuid: handle.uuid.clone(),
                             perspective: handle,
                             signal,
                             recipient: Some(recipient),
@@ -3154,6 +4751,7 @@ impl PerspectiveInstance {
                                     .publish(
                                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                            perspective_uuid: handle.uuid.clone(),
                                             perspective: handle,
                                             signal,
                                             recipient: Some(user_did),
@@ -3193,6 +4791,7 @@ impl PerspectiveInstance {
                         .publish(
                             &NEIGHBOURHOOD_SIGNAL_TOPIC,
                             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                perspective_uuid: handle.uuid.clone(),
                                 perspective: handle,
                                 signal,
                                 recipient: Some(main_agent_did),
@@ -3252,15 +4851,52 @@ impl PerspectiveInstance {
             }
         };
 
+        // Single-pass substitution.
+        //
+        // The previous implementation did a sequential `String::replace`
+        // for each parameter in order, which cascaded: a replacement's
+        // output could contain another parameter's name and get
+        // re-substituted in the next iteration, silently corrupting data
+        // whenever a user-provided value happened to match a later
+        // parameter name. It was also order-dependent for parameters
+        // whose names were prefixes of each other.
+        //
+        // Instead, scan the input once left-to-right. At each position,
+        // try each parameter name (longest first, so that e.g. "foo_bar"
+        // wins over "foo" when both exist) and if one matches, emit its
+        // value and skip past the name without re-scanning the emitted
+        // text. Otherwise advance one UTF-8 character.
+        let mut sorted_params: Vec<&Parameter> = parameters.iter().collect();
+        sorted_params.sort_by_key(|p| std::cmp::Reverse(p.name.len()));
         let replace_parameters = |input: Option<String>| -> Option<String> {
-            if let Some(mut output) = input {
-                for parameter in &parameters {
-                    output = output.replace(&parameter.name, &jsvalue_to_string(&parameter.value));
-                }
-                Some(output)
-            } else {
-                input
+            let input = input?;
+            if sorted_params.is_empty() {
+                return Some(input);
             }
+            let mut output = String::with_capacity(input.len());
+            let bytes = input.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let mut matched = false;
+                for p in &sorted_params {
+                    if p.name.is_empty() {
+                        continue;
+                    }
+                    let name_bytes = p.name.as_bytes();
+                    if bytes[i..].starts_with(name_bytes) {
+                        output.push_str(&jsvalue_to_string(&p.value));
+                        i += name_bytes.len();
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    let ch_len = input[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    output.push_str(&input[i..i + ch_len]);
+                    i += ch_len;
+                }
+            }
+            Some(output)
         };
 
         for command in commands.iter() {
@@ -3314,8 +4950,8 @@ impl PerspectiveInstance {
                     // Also prune matching links from pending batch additions
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 let source_match = link_expr.data.source == remove_source;
                                 let pred_match = remove_predicate.is_none()
                                     || link_expr.data.predicate == remove_predicate;
@@ -3354,8 +4990,8 @@ impl PerspectiveInstance {
                     // create a duplicate (e.g. save+update in one transaction).
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
+                        if let Some(batch) = batches.get_mut(bid) {
+                            batch.diff.additions.retain(|link_expr| {
                                 !(link_expr.data.source == source
                                     && link_expr.data.predicate == predicate)
                             });
@@ -3374,8 +5010,16 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::CollectionSetter => {
-                    // Remove matching persisted links
-                    let link_expressions = self
+                    // Diff, rather than delete-everything-then-re-add.
+                    //
+                    // The old pattern made a one-item change to a 100-item
+                    // collection cost 100 removals and 101 additions, every one
+                    // of them signed and synced. It also restamped every link,
+                    // which is what today's ordering silently depends on — so
+                    // the diff and the ordering below have to arrive together or
+                    // every existing ordered collection scrambles on its next
+                    // save.
+                    let persisted = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
                             predicate: predicate.clone(),
@@ -3385,34 +5029,117 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
-                    for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), batch_id.clone())
-                            .await?;
-                    }
-                    // Also prune matching links from pending batch additions
+
+                    let desired: Vec<String> = parameters
+                        .iter()
+                        .map(|p| jsvalue_to_string(&p.value))
+                        .collect();
+                    let desired_set: std::collections::HashSet<&str> =
+                        desired.iter().map(|s| s.as_str()).collect();
+
+                    // Reconcile with what this batch has already staged for the
+                    // relation, before staging anything more.
+                    //
+                    //   - an addition for a member now going away is dropped, so
+                    //     a save+update in one transaction cannot leave a
+                    //     duplicate behind;
+                    //   - a removal for a member that is wanted again is
+                    //     cancelled. `[A] → [B] → [A, B]` in one batch should
+                    //     leave A's original link alone, not remove it and
+                    //     re-add it under a fresh signature and timestamp —
+                    //     restamping is exactly what this diff exists to stop.
+                    //
+                    // `already_removed` is read after that cancellation so the
+                    // loop below does not stage a second removal for a member
+                    // this batch has already let go: the store still lists it
+                    // until commit.
+                    let mut already_removed: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
-                        if let Some(diff) = batches.get_mut(bid) {
-                            diff.additions.retain(|link_expr| {
-                                !(link_expr.data.source == source
-                                    && link_expr.data.predicate == predicate)
+                        if let Some(batch) = batches.get_mut(bid) {
+                            let mine = |l: &Link| l.source == source && l.predicate == predicate;
+                            batch.diff.additions.retain(|link_expr| {
+                                !(mine(&link_expr.data)
+                                    && !desired_set.contains(link_expr.data.target.as_str()))
                             });
+                            batch.diff.removals.retain(|link_expr| {
+                                !(mine(&link_expr.data)
+                                    && desired_set.contains(link_expr.data.target.as_str()))
+                            });
+                            already_removed = batch
+                                .diff
+                                .removals
+                                .iter()
+                                .filter(|l| mine(&l.data))
+                                .map(|l| l.data.target.clone())
+                                .collect();
                         }
                     }
-                    self.add_links(
-                        parameters
-                            .iter()
-                            .map(|p| Link {
-                                source: source.clone(),
-                                predicate: predicate.clone(),
-                                target: jsvalue_to_string(&p.value),
-                            })
-                            .collect(),
-                        status,
-                        batch_id.clone(),
-                        context,
-                    )
-                    .await?;
+
+                    // Only a persisted link can be removed. A member that exists
+                    // solely as a pending addition leaves by being pruned above,
+                    // not by a removal of something the store has never seen.
+                    for link in &persisted {
+                        if !desired_set.contains(link.data.target.as_str())
+                            && !already_removed.contains(&link.data.target)
+                        {
+                            self.remove_link(link.clone().into(), batch_id.clone())
+                                .await?;
+                        }
+                    }
+
+                    // Membership as this batch would leave it. A second save on
+                    // the same relation in one batch has to see the first one's
+                    // staged additions, or it re-adds every one of them — the
+                    // store will not show them until commit.
+                    let existing = self
+                        .links_including_batch(
+                            persisted,
+                            &source,
+                            predicate.as_deref(),
+                            batch_id.as_deref(),
+                        )
+                        .await;
+
+                    // What the collection holds now, with each member's earliest
+                    // link timestamp — the ordering module's membership input.
+                    let mut current_members: Vec<(String, String)> = Vec::new();
+                    let mut existing_targets: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for link in &existing {
+                        if existing_targets.insert(link.data.target.clone()) {
+                            current_members
+                                .push((link.data.target.clone(), link.timestamp.clone()));
+                        }
+                    }
+
+                    let new_links: Vec<Link> = desired
+                        .iter()
+                        .filter(|t| !existing_targets.contains(*t))
+                        .map(|t| Link {
+                            source: source.clone(),
+                            predicate: predicate.clone(),
+                            target: t.clone(),
+                        })
+                        .collect();
+                    if !new_links.is_empty() {
+                        self.add_links(new_links, status.clone(), batch_id.clone(), context)
+                            .await?;
+                    }
+
+                    if let Some(ref pred) = predicate {
+                        self.apply_collection_ordering(
+                            &source,
+                            pred,
+                            &current_members,
+                            &desired,
+                            status,
+                            batch_id.clone(),
+                            context,
+                        )
+                        .await?;
+                    }
                 }
             }
 
@@ -3440,13 +5167,15 @@ impl PerspectiveInstance {
         })
     }
 
-    /// Parse actions JSON from a literal target (format: "literal://string:{json}")
+    /// Parse actions JSON from a literal target (format: "literal:string:{json}" or legacy "literal://string:{json}")
     fn parse_actions_from_literal(target: &str) -> Result<Vec<Command>, AnyError> {
-        let prefix = "literal://string:";
-        if !target.starts_with(prefix) {
+        let json_str = if let Some(rest) = target.strip_prefix("literal://string:") {
+            rest
+        } else if let Some(rest) = target.strip_prefix("literal:string:") {
+            rest
+        } else {
             return Err(anyhow!("Invalid literal format: {}", target));
-        }
-        let json_str = &target[prefix.len()..];
+        };
         // Decode URL-encoded characters if present
         let decoded = urlencoding::decode(json_str)
             .map(|s| s.to_string())
@@ -3461,14 +5190,13 @@ impl PerspectiveInstance {
         class_name: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Query SurrealDB for links with the given predicate whose source ends with {ClassName}Shape
+        // Query SPARQL store for links with the given predicate whose source ends with {ClassName}Shape
         let shape_suffix = format!("{}Shape", class_name);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.uuid.clone();
 
         let links = self
-            .surreal_service
-            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &shape_suffix)
-            .await?;
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
 
         // Return the first match
         if let Some(link) = links.first() {
@@ -3487,12 +5215,11 @@ impl PerspectiveInstance {
     ) -> Result<Option<Vec<Command>>, AnyError> {
         // Property shape URI format: {namespace}{ClassName}.{propertyName}
         let prop_suffix = format!("{}.{}", class_name, property);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let _uuid = self.uuid.clone();
 
         let links = self
-            .surreal_service
-            .get_links_by_predicate_and_source_suffix(&uuid, predicate, &prop_suffix)
-            .await?;
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
 
         // Return the first match
         if let Some(link) = links.first() {
@@ -3502,29 +5229,41 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
-    /// Get resolve language from SHACL links
+    /// Get the resolve language address (`ad4m://resolveLanguage`) for a property.
+    ///
+    /// This is the sole selector of storage mode:
+    ///   - `None`             → deterministic typed literal (POS-index
+    ///                          fast path — the default for a plain
+    ///                          `@Property()`).
+    ///   - `Some("literal")`  → signed envelope on the built-in literal
+    ///                          language (per-value provenance, e.g.
+    ///                          Flux message bodies).
+    ///   - `Some(<addr>)`     → `expression_create` on that custom
+    ///                          language.
     pub async fn get_resolve_language_from_shacl(
         &self,
         class_name: &str,
         property: &str,
     ) -> Result<Option<String>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
-        let uuid = self.persisted.lock().await.uuid.clone();
 
         let links = self
-            .surreal_service
-            .get_links_by_predicate_and_source_suffix(&uuid, "ad4m://resolveLanguage", &prop_suffix)
-            .await?;
+            .sparql_store
+            .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
         if let Some(link) = links.first() {
-            // Extract value from literal://string:{value}
-            let prefix = "literal://string:";
-            if link.data.target.starts_with(prefix) {
-                let encoded_value = &link.data.target[prefix.len()..];
-                let decoded = urlencoding::decode(encoded_value)
-                    .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
-                return Ok(Some(decoded.to_string()));
-            }
+            // Extract value from literal:string:{value} or legacy literal://string:{value}
+            let encoded_value =
+                if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
+                    rest
+                } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
+                    rest
+                } else {
+                    return Ok(Some(link.data.target.clone()));
+                };
+            let decoded = urlencoding::decode(encoded_value)
+                .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
+            return Ok(Some(decoded.to_string()));
         }
 
         Ok(None)
@@ -3555,35 +5294,60 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<String, AnyError> {
-        // Get resolve language from SHACL links
         let resolve_language = self
             .get_resolve_language_from_shacl(class_name, property)
             .await?;
 
-        if let Some(resolve_language) = resolve_language {
-            // Create an expression for the value
+        // Storage mode derives entirely from `resolveLanguage`:
+        //   - unset            → deterministic typed literal (fast path)
+        //   - Some("literal")  → signed envelope on the literal language
+        //   - Some(<addr>)     → expression_create on that custom language
+        if let Some(lang) = resolve_language.as_deref() {
+            if lang != "literal" {
+                let controller = crate::languages::LanguageController::global_instance();
+                let agent_context = context.clone();
+                return match controller
+                    .expression_create(lang, value.clone(), &agent_context)
+                    .await
+                {
+                    Ok(url) => Ok(url),
+                    Err(e) => {
+                        log::warn!("Failed to create expression on {}: {}", lang, e);
+                        Ok(value.to_string())
+                    }
+                };
+            }
+        }
+
+        // Literal-language storage. The property explicitly opts into the
+        // signed-envelope path via `resolveLanguage:"literal"` (per-value
+        // provenance, e.g. Flux message bodies); otherwise (resolveLanguage
+        // unset) the value is stored as a deterministic literal: IRI.
+        let envelope = resolve_language.as_deref() == Some("literal");
+
+        if envelope {
             let controller = crate::languages::LanguageController::global_instance();
             let agent_context = context.clone();
             match controller
-                .expression_create(&resolve_language, value.clone(), &agent_context)
+                .expression_create("literal", value.clone(), &agent_context)
                 .await
             {
                 Ok(url) => Ok(url),
                 Err(e) => {
-                    log::warn!("Failed to create expression on {}: {}", resolve_language, e);
-                    Ok(value.to_string())
+                    log::warn!("Failed to create expression on literal: {}", e);
+                    Err(anyhow!("Failed to create literal expression: {}", e))
                 }
             }
         } else {
             let uri = match value {
                 serde_json::Value::String(s) => {
-                    // If the value is already a valid URI (has a scheme), use it directly.
-                    // Otherwise wrap it in a literal:// URI so link targets are always valid URIs.
-                    static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> =
-                        std::sync::OnceLock::new();
-                    let re = URI_SCHEME_RE
-                        .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
-                    if re.is_match(s) {
+                    // If the value is already a well-formed absolute IRI, store it as a
+                    // raw NamedNode target. Otherwise wrap it in a `literal:string:*`
+                    // URI so link targets are always valid IRIs and stay round-trippable
+                    // through the query side. The predicate is shared with
+                    // `model_query::utils::looks_like_absolute_iri` — see
+                    // `is_safe_iri_target` for why they MUST agree.
+                    if is_safe_iri_target(s) {
                         s.clone()
                     } else {
                         Literal::from_string(s.clone())
@@ -3602,12 +5366,43 @@ impl PerspectiveInstance {
                             .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
                     }
                 }
-                _ => value.to_string(),
+                // Booleans become deterministic `literal:boolean:` IRIs, matching
+                // the TS `valueToLiteralIri` / `Literal` encoding. The storage
+                // layer turns these into typed `xsd:boolean` terms for indexed
+                // WHERE matching, and the read path decodes them back to a JSON
+                // bool. The Rust `Literal` helper has no boolean variant, so we
+                // format the wire form directly.
+                serde_json::Value::Bool(b) => format!("literal:boolean:{b}"),
+                // Objects / arrays become deterministic `literal:json:` IRIs so
+                // they round-trip back to JSON values rather than being stored
+                // as raw `value.to_string()` targets (which the storage layer
+                // would keep as opaque NamedNode IRIs and read back as strings).
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    Literal::from_json(value.clone())
+                        .to_url()
+                        .map_err(|e| anyhow!("Failed to encode JSON as literal URI: {}", e))?
+                }
+                serde_json::Value::Null => value.to_string(),
             };
             Ok(uri)
         }
     }
 
+    /// Mint a new instance of a subject class at `expression_address`: runs
+    /// the class's `ad4m://constructor` actions merged with the
+    /// `ad4m://setter` actions for every property in `initial_values`.
+    ///
+    /// Value encoding per property:
+    ///   - scalars (string / number / bool) become deterministic typed
+    ///     literals, unless the property opts into a `resolveLanguage`
+    ///     (see [`Self::resolve_property_value`]);
+    ///   - a JSON **array on a collection property** — one whose setter
+    ///     actions are all `addLink` — is expanded into one setter run per
+    ///     element, landing as N links in the same batch;
+    ///   - any other array or object is stored as a single `literal:json:`
+    ///     value (a scalar property may legitimately hold a JSON blob).
+    ///
+    /// Properties with no declared setter are skipped with a warning.
     pub async fn create_subject(
         &mut self,
         subject_class: SubjectClassOption,
@@ -3641,34 +5436,90 @@ impl PerspectiveInstance {
                     if let Some(setter_commands) =
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
-                        let target_value = self
-                            .resolve_property_value(&class_name, prop, value, context)
-                            .await?;
+                        // An array value on a property whose setter actions are all
+                        // `addLink` is a collection write: one setter execution per
+                        // element, accumulating N links. Everywhere else an array
+                        // stays a single `literal:json:` value (a scalar property may
+                        // legitimately hold a JSON blob), because expanding over a
+                        // `setSingleTarget` setter would run last-element-wins and
+                        // silently drop the rest.
+                        let expand_collection = matches!(value, serde_json::Value::Array(_))
+                            && setter_commands.iter().all(|c| c.action == Action::AddLink);
+                        let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+                            (true, serde_json::Value::Array(items)) => items.clone(),
+                            _ => vec![value.clone()],
+                        };
 
-                        //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
-                        //    prop, prop_start.elapsed());
+                        for (idx, element) in elements.iter().enumerate() {
+                            let target_value = self
+                                .resolve_property_value(&class_name, prop, element, context)
+                                .await?;
 
-                        // Compare predicates between setter and constructor commands
-                        for setter_cmd in setter_commands.iter() {
-                            let mut overwritten = false;
-                            if let Some(setter_pred) = &setter_cmd.predicate {
-                                for cmd in commands.iter_mut() {
-                                    if let Some(pred) = &cmd.predicate {
-                                        if pred == setter_pred {
-                                            cmd.target = Some(target_value.clone());
-                                            overwritten = true;
-                                            break;
+                            //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
+                            //    prop, prop_start.elapsed());
+
+                            // Compare predicates between setter and constructor commands.
+                            // Only the first element may overwrite a constructor
+                            // placeholder; every further collection element must append,
+                            // or they would all collapse onto the same command.
+                            for setter_cmd in setter_commands.iter() {
+                                let mut overwritten = false;
+                                if idx == 0 {
+                                    if let Some(setter_pred) = &setter_cmd.predicate {
+                                        for cmd in commands.iter_mut() {
+                                            if let Some(pred) = &cmd.predicate {
+                                                if pred == setter_pred {
+                                                    cmd.target = Some(target_value.clone());
+                                                    // The constructor command survives this
+                                                    // merge, only its target is replaced — so
+                                                    // without carrying the setter's `local`
+                                                    // across, a property whose setter writes
+                                                    // Local links would be written Shared at
+                                                    // creation and Local on every later
+                                                    // update: the same property with two
+                                                    // different statuses depending on when it
+                                                    // was written. The setter is the
+                                                    // authority for how its own predicate is
+                                                    // stored.
+                                                    if setter_cmd.local.is_some() {
+                                                        cmd.local = setter_cmd.local;
+                                                    }
+                                                    overwritten = true;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if !overwritten {
-                                commands.push(Command {
-                                    target: Some(target_value.clone()),
-                                    ..setter_cmd.clone()
-                                });
+                                if !overwritten {
+                                    commands.push(Command {
+                                        target: Some(target_value.clone()),
+                                        ..setter_cmd.clone()
+                                    });
+                                }
                             }
                         }
+                    } else {
+                        /*
+                           A value was supplied for a property with no `ad4m://setter`, and until now
+                           that was silently dropped.
+
+                           Silent is the wrong default here: from the caller's side the write
+                           succeeds — the instance is minted, every other property lands, no error is
+                           returned — and the omission only surfaces much later as whatever reads the
+                           instance back deciding it is malformed. Tracing one of those means working
+                           backwards from a reader to a writer that never complained.
+
+                           Warn rather than fail, because dropping an unknown key is legitimate: a
+                           caller may pass a superset of what a class declares. What is not
+                           legitimate is doing it without saying so.
+                        */
+                        log::warn!(
+                            "create_subject: class `{}` declares no setter for property `{}` — \
+                             the supplied value was NOT written",
+                            class_name,
+                            prop
+                        );
                     }
                 }
             }
@@ -3690,6 +5541,80 @@ impl PerspectiveInstance {
         //log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
 
         Ok(())
+    }
+
+    /// Patch property values on an instance that already exists: runs the
+    /// class's `ad4m://setter` actions for the given properties **without** the
+    /// constructor.
+    ///
+    /// This is [`Self::create_subject`] minus the class-minting half. Per
+    /// property the write is byte-for-byte what `create_subject` would do —
+    /// same setter commands, same `resolve_property_value` encoding, so a
+    /// `setSingleTarget` setter still replaces that predicate's current target
+    /// — but the constructor's type-flag link is left untouched, since the
+    /// instance is already of that class. Use it to refine an existing node
+    /// (rename, fill a missing field) rather than mint a duplicate.
+    ///
+    /// Properties with no declared setter are skipped, exactly as in
+    /// `create_subject`. An empty/absent value set is a no-op.
+    pub async fn update_subject(
+        &mut self,
+        subject_class: SubjectClassOption,
+        expression_address: String,
+        values: serde_json::Value,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let class_name = self
+            .subject_class_option_to_class_name(subject_class, context)
+            .await?;
+
+        let mut commands: Vec<Command> = Vec::new();
+        if let serde_json::Value::Object(obj) = values {
+            for (prop, value) in obj.iter() {
+                let Some(setter_commands) =
+                    self.get_property_setter_actions(&class_name, prop).await?
+                else {
+                    // Same silent drop as `create_subject`, same reason for saying so out loud —
+                    // see the comment there. A class whose collection has no setter loses every
+                    // supplied member here without a word.
+                    log::warn!(
+                        "update_subject: class `{}` declares no setter for property `{}` — \
+                         the supplied value was NOT written",
+                        class_name,
+                        prop
+                    );
+                    continue;
+                };
+                // Same collection expansion as `create_subject`: an array on an
+                // all-`addLink` setter appends one link per element; any other
+                // array stays a single `literal:json:` value.
+                let expand_collection = matches!(value, serde_json::Value::Array(_))
+                    && setter_commands.iter().all(|c| c.action == Action::AddLink);
+                let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+                    (true, serde_json::Value::Array(items)) => items.clone(),
+                    _ => vec![value.clone()],
+                };
+                for element in &elements {
+                    let target_value = self
+                        .resolve_property_value(&class_name, prop, element, context)
+                        .await?;
+                    for setter_cmd in setter_commands.iter() {
+                        commands.push(Command {
+                            target: Some(target_value.clone()),
+                            ..setter_cmd.clone()
+                        });
+                    }
+                }
+            }
+        }
+
+        if commands.is_empty() {
+            return Ok(());
+        }
+
+        self.execute_commands(commands, expression_address, vec![], batch_id, context)
+            .await
     }
 
     pub async fn get_subject_data(
@@ -3793,7 +5718,10 @@ impl PerspectiveInstance {
                                     .await
                                 {
                                     Ok(Some(expr_json)) => {
-                                        let rendered = crate::graphql::query_resolvers::build_expression_rendered(&expr_json, &lang_address);
+                                        let rendered = crate::helpers::build_expression_rendered(
+                                            &expr_json,
+                                            &lang_address,
+                                        );
                                         rendered.data
                                     }
                                     _ => prolog_value_to_json_string(property_value.clone()),
@@ -3861,12 +5789,13 @@ impl PerspectiveInstance {
         result: String,
         delay: Option<Duration>,
     ) {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         tokio::spawn(async move {
             if let Some(delay) = delay {
                 sleep(delay).await;
             }
             let filter = PerspectiveQuerySubscriptionFilter {
+                perspective_uuid: uuid.clone(),
                 uuid,
                 subscription_id,
                 result,
@@ -3895,23 +5824,19 @@ impl PerspectiveInstance {
                 .map(|(id, _)| id.clone())
         };
 
-        // Return existing subscription if found
+        // Return existing subscription if found. The caller becomes one more
+        // holder of the shared entry; see `SubscribedQuery::holders`.
         if let Some(existing_id) = existing_subscription {
             let existing_result = {
-                let queries = self.subscribed_queries.lock().await;
-                queries.get(&existing_id).map(|q| q.last_result.clone())
+                let mut queries = self.subscribed_queries.lock().await;
+                queries.get_mut(&existing_id).map(|q| {
+                    q.holders += 1;
+                    q.last_keepalive = Instant::now();
+                    q.last_result.clone()
+                })
             };
 
             if let Some(last_result) = existing_result {
-                let result_string = format!("#init#{}", last_result);
-                for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-                    self.send_subscription_update(
-                        existing_id.clone(),
-                        result_string.clone(),
-                        Some(Duration::from_millis(delay)),
-                    )
-                    .await;
-                }
                 return Ok((existing_id, last_result));
             }
         }
@@ -3924,16 +5849,29 @@ impl PerspectiveInstance {
         } else {
             crate::agent::AgentContext::main_agent()
         };
-        let initial_result = self
-            .prolog_query_subscription_with_context(query.clone(), &agent_context)
-            .await?;
-        let result_string = prolog_resolution_to_string(initial_result);
+        let result_string = if is_sparql_query(&query) {
+            self.sparql_query(query.clone())?
+        } else {
+            let initial_result = self
+                .prolog_query_subscription_with_context(query.clone(), &agent_context)
+                .await?;
+            prolog_resolution_to_string(initial_result)
+        };
+
+        let predicates = if is_sparql_query(&query) {
+            extract_predicates_from_sparql(&query)
+        } else {
+            HashSet::new() // Prolog queries: always re-check
+        };
 
         let subscribed_query = SubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            predicates,
+            model_query_params: None,
+            holders: 1,
         };
 
         // Now insert the subscription
@@ -3942,18 +5880,161 @@ impl PerspectiveInstance {
             .await
             .insert(subscription_id.clone(), subscribed_query);
 
-        // Send initial result after 3 delays
-        let init_string = format!("#init#{}", result_string);
-        for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_string.clone(),
-                Some(Duration::from_millis(delay)),
+        Ok((subscription_id, result_string))
+    }
+
+    /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
+    /// registers a subscription, and runs the initial model query — all in one call.
+    /// When link changes match the trigger predicates, `execute_model_query` is
+    /// re-run in Rust and the updated results are pushed to the client.
+    pub async fn model_subscribe_and_query(
+        &self,
+        class_name: String,
+        query_json: String,
+        user_email: Option<String>,
+    ) -> Result<(String, String), AnyError> {
+        // 1. Run the initial model query
+        let initial_result = self.model_query(&class_name, &query_json).await?;
+
+        // 2. Build trigger SPARQL from shape predicates resolved through the cache.
+        let trigger_predicates =
+            self.build_model_trigger_predicates(&class_name, Some(&query_json));
+
+        let trigger_sparql = if trigger_predicates.is_empty() {
+            // Fallback: match any triple (always re-check)
+            "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
+        } else {
+            let patterns: Vec<String> = trigger_predicates
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
+                .collect();
+            format!(
+                "SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1",
+                patterns.join(" UNION ")
             )
-            .await;
+        };
+
+        let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
+
+        // 3. Check for existing subscription with same params
+        let existing_subscription = {
+            let queries = self.subscribed_queries.lock().await;
+            queries
+                .iter()
+                .find(|(_, q)| {
+                    if let Some(ref params) = q.model_query_params {
+                        params.class_name == class_name
+                            && params.query_json == query_json
+                            && q.user_email == user_email
+                    } else {
+                        false
+                    }
+                })
+                .map(|(id, _)| id.clone())
+        };
+
+        if let Some(existing_id) = existing_subscription {
+            // Update last_result and trigger metadata with fresh data. The
+            // caller becomes one more holder of the shared entry; see
+            // `SubscribedQuery::holders`.
+            {
+                let mut queries = self.subscribed_queries.lock().await;
+                if let Some(q) = queries.get_mut(&existing_id) {
+                    q.query = trigger_sparql.clone();
+                    q.predicates = predicate_set.clone();
+                    q.last_result = initial_result.clone();
+                    q.last_keepalive = Instant::now();
+                    q.holders += 1;
+                }
+            }
+            return Ok((existing_id, initial_result));
         }
 
-        Ok((subscription_id, result_string))
+        // 4. Register new subscription
+        let subscription_id = uuid::Uuid::new_v4().to_string();
+        let subscribed_query = SubscribedQuery {
+            query: trigger_sparql,
+            last_result: initial_result.clone(),
+            last_keepalive: Instant::now(),
+            user_email,
+            predicates: predicate_set,
+            model_query_params: Some(ModelSubscriptionParams {
+                class_name,
+                query_json,
+            }),
+            holders: 1,
+        };
+
+        self.subscribed_queries
+            .lock()
+            .await
+            .insert(subscription_id.clone(), subscribed_query);
+
+        Ok((subscription_id, initial_result))
+    }
+
+    /// Extract predicates from a model shape for subscription trigger matching.
+    /// Reads the shape from the cache (which warms from SHACL triples on miss)
+    /// so subscription re-evaluation matches the same predicate set queries do.
+    fn build_model_trigger_predicates(
+        &self,
+        class_name: &str,
+        query_json: Option<&str>,
+    ) -> Vec<String> {
+        let mut predicates = Vec::new();
+
+        let shape = self.get_shape(class_name).ok();
+        if let Some(shape) = &shape {
+            predicates.extend(shape.predicates());
+        }
+
+        // `links` reaches predicates the shape does not declare (a revocation
+        // tombstone); a subscription asking for one must re-run when it lands.
+        if let (Some(shape), Some(qj)) = (&shape, query_json) {
+            if let Ok(query) = serde_json::from_str::<super::model_query::ModelQueryInput>(qj) {
+                predicates.extend(super::model_query::links_trigger_predicates(
+                    shape,
+                    &query,
+                    &self.shape_resolver(),
+                ));
+            }
+        }
+
+        // Extract parent predicate from query JSON (parent-scoped subscriptions
+        // must trigger when the parent link is added/removed)
+        if let Some(qj) = query_json {
+            if let Ok(query) = serde_json::from_str::<serde_json::Value>(qj) {
+                if let Some(pred) = query
+                    .get("parent")
+                    .and_then(|p| p.get("predicate"))
+                    .and_then(|p| p.as_str())
+                {
+                    predicates.push(pred.to_string());
+                }
+                // `producedByFlow` resolves through the flow's receipts and
+                // the flow catalogue, not the shape: re-run when a receipt's
+                // index entry or body lands (sync may deliver them apart) —
+                // the reads `load_flow_receipts` makes — or a flow is
+                // registered, whose definition is written with its
+                // `rdf://type ad4m://Flow` link.
+                if query
+                    .get("where")
+                    .and_then(|w| w.get("producedByFlow"))
+                    .is_some()
+                {
+                    use super::flow_instance::{produced, receipt};
+                    predicates.push(produced::FLOW_RECEIPT_INDEX_PREDICATE.to_string());
+                    predicates.push(receipt::FLOW_RECEIPT_CONTENT_PREDICATE.to_string());
+                    predicates.push("rdf://type".to_string());
+                }
+            }
+        }
+
+        predicates.sort();
+        predicates.dedup();
+
+        predicates
     }
 
     pub async fn keepalive_query(&self, subscription_id: String) -> Result<(), AnyError> {
@@ -3966,18 +6047,35 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Release one subscriber's hold on `subscription_id`. The entry is removed
+    /// (and the prolog service notified) only when no holder remains, so a
+    /// subscription shared by several subscribers keeps pushing updates to the
+    /// others. Returns `Ok(true)` when the id was registered, `Ok(false)` when
+    /// it was unknown (already removed or evicted).
     pub async fn dispose_query_subscription(
         &self,
         subscription_id: String,
     ) -> Result<bool, AnyError> {
-        let removed_query = {
+        let (found, removed_query) = {
             let mut queries = self.subscribed_queries.lock().await;
-            queries.remove(&subscription_id)
+            match queries.get_mut(&subscription_id) {
+                None => (false, None),
+                Some(q) if q.holders > 1 => {
+                    q.holders -= 1;
+                    log::debug!(
+                        "🔗 subscription {} released by one holder, {} remaining",
+                        subscription_id,
+                        q.holders
+                    );
+                    (true, None)
+                }
+                Some(_) => (true, queries.remove(&subscription_id)),
+            }
         };
 
         if let Some(query) = removed_query {
             // Notify prolog service that subscription ended
-            let uuid = self.persisted.lock().await.uuid.clone();
+            let uuid = self.uuid.clone();
             if let Err(e) = get_prolog_service()
                 .await
                 .subscription_ended(uuid, query.query)
@@ -3985,238 +6083,19 @@ impl PerspectiveInstance {
             {
                 log::warn!("Failed to notify prolog service of subscription end: {}", e);
             }
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        Ok(found)
     }
 
-    pub async fn subscribe_and_query_surreal(
-        &self,
-        query: String,
-        user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query and user
-        let existing_subscription = {
-            let queries = self.surreal_subscribed_queries.lock().await;
-            queries
-                .iter()
-                .find(|(_, q)| q.query == query && q.user_email == user_email)
-                .map(|(id, _)| id.clone())
-        };
-
-        // Return existing subscription if found
-        if let Some(existing_id) = existing_subscription {
-            let existing_result = {
-                let queries = self.surreal_subscribed_queries.lock().await;
-                queries.get(&existing_id).map(|q| q.last_result.clone())
-            };
-
-            if let Some(last_result) = existing_result {
-                let result_string = format!("#init#{}", last_result);
-                for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-                    self.send_subscription_update(
-                        existing_id.clone(),
-                        result_string.clone(),
-                        Some(Duration::from_millis(delay)),
-                    )
-                    .await;
-                }
-                return Ok((existing_id, last_result));
-            }
-        }
-
-        let subscription_id = Uuid::new_v4().to_string();
-
-        log::debug!(
-            "subscribe_and_query_surreal: new subscription {} for query: {}",
-            subscription_id,
-            query
-        );
-
-        // Execute surreal query with user context for $agentDid and $perspectiveId substitution
-        let initial_result_vec = self
-            .surreal_query_notification(query.clone(), user_email.clone())
-            .await?;
-        let result_string = serde_json::to_string(&initial_result_vec)?;
-
-        log::debug!(
-            "subscribe_and_query_surreal: {} initial result has {} items",
-            subscription_id,
-            initial_result_vec.len()
-        );
-
-        let subscribed_query = SurrealSubscribedQuery {
-            query,
-            last_result: result_string.clone(),
-            last_keepalive: Instant::now(),
-            user_email,
-        };
-
-        // Now insert the subscription
-        self.surreal_subscribed_queries
-            .lock()
-            .await
-            .insert(subscription_id.clone(), subscribed_query);
-
-        // Send initial result with #init# prefix for compatibility
-        let init_msg = format!("#init#{}", result_string);
-        // Send multiple updates to ensure client gets it (same as Prolog implementation)
-        for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
-            self.send_subscription_update(
-                subscription_id.clone(),
-                init_msg.clone(),
-                Some(Duration::from_millis(delay)),
-            )
-            .await;
-        }
-
-        Ok((subscription_id, result_string))
-    }
-
-    pub async fn keepalive_surreal_query(&self, subscription_id: String) -> Result<(), AnyError> {
-        let mut queries = self.surreal_subscribed_queries.lock().await;
-        if let Some(query) = queries.get_mut(&subscription_id) {
-            query.last_keepalive = Instant::now();
-            Ok(())
-        } else {
-            Err(anyhow!("Surreal subscription not found"))
-        }
-    }
-
-    pub async fn dispose_surreal_query_subscription(
-        &self,
-        subscription_id: String,
-    ) -> Result<bool, AnyError> {
-        let mut queries = self.surreal_subscribed_queries.lock().await;
-        Ok(queries.remove(&subscription_id).is_some())
-    }
-
-    async fn surreal_subscription_cleanup_loop(&self) {
-        while !*self.is_teardown.lock().await {
-            // Check trigger without holding lock during the operation
-            let should_check = { *self.trigger_surreal_subscription_check.lock().await };
-
-            if should_check {
-                self.check_surreal_subscribed_queries().await;
-                *self.trigger_surreal_subscription_check.lock().await = false;
-            }
-            sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
-        }
-    }
-
-    async fn check_surreal_subscribed_queries(&self) {
+    async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
         let mut queries_to_remove = Vec::new();
-        let mut query_futures = Vec::new();
+        let mut query_futures: Vec<
+            std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
+        > = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
-        // DON'T clone the potentially huge last_result string
-        let queries = {
-            let queries_guard = self.surreal_subscribed_queries.lock().await;
-            if !queries_guard.is_empty() {
-                log::debug!(
-                    "check_surreal_subscribed_queries: checking {} active subscription(s)",
-                    queries_guard.len()
-                );
-            }
-            queries_guard
-                .iter()
-                .map(|(id, query)| {
-                    (
-                        id.clone(),
-                        query.query.clone(),
-                        query.user_email.clone(),
-                        query.last_keepalive,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive) in queries {
-            // Check for timeout
-            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
-                queries_to_remove.push(id);
-                continue;
-            }
-
-            // Spawn query check future
-            let self_clone = self.clone();
-            let query_for_log = query_string.clone();
-            let query_future = async move {
-                match self_clone
-                    .surreal_query_notification(query_string, user_email)
-                    .await
-                {
-                    Ok(result_vec) => {
-                        if let Ok(result_string) = serde_json::to_string(&result_vec) {
-                            // Compare with stored last_result only now, avoiding the clone earlier
-                            let mut queries = self_clone.surreal_subscribed_queries.lock().await;
-                            if let Some(stored_query) = queries.get_mut(&id) {
-                                if result_string != stored_query.last_result {
-                                    log::debug!(
-                                        "Surreal subscription {} result changed ({} items). Query: {}",
-                                        id,
-                                        result_vec.len(),
-                                        query_for_log
-                                    );
-                                    log::debug!(
-                                        "Surreal subscription {} new result (first 500 chars): {}",
-                                        id,
-                                        &result_string[..result_string.len().min(500)]
-                                    );
-                                    // Release lock before sending update
-                                    drop(queries);
-                                    self_clone
-                                        .send_subscription_update(
-                                            id.clone(),
-                                            result_string.clone(),
-                                            None,
-                                        )
-                                        .await;
-                                    // Re-acquire lock to update the result
-                                    let mut queries =
-                                        self_clone.surreal_subscribed_queries.lock().await;
-                                    if let Some(stored_query) = queries.get_mut(&id) {
-                                        stored_query.last_result = result_string;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "SurrealDB subscription query failed for subscription {}: {}",
-                            id,
-                            e
-                        );
-                        // Note: We don't remove the subscription on query failure
-                        // to allow for transient errors. It will be removed on timeout.
-                    }
-                }
-            };
-            query_futures.push(query_future);
-        }
-
-        // Wait for all query futures to complete
-        future::join_all(query_futures).await;
-
-        // Remove timed out queries
-        if !queries_to_remove.is_empty() {
-            let mut queries = self.surreal_subscribed_queries.lock().await;
-            for id in queries_to_remove {
-                queries.remove(&id);
-            }
-        }
-    }
-
-    async fn check_subscribed_queries(&self) {
-        let mut queries_to_remove = Vec::new();
-        let mut query_futures = Vec::new();
-        let now = Instant::now();
-
-        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
+        // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
+        // and model_query_params (if this is a model subscription).
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
@@ -4228,59 +6107,131 @@ impl PerspectiveInstance {
                         query.query.clone(),
                         query.user_email.clone(),
                         query.last_keepalive,
+                        query.predicates.clone(),
+                        query.model_query_params.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive) in queries {
+        for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries
+        {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
                 continue;
             }
 
-            // Spawn query check future
+            // Skip subscription if its predicates don't overlap with changed predicates
+            // sub_predicates empty => always check (variable predicate in query)
+            // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
+            // ChangedPredicates::NoneRecorded => should not happen here, but skip if it does
+            if !sub_predicates.is_empty() {
+                if let ChangedPredicates::Specific(ref changed) = changed_predicates {
+                    if sub_predicates.is_disjoint(changed) {
+                        log::debug!(
+                            "⏭️ Skipping subscription {} — predicates {:?} disjoint from changed {:?}",
+                            id, sub_predicates, changed
+                        );
+                        continue; // No overlap — skip this subscription
+                    }
+                } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
+                    continue;
+                }
+            } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
+                continue;
+            }
+
+            // Each future returns Option<(id, new_result)> instead of locking individually.
+            // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
-            let query_future = async move {
-                //let this_now = Instant::now();
-                let agent_context = if let Some(email) = user_email {
+            let query_future = Box::pin(async move {
+                let _agent_context = if let Some(email) = user_email {
                     crate::agent::AgentContext::for_user_email(email)
                 } else {
                     crate::agent::AgentContext::main_agent()
                 };
-                if let Ok(result) = self_clone
-                    .prolog_query_subscription_with_context(query_string, &agent_context)
-                    .await
-                {
-                    let result_string = prolog_resolution_to_string(result);
-                    // Compare with stored last_result only now, avoiding the clone earlier
-                    let mut queries = self_clone.subscribed_queries.lock().await;
-                    if let Some(stored_query) = queries.get_mut(&id) {
-                        if result_string != stored_query.last_result {
-                            //log::info!("Query {} has changed: {}", id, result_string);
-                            // Release lock before sending update
-                            drop(queries);
-                            self_clone
-                                .send_subscription_update(id.clone(), result_string.clone(), None)
-                                .await;
-                            // Re-acquire lock to update the result
-                            let mut queries = self_clone.subscribed_queries.lock().await;
-                            if let Some(stored_query) = queries.get_mut(&id) {
-                                stored_query.last_result = result_string;
-                            }
+
+                // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
+                // With no shape wait: every subscription on the perspective is
+                // re-checked under one `join_all` below, so a wait here for one
+                // subscription's unsynced class would hold back every other
+                // subscription's update. A class still missing fails this pass
+                // at once and is retried on the next one.
+                let result_string = if let Some(ref params) = model_params {
+                    match self_clone
+                        .model_query_within(&params.class_name, &params.query_json, Duration::ZERO)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("❌ 🔗 🧠 model-based subscription query failed: {}", e);
+                            return None;
                         }
                     }
-                }
-                //log::info!("Query {} check took {:?}", id, this_now.elapsed());
-            };
+                } else if is_sparql_query(&query_string) {
+                    match self_clone.sparql_query(query_string) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
+                            return None;
+                        }
+                    }
+                } else {
+                    match self_clone
+                        .prolog_query_subscription_with_context(query_string, &_agent_context)
+                        .await
+                    {
+                        Ok(result) => prolog_resolution_to_string(result),
+                        Err(e) => {
+                            log::error!("❌ 🔗 📜 Prolog subscription query failed: {}", e);
+                            return None;
+                        }
+                    }
+                };
+                Some((id, result_string))
+            });
             query_futures.push(query_future);
         }
 
-        // Wait for all query futures to complete
-        future::join_all(query_futures).await;
-        //log::info!("done checking subscribed queries in {:?}", now.elapsed());
+        // Run all queries concurrently — no lock contention during execution
+        let results = future::join_all(query_futures).await;
+
+        // Single lock acquisition to compare and update all results
+        let mut updates_to_send = Vec::new();
+        {
+            let mut queries = self.subscribed_queries.lock().await;
+            for result in results.into_iter().flatten() {
+                let (id, result_string) = result;
+                if let Some(stored_query) = queries.get_mut(&id) {
+                    let changed = result_string != stored_query.last_result;
+                    if changed {
+                        let old_len = stored_query.last_result.len();
+                        let new_len = result_string.len();
+                        log::debug!(
+                            "📤 🔗 subscription {} result changed (old_len={}, new_len={})",
+                            id,
+                            old_len,
+                            new_len
+                        );
+                        stored_query.last_result = result_string.clone();
+                        updates_to_send.push((id, result_string));
+                    } else {
+                        log::trace!(
+                            "📭 🔗 subscription {} result unchanged (len={})",
+                            id,
+                            result_string.len()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Send updates outside the lock
+        for (id, result_string) in updates_to_send {
+            self.send_subscription_update(id, result_string, None).await;
+        }
 
         // Remove timed out queries and notify prolog service
         if !queries_to_remove.is_empty() {
@@ -4293,7 +6244,7 @@ impl PerspectiveInstance {
             };
 
             // Notify prolog service for each timed out subscription
-            let uuid = self.persisted.lock().await.uuid.clone();
+            let uuid = self.uuid.clone();
             for (_id, query) in removed_queries {
                 if let Err(e) = get_prolog_service()
                     .await
@@ -4310,39 +6261,108 @@ impl PerspectiveInstance {
     }
 
     async fn subscribed_queries_loop(&self) {
-        // Prolog subscriptions only make sense in Simple and Pooled modes
-        // In SdnaOnly mode, link queries don't work, only SDNA queries
-        // In Disabled mode, prolog is disabled entirely
-        if PROLOG_MODE == PrologMode::SdnaOnly || PROLOG_MODE == PrologMode::Disabled {
-            log::debug!(
-                "Prolog subscription loop disabled in {:?} mode",
-                PROLOG_MODE
-            );
-            return;
-        }
+        // Note: the subscription loop must run even when Prolog is disabled,
+        // because SPARQL subscriptions don't use Prolog at all.
 
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
 
-        while !*self.is_teardown.lock().await {
+        // Debounce window for batching rapid link changes into a single
+        // subscription dispatch. A single Ad4mModel.save() can produce
+        // multiple link inserts (one per property/flag); without a wide
+        // enough window the dispatch can fire on a partial-state read
+        // — e.g. seeing the `name` link but not yet the `status` link a
+        // status="active" filter relies on — and the subsequent re-fetch
+        // reflects only part of the just-saved model. Back-to-back saves
+        // amplify this into a missed-update race that surfaces as a stuck
+        // `lastCall.args[0].results.length` in paginate-subscribe tests.
+        // 250ms is still imperceptible to UI consumers and absorbs both
+        // the multi-link-per-save and the rapid-saves-in-a-row cases.
+        const BATCH_WINDOW_MS: u64 = 250;
+
+        while !self.is_teardown.load(Ordering::Acquire) {
             // Check trigger without holding lock during the operation
-            let should_check = { *self.trigger_prolog_subscription_check.lock().await };
+            let should_check = self
+                .trigger_prolog_subscription_check
+                .load(Ordering::Acquire);
 
             if should_check {
-                self.check_subscribed_queries().await;
-                *self.trigger_prolog_subscription_check.lock().await = false;
+                // Batch debounce: wait a short window for more changes to accumulate
+                sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
+
+                // Atomically reset trigger AFTER the sleep, so we catch any
+                // triggers that arrived during the debounce window.
+                self.trigger_prolog_subscription_check
+                    .swap(false, Ordering::AcqRel);
+                let changed_preds = std::mem::replace(
+                    &mut *self.changed_predicates.lock().await,
+                    ChangedPredicates::NoneRecorded,
+                );
+
+                log::debug!(
+                    "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
+                    self.uuid,
+                    changed_preds
+                );
+                self.check_subscribed_queries(changed_preds).await;
             }
 
-            // Periodic subscription logging
+            // Periodic subscription logging and proactive timeout cleanup
             log_counter += 1;
             if log_counter >= LOG_INTERVAL {
                 log_counter = 0;
                 // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
-                let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                let queries = self.subscribed_queries.lock().await;
-                if !queries.is_empty() {
+                let perspective_uuid = self.uuid.clone();
+                let mut queries = self.subscribed_queries.lock().await;
+
+                // Proactively remove timed-out subscriptions even when no
+                // trigger has fired. Without this, expired subscriptions sit
+                // in the map forever, holding their last_result strings in
+                // memory, when no new links are being added.
+                let now = Instant::now();
+                let mut removed_queries: Vec<String> = Vec::new();
+                queries.retain(|_id, q| {
+                    let keep = now.duration_since(q.last_keepalive).as_secs()
+                        <= QUERY_SUBSCRIPTION_TIMEOUT;
+                    if !keep {
+                        removed_queries.push(q.query.clone());
+                    }
+                    keep
+                });
+                // Drop the lock before async prolog calls
+                drop(queries);
+
+                if !removed_queries.is_empty() {
                     log::info!(
-                        "📊 Prolog subscriptions [{}]: {} active",
+                        "🧹 🔗 cleaned up {} timed-out subscription(s) for perspective {}",
+                        removed_queries.len(),
+                        perspective_uuid
+                    );
+                    // Notify prolog service for each removed subscription,
+                    // mirroring the flow in check_subscribed_queries().
+                    for query in &removed_queries {
+                        if let Err(e) = get_prolog_service()
+                            .await
+                            .subscription_ended(perspective_uuid.clone(), query.clone())
+                            .await
+                        {
+                            log::warn!(
+                                "Failed to notify prolog service of subscription timeout: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Re-acquire for the logging section below
+                let queries = self.subscribed_queries.lock().await;
+
+                if !queries.is_empty() {
+                    // Heartbeat only — every ~60s per perspective. Kept at
+                    // debug to avoid steady-state noise; a subscription
+                    // register/dispose event is emitted at info instead.
+                    log::debug!(
+                        "📊 🔗 subscriptions [{}]: {} active",
                         perspective_uuid,
                         queries.len()
                     );
@@ -4352,7 +6372,7 @@ impl PerspectiveInstance {
                         } else {
                             query.query.clone()
                         };
-                        log::info!("   - [{}]: {}", id, query_preview);
+                        log::debug!("   - 🔗 [{}]: {}", id, query_preview);
                     }
                 }
             }
@@ -4362,10 +6382,10 @@ impl PerspectiveInstance {
     }
 
     async fn fallback_sync_loop(&self) {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         log::debug!("Starting fallback sync loop for perspective {}", uuid);
 
-        while !*self.is_teardown.lock().await {
+        while !self.is_teardown.load(Ordering::Acquire) {
             // Check if we should run the fallback sync (avoid holding multiple locks)
             let should_run = {
                 // Check perspective state first
@@ -4414,28 +6434,306 @@ impl PerspectiveInstance {
                     }
                     log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
                 } else {
-                    // Reset interval to 30 seconds on failure
-                    *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
+                    // Exponential backoff capped at 5 minutes. Previously
+                    // this path reset the interval to 30s, meaning an
+                    // unreachable link language would be called every 30
+                    // seconds forever, even after repeated timeouts.
+                    let mut guard = self.fallback_sync_interval.lock().await;
+                    let doubled = guard.saturating_mul(2);
+                    let capped = std::cmp::min(doubled, Duration::from_secs(300));
+                    *guard = std::cmp::max(capped, Duration::from_secs(30));
                     log::warn!(
-                        "Fallback sync failed for perspective {}, keeping interval at 30 seconds",
-                        uuid
+                        "Fallback sync failed for perspective {}, backing off to {:?}",
+                        uuid,
+                        *guard
                     );
                 }
             }
 
-            // Get fresh interval for sleep (after potential updates)
+            // Sleep in short slices so teardown is observed promptly even
+            // when the backoff interval is several minutes.
             let sleep_interval = *self.fallback_sync_interval.lock().await;
-            sleep(sleep_interval).await;
+            let mut remaining = sleep_interval;
+            let slice = Duration::from_secs(1);
+            while remaining > Duration::from_millis(0) {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    log::debug!("Fallback sync loop ended for perspective {}", uuid);
+                    return;
+                }
+                let step = std::cmp::min(slice, remaining);
+                sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
         }
 
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
+    }
+
+    /// Auto-processor watch loop (P-B2b2 polling MVP).
+    ///
+    /// One instance per perspective, joined into `start_background_tasks`.
+    /// Every tick (`AUTO_PROCESSOR_TICK_MS` while turns are pending, backing
+    /// off to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS` while idle, see
+    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)):
+    ///   1. Load every `AutoProcessorConfig` declared on this perspective's
+    ///      shared graph (`load_processors`). Zero configs = no-op tick.
+    ///   2. Per config, run its `source_scope_query` to gather the current
+    ///      transcript (`?speaker` `?text` `?timestamp`), drop turns older
+    ///      than `source_window_ms` when set, hash each remaining turn, and
+    ///      skip IDs already in this processor's `InterpretationRun.sources`
+    ///      (windowed by `ran_at` only when `source_window_ms` is set).
+    ///   3. Per config, `drain_ready_batch(cfg, now_ms)` — if a batch is ready
+    ///      (i.e. `debounce_ms` elapsed since the last `record_item`), run
+    ///      `run_one_pass` in-line. `Won` writes `processor` + `sources` on the
+    ///      new run node (the durable cursor). `BackedOff` holds the ids back
+    ///      locally for `claim_ttl_ms` — the winner's sources are what really
+    ///      retire them, but they only arrive once links sync, and re-racing
+    ///      the claim every debounce window until then is pure churn.
+    ///      `ShapesMissing` and `EmptyTranscript` do not write sources, so the
+    ///      ids are retried once the shape or transcript lands.
+    ///
+    /// This is the "polling MVP". The event-driven variant
+    /// (subscribe to `PERSPECTIVE_LINK_ADDED_TOPIC`, record `link.data.source`
+    /// deltas) is a follow-up optimisation — the coordination correctness
+    /// envelope is the same because the `ProcessingClaim` (P-A) is the real
+    /// double-processing guard, not the trigger latency.
+    /// `context` is the agent this executor runs passes as — production passes
+    /// the main agent; a multi-user test spawns one loop per managed user so the
+    /// `ProcessingClaim` election runs across distinct DIDs on one executor.
+    pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
+        use crate::perspectives::auto_processor::watcher::{
+            next_tick_delay_ms, WatcherState, AUTO_PROCESSOR_TICK_MS,
+        };
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let uuid = self.uuid.clone();
+        let mut watcher = WatcherState::new();
+        let mut delay_ms = AUTO_PROCESSOR_TICK_MS;
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            // Sleep in base-tick slices so teardown is observed as promptly
+            // while backed off as at the base rate.
+            let mut remaining = delay_ms;
+            while remaining > 0 {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    return;
+                }
+                let step = remaining.min(AUTO_PROCESSOR_TICK_MS);
+                sleep(Duration::from_millis(step)).await;
+                remaining -= step;
+            }
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+            let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_millis() as i64,
+                Err(_) => continue, // clock before epoch — skip tick
+            };
+            let had_pending = self
+                .run_auto_processor_tick(&mut watcher, now_ms, &context)
+                .await;
+            delay_ms = next_tick_delay_ms(delay_ms, had_pending);
+        }
+
+        log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
+    }
+
+    /// One tick of the auto-processor watch loop, factored out so tests can
+    /// drive the processor deterministically (feed a `now_ms`, no 500ms sleeps)
+    /// and observe it purely through the [`events`](crate::perspectives::auto_processor::events)
+    /// signals — exercising the exact production path the background loop runs,
+    /// with no manual interpretation or transcript wrangling.
+    ///
+    /// Loads every declared `AutoProcessorConfig`, records new-since-processed
+    /// transcript turns into `watcher` (gather minus this processor's
+    /// `InterpretationRun.sources`, optionally windowed), then drains and runs
+    /// any ready batch.
+    ///
+    /// `context` is the agent this executor runs the pass as — the production
+    /// loop passes the main agent; a multi-user test passes each managed user's
+    /// context so the `ProcessingClaim` election runs across distinct DIDs
+    /// (proving two users on one executor don't double-process).
+    ///
+    /// Returns whether a declared processor had turns pending after recording,
+    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
+    /// sampled before draining, so a drained batch that is retried (stand-down,
+    /// awaiting author, missing shapes, pass error) keeps the base rate: the
+    /// next tick re-records it. `false` when no processor is declared or every
+    /// gathered turn was already processed or deferred. If loading the
+    /// processors fails, any queued turn counts. A per-config query failure
+    /// records nothing for that config, so a failing scope query backs off
+    /// instead of logging a warning twice a second.
+    pub(crate) async fn run_auto_processor_tick(
+        &self,
+        watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
+        now_ms: i64,
+        context: &AgentContext,
+    ) -> bool {
+        use crate::perspectives::auto_processor::{
+            config::load_processors,
+            cursor::{load_processed_source_ids, turn_in_source_window},
+            events::{emit, AutoProcessorEvent, AutoProcessorStep},
+            watcher::{run_one_pass, PassOutcome, PendingTurn},
+        };
+
+        let uuid = self.uuid.clone();
+        let configs = match load_processors(self).await {
+            Ok(cs) => cs,
+            Err(e) => {
+                log::warn!(
+                    "auto_processor_tick [{}]: load_processors failed: {e:#}",
+                    uuid
+                );
+                return watcher.has_pending();
+            }
+        };
+        if configs.is_empty() {
+            return false;
+        }
+
+        // 1. Record new-since-last-processed turns per config (payload kept).
+        for cfg in &configs {
+            let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
+                self,
+                &cfg.source_scope_query,
+            )
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                        cfg.processor_id,
+                        uuid
+                    );
+                    continue;
+                }
+            };
+            let processed = match load_processed_source_ids(
+                self,
+                &cfg.processor_id,
+                now_ms,
+                cfg.source_window_ms,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
+                        cfg.processor_id,
+                        uuid
+                    );
+                    continue;
+                }
+            };
+            for turn in &transcript {
+                if let Some(window_ms) = cfg.source_window_ms {
+                    if !turn_in_source_window(&turn.timestamp, now_ms, window_ms) {
+                        continue;
+                    }
+                }
+                let pending = PendingTurn::from_transcript(turn);
+                if processed.contains(&pending.id)
+                    || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
+                {
+                    continue;
+                }
+                watcher.record_item(&cfg.processor_id, pending, now_ms);
+            }
+        }
+
+        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+
+        // 2. Drain + run a pass per config.
+        for cfg in &configs {
+            let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
+                continue;
+            };
+            // Hoisted above the `BatchReady` emit so that signal can carry the batch key too.
+            // It is the first event of a pass, so a consumer that could not key it would have to
+            // buffer everything until the pass's second event told it what row to open.
+            let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
+            let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
+            // Signal the batch is ready before the pass runs, so listeners
+            // (tests, the WS layer) can await "processing started". Tagged with
+            // the acting agent like every signal `run_one_pass` emits: the WS
+            // layer delivers an untagged event to admin sessions only.
+            let mut ready =
+                AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
+                    .with_items(&item_ids)
+                    .with_batch_key(&batch_id);
+            if let Ok(me) = did_for_context(context) {
+                ready = ready.with_agent_did(&me);
+            }
+            emit(ready).await;
+            let mut perspective_clone = self.clone();
+            // Stall-fallback: if this batch has been standing down for its online
+            // elected author past `claim_ttl_ms`, escalate past election straight
+            // to the claim (the min-DID claim still prevents doubles among peers
+            // that escalate together).
+            let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let outcome = match run_one_pass(
+                &mut perspective_clone,
+                cfg,
+                &batch,
+                now_ms,
+                context,
+                escalate,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor `{}` [{}]: run_one_pass errored (batch len={}): {e:#}",
+                        cfg.processor_id,
+                        uuid,
+                        batch.len()
+                    );
+                    continue;
+                }
+            };
+            match outcome {
+                PassOutcome::Won { .. } => {
+                    // Sources are on the new InterpretationRun; next tick's
+                    // cursor SPARQL skips these ids. Clear any stall clock.
+                    watcher.clear_standdown(&batch_id);
+                }
+                PassOutcome::BackedOff { .. } => {
+                    // The winner's `sources` are the durable record, but they
+                    // only reach us once their links sync. Hold the ids back
+                    // until the claim would have expired so we neither re-race
+                    // the batch every debounce window nor lose it if the
+                    // winner crashes before writing.
+                    watcher.defer_turns(&cfg.processor_id, &item_ids, now_ms, cfg.claim_ttl_ms);
+                    watcher.clear_standdown(&batch_id);
+                }
+                PassOutcome::NotCandidate { .. } => {
+                    // Stood down for an *online* elected author. Start/continue
+                    // the stall clock so a persistently-inactive elected author
+                    // eventually trips the escalation above. Not marked processed
+                    // — retried next tick (the author acts, or we escalate).
+                    watcher.note_standdown(batch_id, now_ms);
+                }
+                PassOutcome::AwaitingAuthor
+                | PassOutcome::ShapesMissing { .. }
+                | PassOutcome::EmptyTranscript => {
+                    // Do NOT mark processed, and do NOT accrue stall time:
+                    // AwaitingAuthor is "no participant online at all" (the
+                    // wait-for-a-participant policy, not a stalled author); the
+                    // others are transient config/transcript states.
+                }
+            }
+        }
+        had_pending
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added
     /// This ensures that new links get synced quickly
     async fn reset_fallback_sync_interval(&self) {
         *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let uuid = self.uuid.clone();
         log::debug!(
             "Reset fallback sync interval to 30 seconds for perspective {}",
             uuid
@@ -4444,14 +6742,45 @@ impl PerspectiveInstance {
 
     pub async fn create_batch(&self) -> String {
         let batch_uuid = Uuid::new_v4().to_string();
-        self.batch_store.write().await.insert(
+
+        let mut batches = self.batch_store.write().await;
+
+        // Clean up any abandoned batches older than BATCH_TIMEOUT_SECS
+        let now = Instant::now();
+        let before = batches.len();
+        batches.retain(|_id, batch| {
+            now.duration_since(batch.created_at).as_secs() < BATCH_TIMEOUT_SECS
+        });
+        let removed = before - batches.len();
+        if removed > 0 {
+            log::info!(
+                "Cleaned up {} abandoned batch(es) older than {}s",
+                removed,
+                BATCH_TIMEOUT_SECS
+            );
+        }
+
+        batches.insert(
             batch_uuid.clone(),
-            PerspectiveDiff {
-                additions: Vec::new(),
-                removals: Vec::new(),
+            TimestampedBatch {
+                diff: PerspectiveDiff {
+                    additions: Vec::new(),
+                    removals: Vec::new(),
+                },
+                created_at: now,
             },
         );
         batch_uuid
+    }
+
+    /// Drop a pending batch from the in-memory store without committing it.
+    /// Returns `true` if the batch was present, `false` if it had already been
+    /// consumed (e.g. by a successful `commit_batch`) or timed out. Callers
+    /// that abandon a batch mid-build (a `create_subject` in a loop failing)
+    /// should call this so the batch does not linger for `BATCH_TIMEOUT_SECS`
+    /// waiting on the next `create_batch` sweep to prune it.
+    pub async fn discard_batch(&self, batch_uuid: &str) -> bool {
+        self.batch_store.write().await.remove(batch_uuid).is_some()
     }
 
     pub async fn commit_batch(
@@ -4468,7 +6797,7 @@ impl PerspectiveInstance {
             let mut batch_store = self.batch_store.write().await;
 
             match batch_store.remove(&batch_uuid) {
-                Some(diff) => diff,
+                Some(batch) => batch.diff,
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
@@ -4486,12 +6815,16 @@ impl PerspectiveInstance {
             removals: Vec::new(),
         };
 
+        let mut persist_diff = PerspectiveDiff::empty();
+
         // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
             let signed_expr = create_signed_expression(link.data.normalize(), context)?;
-            let decorated =
-                DecoratedLinkExpression::from((LinkExpression::from(signed_expr), status.clone()));
+            let mut stored = LinkExpression::from(signed_expr);
+            stored.status = Some(status.clone());
+            persist_diff.additions.push(stored.clone());
+            let decorated = DecoratedLinkExpression::from((stored, status.clone()));
 
             match status {
                 LinkStatus::Shared => shared_diff.additions.push(decorated),
@@ -4502,6 +6835,7 @@ impl PerspectiveInstance {
         // Process removals
         for link in diff.removals {
             let status = link.status.clone().unwrap_or(LinkStatus::Shared);
+            persist_diff.removals.push(link.clone());
             let decorated = DecoratedLinkExpression::from((link, status.clone()));
             match status {
                 LinkStatus::Shared => shared_diff.removals.push(decorated),
@@ -4519,7 +6853,7 @@ impl PerspectiveInstance {
             //let db_start = std::time::Instant::now();
             //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
 
-            // Commit to link language (SurrealDB will be updated later via persist_link_diff)
+            // Commit to link language (SPARQL store will be updated later via persist_link_diff)
             if self.has_link_language().await {
                 //let link_lang_start = std::time::Instant::now();
                 //log::info!("🔄 BATCH COMMIT: Starting link language commit");
@@ -4542,24 +6876,34 @@ impl PerspectiveInstance {
             }
         }
 
-        // Create combined diff for prolog update, SurrealDB update, and return value
+        // Create combined diff for prolog update, SPARQL store update, and return value
         let combined_diff = DecoratedPerspectiveDiff {
             additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
 
-        // Only spawn prolog facts update if there are changes to update
+        // Only update storage / subscription engines when there are changes.
+        // The SPARQL store must be updated first so any subscription re-checks
+        // triggered by update_prolog_engines() see the committed batch state.
         if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
             //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem",
+            //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-            // Update prolog facts once for all changes and wait for completion
+            self.persist_link_diff(&persist_diff).await?;
+
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            self.persist_link_diff(&combined_diff).await?;
+            // Publish PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED to WS subscribers.
+            // The single-mutation paths (add_link / link_mutations /
+            // diff_from_link_language) publish their diff synchronously before
+            // spawning the prolog update, and spawn_prolog_facts_update
+            // deliberately skips publishing to avoid double-delivery on those
+            // paths. commit_batch never went through that publish step, so
+            // batched diffs were never reaching WS subscribers — that's what
+            // this call restores.
+            self.pubsub_publish_diff(combined_diff.clone()).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
@@ -4590,13 +6934,13 @@ pub fn prolog_result(result: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::signatures::TestSigner;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
-    use crate::graphql::graphql_types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
-    use crate::surreal_service::SurrealDBService;
     use crate::test_utils::setup_wallet;
+    use crate::types::PerspectiveState;
     use fake::{Fake, Faker};
     use uuid::Uuid;
 
@@ -4604,14 +6948,11 @@ mod tests {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
 
-        // Initialize agent, prolog and surreal services for tests
+        // Initialize agent and prolog services for tests
         AgentService::init_global_test_instance();
         init_prolog_service().await;
 
         let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
-            .await
-            .expect("Failed to create SurrealDB service");
 
         let instance = PerspectiveInstance::new(
             PerspectiveHandle {
@@ -4623,35 +6964,6 @@ mod tests {
                 owners: None,
             },
             None,
-            surreal_service,
-        );
-
-        // Ensure prolog engine pool is initialized
-        instance
-            .ensure_prolog_engine_pool()
-            .await
-            .expect("Failed to initialize prolog engine pool");
-
-        instance
-    }
-
-    async fn create_perspective() -> PerspectiveInstance {
-        let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
-            .await
-            .expect("Failed to create SurrealDB service");
-
-        let instance = PerspectiveInstance::new(
-            PerspectiveHandle {
-                uuid,
-                name: Some("Test Perspective".to_string()),
-                shared_url: None,
-                neighbourhood: None,
-                state: PerspectiveState::Private,
-                owners: None,
-            },
-            None,
-            surreal_service,
         );
 
         // Ensure prolog engine pool is initialized
@@ -4669,6 +6981,460 @@ mod tests {
             target: format!("https://{}.org", Faker.fake::<String>()),
             predicate: Some(format!("https://{}.net", Faker.fake::<String>())),
         }
+    }
+
+    /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
+    ///
+    /// The store does not show a batch's own additions until it commits, so the
+    /// second run used to diff against pre-batch membership and re-stage
+    /// everything the first had already added. This is an ordinary sequence, not
+    /// an exotic one: the ORM re-snapshots after a batched save precisely so a
+    /// later save in the same batch diffs correctly.
+    #[tokio::test]
+    async fn test_collection_setter_twice_in_one_batch_stages_each_member_once() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/1";
+        let predicate = "we://children";
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let params = |targets: &[&str]| -> Vec<Parameter> {
+            serde_json::from_value(serde_json::json!(targets
+                .iter()
+                .map(|t| serde_json::json!({ "name": "value", "value": t }))
+                .collect::<Vec<_>>()))
+            .unwrap()
+        };
+
+        let batch_id = perspective.create_batch().await;
+
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params(&["we://a", "we://b"]),
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params(&["we://a", "we://b", "we://c"]),
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let mut staged: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        staged.sort();
+
+        assert_eq!(
+            staged,
+            vec!["we://a", "we://b", "we://c"],
+            "each member staged exactly once — before the batch-aware read the \
+             second run re-added a and b, which the store could not yet see"
+        );
+    }
+
+    /// A collection set in the same batch that creates its instance still gets
+    /// ordering entries.
+    ///
+    /// This is the create path: `save()` on a new instance opens one batch,
+    /// runs the constructor actions that write the class's flag links, sets the
+    /// relations, and commits. The strategy lookup classifies the source, and
+    /// classification reads the store — where those flag links do not exist
+    /// yet.
+    #[tokio::test]
+    async fn test_ordered_collection_created_in_one_batch_gets_entries() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/5";
+        let predicate = "we://children";
+
+        let shacl = r#"{
+            "target_class": "we://Collection",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://collection",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://children", "name": "children", "ordering": "linkedList" }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "Collection".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &context,
+            )
+            .await
+            .expect("add_sdna");
+
+        // One batch: write the flag link that makes this URI an instance, then
+        // set the ordered collection — exactly what `save()` does on create.
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([
+            { "source": "this", "predicate": "we://flag", "target": "we://collection",
+              "action": "addLink" },
+        ]))
+        .unwrap();
+        let setter: Vec<Command> = serde_json::from_value(serde_json::json!([
+            { "source": "this", "predicate": predicate, "target": "value",
+              "action": "collectionSetter" },
+        ]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .execute_commands(
+                commands,
+                source.to_string(),
+                vec![],
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let params: Vec<Parameter> = serde_json::from_value(serde_json::json!([
+            { "name": "value", "value": "we://x/a" },
+            { "name": "value", "value": "we://x/b" },
+        ]))
+        .unwrap();
+        perspective
+            .execute_commands(
+                setter,
+                source.to_string(),
+                params,
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let order_links: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| {
+                l.data.source == source
+                    && l.data.predicate.as_deref()
+                        == Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE)
+            })
+            .map(|l| l.data.target.as_str())
+            .collect();
+
+        assert!(
+            !order_links.is_empty(),
+            "an ordered collection created in one batch gets its entries — the \
+             flag link that classifies the source is staged in the same batch, \
+             not yet in the store"
+        );
+    }
+
+    /// An ordering declaration survives registration and comes back off the
+    /// stored shape.
+    ///
+    /// This is the boundary the ordering feature actually crosses in
+    /// production: `@Model` classes register through `ensureSubjectClass`,
+    /// which ships `SHACLShape.toJSON()` to `add_sdna`, which turns it into
+    /// links via `parse_shacl_to_links` — and `load_shape` reads the strategy
+    /// back only from the `ad4m://ordering` link that produces. Both halves of
+    /// the feature hang off `ShapeProperty::ordering`: the setter writes no
+    /// entries without it, and hydration never reorders. Every other test for
+    /// this feature builds its shape from JSON directly, so none of them touch
+    /// this path.
+    #[tokio::test]
+    async fn test_ordering_declaration_survives_sdna_registration() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "we://Collection",
+            "properties": [
+                { "path": "we://name", "name": "name", "datatype": "xsd://string",
+                  "min_count": 1, "max_count": 1, "resolve_language": "literal" },
+                { "path": "we://children", "name": "children", "ordering": "linkedList" },
+                { "path": "we://tags", "name": "tags" }
+            ]
+        }"#;
+
+        perspective
+            .add_sdna(
+                "Collection".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let shape = perspective.get_shape("Collection").expect("shape");
+        let children = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "children")
+            .expect("children property is in the stored shape");
+
+        assert_eq!(
+            children.ordering.as_deref(),
+            Some("linkedList"),
+            "the ordering declaration reached the store and came back — without \
+             it both the setter and hydration silently do nothing"
+        );
+
+        let tags = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "tags")
+            .expect("tags property is in the stored shape");
+        assert_eq!(
+            tags.ordering, None,
+            "a relation that declares no ordering stays unordered"
+        );
+    }
+
+    /// Drive `collectionSetter` once per desired set, all in one batch, and
+    /// report what the batch holds for `(source, predicate)` at the end.
+    ///
+    /// `persist` is seeded outside any batch, so the store really holds it.
+    async fn staged_after_batched_sets(
+        source: &str,
+        predicate: &str,
+        persist: &[&str],
+        sets: &[&[&str]],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+
+        for target in persist {
+            perspective
+                .add_link(
+                    Link {
+                        source: source.to_string(),
+                        predicate: Some(predicate.to_string()),
+                        target: target.to_string(),
+                    },
+                    LinkStatus::Shared,
+                    None,
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+        for targets in sets {
+            let params: Vec<Parameter> = serde_json::from_value(serde_json::json!(targets
+                .iter()
+                .map(|t| serde_json::json!({ "name": "value", "value": t }))
+                .collect::<Vec<_>>()))
+            .unwrap();
+            perspective
+                .execute_commands(
+                    commands.clone(),
+                    source.to_string(),
+                    params,
+                    Some(batch_id.clone()),
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let mine = |l: &LinkExpression| {
+            l.data.source == source && l.data.predicate.as_deref() == Some(predicate)
+        };
+        let mut additions: Vec<String> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| mine(l))
+            .map(|l| l.data.target.clone())
+            .collect();
+        let mut removals: Vec<String> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|l| mine(l))
+            .map(|l| l.data.target.clone())
+            .collect();
+        additions.sort();
+        removals.sort();
+        (additions, removals)
+    }
+
+    /// `[A] → [B] → [B, C]` in one batch stages A's removal once, not twice.
+    ///
+    /// The store still lists A until the batch commits, so the second setter
+    /// sees it as present-and-unwanted and would stage the same removal again.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_stages_a_removal_once() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/3",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://b", "we://c"]],
+        )
+        .await;
+
+        assert_eq!(removals, vec!["we://a"], "A is staged for removal once");
+        assert_eq!(additions, vec!["we://b", "we://c"]);
+    }
+
+    /// `[A] → [B] → [A, B]` in one batch leaves A's original link alone.
+    ///
+    /// A is dropped and then wanted back before the batch commits. Cancelling
+    /// the staged removal keeps the link that is already there; without that it
+    /// is removed and re-added under a fresh signature and timestamp, which is
+    /// the restamping this diff exists to stop.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_cancels_a_reinstated_removal() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/4",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://a", "we://b"]],
+        )
+        .await;
+
+        assert!(
+            removals.is_empty(),
+            "A is wanted again, so its staged removal is cancelled: {removals:?}"
+        );
+        assert_eq!(
+            additions,
+            vec!["we://b"],
+            "only B is staged — A's existing link is untouched, not re-added"
+        );
+    }
+
+    /// `[A] → [B] → [A]` in one batch nets to nothing staged at all.
+    ///
+    /// The end state matches the start state, so the batch should carry no
+    /// operations for the relation. Getting there needs both reconciliations to
+    /// compose: B's addition pruned because it is no longer desired, and A's
+    /// removal cancelled because it is desired again. Either one alone leaves
+    /// the batch writing a change that undoes itself.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_nets_a_round_trip_to_nothing() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/6",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://a"]],
+        )
+        .await;
+
+        assert!(
+            additions.is_empty() && removals.is_empty(),
+            "the collection ends where it started, so nothing is staged — \
+             additions {additions:?}, removals {removals:?}"
+        );
+    }
+
+    /// A member the batch has already removed is not reported as still present.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_drops_a_removed_member() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/2";
+        let predicate = "we://children";
+
+        // Persist a member outside any batch, so the store really holds it.
+        perspective
+            .add_link(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: "we://a".to_string(),
+                },
+                LinkStatus::Shared,
+                None,
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+
+        // Set the collection to just `b`: `a` is persisted and unwanted, so it
+        // is removed within the batch.
+        let params: Vec<Parameter> =
+            serde_json::from_value(serde_json::json!([{ "name": "value", "value": "we://b" }]))
+                .unwrap();
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params,
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let removed: Vec<&str> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        assert_eq!(
+            removed,
+            vec!["we://a"],
+            "the persisted member is removed once"
+        );
+
+        let staged: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        assert_eq!(staged, vec!["we://b"], "only the new member is staged");
     }
 
     #[tokio::test]
@@ -4735,6 +7501,43 @@ mod tests {
         links.sort_by(cmp);
         all_links_sorted.sort_by(cmp);
         assert_eq!(links, all_links_sorted);
+    }
+
+    #[tokio::test]
+    async fn discard_batch_removes_pending_batch_and_is_idempotent() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+
+        let batch_id = perspective.create_batch().await;
+
+        // First discard: batch is present, removed, returns true.
+        assert!(
+            perspective.discard_batch(&batch_id).await,
+            "first discard should report the batch was present"
+        );
+
+        // Second discard on the same id: already gone, returns false.
+        assert!(
+            !perspective.discard_batch(&batch_id).await,
+            "second discard should be a no-op"
+        );
+
+        // commit_batch on a discarded id must now fail with the well-known
+        // \"No batch found\" error — proves the batch was really pruned.
+        let err = perspective
+            .commit_batch(batch_id.clone(), &ctx)
+            .await
+            .expect_err("commit_batch after discard must fail");
+        assert!(
+            format!("{err}").to_lowercase().contains("no batch found"),
+            "unexpected commit_batch error after discard: {err}"
+        );
+
+        // Discarding an id that never existed is a no-op, not a panic.
+        assert!(
+            !perspective.discard_batch("does-not-exist").await,
+            "discarding an unknown id should return false without panicking"
+        );
     }
 
     #[tokio::test]
@@ -5173,267 +7976,403 @@ mod tests {
         assert_eq!(links_after.len(), 2);
     }
 
+    /// A class whose properties are all optional has empty constructor and
+    /// destructor lists. The writer must still store both links, or
+    /// `create_subject` fails with "No SHACL constructor found".
     #[tokio::test]
-    async fn test_add_link_surreal_query() {
-        println!("test_add_link_surreal_query");
+    async fn create_subject_works_for_a_shape_with_empty_constructor() {
         let mut perspective = setup().await;
-
-        println!("test_add_link_surreal_query");
-        // Add a link
-        let link = create_link();
-        println!("link: {:?}", link);
-        let source = link.source.clone();
-        let predicate = link.predicate.clone().unwrap_or_default();
-        let target = link.target.clone();
+        let shacl = r#"{
+            "target_class": "t://Memo",
+            "properties": [{
+                "path": "t://body",
+                "name": "body",
+                "max_count": 1,
+                "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://body", "target": "value"}]
+            }],
+            "constructor_actions": [],
+            "destructor_actions": []
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Memo".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
 
         perspective
-            .add_link(
-                link.clone(),
-                LinkStatus::Shared,
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Memo".to_string()),
+                    query: None,
+                },
+                "t://memo/1".to_string(),
+                Some(serde_json::json!({ "body": "hi" })),
                 None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        let body = perspective
+            .get_links(&LinkQuery {
+                source: Some("t://memo/1".to_string()),
+                predicate: Some("t://body".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 1);
+    }
+
+    /// The collection-expansion gate in `create_subject` / `update_subject`:
+    /// a JSON array on a property whose setter actions are all `addLink`
+    /// becomes one link per element, while an array on a `setSingleTarget`
+    /// property keeps the single `literal:json:` encoding (a scalar property
+    /// may legitimately hold a JSON blob, and expanding over
+    /// `setSingleTarget` would keep only the last element).
+    #[tokio::test]
+    async fn create_subject_expands_arrays_only_on_add_link_setters() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "node_shape_uri": "t://ItemShape",
+            "target_class": "t://Item",
+            "properties": [
+                {
+                    "path": "t://tag",
+                    "name": "tags",
+                    "collection": true,
+                    "datatype": "xsd://string",
+                    "min_count": 0,
+                    "writable": true,
+                    "setter": [{"action": "addLink", "source": "this", "predicate": "t://tag", "target": "value"}]
+                },
+                {
+                    "path": "t://meta",
+                    "name": "meta",
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://meta", "target": "value"}]
+                }
+            ],
+            "constructor_actions": [{"action": "addLink", "source": "this", "predicate": "t://type", "target": "t://Item"}],
+            "destructor_actions": []
+        }"#;
+        perspective
+            .add_sdna(
+                "Item".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
                 &AgentContext::main_agent(),
             )
             .await
-            .unwrap();
-        println!("link added");
+            .expect("add_sdna");
+        let ctx = AgentContext::main_agent();
 
-        // Query SurrealDB
-        let results = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        println!("results: {:?}", results);
-        // Verify link was added to SurrealDB
-        assert!(results.len() > 0, "Expected at least one link in SurrealDB");
-
-        // Find the added link in results
-        let found = results.iter().any(|result| {
-            result.get("source").and_then(|v| v.as_str()) == Some(&source)
-                && result.get("predicate").and_then(|v| v.as_str()) == Some(&predicate)
-                && result.get("target").and_then(|v| v.as_str()) == Some(&target)
-        });
-
-        assert!(found, "Added link not found in SurrealDB query results");
-    }
-
-    #[tokio::test]
-    async fn test_remove_link_surreal_query() {
-        let mut perspective = setup().await;
-
-        // Add a link
-        let link = create_link();
-        let added_link = perspective
-            .add_link(
-                link.clone(),
-                LinkStatus::Shared,
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Item".to_string()),
+                    query: None,
+                },
+                "t://item/1".to_string(),
+                Some(serde_json::json!({
+                    "tags": ["a", "b"],
+                    "meta": ["x", "y"],
+                })),
                 None,
-                &AgentContext::main_agent(),
+                &ctx,
             )
             .await
-            .unwrap();
+            .expect("create_subject");
 
-        // Verify link exists in SurrealDB
-        let results_before = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results_before.len(), 1, "Expected one link before removal");
-
-        // Remove the link
-        perspective
-            .remove_link(added_link.into(), None)
-            .await
-            .unwrap();
-
-        // Query SurrealDB again
-        let results_after = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-
-        // Verify link was removed
-        assert_eq!(results_after.len(), 0, "Expected no links after removal");
-    }
-
-    #[tokio::test]
-    async fn test_batch_add_remove_surreal_query() {
-        let mut perspective = setup().await;
-
-        // Add multiple links
-        let mut added_links = Vec::new();
-        for _ in 0..5 {
-            let link = create_link();
-            let added = perspective
-                .add_link(
-                    link.clone(),
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-            added_links.push(added);
-        }
-
-        // Query SurrealDB
-        let results = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 5, "Expected 5 links in SurrealDB");
-
-        // Remove 3 links
-        for i in 0..3 {
-            perspective
-                .remove_link(added_links[i].clone().into(), None)
-                .await
-                .unwrap();
-        }
-
-        // Query SurrealDB again
-        let results_after = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results_after.len(), 2, "Expected 2 links after removing 3");
-    }
-
-    #[tokio::test]
-    async fn test_full_reload_surreal_query() {
-        let mut perspective = setup().await;
-
-        // Add some normal links first
-        for _ in 0..3 {
-            let link = create_link();
-            perspective
-                .add_link(
-                    link.clone(),
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-        }
-
-        // Query before triggering rebuild
-        let results_before = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
-        assert_eq!(results_before.len(), 3, "Expected 3 links before rebuild");
-
-        // Add an SDNA link (which triggers full rebuild)
-        let sdna_link = Link {
-            source: "test://source".to_string(),
-            target: "ad4m://sdna".to_string(),
-            predicate: Some("ad4m://has_sdna".to_string()),
+        let links_for = |predicate: &str| LinkQuery {
+            source: Some("t://item/1".to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
         };
-        perspective
-            .add_link(
-                sdna_link.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
+        let lit = |s: &str| {
+            Literal::from_string(s.to_string())
+                .to_url()
+                .expect("literal encoding")
+        };
 
-        // Query after rebuild
-        let results_after = perspective
-            .surreal_query("SELECT * FROM link".to_string())
-            .await
-            .unwrap();
+        // Collection: the array expanded into one addLink per element.
+        let tag_links = perspective.get_links(&links_for("t://tag")).await.unwrap();
+        let mut tag_targets: Vec<String> =
+            tag_links.iter().map(|l| l.data.target.clone()).collect();
+        tag_targets.sort();
         assert_eq!(
-            results_after.len(),
-            4,
-            "Expected 4 links after rebuild (3 normal + 1 SDNA)"
+            tag_targets,
+            vec![lit("a"), lit("b")],
+            "array on an addLink-setter collection must become one link per element",
         );
 
-        // Verify all links are present
-        let all_links = perspective.get_links(&LinkQuery::default()).await.unwrap();
+        // Scalar: the array stayed a single literal:json: value.
+        let meta_links = perspective.get_links(&links_for("t://meta")).await.unwrap();
         assert_eq!(
-            all_links.len(),
-            results_after.len(),
-            "SurrealDB and Prolog link counts should match"
+            meta_links.len(),
+            1,
+            "array on a setSingleTarget property must stay one link",
         );
-    }
-
-    #[tokio::test]
-    async fn test_surreal_query_error_handling() {
-        let perspective = setup().await;
-
-        // Test with invalid query syntax - should return an error, not crash
-        let result = perspective
-            .surreal_query("INVALID QUERY SYNTAX".to_string())
-            .await;
-
-        // Should return an error for invalid query
-        assert!(result.is_err(), "Expected error for invalid query syntax");
-
-        // Verify error message contains useful information
-        let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("SurrealDB query failed") || err_msg.contains("perspective"),
-            "Error message should contain context about the failure"
+            meta_links[0].data.target.starts_with("literal:json:"),
+            "scalar array value must keep the literal:json: encoding, got {}",
+            meta_links[0].data.target,
+        );
+
+        // update_subject appends further collection elements through the
+        // same expansion.
+        perspective
+            .update_subject(
+                SubjectClassOption {
+                    class_name: Some("Item".to_string()),
+                    query: None,
+                },
+                "t://item/1".to_string(),
+                serde_json::json!({ "tags": ["c", "d"] }),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("update_subject");
+        let tag_links = perspective.get_links(&links_for("t://tag")).await.unwrap();
+        assert_eq!(
+            tag_links.len(),
+            4,
+            "update_subject must append each array element as its own link",
         );
     }
 
+    /// Hand-written `add_model` SHACL that declares `"local": true` on the
+    /// property shape and NOWHERE else — no action carries the flag. This is
+    /// what an agent authoring a class over MCP writes, and before the
+    /// property-level flag was propagated at parse time it produced Shared
+    /// links everywhere: the declaration was pure decoration.
+    ///
+    /// All three write paths are checked, because they reach
+    /// `execute_commands` through different command sources: the constructor
+    /// entry (initial value), the setter merged over that entry
+    /// (`create_subject` with a value), a setter on an existing instance
+    /// (`update_subject`), and the collection expansion that runs a setter
+    /// once per array element.
     #[tokio::test]
-    async fn test_perspective_isolation_surreal_query() {
-        // Initialize services once
-        setup_wallet();
-        Ad4mDb::init_global_instance(":memory:").unwrap();
-        AgentService::init_global_test_instance();
-
-        // Create two separate perspectives without re-initializing globals
-        let mut perspective1 = create_perspective().await;
-        let mut perspective2 = create_perspective().await;
-
-        // Add links to perspective 1
-        let link1 = create_link();
-        perspective1
-            .add_link(
-                link1.clone(),
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
+    async fn declarative_local_property_writes_local_links() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Cache",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Cache"},
+                {"action": "addLink", "source": "this", "predicate": "t://state", "target": "literal:string:init"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "t://state", "name": "state", "datatype": "xsd://string",
+                    "min_count": 1, "max_count": 1, "writable": true, "local": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://state", "target": "value"}]
+                },
+                {
+                    "path": "t://mark", "name": "marks", "collection": true, "writable": true, "local": true,
+                    "setter": [{"action": "addLink", "source": "this", "predicate": "t://mark", "target": "value"}]
+                },
+                {
+                    "path": "t://title", "name": "title", "datatype": "xsd://string",
+                    "max_count": 1, "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://title", "target": "value"}]
+                }
+            ]
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Cache".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
             )
             .await
-            .unwrap();
+            .expect("add_sdna");
 
-        // Add different links to perspective 2
-        let link2 = create_link();
-        perspective2
-            .add_link(
-                link2.clone(),
-                LinkStatus::Shared,
+        async fn status_of(
+            perspective: &PerspectiveInstance,
+            uri: &str,
+            predicate: &str,
+        ) -> Vec<LinkStatus> {
+            perspective
+                .get_links(&LinkQuery {
+                    source: Some(uri.to_string()),
+                    predicate: Some(predicate.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links")
+                .into_iter()
+                .map(|l| l.status.clone().unwrap_or(LinkStatus::Shared))
+                .collect()
+        }
+
+        // 1. Initial value only: the `t://state` link comes from the
+        //    constructor action, which the SHACL never marked local.
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/1".to_string(),
+                Some(serde_json::json!({ "title": "first" })),
                 None,
-                &AgentContext::main_agent(),
+                &ctx,
             )
             .await
-            .unwrap();
+            .expect("create_subject");
 
-        // Query both perspectives
-        let results1 = perspective1
-            .surreal_query("SELECT * FROM link".to_string())
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://state").await,
+            vec![LinkStatus::Local],
+            "the constructor's initial value for a `local: true` property must be local",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://title").await,
+            vec![LinkStatus::Shared],
+            "a property that declares no `local` must stay shared",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "rdf://type").await,
+            vec![LinkStatus::Shared],
+            "a class marker on no local property's predicate must stay shared",
+        );
+
+        // 2. Setter value supplied at creation: `create_subject` merges the
+        //    setter's target INTO the constructor command, keeping that
+        //    command. Same property, same instance — must be local as well,
+        //    or one property ends up with two statuses depending on the call.
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/2".to_string(),
+                Some(serde_json::json!({ "state": "running", "marks": ["a", "b"] })),
+                None,
+                &ctx,
+            )
             .await
-            .unwrap();
-        let results2 = perspective2
-            .surreal_query("SELECT * FROM link".to_string())
+            .expect("create_subject");
+
+        assert_eq!(
+            status_of(&perspective, "t://cache/2", "t://state").await,
+            vec![LinkStatus::Local],
+            "a setter value merged over the constructor entry must stay local",
+        );
+        let mark_statuses = status_of(&perspective, "t://cache/2", "t://mark").await;
+        assert_eq!(mark_statuses.len(), 2, "both collection elements written");
+        assert!(
+            mark_statuses.iter().all(|s| *s == LinkStatus::Local),
+            "every element added to a local collection must be local, got {mark_statuses:?}",
+        );
+
+        // 3. A later setter write on an existing instance.
+        perspective
+            .update_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/1".to_string(),
+                serde_json::json!({ "state": "updated", "marks": ["c"] }),
+                None,
+                &ctx,
+            )
             .await
-            .unwrap();
+            .expect("update_subject");
 
-        // Each perspective should only see its own link
-        assert_eq!(results1.len(), 1, "Perspective 1 should have 1 link");
-        assert_eq!(results2.len(), 1, "Perspective 2 should have 1 link");
+        let state_statuses = status_of(&perspective, "t://cache/1", "t://state").await;
+        assert!(
+            state_statuses.iter().all(|s| *s == LinkStatus::Local),
+            "setter writes on a local property must be local, got {state_statuses:?}",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://mark").await,
+            vec![LinkStatus::Local],
+        );
+    }
 
-        // Verify the links are different (by checking source)
-        let source1 = results1[0].get("source").and_then(|v| v.as_str()).unwrap();
-        let source2 = results2[0].get("source").and_then(|v| v.as_str()).unwrap();
-        assert_ne!(
-            source1, source2,
-            "Links from different perspectives should be isolated"
+    /// The decorator path: `shacl-gen.ts` copies `local` into the
+    /// setter/adder/remover actions but NOT into the constructor entries it
+    /// emits for an `initial` value or a required writable property. The
+    /// constructor command survives `create_subject`'s merge (only its target
+    /// is replaced), so without carrying the setter's `local` across, the
+    /// creation-time value lands Shared while every later write lands Local.
+    ///
+    /// Declared here without a property-level `local` on purpose: it isolates
+    /// the merge, so this still fails if parse-time propagation is removed.
+    #[tokio::test]
+    async fn action_level_local_survives_the_constructor_merge() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Flow",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Flow"},
+                {"action": "addLink", "source": "this", "predicate": "t://current_state", "target": "literal:string:init"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "t://current_state", "name": "currentState", "datatype": "xsd://string",
+                    "min_count": 1, "max_count": 1, "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://current_state", "target": "value", "local": true}]
+                }
+            ]
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Flow".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Flow".to_string()),
+                    query: None,
+                },
+                "t://flow/1".to_string(),
+                Some(serde_json::json!({ "currentState": "started" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some("t://flow/1".to_string()),
+                predicate: Some("t://current_state".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status.clone().unwrap_or(LinkStatus::Shared),
+            LinkStatus::Local,
+            "the setter's `local` must survive being merged into the constructor command",
         );
     }
 
@@ -5477,1939 +8416,1264 @@ mod tests {
     //     assert!(links_after.len() > 0);
     // }
 
+    // ============================================================================
+    // DOCUMENTATION EXAMPLES TESTS
+    // These tests verify query examples against the SPARQL backend
+    // ============================================================================
+
+    // ============================================================================
+    // PREDICATE EXTRACTION TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_extract_predicates_from_sparql() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?s ?t WHERE { GRAPH ?g { ?s <flux://has_message> ?t } }",
+        );
+        assert!(predicates.contains("flux://has_message"));
+        assert_eq!(predicates.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_predicates_variable_predicate() {
+        // ?s ?p ?o — no fixed predicate, should return empty (always match)
+        let predicates = extract_predicates_from_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
+        assert!(predicates.is_empty());
+    }
+
+    #[test]
+    fn test_extract_predicates_multiple() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?s ?o1 ?o2 WHERE { ?s <flux://has_message> ?o1 . ?s <flux://has_reaction> ?o2 }"
+        );
+        assert!(predicates.contains("flux://has_message"));
+        assert!(predicates.contains("flux://has_reaction"));
+        assert_eq!(predicates.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_predicates_uri_subject() {
+        let predicates = extract_predicates_from_sparql(
+            "SELECT ?o WHERE { <did:key:abc> <flux://has_name> ?o }",
+        );
+        assert!(predicates.contains("flux://has_name"));
+        assert_eq!(predicates.len(), 1);
+    }
+
+    #[test]
+    fn test_predicate_filtering_skips_unrelated() {
+        // Subscription with specific predicates should be skipped when
+        // changed predicates don't overlap
+        let sub_predicates: HashSet<String> = ["flux://has_message".to_string()].into();
+        let changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        assert!(sub_predicates.is_disjoint(&changed));
+    }
+
+    #[test]
+    fn test_predicate_filtering_matches_related() {
+        let sub_predicates: HashSet<String> = ["flux://has_message".to_string()].into();
+        let changed: HashSet<String> = [
+            "flux://has_message".to_string(),
+            "flux://has_reaction".to_string(),
+        ]
+        .into();
+        assert!(!sub_predicates.is_disjoint(&changed));
+    }
+
+    #[test]
+    fn test_predicate_filtering_empty_sub_always_matches() {
+        // Empty sub predicates (variable predicate query) should always match
+        let sub_predicates: HashSet<String> = HashSet::new();
+        let _changed: HashSet<String> = ["flux://has_reaction".to_string()].into();
+        // Empty set is disjoint with everything, but our code checks !sub_predicates.is_empty() first
+        assert!(sub_predicates.is_empty()); // so this subscription would NOT be skipped
+    }
+
+    #[test]
+    fn test_changed_predicates_enum_check_all_is_sticky() {
+        let mut state = ChangedPredicates::NoneRecorded;
+
+        // NoneRecorded + specific → Specific
+        state = match state {
+            ChangedPredicates::NoneRecorded => {
+                ChangedPredicates::Specific(["p1".to_string()].into())
+            }
+            other => other,
+        };
+        assert!(matches!(state, ChangedPredicates::Specific(_)));
+
+        // Specific + more specific → Specific (union)
+        if let ChangedPredicates::Specific(ref mut set) = state {
+            set.insert("p2".to_string());
+        }
+        if let ChangedPredicates::Specific(ref set) = state {
+            assert!(set.contains("p1"));
+            assert!(set.contains("p2"));
+        }
+
+        // Specific + predicate-less → CheckAll
+        state = ChangedPredicates::CheckAll;
+        assert!(matches!(state, ChangedPredicates::CheckAll));
+
+        // CheckAll + anything → CheckAll (sticky)
+        state = match state {
+            ChangedPredicates::CheckAll => ChangedPredicates::CheckAll,
+            other => other,
+        };
+        assert!(matches!(state, ChangedPredicates::CheckAll));
+    }
+
+    #[test]
+    fn test_changed_predicates_none_recorded_to_check_all() {
+        // NoneRecorded + no predicates → CheckAll
+        let state = ChangedPredicates::NoneRecorded;
+        let has_predicate_less = true;
+        let result = if has_predicate_less {
+            ChangedPredicates::CheckAll
+        } else {
+            state
+        };
+        assert!(matches!(result, ChangedPredicates::CheckAll));
+    }
+
+    #[test]
+    fn test_extract_predicates_mixed_fixed_and_variable() {
+        // A real model SPARQL query has fixed predicates in join patterns
+        // (conformance checks) AND a variable predicate in the main triple
+        // pattern. Because the variable predicate matches ANY predicate,
+        // the subscription must always be re-checked → empty set.
+        let query = r#"
+            SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+                ?source <test://post_type> <test://post> .
+                ?source <test://has_title> ?cfTarget_title .
+                GRAPH ?linkGraph { ?source ?predicate ?target . }
+                FILTER(isIRI(?source) && isIRI(?predicate))
+                ?linkGraph <ad4m://ontology/author> ?author .
+                ?linkGraph <ad4m://ontology/timestamp> ?timestamp .
+            }
+        "#;
+        let predicates = extract_predicates_from_sparql(query);
+        assert!(
+            predicates.is_empty(),
+            "Query with variable ?predicate should return empty set, got: {:?}",
+            predicates
+        );
+    }
+
+    #[test]
+    fn test_extract_predicates_reifier_pattern_variable_predicate() {
+        // RDF 1.2 reifier-based queries use `?source ?predicate ?target .`
+        // outside of GRAPH patterns. The variable predicate must still be
+        // detected so subscriptions always re-check.
+        let query = r#"
+            SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+                ?source <test://post_type> <test://post> .
+                ?source ?predicate ?target .
+                ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+                FILTER(isIRI(?source) && isIRI(?predicate))
+                ?_reifier <ad4m://ontology/author> ?author .
+                ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+            }
+        "#;
+        let predicates = extract_predicates_from_sparql(query);
+        assert!(
+            predicates.is_empty(),
+            "Reifier query with variable ?predicate should return empty set, got: {:?}",
+            predicates
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape cache: lazy load from SHACL, invalidation on re-write,
+    // and explicit error for unknown classes.
+    // -----------------------------------------------------------------------
+
+    /// Minimal SHACL JSON for a single-property class.  Builds the same
+    /// graph shape `shacl-gen.ts` emits in production.
+    fn cache_test_shacl(class: &str, namespace: &str) -> String {
+        format!(
+            r#"{{
+                "target_class": "{ns}{class}",
+                "properties": [
+                    {{ "path": "{ns}name", "name": "name", "datatype": "xsd://string", "min_count": 1, "max_count": 1, "resolve_language": "literal" }}
+                ]
+            }}"#,
+            ns = namespace,
+            class = class
+        )
+    }
+
+    /// A subscription's trigger set covers the predicates its `links` read,
+    /// including ones the shape does not declare and ones asked for inside an
+    /// `include` sub-query. Before, it held only the shape's predicates, so a
+    /// subscription asking for a revocation tombstone never re-ran when the
+    /// tombstone landed and kept reporting `[]`.
     #[tokio::test]
-    async fn test_surreal_query_for_recipe_instances() {
+    async fn test_model_trigger_predicates_cover_links_iris() {
         let mut perspective = setup().await;
-
-        println!("\n=== Step 1: Adding Recipe SDNA ===");
-
-        // Step 1: Add Recipe SDNA with SHACL JSON
-        let shacl_json = r#"{
-            "target_class": "recipe://Recipe",
-            "constructor_actions": [
-                {"action": "addLink", "source": "this", "predicate": "recipe://name", "target": ""},
-                {"action": "addLink", "source": "this", "predicate": "recipe://rating", "target": "0"}
-            ],
-            "properties": [
-                {
-                    "path": "recipe://name",
-                    "name": "name",
-                    "datatype": "xsd://string",
-                    "writable": true,
-                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://name", "target": "value"}]
-                },
-                {
-                    "path": "recipe://rating",
-                    "name": "rating",
-                    "datatype": "xsd://string",
-                    "writable": true,
-                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://rating", "target": "value"}]
-                }
-            ]
-        }"#;
-
-        perspective.ensure_prolog_engine_pool().await.unwrap();
         perspective
             .add_sdna(
                 "Recipe".to_string(),
-                "".to_string(), // Empty Prolog code
+                String::new(),
                 SdnaType::SubjectClass,
-                Some(shacl_json.to_string()), // SHACL JSON
+                Some(cache_test_shacl("Recipe", "ns://")),
                 &AgentContext::main_agent(),
             )
             .await
-            .unwrap();
+            .expect("add_sdna");
+        let query = r#"{
+            "links": ["name", "ad4m://flow/role_grant_revoked"],
+            "include": { "steps": { "links": ["ns://nested_note"] } }
+        }"#;
+        let predicates = perspective.build_model_trigger_predicates("Recipe", Some(query));
+        for expected in [
+            "ns://name",
+            "ad4m://flow/role_grant_revoked",
+            "ns://nested_note",
+        ] {
+            assert!(
+                predicates.iter().any(|p| p == expected),
+                "trigger set {predicates:?} is missing {expected}"
+            );
+        }
+    }
 
-        // Verify SHACL links were added
-        let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        println!("SHACL links added: {} links total", links.len());
-
-        // Verify we have the subject class link
-        let class_link_exists = links.iter().any(|l| {
-            l.data.source == "ad4m://self"
-                && l.data.predicate == Some("ad4m://has_subject_class".to_string())
-                && l.data.target == "literal://string:Recipe"
-        });
-        assert!(
-            class_link_exists,
-            "Expected ad4m://has_subject_class link for Recipe"
-        );
-
-        println!("✓ Recipe SDNA added with SHACL definitions");
-
+    /// A `producedByFlow` subscription's answer moves when a receipt lands
+    /// (index entry or body, which sync may deliver separately) or a flow is
+    /// registered — none of them shape predicates. Before, the trigger set
+    /// held only the shape's predicates, so a receipt minted after the
+    /// subscription never re-ran it and the new output never appeared.
+    #[tokio::test]
+    async fn test_model_trigger_predicates_cover_produced_by_flow_reads() {
+        use crate::perspectives::flow_instance::{produced, receipt};
+        let mut perspective = setup().await;
         perspective
-            .create_subject(
-                SubjectClassOption {
-                    class_name: Some("Recipe".to_string()),
-                    query: None,
-                },
-                "literal://recipe1".to_string(),
-                Some(serde_json::json!({
-                    "name": "Pasta Carbonara",
-                    "rating": "5"
-                })),
-                None,
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(cache_test_shacl("Recipe", "ns://")),
                 &AgentContext::main_agent(),
             )
             .await
-            .unwrap();
+            .expect("add_sdna");
+        let reads = [
+            produced::FLOW_RECEIPT_INDEX_PREDICATE,
+            receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
+            "rdf://type",
+        ];
 
-        perspective
-            .create_subject(
-                SubjectClassOption {
-                    class_name: Some("Recipe".to_string()),
-                    query: None,
-                },
-                "literal://recipe2".to_string(),
-                Some(serde_json::json!({
-                    "name": "Pizza Margherita",
-                    "rating": "4"
-                })),
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        println!("✓ Created 2 Recipe instances using create_subject");
-
-        // Debug: Check all links after creating subjects
-        let all_links_after_subjects = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        println!(
-            "\n=== Debug: All links after creating subjects ({} total) ===",
-            all_links_after_subjects.len()
+        let filtered = perspective.build_model_trigger_predicates(
+            "Recipe",
+            Some(r#"{ "where": { "producedByFlow": { "flow": "ns://F", "state": "done" } } }"#),
         );
-        for link in &all_links_after_subjects {
-            println!(
-                "  {} --[{}]--> {}",
-                link.data.source,
-                link.data.predicate.as_ref().unwrap_or(&"None".to_string()),
-                link.data.target
+        for expected in reads.iter().copied().chain(["ns://name"]) {
+            assert!(
+                filtered.iter().any(|p| p == expected),
+                "trigger set {filtered:?} is missing {expected}"
             );
         }
 
-        println!("\n=== Step 3: Adding noise links ===");
-
-        // Step 3: Add some noise links (non-recipe data) to ensure filtering works
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://user1".to_string(),
-                    target: "literal://Alice".to_string(),
-                    predicate: Some("user://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://incomplete_recipe".to_string(),
-                    target: "literal://HalfRecipe".to_string(),
-                    predicate: Some("recipe://name".to_string()),
-                    // Missing rating - should NOT be found as a Recipe instance
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        println!("✓ Added noise links");
-
-        // Give SurrealDB time to process all the links
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        println!("\n=== Step 4: Running structural SurrealQL query ===");
-
-        // Debug: First, check raw data in SurrealDB including IDs
-        let raw_query = format!("SELECT id, source, predicate, target FROM link ",);
-        let raw_results = perspective.surreal_query(raw_query).await.unwrap();
-        println!("Debug - Raw links in SurrealDB: {}", raw_results.len());
-        for (i, link) in raw_results.iter().enumerate() {
-            let id = link
-                .get("id")
-                .map(|v| format!("{:?}", v))
-                .unwrap_or("NO ID".to_string());
-            let source = link.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let pred = link
-                .get("predicate")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let target = link.get("target").and_then(|v| v.as_str()).unwrap_or("?");
-            println!(
-                "  {}: [{}] {} --[{}]--> {}",
-                i + 1,
-                id,
-                source,
-                pred,
-                target
+        // Only the filter pays for them: a plain subscription stays narrow.
+        let plain = perspective.build_model_trigger_predicates("Recipe", Some("{}"));
+        for unexpected in reads {
+            assert!(
+                !plain.iter().any(|p| p == unexpected),
+                "plain trigger set {plain:?} should not carry {unexpected}"
             );
         }
-
-        // Debug: Test GROUP BY with count() WITHOUT alias (like the docs example)
-        let count_query = "SELECT source, count() AS total FROM link GROUP BY source";
-        println!("\nDebug - GROUP BY without alias: {}", count_query);
-        let count_results = perspective
-            .surreal_query(count_query.to_string())
-            .await
-            .unwrap();
-        println!("Result: Found {} grouped sources", count_results.len());
-        for row in &count_results {
-            let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let total = row
-                .get("total")
-                .map(|v| format!("{:?}", v))
-                .unwrap_or("?".to_string());
-            println!("  {} has {} links", source, total);
-        }
-
-        // Debug: Test the SIMPLEST possible GROUP BY with array::group
-        let simplest_query = "SELECT source AS base, array::group(predicate) AS predicates FROM link GROUP BY source";
-        println!("\nDebug - GROUP BY with array::group(): {}", simplest_query);
-        let simplest_results = perspective
-            .surreal_query(simplest_query.to_string())
-            .await
-            .unwrap();
-        println!("Result: Found {} grouped sources", simplest_results.len());
-        for row in &simplest_results {
-            if let (Some(base), Some(preds)) = (
-                row.get("base").and_then(|v| v.as_str()),
-                row.get("predicates").and_then(|v| v.as_array()),
-            ) {
-                println!("  {} has {} predicates", base, preds.len());
-            }
-        }
-
-        // Debug: Test GROUP BY with manual perspective filter
-        let simple_group_query = format!(
-            "SELECT source AS base, array::group(predicate) AS predicates FROM link  GROUP BY source"
-        );
-        println!("\nDebug - GROUP BY with WHERE: {}", simple_group_query);
-        let simple_group_results = perspective.surreal_query(simple_group_query).await.unwrap();
-        println!(
-            "Result: Found {} grouped sources",
-            simple_group_results.len()
-        );
-        for row in &simple_group_results {
-            if let (Some(base), Some(preds)) = (
-                row.get("base").and_then(|v| v.as_str()),
-                row.get("predicates").and_then(|v| v.as_array()),
-            ) {
-                println!("  {} has {} predicates: {:?}", base, preds.len(), preds);
-            }
-        }
-
-        // Step 4: Query for Recipe instances based on structure (both required properties must exist)
-        // This emulates Prolog's instance(C, Base) check
-        // Using manual perspective filter since auto-injection is temporarily disabled
-        // NOTE: Cannot alias 'source' in SELECT when using GROUP BY source - it breaks SurrealDB grouping!
-        let query = r#"
-SELECT
-  source,
-  array::group(predicate) AS predicates,
-  array::group(target) AS targets
-FROM link
-WHERE
-  source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name')
-  AND source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://rating')
-GROUP BY source
-"#
-        .to_string();
-
-        println!("\n=== Running structural query for Recipe instances ===");
-        println!("Query:\n{}", query);
-
-        let results = perspective.surreal_query(query.clone()).await.unwrap();
-
-        println!("\n=== Results ===");
-        println!("Found {} recipe instances", results.len());
-        for (i, row) in results.iter().enumerate() {
-            let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let predicates = row.get("predicates").and_then(|v| v.as_array()).unwrap();
-            let targets = row.get("targets").and_then(|v| v.as_array()).unwrap();
-
-            println!("\nRecipe {}: source = {}", i + 1, source);
-            println!("  Properties:");
-            for j in 0..predicates.len() {
-                let pred = predicates[j].as_str().unwrap_or("?");
-                let target = targets[j].as_str().unwrap_or("?");
-                println!("    {} = {}", pred, target);
-            }
-        }
-
-        // Assertions
-        assert_eq!(
-            results.len(),
-            2,
-            "Should find exactly 2 recipe instances (not the incomplete one, not the user)"
-        );
-
-        // Verify both recipes are present with correct data
-        let recipe1 = results
-            .iter()
-            .find(|r| r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe1"));
-        let recipe2 = results
-            .iter()
-            .find(|r| r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe2"));
-
-        assert!(recipe1.is_some(), "Should find recipe1");
-        assert!(recipe2.is_some(), "Should find recipe2");
-
-        // Verify recipe1 has correct properties
-        let r1_targets = recipe1
-            .unwrap()
-            .get("targets")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        let has_pasta = r1_targets.iter().any(|v| {
-            v.as_str()
-                .map(|s| s.contains("Pasta") || s.contains("Carbonara"))
-                .unwrap_or(false)
-        });
-        let has_rating_5 = r1_targets
-            .iter()
-            .any(|v| v.as_str().map(|s| s.contains('5')).unwrap_or(false));
-        assert!(
-            has_pasta,
-            "Recipe1 should have name containing 'Pasta Carbonara'"
-        );
-        assert!(has_rating_5, "Recipe1 should have rating '5'");
-
-        // Verify recipe2 has correct properties
-        let r2_targets = recipe2
-            .unwrap()
-            .get("targets")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        let has_pizza = r2_targets.iter().any(|v| {
-            v.as_str()
-                .map(|s| s.contains("Pizza") || s.contains("Margherita"))
-                .unwrap_or(false)
-        });
-        let has_rating_4 = r2_targets
-            .iter()
-            .any(|v| v.as_str().map(|s| s.contains('4')).unwrap_or(false));
-        assert!(
-            has_pizza,
-            "Recipe2 should have name containing 'Pizza Margherita'"
-        );
-        assert!(has_rating_4, "Recipe2 should have rating '4'");
-
-        println!("\n=== ✓ SUCCESS ===");
-        println!("✓ Found exactly 2 recipe instances");
-        println!("✓ Filtered out incomplete recipe (missing rating)");
-        println!("✓ Filtered out user data (different structure)");
-        println!("✓ Both recipes have correct property values");
     }
 
     #[tokio::test]
-    async fn test_literal_parsing_in_surreal_queries() {
+    async fn test_get_shape_returns_error_when_no_shacl_stored() {
+        let perspective = setup().await;
+        let result = perspective.get_shape("Unknown");
+        assert!(result.is_err(), "missing class should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("No SHACL shape stored for class 'Unknown'"),
+            "error should name the class, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #909: an include's target-class SHACL that has not synced yet gets the
+    // same bounded wait as the queried class's own.
+    // -----------------------------------------------------------------------
+
+    const NESTED_TASK_SHACL: &str = r#"{
+        "target_class": "task://Task",
+        "properties": [
+            {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"}
+        ]
+    }"#;
+
+    /// A `Board` whose `tasks` relation targets `Task`, one board linked to one
+    /// task, and only `Board`'s SHACL registered — the state a peer is in when
+    /// the queried class has synced and the included one has not.
+    async fn nested_include_fixture() -> PerspectiveInstance {
         let mut perspective = setup().await;
+        add_class(&mut perspective, "Board", NESTED_BOARD_SHACL).await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://board1", "board://name", "literal:string:Sprint1"),
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+            ],
+        );
+        perspective
+    }
 
-        println!("\n=== Testing fn::parse_literal() in SurrealDB ===");
+    const NESTED_BOARD_SHACL: &str = r#"{
+        "target_class": "board://Board",
+        "properties": [
+            {"path": "board://name", "name": "name", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+            {"path": "board://has_task", "name": "tasks", "node_kind": "IRI", "relation_kind": "hasMany", "target_class_name": "Task"}
+        ]
+    }"#;
 
-        // Helper function to URL encode for literal URLs
-        fn url_encode(s: &str) -> String {
-            s.chars()
-                .map(|c| match c {
-                    'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-                    _ => format!("%{:02X}", c as u8),
-                })
+    async fn add_class(perspective: &mut PerspectiveInstance, name: &str, shacl: &str) {
+        perspective
+            .add_sdna(
+                name.into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("add {name}: {e}"));
+    }
+
+    /// Writes `triples` straight into the store as shared links, the way they
+    /// land from a peer, without triggering a subscription pass.
+    fn add_shared_triples(perspective: &PerspectiveInstance, triples: &[(&str, &str, &str)]) {
+        let signer = TestSigner::generate();
+        for (i, (s, p, t)) in triples.iter().enumerate() {
+            let data = Link {
+                source: s.to_string(),
+                predicate: Some(p.to_string()),
+                target: t.to_string(),
+            };
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
+            perspective.sparql_store.add_link(&link).expect("add link");
+        }
+    }
+
+    const NESTED_INCLUDE_QUERY: &str = r#"{"include":{"tasks":true}}"#;
+
+    /// On a shared perspective, `Task`'s SHACL arriving while the query waits
+    /// lets the include hydrate instead of failing the whole query.
+    #[tokio::test]
+    async fn test_model_query_waits_for_late_include_target_shape() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_sync = async move {
+            sleep(Duration::from_millis(500)).await;
+            syncing
+                .add_sdna(
+                    "Task".into(),
+                    "".into(),
+                    SdnaType::SubjectClass,
+                    Some(NESTED_TASK_SHACL.into()),
+                    &AgentContext::main_agent(),
+                )
+                .await
+                .expect("add Task");
+        };
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, Duration::from_secs(10)),
+            late_sync
+        );
+
+        let result: serde_json::Value =
+            serde_json::from_str(&result.expect("query waits for Task's shape")).unwrap();
+        let tasks = result["instances"][0]["tasks"]
+            .as_array()
+            .expect("tasks array");
+        assert_eq!(tasks.len(), 1, "one task included: {result}");
+        assert_eq!(tasks[0]["id"], "ad4m://task1", "task hydrated: {result}");
+    }
+
+    /// On a shared perspective, a target-class SHACL that never arrives fails
+    /// the query with the usual message — but only once the budget is spent.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_after_budget() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+        let budget = Duration::from_millis(800);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .await
+            .expect_err("Task's shape never arrives");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "error only after the budget is spent, came after {elapsed:?}"
+        );
+        assert!(
+            err.to_string().contains("waited"),
+            "error says a wait happened, got: {err}"
+        );
+    }
+
+    /// A local-only perspective has no peer to wait for: a missing target
+    /// class is a caller bug and fails at once, whatever the budget.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_at_once_when_local() {
+        let perspective = nested_include_fixture().await;
+        let budget = Duration::from_secs(10);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .await
+            .expect_err("Task is not registered");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "local-only must not wait, took {elapsed:?}"
+        );
+        assert!(
+            !err.to_string().contains("waited"),
+            "no wait happened, so the error must not claim one: {err}"
+        );
+    }
+
+    const TASK_WITH_COMMENTS_SHACL: &str = r#"{
+        "target_class": "task://Task",
+        "properties": [
+            {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+            {"path": "task://has_comment", "name": "comments", "node_kind": "IRI", "relation_kind": "hasMany", "target_class_name": "Comment"}
+        ]
+    }"#;
+
+    const TWO_LEVEL_INCLUDE_QUERY: &str = r#"{"include":{"tasks":{"include":{"comments":true}}}}"#;
+
+    /// Budget for the shared-budget tests. A class that lands late does so
+    /// at 0.6 × this, so one shared budget ends at 1.0 × and a fresh one
+    /// per wait at 1.6 × — far enough apart to tell without flaking.
+    const SHARED_BUDGET: Duration = Duration::from_secs(2);
+
+    /// Asserts a query that waited for two classes ended by one budget's
+    /// deadline, not two, and failed on the class that never arrived.
+    fn assert_one_budget_spent(err: &AnyError, elapsed: Duration, never_arrives: &str) {
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "No SHACL shape stored for class '{never_arrives}'"
+            )),
+            "fails on the class that never arrives, got: {msg}"
+        );
+        assert!(
+            msg.contains("waited"),
+            "error says a wait happened, got: {msg}"
+        );
+        assert!(
+            elapsed >= SHARED_BUDGET,
+            "the budget is used in full before failing, came after {elapsed:?}"
+        );
+        assert!(
+            elapsed < SHARED_BUDGET.mul_f32(1.4),
+            "two waits share one budget of {SHARED_BUDGET:?}, but the query took {elapsed:?}"
+        );
+    }
+
+    /// Two missing include targets, `Board → Task → Comment`: `Task` lands
+    /// part-way through the budget, `Comment` never does. The wait for
+    /// `Comment` gets only what `Task`'s wait left, not a fresh budget.
+    #[tokio::test]
+    async fn test_model_query_include_waits_share_one_budget() {
+        let perspective = nested_include_fixture().await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://comment1", "comment://body", "literal:string:c"),
+                ("ad4m://task1", "task://has_comment", "ad4m://comment1"),
+            ],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_task = async move {
+            sleep(SHARED_BUDGET.mul_f32(0.6)).await;
+            add_class(&mut syncing, "Task", TASK_WITH_COMMENTS_SHACL).await;
+        };
+        let started = Instant::now();
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, SHARED_BUDGET),
+            late_task
+        );
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("Comment's shape never arrives");
+        assert_one_budget_spent(&err, elapsed, "Comment");
+    }
+
+    /// The queried class itself lands part-way through the budget and its
+    /// include target never does. The include's wait draws on the deadline
+    /// set before the top-level wait, not on one restarted after it.
+    #[tokio::test]
+    async fn test_model_query_top_level_and_include_waits_share_one_budget() {
+        let perspective = setup().await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://board1", "board://name", "literal:string:Sprint1"),
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+            ],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_board = async move {
+            sleep(SHARED_BUDGET.mul_f32(0.6)).await;
+            add_class(&mut syncing, "Board", NESTED_BOARD_SHACL).await;
+        };
+        let started = Instant::now();
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, SHARED_BUDGET),
+            late_board
+        );
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("Task's shape never arrives");
+        assert_one_budget_spent(&err, elapsed, "Task");
+    }
+
+    /// Subscription re-checks run under one `join_all`, so a model
+    /// subscription waiting for an include target that never syncs must not
+    /// hold back another subscription's update on the same perspective.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_subscription_recheck_does_not_wait_for_missing_include_shape() {
+        let mut perspective = setup().await;
+        add_class(&mut perspective, "Board", NESTED_BOARD_SHACL).await;
+        add_shared_triples(
+            &perspective,
+            &[("ad4m://board1", "board://name", "literal:string:Sprint1")],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        // No board has tasks yet, so hydration does not need `Task`.
+        let (board_sub, _) = perspective
+            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None)
+            .await
+            .expect("subscribe to Board");
+        let (other_sub, _) = perspective
+            .subscribe_and_query("SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(), None)
+            .await
+            .expect("subscribe to titles");
+
+        // A task syncs in under the board, but `Task`'s SHACL never does;
+        // an unrelated link for the other subscription lands alongside.
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+                ("ns://thing/1", "ns://title", "literal:string:hello"),
+            ],
+        );
+
+        let started = Instant::now();
+        perspective
+            .check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the pass waited {elapsed:?} for Task's shape (budget {MODEL_QUERY_SHAPE_WAIT:?})"
+        );
+        let queries = perspective.subscribed_queries.lock().await;
+        assert!(
+            queries[&other_sub].last_result.contains("ns://thing/1"),
+            "the other subscription is updated in the same pass, got: {}",
+            queries[&other_sub].last_result
+        );
+        assert!(
+            !queries[&board_sub].last_result.contains("ad4m://task1"),
+            "the Board subscription skips this pass, got: {}",
+            queries[&board_sub].last_result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shape_cache_returns_same_arc_on_second_call() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+        let second = perspective.get_shape("Recipe").expect("second lookup");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "cache should return the same Arc on a hit"
+        );
+        assert_eq!(first.target_class, "ns://Recipe");
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_shape_forces_reparse() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+        perspective.invalidate_shape("Recipe");
+        let second = perspective.get_shape("Recipe").expect("re-parse");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "invalidation should cause a fresh Arc"
+        );
+        assert_eq!(second.target_class, first.target_class);
+    }
+
+    #[tokio::test]
+    async fn test_add_sdna_invalidates_cache_for_class() {
+        let mut perspective = setup().await;
+        let shacl_initial = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl_initial),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna initial");
+        let first = perspective.get_shape("Recipe").expect("first lookup");
+
+        // add_sdna refuses to register a class twice with the same name;
+        // simulate a SHACL re-write by invalidating directly (matches the
+        // path register_shape would take if re-registration were exposed).
+        perspective.invalidate_shape("Recipe");
+
+        let second = perspective
+            .get_shape("Recipe")
+            .expect("re-parse after invalidation");
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    /// A shape `parse_shacl_to_links` refuses must leave the store untouched
+    /// (#908, #1348). The purge of an existing class and the
+    /// `has_subject_class` / `sdna` writes are shared links, so refusing
+    /// only after them deletes the class for every peer.
+    #[tokio::test]
+    async fn test_add_sdna_refused_shape_leaves_the_store_untouched() {
+        fn post_shacl(writer_datatype: Option<&str>) -> String {
+            let datatype = writer_datatype
+                .map(|d| format!(r#""datatype": "{d}","#))
+                .unwrap_or_default();
+            format!(
+                r#"{{
+                    "target_class": "ns://Post",
+                    "properties": [
+                        {{ "path": "ns://title", "name": "title", "datatype": "xsd://string" }},
+                        {{ "path": "ns://writer", "name": "writer", {datatype}
+                           "relation_kind": "hasOne", "class": "ns://AuthorShape",
+                           "target_class_name": "Author" }}
+                    ]
+                }}"#
+            )
+        }
+        fn all_links(perspective: &PerspectiveInstance) -> Vec<(String, Option<String>, String)> {
+            let mut links: Vec<_> = perspective
+                .get_links_local(&LinkQuery::default())
+                .expect("get_links_local")
+                .into_iter()
+                .map(|(l, _)| (l.data.source, l.data.predicate, l.data.target))
+                .collect();
+            links.sort();
+            links
+        }
+        fn shape_summary(shape: &ModelShape) -> Vec<(String, Option<String>)> {
+            shape
+                .properties
+                .iter()
+                .map(|p| (p.name.clone(), p.datatype.clone()))
                 .collect()
         }
-
-        // Create literal://json: URLs with Expression objects (as created by the literal language)
-        let recipe1_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pasta Carbonara","proof":{"signature":"abc123"}}"#;
-        let recipe1_name_literal = format!("literal://json:{}", url_encode(recipe1_json));
-
-        let recipe2_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pizza Margherita","proof":{"signature":"def456"}}"#;
-        let recipe2_name_literal = format!("literal://json:{}", url_encode(recipe2_json));
-
-        let recipe3_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Salad","proof":{"signature":"ghi789"}}"#;
-        let recipe3_name_literal = format!("literal://json:{}", url_encode(recipe3_json));
-
-        println!("Created literal URLs:");
-        println!("  Recipe1: {}", recipe1_name_literal);
-        println!("  Recipe2: {}", recipe2_name_literal);
-        println!("  Recipe3: {}", recipe3_name_literal);
-
-        // Add links with literal URLs as targets
+        let ctx = AgentContext::main_agent();
+        let mut perspective = setup().await;
         perspective
-            .add_link(
-                Link {
-                    source: "literal://recipe1".to_string(),
-                    target: recipe1_name_literal.clone(),
-                    predicate: Some("recipe://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
+            .add_sdna(
+                "Post".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(None)),
+                &ctx,
             )
             .await
-            .unwrap();
+            .expect("valid registration");
+        let links_before = all_links(&perspective);
+        let shape_before = shape_summary(&perspective.get_shape("Post").expect("shape"));
+        assert!(
+            shape_before.contains(&("writer".to_string(), None)),
+            "{shape_before:?}"
+        );
 
-        perspective
-            .add_link(
-                Link {
-                    source: "literal://recipe2".to_string(),
-                    target: recipe2_name_literal.clone(),
-                    predicate: Some("recipe://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
+        // Re-registering the existing class with both options.
+        let err = perspective
+            .add_sdna(
+                "Post".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(Some("xsd://string"))),
+                &ctx,
             )
             .await
-            .unwrap();
+            .expect_err("both datatype and class must be refused");
+        assert!(err.to_string().contains("datatype"), "{err}");
+        assert_eq!(all_links(&perspective), links_before, "re-registration");
+        // Re-read from the store, not the cache.
+        perspective.invalidate_shape("Post");
+        assert_eq!(
+            shape_summary(&perspective.get_shape("Post").expect("original shape")),
+            shape_before
+        );
 
+        // First registration of a new class, alone and inside a batch where
+        // a valid entry comes first: nothing of either may be written.
         perspective
-            .add_link(
-                Link {
-                    source: "literal://recipe3".to_string(),
-                    target: recipe3_name_literal.clone(),
-                    predicate: Some("recipe://name".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
+            .add_sdna(
+                "Draft".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(Some("xsd://string")).replace("ns://Post", "ns://Draft")),
+                &ctx,
             )
             .await
-            .unwrap();
-
-        println!("✓ Added 3 recipe links with literal URLs");
-
-        // Give SurrealDB time to process
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test 1: Query without fn::parse_literal() - should match the full literal URL
-        println!("\n=== Test 1: Query without fn::parse_literal() ===");
-        let query_raw = format!(
-            "SELECT source, target FROM link WHERE predicate = 'recipe://name' AND target = '{}'",
-            recipe1_name_literal
-        );
-        println!("Query: {}", query_raw);
-        let results_raw = perspective.surreal_query(query_raw).await.unwrap();
-        println!("Results: {} matches", results_raw.len());
-        assert_eq!(
-            results_raw.len(),
-            1,
-            "Should find exactly 1 match with full literal URL"
-        );
-
-        // Test 2A: Test if JavaScript functions work at all
-        println!("\n=== Test 2A: Test if JavaScript works with simple function ===");
-        let query_simple_js = "RETURN function() { return 42; }";
-        println!("Query: {}", query_simple_js);
-        let result_simple_js = perspective
-            .surreal_query(query_simple_js.to_string())
+            .expect_err("first registration");
+        assert_eq!(all_links(&perspective), links_before, "first registration");
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(post_shacl(None).replace("ns://Post", "ns://Note")),
+                    ),
+                    (
+                        "Post".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(post_shacl(Some("xsd://string"))),
+                    ),
+                ],
+                &ctx,
+            )
             .await
-            .unwrap();
-        println!("Result: {:?}", result_simple_js);
-
-        // Test 2B: Test a debug function that returns arguments
-        println!("\n=== Test 2B: Test what arguments contains ===");
-        let query_debug = "RETURN function() { return arguments.length; }";
-        println!("Query: {}", query_debug);
-        let result_debug = perspective
-            .surreal_query(query_debug.to_string())
-            .await
-            .unwrap();
-        println!("Arguments length: {:?}", result_debug);
-
-        // Test 2C: Test fn::parse_literal() directly
-        println!("\n=== Test 2C: Test fn::parse_literal() directly ===");
-        let test_simple_literal = "literal://string:Hello%20World";
-        let query_test_fn = format!("RETURN fn::parse_literal('{}')", test_simple_literal);
-        println!("Query: {}", query_test_fn);
-        let result_test_fn = perspective.surreal_query(query_test_fn).await.unwrap();
-        println!("Result: {:?}", result_test_fn);
-
-        // Test 3: Now check what fn::parse_literal() returns for our data
-        println!("\n=== Test 3: Check what fn::parse_literal() returns on link targets ===");
-        let query_check = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name'",
-        );
-        println!("Query:\n{}", query_check);
-        let results_check = perspective.surreal_query(query_check).await.unwrap();
-        println!("Results: {} links", results_check.len());
-
-        for result in &results_check {
-            let source = result.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let target = result.get("target").and_then(|v| v.as_str()).unwrap_or("?");
-            let parsed = result.get("parsed_data");
-            println!("  Source: {}", source);
-            println!("  Target: {}...", &target[..60.min(target.len())]);
-            println!("  Parsed: {:?}", parsed);
-        }
-
-        // Test 4: Try to match using parsed value
-        println!("\n=== Test 4: Query with fn::parse_literal() to match data value ===");
-        let query_parsed = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) = 'Pasta Carbonara'",
-        );
-        println!("Query:\n{}", query_parsed);
-        let results_parsed = perspective.surreal_query(query_parsed).await.unwrap();
-        println!("Results: {} matches", results_parsed.len());
-
-        if results_parsed.len() == 0 {
-            println!("WARNING: fn::parse_literal() returned 0 results - function may not be working correctly");
-            println!("This could be due to:");
-            println!("  1. JavaScript functions not enabled (need --allow-scripting flag)");
-            println!("  2. Function definition syntax error");
-            println!("  3. Closure not capturing $url parameter correctly");
-        }
-
-        assert_ne!(
-            results_parsed.len(),
-            0,
-            "fn::parse_literal() should return results for matching data"
-        );
-
-        assert_eq!(
-            results_parsed.len(),
-            1,
-            "Should find exactly 1 match using fn::parse_literal()"
-        );
-
-        let result = &results_parsed[0];
-        let source = result.get("source").and_then(|v| v.as_str()).unwrap();
-        let parsed_data = result.get("parsed_data").and_then(|v| v.as_str()).unwrap();
-
-        println!("  Source: {}", source);
-        println!("  Parsed data: {}", parsed_data);
-
-        assert_eq!(source, "literal://recipe1", "Should find recipe1");
-        assert_eq!(
-            parsed_data, "Pasta Carbonara",
-            "Should extract 'data' field from JSON"
-        );
-
-        // Test 5: Query multiple values with fn::parse_literal()
-        println!("\n=== Test 5: Query with IN clause using fn::parse_literal() ===");
-        let query_multiple = format!(
-            "SELECT source, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) IN ['Pasta Carbonara', 'Pizza Margherita']",
-        );
-        println!("Query:\n{}", query_multiple);
-        let results_multiple = perspective.surreal_query(query_multiple).await.unwrap();
-        println!("Results: {} matches", results_multiple.len());
-
-        assert_eq!(
-            results_multiple.len(),
-            2,
-            "Should find exactly 2 matches with IN clause"
-        );
-
-        let names: Vec<String> = results_multiple
-            .iter()
-            .filter_map(|r| {
-                r.get("parsed_data")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .collect();
-
-        println!("  Found names: {:?}", names);
-        assert!(
-            names.contains(&"Pasta Carbonara".to_string()),
-            "Should find Pasta Carbonara"
-        );
-        assert!(
-            names.contains(&"Pizza Margherita".to_string()),
-            "Should find Pizza Margherita"
-        );
-        assert!(
-            !names.contains(&"Salad".to_string()),
-            "Should not find Salad"
-        );
-
-        // Test 6: GROUP BY with fn::parse_literal() - this should fail as SurrealDB doesn't support it
-        println!("\n=== Test 6: GROUP BY with fn::parse_literal() ===");
-        let query_group = format!(
-            "SELECT fn::parse_literal(target), array::group(source) AS sources FROM link WHERE predicate = 'recipe://name' GROUP BY fn::parse_literal(target)",
-        );
-        println!("Query:\n{}", query_group);
-        let result_group = perspective.surreal_query(query_group).await;
-
-        // This should fail - SurrealDB doesn't support grouping by function results
-        if result_group.is_err() {
-            println!("  ✓ Query failed as expected - SurrealDB doesn't support GROUP BY fn::function_call()");
-            println!("  Error: {}", result_group.unwrap_err());
-        } else {
-            println!(
-                "  WARNING: Query succeeded unexpectedly! SurrealDB may have added this feature."
-            );
-            let results_group = result_group.unwrap();
-            println!("  Results: {} groups", results_group.len());
-            for group in &results_group {
-                println!(
-                    "  Group object keys: {:?}",
-                    group.as_object().map(|o| o.keys().collect::<Vec<_>>())
-                );
-            }
-        }
-
-        println!("\n=== ✓ SUCCESS ===");
-        println!("✓ fn::parse_literal() correctly parses literal://json: URLs");
-        println!("✓ Extracted 'data' field from Expression objects");
-        println!("✓ WHERE clauses work with parsed values");
-        println!("✓ IN clauses work with parsed values");
-        println!("Note: GROUP BY fn::function_call() not supported in SurrealDB 2.1");
+            .expect_err("batch");
+        assert_eq!(all_links(&perspective), links_before, "batch");
     }
 
     #[tokio::test]
-    async fn test_surreal_query_blocks_mutating_operations() {
+    async fn test_where_compiled_getter_on_relation() {
         let mut perspective = setup().await;
+        // Mirrors `Ad4mModel — Where-Clause Relation Filtering` integration test:
+        // TaskBoard.activeTasks uses a where-compiled getter to filter by status.
+        let task_shacl = r#"{
+            "target_class": "task://Task",
+            "properties": [
+                {"path": "task://type", "name": "type", "has_value": "task://task", "min_count": 1, "max_count": 1},
+                {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+                {"path": "task://status", "name": "status", "min_count": 1, "max_count": 1, "resolve_language": "literal"}
+            ]
+        }"#;
+        let board_shacl = r#"{
+            "target_class": "board://TaskBoard",
+            "properties": [
+                {"path": "board://name", "name": "name", "max_count": 1, "resolve_language": "literal"},
+                {
+                    "path": "board://has_task",
+                    "name": "activeTasks",
+                    "node_kind": "IRI",
+                    "relation_kind": "hasMany",
+                    "target_class_name": "Task",
+                    "getter": "SELECT ?target WHERE { <Base> <board://has_task> ?target . ?target <task://status> ?_wc0 . FILTER(STR(?_wc0) = \"active\" || STR(?_wc0) = \"literal:string:active\") }",
+                    "where_filter": {"status": "active"},
+                    "where_predicates": {"status": "task://status"}
+                },
+                {
+                    "path": "board://has_task",
+                    "name": "allTasks",
+                    "node_kind": "IRI",
+                    "relation_kind": "hasMany",
+                    "target_class_name": "Task",
+                    "getter": "SELECT ?target WHERE { <Base> <board://has_task> ?target . ?target <task://type> <task://task> . ?target <task://title> ?_v0 . ?target <task://status> ?_v1 . }"
+                }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "Task".into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(task_shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add Task");
+        perspective
+            .add_sdna(
+                "TaskBoard".into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(board_shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add TaskBoard");
 
-        // Add some test data
+        // IDs used in subject position must be real IRIs — typed-literal
+        // storage strips `literal:string:` wrappers from object position, so
+        // a value used as both subject and target wouldn't round-trip.
+        let board = "ad4m://test_board";
+        let active1 = "ad4m://active1";
+        let active2 = "ad4m://active2";
+        let done1 = "ad4m://done1";
+        let signed_active = "literal:string:active";
+        let signed_done = "literal:string:done";
+        let signed_title = "literal:string:t";
+        let triples: Vec<(&str, &str, &str)> = vec![
+            // Board name
+            (board, "board://name", "literal:string:Sprint1"),
+            // Tasks: type flag + title + status
+            (active1, "task://type", "task://task"),
+            (active1, "task://title", signed_title),
+            (active1, "task://status", signed_active),
+            (active2, "task://type", "task://task"),
+            (active2, "task://title", signed_title),
+            (active2, "task://status", signed_active),
+            (done1, "task://type", "task://task"),
+            (done1, "task://title", signed_title),
+            (done1, "task://status", signed_done),
+            // Board → tasks
+            (board, "board://has_task", active1),
+            (board, "board://has_task", active2),
+            (board, "board://has_task", done1),
+        ];
+        let signer = TestSigner::generate();
+        for (i, (s, p, t)) in triples.iter().enumerate() {
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let data = Link {
+                source: s.to_string(),
+                predicate: Some(p.to_string()),
+                target: t.to_string(),
+            };
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
+            perspective.sparql_store.add_link(&link).expect("add link");
+        }
+
+        let query_json = format!(
+            r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#,
+            board
+        );
+        let result_json = perspective
+            .model_query("TaskBoard", &query_json)
+            .await
+            .expect("model_query");
+        let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
+        let instances = result["instances"].as_array().expect("instances array");
+        assert_eq!(instances.len(), 1, "should find the board");
+        let active = instances[0]["activeTasks"]
+            .as_array()
+            .expect("activeTasks array");
+        assert_eq!(
+            active.len(),
+            2,
+            "where-getter should narrow to 2 active tasks"
+        );
+        let all = instances[0]["allTasks"].as_array().expect("allTasks array");
+        assert_eq!(all.len(), 3, "conformance getter should keep all 3 tasks");
+    }
+
+    #[tokio::test]
+    async fn test_model_query_fires_property_getter() {
+        let mut perspective = setup().await;
+        // Exact JSON produced by SHACLShape.toJSON() for the BlogPost
+        // fixture in tests/js/tests/prolog-and-literals.test.ts.
+        let shacl = r#"{
+            "node_shape_uri": "blog://BlogPostShape",
+            "target_class": "blog://BlogPost",
+            "properties": [
+                {
+                    "path": "blog://title",
+                    "name": "title",
+                    "datatype": "xsd://string",
+                    "max_count": 1,
+                    "writable": true,
+                    "resolve_language": "literal",
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "blog://title", "target": "value"}]
+                },
+                {
+                    "path": "blog://parent",
+                    "name": "parentPost",
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "blog://parent", "target": "value"}],
+                    "getter": "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
+                },
+                {
+                    "path": "ad4m://getter/BlogPost/tags",
+                    "name": "tags",
+                    "node_kind": "IRI",
+                    "getter": "SELECT ?target WHERE { <Base> <blog://tagged_with> ?target . }",
+                    "relation_kind": "hasMany"
+                }
+            ],
+            "constructor_actions": [],
+            "destructor_actions": []
+        }"#;
+        perspective
+            .add_sdna(
+                "BlogPost".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let post_root = "literal:string:test_post_root";
+        let parent_root = "literal:string:test_parent_root";
+
+        // Title link makes the post a BlogPost instance (structural conformance)
+        let signer = TestSigner::generate();
+        for (i, (src, pred, tgt)) in [
+            (post_root, "blog://title", "literal:string:my_post"),
+            (parent_root, "blog://title", "literal:string:my_parent"),
+            (post_root, "blog://reply_to", parent_root),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let data = Link {
+                source: src.to_string(),
+                predicate: Some(pred.to_string()),
+                target: tgt.to_string(),
+            };
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
+            perspective.sparql_store.add_link(&link).expect("add_link");
+        }
+
+        let query_json = format!(
+            r#"{{"where":{{"id":"{}"}},"limit":1,"deepQuery":true}}"#,
+            post_root
+        );
+        let result_json = perspective
+            .model_query("BlogPost", &query_json)
+            .await
+            .expect("model_query");
+        let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
+        let instances = result["instances"].as_array().expect("instances array");
+        assert_eq!(instances.len(), 1, "should find the post");
+        let parent_value = instances[0]["parentPost"].as_str();
+        assert_eq!(
+            parent_value,
+            Some(parent_root),
+            "getter should populate parentPost"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_property_getter_survives_add_sdna_pipeline() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "blog://BlogPost",
+            "properties": [
+                {
+                    "path": "blog://title",
+                    "name": "title",
+                    "datatype": "xsd://string",
+                    "max_count": 1,
+                    "resolve_language": "literal"
+                },
+                {
+                    "path": "blog://parent",
+                    "name": "parentPost",
+                    "max_count": 1,
+                    "getter": "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
+                }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "BlogPost".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let shape = perspective.get_shape("BlogPost").expect("shape");
+        let parent = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "parentPost")
+            .expect("parentPost property");
+        assert_eq!(
+            parent.getter.as_deref(),
+            Some("SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"),
+            "getter must survive addSdna → SHACL store → load_shape round trip"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_model_query_resolves_shape_through_cache() {
+        let mut perspective = setup().await;
+        let shacl = cache_test_shacl("Recipe", "ns://");
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        // First query warms the cache (load_shape fires once).
+        let result_json = perspective
+            .model_query("Recipe", "{}")
+            .await
+            .expect("first query");
+        assert!(result_json.contains("\"instances\""));
+
+        // Subsequent queries hit the cache and resolve to the same Arc as
+        // get_shape would have returned.
+        let warm = perspective.get_shape("Recipe").expect("warm shape");
+        let warm_again = perspective.get_shape("Recipe").expect("warm shape again");
+        assert!(Arc::ptr_eq(&warm, &warm_again));
+    }
+
+    // ── Regression tests for PR #829 follow-up ──
+
+    /// Regression: `commit_batch()` must publish `PERSPECTIVE_LINK_ADDED` (and
+    /// the corresponding REMOVED/UPDATED topics) so WebSocket subscribers see
+    /// batched diffs. The single-mutation paths publish synchronously before
+    /// spawning prolog, and `spawn_prolog_facts_update` deliberately skips
+    /// publishing to avoid double-delivery on those paths — so without an
+    /// explicit publish in `commit_batch`, batched diffs silently never reach
+    /// WS subscribers. Asserts a message lands on the topic within 2s of the
+    /// commit returning.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_link_added_event() {
+        let mut perspective = setup().await;
         let link = create_link();
+        let batch_id = perspective.create_batch().await;
+
+        // Add a Shared addition into the batch (Shared so it lands on the
+        // PERSPECTIVE_LINK_ADDED topic — see `pubsub_publish_diff`).
         perspective
             .add_link(
                 link.clone(),
                 LinkStatus::Shared,
-                None,
+                Some(batch_id.clone()),
                 &AgentContext::main_agent(),
             )
             .await
             .unwrap();
 
-        // Verify data was added
-        let select_query = "SELECT * FROM link".to_string();
-        let results = perspective.surreal_query(select_query).await.unwrap();
-        assert_eq!(results.len(), 1, "Should have 1 link");
+        // Subscribe BEFORE committing. The global PubSub uses tokio broadcast
+        // channels; subscribers only see messages sent after they subscribe.
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut added_rx = pubsub
+            .subscribe(&crate::pubsub::PERSPECTIVE_LINK_ADDED_TOPIC)
+            .await;
 
-        // Try to DELETE (should be blocked)
-        let delete_query = "DELETE FROM link".to_string();
-        let result = perspective.surreal_query(delete_query).await;
-        assert!(
-            result.is_err(),
-            "DELETE should be blocked and return an error"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("mutating operation"),
-            "Error should mention mutating operation"
-        );
-
-        // Verify data was NOT deleted
-        let verify_query = "SELECT * FROM link".to_string();
-        let results = perspective.surreal_query(verify_query).await.unwrap();
+        let expected_uuid = perspective.uuid.clone();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
         assert_eq!(
-            results.len(),
+            diff.additions.len(),
             1,
-            "Link should still exist after blocked DELETE"
+            "commit_batch should return the batched addition"
         );
 
-        // Try to UPDATE (should be blocked)
-        let update_query = "UPDATE link SET predicate = 'hacked'".to_string();
-        let result = perspective.surreal_query(update_query).await;
-        assert!(
-            result.is_err(),
-            "UPDATE should be blocked and return an error"
-        );
-
-        // Try to DROP (should be blocked)
-        let drop_query = "DROP TABLE link".to_string();
-        let result = perspective.surreal_query(drop_query).await;
-        assert!(
-            result.is_err(),
-            "DROP should be blocked and return an error"
-        );
-
-        // Try to CREATE (should be blocked)
-        let create_query = "CREATE link CONTENT { source: 'evil', target: 'hack' }".to_string();
-        let result = perspective.surreal_query(create_query).await;
-        assert!(
-            result.is_err(),
-            "CREATE should be blocked and return an error"
-        );
-
-        // Try to DEFINE (should be blocked)
-        let define_query = "DEFINE FIELD evil ON link TYPE string".to_string();
-        let result = perspective.surreal_query(define_query).await;
-        assert!(
-            result.is_err(),
-            "DEFINE should be blocked and return an error"
-        );
-
-        println!("✓ All mutating operations were successfully blocked");
-        println!("✓ Data integrity maintained - original link still exists");
-    }
-
-    // ============================================================================
-    // DOCUMENTATION EXAMPLES TESTS
-    // These tests verify all query examples from the SurrealDB documentation
-    // ============================================================================
-
-    #[tokio::test]
-    async fn test_docs_basic_filtering() {
-        let mut perspective = setup().await;
-
-        // Add test data
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Filter links by predicate
-        let follows = perspective
-            .surreal_query("SELECT * FROM link WHERE predicate = 'ad4m://follows'".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(follows.len(), 1, "Should find 1 follow link");
-        assert_eq!(
-            follows[0].get("predicate").and_then(|v| v.as_str()),
-            Some("ad4m://follows")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_aggregations_count_by_predicate() {
-        let mut perspective = setup().await;
-
-        // Add test data
-        for _ in 0..3 {
-            perspective
-                .add_link(
-                    Link {
-                        source: format!("user://{}", uuid::Uuid::new_v4()),
-                        target: "user://alice".to_string(),
-                        predicate: Some("ad4m://follows".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
+        // PERSPECTIVE_LINK_ADDED_TOPIC is global, so other tests running
+        // concurrently can publish to it as well. Drain until we find the
+        // message for THIS perspective + link (or the deadline expires).
+        // Without the publish call in commit_batch the loop never sees a
+        // matching message and the timeout fires.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let msg = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let candidate = tokio::time::timeout(remaining, added_rx.recv())
                 .await
-                .unwrap();
-        }
-
-        for _ in 0..2 {
-            perspective
-                .add_link(
-                    Link {
-                        source: format!("user://{}", uuid::Uuid::new_v4()),
-                        target: "post://123".to_string(),
-                        predicate: Some("ad4m://likes".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
+                .expect(
+                    "commit_batch() did not publish a matching PERSPECTIVE_LINK_ADDED \
+                     within 2s — batched diffs are not reaching WS subscribers",
                 )
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Count links by predicate
-        let stats = perspective
-            .surreal_query(
-                "SELECT predicate, count() as total FROM link GROUP BY predicate".to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(stats.len(), 2, "Should have 2 predicate groups");
-
-        let follows_stat = stats
-            .iter()
-            .find(|s| s.get("predicate").and_then(|v| v.as_str()) == Some("ad4m://follows"))
-            .expect("Should find follows stat");
-        // Extract count - might be nested in different ways
-        let follows_count = follows_stat
-            .get("total")
-            .and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                    .or_else(|| v.as_array().map(|a| a.len() as u64))
-            })
-            .expect("Should extract total count");
-        assert_eq!(follows_count, 3, "Should have 3 follows");
-
-        let likes_stat = stats
-            .iter()
-            .find(|s| s.get("predicate").and_then(|v| v.as_str()) == Some("ad4m://likes"))
-            .expect("Should find likes stat");
-        let likes_count = likes_stat
-            .get("total")
-            .and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                    .or_else(|| v.as_array().map(|a| a.len() as u64))
-            })
-            .unwrap();
-        assert_eq!(likes_count, 2, "Should have 2 likes");
-    }
-
-    #[tokio::test]
-    async fn test_docs_aggregations_distinct() {
-        let mut perspective = setup().await;
-
-        // Add test data with same author
-        let _author1 = "did:key:author1";
-        let _author2 = "did:key:author2";
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://1".to_string(),
-                    predicate: Some("ad4m://posted".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "post://2".to_string(),
-                    predicate: Some("ad4m://posted".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Count distinct sources  and authors
-        // Note: SurrealDB doesn't support count(DISTINCT field), use GROUP BY instead
-        let total_links = perspective
-            .surreal_query("SELECT count() as total FROM link".to_string())
-            .await
-            .unwrap();
-
-        // SurrealDB's count() might return multiple rows or a single aggregated row
-        let total: u64 = if total_links.len() == 1 {
-            // Single aggregated row
-            total_links[0]
-                .get("total")
-                .and_then(|v| v.as_u64().or_else(|| v.get("Int").and_then(|i| i.as_u64())))
-                .or_else(|| {
-                    total_links[0]
-                        .get("count")
-                        .and_then(|v| v.as_u64().or_else(|| v.get("Int").and_then(|i| i.as_u64())))
-                })
-                .unwrap()
-        } else {
-            // Multiple rows, sum them up
-            total_links
-                .iter()
-                .map(|row| {
-                    row.get("count")
-                        .and_then(|v| v.get("Int").and_then(|i| i.as_u64()))
-                        .unwrap_or(1)
-                })
-                .sum()
-        };
-        assert!(total >= 2, "Should have at least 2 links");
-
-        // Count unique sources using GROUP BY
-        let unique_sources = perspective
-            .surreal_query("SELECT source FROM link GROUP BY source".to_string())
-            .await
-            .unwrap();
-        assert_eq!(unique_sources.len(), 2, "Should have 2 unique sources");
-    }
-
-    #[tokio::test]
-    async fn test_docs_forward_traversal() {
-        let mut perspective = setup().await;
-
-        // Test: Find all users that Alice follows
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://charlie".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let alice_follows = perspective
-            .surreal_query(
-                "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(alice_follows.len(), 2, "Alice should follow 2 users");
-        let targets: Vec<&str> = alice_follows
-            .iter()
-            .filter_map(|r| r.get("target").and_then(|v| v.as_str()))
-            .collect();
-        assert!(targets.contains(&"user://bob"));
-        assert!(targets.contains(&"user://charlie"));
-    }
-
-    #[tokio::test]
-    async fn test_docs_reverse_traversal() {
-        let mut perspective = setup().await;
-
-        // Test: Find all users who follow Alice (followers)
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://charlie".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let alice_followers = perspective
-            .surreal_query(
-                "SELECT source FROM link WHERE out.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(alice_followers.len(), 2, "Alice should have 2 followers");
-        let sources: Vec<&str> = alice_followers
-            .iter()
-            .filter_map(|r| r.get("source").and_then(|v| v.as_str()))
-            .collect();
-        assert!(sources.contains(&"user://bob"));
-        assert!(sources.contains(&"user://charlie"));
-    }
-
-    #[tokio::test]
-    async fn test_docs_bidirectional_query() {
-        let mut perspective = setup().await;
-
-        // Alice follows Bob
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Charlie follows Alice
-        perspective
-            .add_link(
-                Link {
-                    source: "user://charlie".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find all users connected to Alice (either following or followed by)
-        let alice_connections = perspective
-            .surreal_query(
-                "SELECT source, target FROM link WHERE (in.uri = 'user://alice' OR out.uri = 'user://alice') AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            alice_connections.len(),
-            2,
-            "Alice should have 2 connections"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_multi_hop_friends_of_friends() {
-        let mut perspective = setup().await;
-
-        // Alice follows Bob and Charlie
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://charlie".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Bob follows Dave
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "user://dave".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Charlie follows Eve
-        perspective
-            .add_link(
-                Link {
-                    source: "user://charlie".to_string(),
-                    target: "user://eve".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find friends of friends (2-hop traversal)
-        // Note: Cannot use DISTINCT with graph traversal in SurrealDB
-        // Use GROUP BY instead or handle deduplication in application
-        let friends_of_friends = perspective
-            .surreal_query(
-                "SELECT out->link[WHERE predicate = 'ad4m://follows'].out.uri AS friend_of_friend FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert!(
-            !friends_of_friends.is_empty(),
-            "Should find friends of friends"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_multi_hop_user_profiles() {
-        let mut perspective = setup().await;
-
-        // Alice follows Bob
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Bob has profile
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "profile://bob_profile".to_string(),
-                    predicate: Some("ad4m://has_profile".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Get user profiles 2 hops away
-        let profiles = perspective
-            .surreal_query(
-                "SELECT out.uri AS user, out->link[WHERE predicate = 'ad4m://has_profile'][0].out.uri AS profile FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://follows'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(profiles.len(), 1, "Should find 1 profile");
-        assert_eq!(
-            profiles[0].get("user").and_then(|v| v.as_str()),
-            Some("user://bob")
-        );
-        assert_eq!(
-            profiles[0].get("profile").and_then(|v| v.as_str()),
-            Some("profile://bob_profile")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_complex_3hop_traversal() {
-        let mut perspective = setup().await;
-
-        // Conversation has child subgroup
-        perspective
-            .add_link(
-                Link {
-                    source: "conversation://main".to_string(),
-                    target: "subgroup://sg1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Subgroup has type
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "flux://conversation_subgroup".to_string(),
-                    predicate: Some("flux://entry_type".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Subgroup has child item
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "item://item1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Item has type
-        perspective
-            .add_link(
-                Link {
-                    source: "item://item1".to_string(),
-                    target: "flux://has_message".to_string(),
-                    predicate: Some("flux://entry_type".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: 3-hop traversal to get item types
-        let item_types = perspective
-            .surreal_query(
-                "SELECT out.uri AS subgroup, out->link[WHERE predicate = 'ad4m://has_child'].out->link[WHERE predicate = 'flux://entry_type'][0].out.uri AS item_type FROM link WHERE in.uri = 'conversation://main' AND predicate = 'ad4m://has_child' AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(item_types.len(), 1, "Should find 1 subgroup with items");
-        assert_eq!(
-            item_types[0].get("subgroup").and_then(|v| v.as_str()),
-            Some("subgroup://sg1")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_comments_on_posts() {
-        let mut perspective = setup().await;
-
-        // Alice authored post
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://authored".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Post has comment
-        perspective
-            .add_link(
-                Link {
-                    source: "post://123".to_string(),
-                    target: "comment://c1".to_string(),
-                    predicate: Some("ad4m://has_comment".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "post://123".to_string(),
-                    target: "comment://c2".to_string(),
-                    predicate: Some("ad4m://has_comment".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find all comments on Alice's posts (2-hop)
-        let comments = perspective
-            .surreal_query(
-                "SELECT out.uri AS post, out->link[WHERE predicate = 'ad4m://has_comment'].out.uri AS comments FROM link WHERE in.uri = 'user://alice' AND predicate = 'ad4m://authored'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(comments.len(), 1, "Should find 1 post");
-        assert_eq!(
-            comments[0].get("post").and_then(|v| v.as_str()),
-            Some("post://123")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_flux_count_subgroups() {
-        let mut perspective = setup().await;
-
-        // Add subgroups
-        for i in 1..=3 {
-            let subgroup_uri = format!("subgroup://sg{}", i);
-
-            // Conversation has child subgroup
-            perspective
-                .add_link(
-                    Link {
-                        source: "conversation://abc".to_string(),
-                        target: subgroup_uri.clone(),
-                        predicate: Some("ad4m://has_child".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-
-            // Subgroup has type
-            perspective
-                .add_link(
-                    Link {
-                        source: subgroup_uri,
-                        target: "flux://conversation_subgroup".to_string(),
-                        predicate: Some("flux://entry_type".to_string()),
-                    },
-                    LinkStatus::Shared,
-                    None,
-                    &AgentContext::main_agent(),
-                )
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Count conversation subgroups
-        let count_query = "SELECT count() AS count FROM link WHERE in.uri = 'conversation://abc' AND predicate = 'ad4m://has_child' AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup'";
-
-        let result = perspective
-            .surreal_query(count_query.to_string())
-            .await
-            .unwrap();
-        // The query might return multiple rows (one per matched link) or a single aggregated row
-        if result.len() == 1 {
-            let count = result[0].get("count").and_then(|v| v.as_u64()).unwrap();
-            assert_eq!(count, 3, "Should count 3 subgroups");
-        } else {
-            // If it returns one row per match, the length IS the count
-            assert_eq!(result.len(), 3, "Should count 3 subgroups");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_docs_flux_unique_participants() {
-        let mut perspective = setup().await;
-
-        let _author1 = "did:key:author1";
-        let _author2 = "did:key:author2";
-
-        // Add subgroup
-        perspective
-            .add_link(
-                Link {
-                    source: "conversation://xyz".to_string(),
-                    target: "subgroup://sg1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "flux://conversation_subgroup".to_string(),
-                    predicate: Some("flux://entry_type".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        // Add items to subgroup with different authors
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "item://item1".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "subgroup://sg1".to_string(),
-                    target: "item://item2".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Get unique participants
-        let participants_query = "SELECT VALUE author FROM link WHERE in.uri = 'conversation://xyz' AND predicate = 'ad4m://has_child' AND out->link[WHERE predicate = 'flux://entry_type'][0].out.uri = 'flux://conversation_subgroup' AND out->link[WHERE predicate = 'ad4m://has_child'].author IS NOT NONE GROUP BY author";
-
-        let participants = perspective
-            .surreal_query(participants_query.to_string())
-            .await
-            .unwrap();
-
-        // Should get authors from nested items
-        assert!(
-            participants.len() == 0 || participants.len() > 0,
-            "Query should execute successfully"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_advanced_grouping_with_having() {
-        let mut perspective = setup().await;
-
-        // Add posts with likes
-        for i in 1..=3 {
-            let post_uri = format!("post://{}", i);
-
-            // Add likes for each post (post1: 5 likes, post2: 15 likes, post3: 8 likes)
-            let like_count = if i == 2 { 15 } else { 5 + i };
-
-            for j in 0..like_count {
-                perspective
-                    .add_link(
-                        Link {
-                            source: format!("user://user{}", j),
-                            target: post_uri.clone(),
-                            predicate: Some("ad4m://likes".to_string()),
-                        },
-                        LinkStatus::Shared,
-                        None,
-                        &AgentContext::main_agent(),
-                    )
-                    .await
-                    .unwrap();
+                .expect("PERSPECTIVE_LINK_ADDED broadcast channel closed unexpectedly");
+            if candidate.contains(&expected_uuid) && candidate.contains(&link.target) {
+                break candidate;
             }
+        };
+
+        // Sanity-check the payload references the link we committed. The
+        // published message is a JSON-encoded PerspectiveLinkFilter referring
+        // to the perspective uuid + the decorated link.
+        assert!(
+            msg.contains(&link.target),
+            "Published PERSPECTIVE_LINK_ADDED message should reference the committed link's target ({}), got: {}",
+            link.target,
+            msg
+        );
+    }
+
+    /// Regression: paginated `get_links(limit=N)` must use the bounded-heap
+    /// store-side top-N method, not "materialise full Vec then sort+truncate".
+    /// Asserts the dedicated store method `query_links_top_n_by_timestamp`
+    /// exists (compile-error catch if removed) and that `get_links(limit=N)`
+    /// returns the same result as a direct call — i.e. it routes through the
+    /// bounded path rather than diverging back to the unbounded sort.
+    #[tokio::test]
+    async fn test_get_links_with_limit_uses_bounded_top_n_path() {
+        let mut perspective = setup().await;
+
+        // Insert 50 links. With sub-millisecond `add_link` calls the
+        // timestamps differ enough that sort order is stable.
+        for _ in 0..50 {
+            let link = create_link();
+            perspective
+                .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+                .await
+                .unwrap();
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Ascending (oldest-first) page of 5 via the public API.
+        let q = LinkQuery {
+            limit: Some(5),
+            ..Default::default()
+        };
+        let page = perspective.get_links(&q).await.unwrap();
+        assert_eq!(page.len(), 5, "limit=5 should return exactly 5 links");
 
-        // Test: Find posts with more than 10 likes
-        // Note: SurrealDB doesn't support HAVING clause, filter in application code
-        let all_posts = perspective
-            .surreal_query(
-                "SELECT out.uri as post, count() as like_count FROM link WHERE predicate = 'ad4m://likes' GROUP BY out.uri"
-                    .to_string(),
-            )
-            .await
+        // Same query directly against the store's bounded top-N method. If
+        // `get_links` no longer routes through this path, the equivalence
+        // assertion below catches drift between the two implementations.
+        let direct = perspective
+            .sparql_store
+            .query_links_top_n_by_timestamp(None, None, None, None, None, 5, false)
             .unwrap();
-
-        // Filter for > 10 likes in application code
-        let popular_posts: Vec<_> = all_posts
-            .iter()
-            .filter(|p| {
-                let count = p
-                    .get("like_count")
-                    .and_then(|v| {
-                        v.as_u64()
-                            .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                            .or_else(|| v.as_array().map(|a| a.len() as u64))
-                    })
-                    .unwrap_or(0);
-                count > 10
-            })
-            .collect();
-
-        // Due to test isolation issues, we just verify the query works and filters correctly
-        // Either we find exactly post://2 with >10 likes, or the test ran after others
-        assert!(
-            !popular_posts.is_empty(),
-            "Should find at least 1 popular post with >10 likes"
+        assert_eq!(
+            direct.len(),
+            5,
+            "query_links_top_n_by_timestamp(limit=5) should return 5 links"
         );
 
-        // Verify the filtering logic works - all returned posts should have >10 likes
-        for post in &popular_posts {
-            let like_count = post
-                .get("like_count")
-                .and_then(|v| {
-                    v.as_u64()
-                        .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                        .or_else(|| v.as_array().map(|a| a.len() as u64))
-                })
-                .unwrap();
+        // Identical results: same timestamps in the same order.
+        let page_ts: Vec<&str> = page.iter().map(|l| l.timestamp.as_str()).collect();
+        let direct_ts: Vec<&str> = direct.iter().map(|l| l.timestamp.as_str()).collect();
+        assert_eq!(
+            page_ts, direct_ts,
+            "get_links(limit) must route through query_links_top_n_by_timestamp — \
+             ordering drift between paths means the bounded heap is not being used"
+        );
+
+        // Sorted ascending.
+        for w in page.windows(2) {
             assert!(
-                like_count > 10,
-                "All filtered posts should have >10 likes, got {}",
-                like_count
+                w[0].timestamp <= w[1].timestamp,
+                "ascending top-N should yield non-decreasing timestamps"
             );
         }
     }
 
     #[tokio::test]
-    async fn test_docs_distinct_values() {
+    async fn sparql_query_cancellable_round_trip() {
         let mut perspective = setup().await;
-
-        // Add links with different predicates
+        let link = create_link();
         perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
+            .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
             .await
             .unwrap();
 
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "post://456".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Get all unique predicates used
-        // Note: SurrealDB has issues with SELECT DISTINCT field, use GROUP BY instead
-        let predicates = perspective
-            .surreal_query("SELECT predicate FROM link GROUP BY predicate".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(predicates.len(), 2, "Should have 2 unique predicates");
-        let pred_values: Vec<&str> = predicates
-            .iter()
-            .filter_map(|p| p.get("predicate").and_then(|v| v.as_str()))
-            .collect();
-        assert!(pred_values.contains(&"ad4m://follows"));
-        assert!(pred_values.contains(&"ad4m://likes"));
-    }
-
-    #[tokio::test]
-    async fn test_docs_sorting_and_pagination() {
-        let mut perspective = setup().await;
-        let now = chrono::Utc::now();
-
-        // Add links with different timestamps
-        for i in 0..5 {
-            let mut link = create_link();
-            link.target = format!("target://{}", i);
-            let mut signed_link = create_signed_expression(link, &AgentContext::main_agent())
-                .expect("Failed to create link");
-            signed_link.timestamp = (now - chrono::Duration::minutes(i as i64)).to_rfc3339();
-
-            perspective
-                .add_link_expression(LinkExpression::from(signed_link), LinkStatus::Shared, None)
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Recent links first, paginated (page 1)
-        let recent_links = perspective
-            .surreal_query("SELECT * FROM link ORDER BY timestamp DESC LIMIT 2 START 0".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(recent_links.len(), 2, "Should get 2 links");
-
-        // Test: Next page
-        let next_page = perspective
-            .surreal_query("SELECT * FROM link ORDER BY timestamp DESC LIMIT 2 START 2".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(next_page.len(), 2, "Should get 2 more links");
-    }
-
-    #[tokio::test]
-    async fn test_docs_string_operations() {
-        let mut perspective = setup().await;
-
-        // Add links with different predicates
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "user://bob".to_string(),
-                    predicate: Some("ad4m://follows".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://bob".to_string(),
-                    target: "user://alice".to_string(),
-                    predicate: Some("ad4m://following".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "user://alice".to_string(),
-                    target: "post://123".to_string(),
-                    predicate: Some("ad4m://likes".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find links with predicates containing "follow"
-        let follow_links = perspective
-            .surreal_query("SELECT * FROM link WHERE predicate CONTAINS 'follow'".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            follow_links.len(),
-            2,
-            "Should find 2 links containing 'follow'"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_docs_filtering_by_properties() {
-        let mut perspective = setup().await;
-        let now = chrono::Utc::now();
-
-        // Add recent link
-        let mut recent_link = create_link();
-        recent_link.source = "user://alice".to_string();
-        let mut recent_signed = create_signed_expression(recent_link, &AgentContext::main_agent())
-            .expect("Failed to create link");
-        recent_signed.timestamp = (now - chrono::Duration::hours(1)).to_rfc3339();
-
-        perspective
-            .add_link_expression(
-                LinkExpression::from(recent_signed),
-                LinkStatus::Shared,
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Add old link
-        let mut old_link = create_link();
-        old_link.source = "user://alice".to_string();
-        let mut old_signed = create_signed_expression(old_link, &AgentContext::main_agent())
-            .expect("Failed to create link");
-        old_signed.timestamp = (now - chrono::Duration::days(365)).to_rfc3339();
-
-        perspective
-            .add_link_expression(LinkExpression::from(old_signed), LinkStatus::Shared, None)
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Find recent links from Alice
-        let start_date = (now - chrono::Duration::days(30)).to_rfc3339();
-        let end_date = now.to_rfc3339();
-
-        let recent_links = perspective
-            .surreal_query(format!(
-                "SELECT * FROM link WHERE in.uri = 'user://alice' AND timestamp > '{}' AND timestamp < '{}'",
-                start_date, end_date
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(recent_links.len(), 1, "Should find 1 recent link");
-    }
-
-    #[tokio::test]
-    async fn test_docs_parse_literal_string() {
-        let mut perspective = setup().await;
-
-        // Add a link pointing to a string literal
-        perspective
-            .add_link(
-                Link {
-                    source: "post://123".to_string(),
-                    target: "literal://string:Hello%20World".to_string(),
-                    predicate: Some("ad4m://has_title".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse string literal
+        // Uncancelled — should return JSON with at least the inserted triple.
+        let cancel = tokio_util::sync::CancellationToken::new();
         let result = perspective
-            .surreal_query(
-                "SELECT fn::parse_literal(out.uri) AS title FROM link WHERE in.uri = 'post://123' AND predicate = 'ad4m://has_title'"
-                    .to_string(),
-            )
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
             .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 result");
-        assert_eq!(
-            result[0].get("title").and_then(|v| v.as_str()),
-            Some("Hello World"),
-            "Should parse string literal correctly"
-        );
+            .expect("non-cancelled query should succeed");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(!rows.is_empty(), "expected at least one row");
     }
 
     #[tokio::test]
-    async fn test_docs_parse_literal_number() {
-        let mut perspective = setup().await;
-
-        // Add a link pointing to a number literal
-        perspective
-            .add_link(
-                Link {
-                    source: "post://456".to_string(),
-                    target: "literal://number:42".to_string(),
-                    predicate: Some("ad4m://has_count".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
+    async fn sparql_query_cancellable_pre_cancelled_errors() {
+        let perspective = setup().await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let err = perspective
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
             .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse number literal
-        let result = perspective
-            .surreal_query(
-                "SELECT fn::parse_literal(out.uri) AS count FROM link WHERE in.uri = 'post://456' AND predicate = 'ad4m://has_count'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 result");
-
-        // fn::parse_literal returns a number (might be nested in object structure)
-        let count_value = result[0].get("count");
-        assert!(count_value.is_some(), "Should have count field");
-
-        // Extract the number - it might be in a nested Float/Int object or directly as a number
-        let count = count_value.and_then(|v| {
-            // First try direct access
-            v.as_i64()
-                .or_else(|| v.as_u64().map(|u| u as i64))
-                .or_else(|| v.as_f64().map(|f| f as i64))
-                // Then try nested object access
-                .or_else(|| v.get("Float").and_then(|f| f.as_f64().map(|f| f as i64)))
-                .or_else(|| v.get("Int").and_then(|i| i.as_i64()))
-        });
-
-        assert!(count.is_some(), "Should be able to extract number");
-        assert_eq!(count, Some(42), "Should parse number literal correctly");
-    }
-
-    #[tokio::test]
-    async fn test_docs_parse_literal_json() {
-        let mut perspective = setup().await;
-
-        // Add a link pointing to a JSON literal (URL encoded)
-        let encoded_json = "%7B%22name%22%3A%22Alice%22%2C%22age%22%3A30%7D"; // {"name":"Alice","age":30}
-        perspective
-            .add_link(
-                Link {
-                    source: "user://789".to_string(),
-                    target: format!("literal://json:{}", encoded_json),
-                    predicate: Some("ad4m://has_profile".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse JSON literal (should extract .data field)
-        let result = perspective
-            .surreal_query(
-                "SELECT fn::parse_literal(out.uri) AS profile FROM link WHERE in.uri = 'user://789' AND predicate = 'ad4m://has_profile'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 result");
-        // fn::parse_literal should extract the data from JSON expressions
-        let profile = result[0].get("profile");
-        assert!(profile.is_some(), "Should have parsed JSON literal");
-    }
-
-    #[tokio::test]
-    async fn test_docs_parse_literal_multi_hop() {
-        let mut perspective = setup().await;
-
-        // Create structure: Parent -> Child -> Title (literal)
-        perspective
-            .add_link(
-                Link {
-                    source: "parent://abc".to_string(),
-                    target: "child://xyz".to_string(),
-                    predicate: Some("ad4m://has_child".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        perspective
-            .add_link(
-                Link {
-                    source: "child://xyz".to_string(),
-                    target: "literal://string:Child%20Title".to_string(),
-                    predicate: Some("flux://title".to_string()),
-                },
-                LinkStatus::Shared,
-                None,
-                &AgentContext::main_agent(),
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Test: Parse literals in multi-hop traversal
-        let result = perspective
-            .surreal_query(
-                "SELECT out.uri AS child, fn::parse_literal(out->link[WHERE predicate = 'flux://title'][0].out.uri) AS title FROM link WHERE in.uri = 'parent://abc' AND predicate = 'ad4m://has_child'"
-                    .to_string(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 1, "Should find 1 child");
-        assert_eq!(
-            result[0].get("child").and_then(|v| v.as_str()),
-            Some("child://xyz")
-        );
-        assert_eq!(
-            result[0].get("title").and_then(|v| v.as_str()),
-            Some("Child Title"),
-            "Should parse literal in multi-hop query"
+            .expect_err("pre-cancelled query should error");
+        assert!(
+            err.to_string().contains("query cancelled"),
+            "expected cancellation marker in error, got: {}",
+            err
         );
     }
 }

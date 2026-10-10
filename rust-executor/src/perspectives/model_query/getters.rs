@@ -1,0 +1,797 @@
+//! SPARQL getter evaluation for properties and relations.
+//!
+//! Some model properties and relations are not stored as simple triples but
+//! are instead defined by custom SPARQL expressions (the `getter` field in
+//! the shape metadata, corresponding to the `@Property({ getter: "..." })`
+//! or `@HasMany({ getter: "..." })` decorators in TypeScript).
+//!
+//! This module evaluates those getters efficiently using **batched `VALUES`
+//! queries** — a single SPARQL query handles all instances at once by
+//! injecting `VALUES ?source { <id1> <id2> ... }`.
+//!
+//! Two getter forms are supported:
+//! - **`ASK`** — Converted to a `SELECT ?source` that returns which sources
+//!   match, producing a boolean per instance.
+//! - **`SELECT`** — Augmented with a `VALUES ?source` clause, producing
+//!   string values (scalar or array) per instance.
+//!
+//! After getter evaluation, optional post-getter where-clause filters
+//! ([`apply_where_filter_to_relation`]) can further narrow down relation
+//! results based on target instance properties.
+
+use deno_core::anyhow::Error;
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, HashMap};
+
+use super::filtering::matches_condition;
+use super::hydration::{reorder_members, ORDERING_STASH_KEY};
+use super::sparql_builder::{verified_link_exists, LinkGuard};
+use super::types::{IncludeValue, ModelShape, ShapeProperty};
+use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
+use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
+
+/// Decode a SPARQL getter row's raw string based on the property's
+/// declared `sh:datatype`. When the property declares a datatype it
+/// holds encoded literal values (`@HasMany({ datatype: "xsd:string" })`
+/// or the equivalent JSON key on a hardwired class), so
+/// `literal:<type>:<value>` wire form gets unwrapped to its typed JSON
+/// value. Without a datatype the property points at instance URIs and
+/// the value passes through byte-for-byte — even when a URI happens to
+/// start with `literal:`. Matches the plain-triple scan branch in
+/// `hydration.rs`, which reads the same `sh:datatype` from the shape.
+fn decode_getter_target(target: &str, datatype: Option<&str>) -> Value {
+    if datatype.is_some() && target.starts_with("literal:") {
+        parse_literal_value(target)
+    } else {
+        Value::String(target.to_string())
+    }
+}
+
+/// Evaluate property getters for a batch of instances, returning only the
+/// getter-computed properties.
+///
+/// This is the public entry point used by `perspective_instance.rs` when
+/// the client requests a targeted getter evaluation (as opposed to the
+/// full query pipeline).  Returns a map of `instance_id → { prop: value }`.
+pub fn evaluate_getters_batch(
+    store: &SparqlStore,
+    shape: &ModelShape,
+    instance_ids: &[String],
+    property_names: Option<&[String]>,
+) -> Result<Value, Error> {
+    if instance_ids.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+
+    // Project the shape down to the properties actually requested by the
+    // caller.  Without this, `evaluate_getters` would run every getter on
+    // the model — defeating the targeted-batch contract and re-issuing
+    // expensive SPARQL queries for properties the client did not ask for.
+    let filtered_props: Vec<ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| {
+            p.getter.is_some()
+                && property_names
+                    .map(|names| names.iter().any(|n| n == &p.name))
+                    .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+
+    if filtered_props.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+
+    let prop_names: Vec<String> = filtered_props.iter().map(|p| p.name.clone()).collect();
+
+    let filtered_shape = ModelShape {
+        target_class: shape.target_class.clone(),
+        shape_uri: shape.shape_uri.clone(),
+        properties: filtered_props,
+        include_relations: shape.include_relations.clone(),
+        interpretation_hint: shape.interpretation_hint.clone(),
+    };
+
+    let mut instances: Vec<Value> = instance_ids
+        .iter()
+        .map(|id| {
+            let mut obj = Map::new();
+            obj.insert("id".to_string(), Value::String(id.clone()));
+            Value::Object(obj)
+        })
+        .collect();
+
+    evaluate_getters(
+        store,
+        &mut instances,
+        &filtered_shape,
+        None,
+        true,
+        None,
+        None,
+    )?;
+
+    let mut result = Map::new();
+    for inst in &instances {
+        if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
+            let mut props = Map::new();
+            for name in &prop_names {
+                if let Some(val) = inst.get(name) {
+                    if val != &Value::Null {
+                        props.insert(name.clone(), val.clone());
+                    }
+                }
+            }
+            if !props.is_empty() {
+                result.insert(id.to_string(), Value::Object(props));
+            }
+        }
+    }
+
+    Ok(Value::Object(result))
+}
+
+/// Strip a trailing top-level `LIMIT N` clause from a SPARQL query string.
+///
+/// Getter expressions may include their own `LIMIT 1` for scalar results.
+/// When batching, we need to remove this limit because the batched query
+/// returns results for multiple sources.
+pub(super) fn strip_trailing_limit(query: &str) -> String {
+    let trimmed = query.trim_end();
+    let upper = trimmed.to_uppercase();
+    if let Some(limit_pos) = upper.rfind("LIMIT") {
+        let after_limit = trimmed[limit_pos + 5..].trim();
+        if !after_limit.is_empty() && after_limit.chars().all(|c| c.is_ascii_digit()) {
+            return trimmed[..limit_pos].trim_end().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Convert an `ASK` getter to a batched `SELECT` returning matching source IRIs.
+///
+/// Replaces `<Base>` with `?source`, extracts the body between `{ }`, and
+/// wraps it in `SELECT ?source WHERE { <source_constraint> <body> }` where
+/// `source_constraint` is a complete `VALUES`/`FILTER` line (see
+/// [`super::utils::values_or_str_filter`]).
+pub(super) fn convert_ask_to_batched_select(ask: &str, source_constraint: &str) -> String {
+    let normalized = ask.replace("<Base>", "?source");
+    if let (Some(open), Some(close)) = (normalized.find('{'), normalized.rfind('}')) {
+        let body = &normalized[open + 1..close];
+        format!(
+            "SELECT ?source WHERE {{ {} {} }}",
+            source_constraint,
+            body.trim()
+        )
+    } else {
+        normalized
+    }
+}
+
+/// Add the #1113 proof filter, and the #1116 `linkStatus` check when the query
+/// has one, to a relation getter that opens with the relation's own triple,
+/// `<Base> <predicate> ?target`. Both are checked on that triple's one link.
+///
+/// That is the form of the conformance getter the SDK generates for a typed
+/// relation (`buildConformanceFilter` in `core/src/model/decorators.ts`). A
+/// relation with a getter is filled here instead of by the filtered hydration
+/// read, so without this a forged link, or a Local link under
+/// `linkStatus: shared`, would add a target to it.
+///
+/// The triples after it, `?target <p> <v> .` for each flag and
+/// `?target <p> ?_vN .` for each required property, are the target class's
+/// conformance. When the getter is exactly that form, each of them gets the
+/// same check, so a forged flag does not make a linked node a target either
+/// (#1120).
+///
+/// Any other getter is the model author's own SPARQL and runs as written. A
+/// getter that opens with the relation's triple but goes on differently gets
+/// the check on that first triple only.
+/// Unchanged as well when the query opts in with `includeUnverified` and sets
+/// no `linkStatus`.
+pub(super) fn verify_relation_getter(
+    getter: &str,
+    predicate: &str,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
+) -> String {
+    let filter = match validate_iri(predicate) {
+        Ok(pred) => {
+            verified_link_exists("<Base>", pred, "?target", link_status, include_unverified)
+        }
+        Err(_) => return getter.to_string(),
+    };
+    if filter.is_empty() {
+        return getter.to_string();
+    }
+    let own_triple = regex::Regex::new(&format!(
+        r"(?is)^\s*SELECT\s+\?target\s+WHERE\s*\{{\s*<Base>\s+<{}>\s+\?target\b",
+        regex::escape(predicate)
+    ))
+    .expect("escaped predicate");
+    let Some(m) = own_triple.find(getter) else {
+        return getter.to_string();
+    };
+    let rest = &getter[m.end()..];
+    let condition = r"\?target\s+<([^<>\s]+)>\s+(<[^<>\s]+>|\?_v\d+)\s*\.";
+    let generated = regex::Regex::new(&format!(r"(?s)^\s*\.(?:\s*{condition})*\s*\}}\s*$"))
+        .expect("static pattern");
+    let rest = if generated.is_match(rest) {
+        let guard = LinkGuard {
+            status: link_status,
+            include_unverified,
+        };
+        regex::Regex::new(condition)
+            .expect("static pattern")
+            .replace_all(rest, |c: &regex::Captures| {
+                let (pred, object) = (format!("<{}>", &c[1]), &c[2]);
+                format!(
+                    "?target {pred} {object} .{}",
+                    guard.exists("?target", &pred, object)
+                )
+            })
+            .into_owned()
+    } else {
+        rest.to_string()
+    };
+    format!("{}{filter}{rest}", &getter[..m.end()])
+}
+
+/// Inject a `?source` batching constraint into a `SELECT` getter.
+///
+/// Performs three transformations:
+/// 1. Replaces `<Base>` with `?source`.
+/// 2. Strips any trailing `LIMIT N` (see [`strip_trailing_limit`]).
+/// 3. Ensures `?source` is in the projection and adds `source_constraint` (a
+///    complete `VALUES`/`FILTER` line) inside the first `{`.
+pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -> String {
+    let mut query = select.replace("<Base>", "?source");
+
+    query = strip_trailing_limit(&query);
+
+    let upper = query.to_uppercase();
+    if let Some(select_end) = upper.find("SELECT").map(|p| p + 6) {
+        if let Some(where_rel) = upper[select_end..].find("WHERE") {
+            let projection = &query[select_end..select_end + where_rel];
+            if !projection.contains("?source") {
+                query.insert_str(select_end, " ?source");
+            }
+        }
+    }
+
+    if let Some(brace_pos) = query.find('{') {
+        let insert = format!(" {source_constraint}");
+        query.insert_str(brace_pos + 1, &insert);
+    }
+
+    query
+}
+
+/// Evaluate SPARQL getters on all instances using batched `VALUES` queries.
+///
+/// For each property/relation with a `getter` expression:
+/// - `ASK` getters are converted to batched `SELECT`s → boolean result.
+/// - `SELECT` getters are injected with `VALUES ?source` → string result(s).
+///
+/// When `deep_query` is `false`, only relation conformance getters (collections
+/// and scalar relations) are evaluated, skipping pure-property getters for
+/// performance.
+pub(super) fn evaluate_getters(
+    store: &SparqlStore,
+    instances: &mut [Value],
+    shape: &ModelShape,
+    _include: Option<&HashMap<String, IncludeValue>>,
+    deep_query: bool,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
+) -> Result<(), Error> {
+    let getter_props: Vec<&ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| p.getter.is_some() && (deep_query || p.is_collection || p.is_scalar_relation))
+        .collect();
+
+    if getter_props.is_empty() || instances.is_empty() {
+        strip_stashed_entries(instances);
+        return Ok(());
+    }
+
+    let instance_iris: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| inst.get("id").and_then(|v| v.as_str()))
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .collect();
+
+    if instance_iris.is_empty() {
+        return Ok(());
+    }
+
+    let source_constraint = values_or_str_filter("source", &instance_iris);
+
+    log::debug!(
+        "evaluate_getters: {} getter props for {} instances (batched)",
+        getter_props.len(),
+        instance_iris.len()
+    );
+
+    for prop in &getter_props {
+        let getter = prop.getter.as_ref().unwrap();
+        let upper = getter.trim().to_uppercase();
+
+        if upper.starts_with("ASK") {
+            let batched = convert_ask_to_batched_select(getter, &source_constraint);
+            match store.query(&batched) {
+                Ok(result_json) => {
+                    let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+                    let matched: std::collections::HashSet<&str> = rows
+                        .iter()
+                        .filter_map(|row| row.get("source").and_then(|v| v.as_str()))
+                        .collect();
+                    for inst in instances.iter_mut() {
+                        let id_owned = inst
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        if let Some(id) = id_owned {
+                            if let Some(obj) = inst.as_object_mut() {
+                                obj.insert(
+                                    prop.name.clone(),
+                                    Value::Bool(matched.contains(id.as_str())),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Batched ASK getter failed for '{}': {}", prop.name, e);
+                }
+            }
+        } else if upper.starts_with("SELECT") {
+            let getter = if prop.is_collection || prop.is_scalar_relation {
+                verify_relation_getter(getter, &prop.predicate, link_status, include_unverified)
+            } else {
+                getter.clone()
+            };
+            let batched = inject_values_into_select(&getter, &source_constraint);
+
+            match store.query(&batched) {
+                Ok(result_json) => {
+                    let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+
+                    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+                    for row in &rows {
+                        let source = match row.get("source").and_then(|v| v.as_str()) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        if let Some(obj) = row.as_object() {
+                            if let Some((_, val)) = obj.iter().find(|(k, _)| k.as_str() != "source")
+                            {
+                                if let Some(s) = val.as_str() {
+                                    if !s.is_empty() && s != "None" {
+                                        grouped
+                                            .entry(source.to_string())
+                                            .or_default()
+                                            .push(s.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    for inst in instances.iter_mut() {
+                        let id_owned = match inst
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                        {
+                            Some(id) => id,
+                            None => continue,
+                        };
+                        let values = grouped.get(id_owned.as_str());
+                        if let Some(obj) = inst.as_object_mut() {
+                            // Symmetry with `hydration.rs`'s collection
+                            // branch: `literal:<type>:<value>` wire form
+                            // gets decoded when the property declares
+                            // `sh:datatype` (`@HasMany({ datatype:
+                            // "xsd:string" })`), otherwise passes through
+                            // byte-for-byte. Keeps the plain-triple scan
+                            // and the getter path in lockstep so a value
+                            // hydrated either way behaves the same.
+                            let dt = prop.datatype.as_deref();
+                            if prop.is_collection {
+                                if prop.is_scalar_relation {
+                                    let val = values
+                                        .and_then(|v| v.first())
+                                        .map(|s| decode_getter_target(s, dt))
+                                        .unwrap_or(Value::Null);
+                                    obj.insert(prop.name.clone(), val);
+                                } else {
+                                    let raw: Vec<String> =
+                                        values.map(|v| v.to_vec()).unwrap_or_default();
+                                    // A relation naming a target class is
+                                    // getter-backed, so `hydrate_one` never saw
+                                    // it as a collection and its CRDT order has
+                                    // not been applied yet. This is where its
+                                    // array is finally decided, so it is where
+                                    // the ordering has to land.
+                                    let ordered = prop.ordering.as_deref().and_then(|strategy| {
+                                        let entries = read_stashed_entries(obj);
+                                        // Position within the getter's own
+                                        // result stands in for a timestamp:
+                                        // members with no entry yet keep
+                                        // exactly the order they have today,
+                                        // which is the unordered→ordered
+                                        // migration path.
+                                        let members: Vec<(String, String)> = raw
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, t)| (t.clone(), format!("{i:016}")))
+                                            .collect();
+                                        reorder_members(
+                                            strategy,
+                                            &members,
+                                            &entries,
+                                            &prop.predicate,
+                                        )
+                                    });
+                                    let arr: Vec<Value> = ordered
+                                        .unwrap_or(raw)
+                                        .iter()
+                                        .map(|s| decode_getter_target(s, dt))
+                                        .collect();
+                                    obj.insert(prop.name.clone(), Value::Array(arr));
+                                }
+                            } else {
+                                if let Some(val) = values.and_then(|v| v.first()) {
+                                    obj.insert(prop.name.clone(), decode_getter_target(val, dt));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Batched SELECT getter failed for '{}': {}", prop.name, e);
+                }
+            }
+        }
+    }
+
+    // Post-getter where-clause filtering
+    for prop in &getter_props {
+        let (wf, wp) = match (&prop.where_filter, &prop.where_predicates) {
+            (Some(wf), Some(wp)) => (wf, wp),
+            _ => continue,
+        };
+        apply_where_filter_to_relation(
+            store,
+            instances,
+            &prop.name,
+            wf,
+            wp,
+            link_status,
+            include_unverified,
+        )?;
+    }
+
+    // Unconditional, and here rather than at the end of the pipeline: the stash
+    // must not outlive the one function that reads it. `filter_properties` only
+    // runs when a query names its properties, so anything left on the instance
+    // past this point would reach the caller.
+    strip_stashed_entries(instances);
+
+    Ok(())
+}
+
+/// The raw ordering entries `hydrate_one` parked on this instance, if any.
+fn read_stashed_entries(obj: &Map<String, Value>) -> Vec<String> {
+    obj.get(ORDERING_STASH_KEY)
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Drop the stash from every instance. See [`ORDERING_STASH_KEY`].
+fn strip_stashed_entries(instances: &mut [Value]) {
+    for inst in instances.iter_mut() {
+        if let Some(obj) = inst.as_object_mut() {
+            obj.remove(ORDERING_STASH_KEY);
+        }
+    }
+}
+
+/// Apply a post-getter where-clause filter to a relation across all instances.
+///
+/// After a getter populates a relation's target IDs, this function fetches
+/// the target instances' property values (via batched `VALUES` queries) and
+/// filters out targets that don't match the where conditions.  The relation
+/// arrays on each parent instance are updated in-place.
+///
+/// The values are read through the query's `linkStatus` and #1113 proof
+/// filter, so a withheld link on a target neither admits it nor, as the last
+/// row read, drops it.
+pub(super) fn apply_where_filter_to_relation(
+    store: &SparqlStore,
+    instances: &mut [Value],
+    relation_name: &str,
+    where_filter: &BTreeMap<String, super::types::WhereCondition>,
+    where_predicates: &HashMap<String, String>,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
+) -> Result<(), Error> {
+    let all_targets: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| {
+            inst.get(relation_name)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .flatten()
+        .collect();
+
+    if all_targets.is_empty() {
+        return Ok(());
+    }
+
+    let unique_targets: Vec<&str> = {
+        let mut seen = std::collections::HashSet::new();
+        all_targets
+            .iter()
+            .filter(|t| seen.insert(t.as_str()))
+            .map(|t| t.as_str())
+            .collect()
+    };
+
+    let target_ids: Vec<String> = unique_targets
+        .iter()
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .collect();
+
+    if target_ids.is_empty() {
+        return Ok(());
+    }
+    let target_constraint = values_or_str_filter("source", &target_ids);
+
+    let mut target_pass: HashMap<String, bool> = unique_targets
+        .iter()
+        .map(|t| (t.to_string(), true))
+        .collect();
+
+    for (prop_name, condition) in where_filter {
+        let predicate = match where_predicates.get(prop_name) {
+            Some(p) => p,
+            None => continue,
+        };
+        if validate_iri(predicate).is_err() {
+            continue;
+        }
+
+        let query = format!(
+            "SELECT ?source ?val WHERE {{ {} ?source <{}> ?val .{} }}",
+            target_constraint,
+            predicate,
+            verified_link_exists(
+                "?source",
+                predicate,
+                "?val",
+                link_status,
+                include_unverified
+            )
+        );
+
+        let result_json = store.query(&query)?;
+        let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
+
+        let mut target_vals: HashMap<String, Value> = HashMap::new();
+        for row in &rows {
+            if let (Some(source), Some(val_str)) = (
+                row.get("source").and_then(|v| v.as_str()),
+                row.get("val").and_then(|v| v.as_str()),
+            ) {
+                target_vals.insert(source.to_string(), parse_literal_value(val_str));
+            }
+        }
+
+        for (target_id, pass) in target_pass.iter_mut() {
+            if !*pass {
+                continue;
+            }
+            match target_vals.get(target_id) {
+                Some(val) => {
+                    if !matches_condition(val, condition) {
+                        *pass = false;
+                    }
+                }
+                None => {
+                    *pass = false;
+                }
+            }
+        }
+    }
+
+    for inst in instances.iter_mut() {
+        if let Some(arr) = inst.get(relation_name).and_then(|v| v.as_array()).cloned() {
+            let filtered: Vec<Value> = arr
+                .into_iter()
+                .filter(|v| {
+                    v.as_str()
+                        .map(|id| target_pass.get(id).copied().unwrap_or(false))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if let Some(obj) = inst.as_object_mut() {
+                obj.insert(relation_name.to_string(), Value::Array(filtered));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod decode_getter_target_tests {
+    //! Lock in the getter-path decode convention so a HasMany-of-string
+    //! read through a `@HasMany({ getter: "SELECT ..." })` sees the same
+    //! plain-value round-trip as one read through a plain-triple scan.
+    //! Decode fires only when the property declares `sh:datatype` — URI
+    //! relations pass through unchanged even when a target happens to
+    //! start with `literal:`.
+    use super::*;
+
+    #[test]
+    fn uri_relation_passes_through_without_datatype() {
+        assert_eq!(
+            decode_getter_target("ad4m://SomeClass/instance/abc", None),
+            Value::String("ad4m://SomeClass/instance/abc".into())
+        );
+    }
+
+    #[test]
+    fn did_target_passes_through_without_datatype() {
+        assert_eq!(
+            decode_getter_target("did:key:z6Mk...", None),
+            Value::String("did:key:z6Mk...".into())
+        );
+    }
+
+    #[test]
+    fn literal_prefixed_uri_passes_through_when_no_datatype_declared() {
+        // A URI that happens to start with `literal:` — e.g. because a
+        // caller chose it as an instance ID — is NOT touched when the
+        // property is a URI relation (no `sh:datatype`). Ensures the
+        // decode is a shape-level opt-in, not a per-target heuristic.
+        assert_eq!(
+            decode_getter_target("literal:string:legacy_uri", None),
+            Value::String("literal:string:legacy_uri".into())
+        );
+    }
+
+    #[test]
+    fn literal_string_wire_form_decodes_when_datatype_is_string() {
+        // Percent-encoded because `parse_literal_value` decodes the URL
+        // encoding baked into `Literal::from_string(...).to_url()`.
+        assert_eq!(
+            decode_getter_target("literal:string:hello%20world", Some("xsd://string")),
+            Value::String("hello world".into())
+        );
+    }
+
+    #[test]
+    fn literal_number_wire_form_decodes_to_typed_json_when_datatype_declared() {
+        // `parse_literal_value` promotes numeric wire form to a JSON
+        // number, not a string.
+        let v = decode_getter_target("literal:number:42", Some("xsd://integer"));
+        assert!(v.is_number(), "expected typed JSON number, got {v:?}");
+        assert_eq!(v.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn uri_target_passes_through_even_when_datatype_declared() {
+        // Guards against over-eager decode. Even with a datatype set,
+        // any target that does not carry the `literal:` prefix is a
+        // URI and passes through unchanged.
+        assert_eq!(
+            decode_getter_target("ad4m://Foo/instance/1", Some("xsd://string")),
+            Value::String("ad4m://Foo/instance/1".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod verify_relation_getter_tests {
+    use super::*;
+
+    /// The exact getter `buildConformanceFilter` (`core/src/model/decorators.ts`)
+    /// emits for `FlaggedTarget` in `core/src/model/relation-filtering.test.ts`,
+    /// which asserts the same string. `verify_relation_getter` only filters a
+    /// getter of this form and passes any other through, so an SDK change to
+    /// the form would silently drop the #1113 filter from typed relations.
+    const SDK_GETTER: &str = "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . ?target <test://type> <test://flagged_type> . ?target <test://name> ?_v0 . }";
+
+    /// `SDK_GETTER` with `check(subject, predicate, object)` after each of its
+    /// four triples' objects.
+    fn guarded_sdk_getter(check: impl Fn(&str, &str, &str) -> String) -> String {
+        format!(
+            "SELECT ?target WHERE {{ <Base> <test://has_flagged> ?target{} . \
+             ?target <test://type> <test://flagged_type> .{} \
+             ?target <test://name> ?_v0 .{} }}",
+            check("<Base>", "test://has_flagged", "?target"),
+            check("?target", "test://type", "<test://flagged_type>"),
+            check("?target", "test://name", "?_v0"),
+        )
+    }
+
+    #[test]
+    fn verify_relation_getter_rewrites_the_sdk_conformance_getter() {
+        let filter = verified_link_exists("<Base>", "test://has_flagged", "?target", None, None);
+        assert!(!filter.is_empty());
+        assert_eq!(
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", None, None),
+            guarded_sdk_getter(|s, p, o| verified_link_exists(s, p, o, None, None)),
+            "the relation's triple and the target's conformance triples"
+        );
+        assert_eq!(
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", None, Some(true)),
+            SDK_GETTER,
+            "the opt-in leaves the getter as written"
+        );
+        let shared = verified_link_exists(
+            "<Base>",
+            "test://has_flagged",
+            "?target",
+            Some(&LinkStatus::Shared),
+            Some(true),
+        );
+        assert!(shared.contains("<ad4m://ontology/status> \"Shared\""));
+        assert_eq!(
+            verify_relation_getter(
+                SDK_GETTER,
+                "test://has_flagged",
+                Some(&LinkStatus::Shared),
+                Some(true)
+            ),
+            guarded_sdk_getter(|s, p, o| verified_link_exists(
+                s,
+                p,
+                o,
+                Some(&LinkStatus::Shared),
+                Some(true)
+            )),
+            "a status still applies under the opt-in"
+        );
+    }
+
+    #[test]
+    fn verify_relation_getter_guards_only_the_first_triple_of_another_form() {
+        let getter = "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . \
+                      OPTIONAL { ?target <test://type> <test://flagged_type> . } }";
+        let filter = verified_link_exists("<Base>", "test://has_flagged", "?target", None, None);
+        assert_eq!(
+            verify_relation_getter(getter, "test://has_flagged", None, None),
+            getter.replacen(
+                "<Base> <test://has_flagged> ?target",
+                &format!("<Base> <test://has_flagged> ?target{filter}"),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn verify_relation_getter_leaves_a_hand_written_getter_alone() {
+        let getter = "SELECT ?target WHERE { ?target <test://custom> <Base> . }";
+        assert_eq!(
+            verify_relation_getter(getter, "test://custom", None, None),
+            getter
+        );
+    }
+}

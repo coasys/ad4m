@@ -27,18 +27,16 @@ watch(
 );
 
 function addListeners(p: PerspectiveProxy) {
-  p.addListener("link-added", (link) => {
+  p.on("link-added", ({ link }) => {
     onAddedLinkCbs.value.forEach((cb) => {
       cb(p, link);
     });
-    return null;
   });
 
-  p.removeListener("link-removed", (link) => {
-    onAddedLinkCbs.value.forEach((cb) => {
+  p.on("link-removed", ({ link }) => {
+    onRemovedLinkCbs.value.forEach((cb) => {
       cb(p, link);
     });
-    return null;
   });
 }
 
@@ -61,8 +59,7 @@ export function usePerspectives(client: Ad4mClient) {
       addListeners(p);
     });
 
-    // @ts-ignore
-    client.perspective.addPerspectiveUpdatedListener(async (handle) => {
+    client.on("perspective-updated", async ({ perspective: handle }) => {
       const perspective = await client.perspective.byUUID(handle.uuid);
 
       if (perspective) {
@@ -71,12 +68,10 @@ export function usePerspectives(client: Ad4mClient) {
           [handle.uuid]: perspective,
         };
       }
-      return null;
     });
 
     // Add new incoming perspectives
-    // @ts-ignore
-    client.perspective.addPerspectiveAddedListener(async (handle) => {
+    client.on("perspective-added", async ({ perspective: handle }) => {
       const perspective = await client.perspective.byUUID(handle.uuid);
 
       if (perspective) {
@@ -89,7 +84,7 @@ export function usePerspectives(client: Ad4mClient) {
     });
 
     // Remove new deleted perspectives
-    client.perspective.addPerspectiveRemovedListener((uuid) => {
+    client.on("perspective-removed", ({ perspectiveUuid: uuid }) => {
       perspectives.value = Object.keys(perspectives.value).reduce(
         (acc, key) => {
           const p = perspectives.value[key];
@@ -97,7 +92,6 @@ export function usePerspectives(client: Ad4mClient) {
         },
         {}
       );
-      return null;
     });
   }, {});
 

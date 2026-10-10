@@ -6,8 +6,9 @@ use inputs::PullArguments;
 use lazy_static::lazy_static;
 
 use perspective_diff_sync_integrity::{
-    CommitInput, HashBroadcast, OnlineAgent, OnlineAgentAndAction, Perspective, PerspectiveDiff,
-    PerspectiveDiffEntryReference, PerspectiveExpression, PullResult, RoutedSignalPayload,
+    CommitInput, HashBroadcast, HashReference, OnlineAgent, OnlineAgentAndAction, Perspective,
+    PerspectiveDiff, PerspectiveDiffEntryReference, PerspectiveExpression, PullResult,
+    RoutedSignalPayload,
 };
 
 mod errors;
@@ -59,6 +60,13 @@ pub fn current_revision(_: ()) -> ExternResult<Option<Hash>> {
     link_adapter::revisions::current_revision::<retriever::HolochainRetreiver>()
         .map_err(|error| utils::err(&format!("{}", error)))
         .map(|val| val.map(|val| val.hash))
+}
+
+#[hdk_extern]
+pub fn latest_revision(_: ()) -> ExternResult<Option<HashReference>> {
+    use retriever::PerspectiveDiffRetreiver;
+    retriever::HolochainRetreiver::latest_revision()
+        .map_err(|error| utils::err(&format!("{}", error)))
 }
 
 #[hdk_extern]

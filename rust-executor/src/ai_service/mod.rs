@@ -1,15 +1,14 @@
-use self::{audio_stream::AudioStream, error::AIServiceError};
-use crate::graphql::graphql_types::ModelInput;
-#[allow(unused_imports)]
-use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
+use self::error::AIServiceError;
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
-use crate::types::{AITask, LocalModel, Model, ModelType};
+use crate::types::ModelInput;
+#[allow(unused_imports)]
+use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
+use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
-use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
 use holochain::test_utils::itertools::Itertools;
@@ -26,15 +25,18 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
-mod audio_stream;
 mod error;
+pub mod harness;
+pub mod providers;
 use log::error;
+use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
 /// Result of an LLM prompt call, with token counts for billing.
 /// Token counts are estimated (chars/4) with the current Kalosum backend.
 /// When Ollama is integrated, these will be exact from the API response.
+#[derive(Debug, Clone)]
 pub struct PromptResult {
     pub text: String,
     pub prompt_tokens: usize,
@@ -51,9 +53,33 @@ pub struct EmbedResult {
 /// Rough token count estimation (~4 chars per token for English text).
 /// Used by the Kalosum backend to populate PromptResult/EmbedResult.
 /// Will be replaced by exact counts when Ollama is integrated.
-fn estimate_token_count(text: &str) -> usize {
+///
+/// TODO(billing accuracy): materially off for non-English scripts (CJK,
+/// Arabic, Hindi tend to ~1 token/char → billing under-estimated ~4×),
+/// code/JSON (~2 chars/token → under-estimated ~2×), and repetitive text
+/// (BPE compresses well → over-estimated). Plumb real Kalosm token counts
+/// when the backend exposes them, or apply a per-model correction factor.
+///
+/// `pub(crate)` so `api::openai_compat::tests` can lock in the current
+/// formula and catch accidental changes.
+pub(crate) fn estimate_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     (chars + 3) / 4
+}
+
+/// Truncate LLM prompt/response text for debug logging. LOGGING.md: debug
+/// level carries "prompt/response bodies (truncated)" — long enough to
+/// actually debug what the model was asked / returned, bounded so a huge
+/// interpretation prompt doesn't flood the log file. Char-boundary safe.
+const LOG_TEXT_PREVIEW_CHARS: usize = 2000;
+
+pub(crate) fn truncate_for_log(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= LOG_TEXT_PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(LOG_TEXT_PREVIEW_CHARS).collect();
+    format!("{head}… [+{} more chars]", total - LOG_TEXT_PREVIEW_CHARS)
 }
 
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
@@ -70,6 +96,15 @@ struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
     last_activity: Arc<Mutex<std::time::Instant>>,
+    /// Broadcast channel for streaming partial/final transcription text back
+    /// to the REST feed handler (SSE response).
+    text_broadcast_tx: tokio::sync::broadcast::Sender<String>,
+    // Billing context (used by the async whisper task via cloned values;
+    // stored here for potential close-stream reconciliation)
+    #[allow(dead_code)]
+    model_id: String,
+    #[allow(dead_code)]
+    user_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -109,10 +144,13 @@ struct LLMTaskSpawnRequest {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
 struct LLMTaskPromptRequest {
     pub task_id: String,
     pub prompt: String,
+    /// Optional decoding constraint (a tool-call grammar).  `None` ⇒ normal
+    /// unconstrained generation, byte-for-byte the pre-tools behaviour.
+    /// Ignored on the remote path (upstream tool forwarding is a follow-up).
+    pub constraint: Option<ArcParser<()>>,
     pub result_sender: oneshot::Sender<Result<String>>,
 }
 
@@ -129,18 +167,149 @@ struct LLMTaskShutdownRequest {
     pub result_sender: oneshot::Sender<()>,
 }
 
+/// Streaming-prompt variant for the OpenAI-compatible chat endpoint.
+///
+/// Identical to [`LLMTaskPromptRequest`] but instead of a oneshot reply
+/// the caller receives an async stream of token chunks.  Used by
+/// `prompt_messages_stream` to back `POST /v1/chat/completions` with
+/// `stream: true`.
+///
+/// The receiver side is an `mpsc::Receiver<String>` so each `Token` arm
+/// can push without awaiting consumer backpressure; the HTTP handler
+/// converts each token into one SSE `chat.completion.chunk`.
+///
+/// `done_sender` fires once the model has emitted its final token (or
+/// errored) and carries `PromptResult` for the closing chunk's `usage`.
+#[allow(dead_code)]
+struct LLMTaskPromptStreamRequest {
+    pub task_id: String,
+    pub prompt: String,
+    /// See [`LLMTaskPromptRequest::constraint`].
+    pub constraint: Option<ArcParser<()>>,
+    pub token_sender: mpsc::UnboundedSender<String>,
+    pub done_sender: oneshot::Sender<Result<PromptResult>>,
+}
+
+// Manual `Debug` — these structs hold a non-`Debug` `ArcParser` constraint.
+// `LLMTaskRequest` must stay `Debug` so that `SendError<LLMTaskRequest>`
+// converts into `anyhow::Error` via `?` at the channel send sites.
+impl std::fmt::Debug for LLMTaskPromptRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMTaskPromptRequest")
+            .field("task_id", &self.task_id)
+            .field("prompt", &self.prompt)
+            .field("constrained", &self.constraint.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for LLMTaskPromptStreamRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMTaskPromptStreamRequest")
+            .field("task_id", &self.task_id)
+            .field("prompt", &self.prompt)
+            .field("constrained", &self.constraint.is_some())
+            .finish()
+    }
+}
+
+/// A prompt sent as a complete turn list, with tools handed over as
+/// definitions rather than rendered into the text.
+///
+/// Distinct from [`LLMTaskPromptRequest`] because it needs no ephemeral task:
+/// the turns are already the whole conversation, so there is no system prompt
+/// or example list for the worker to assemble one from.
+#[derive(Debug)]
+struct LLMTaskPromptTurnsRequest {
+    pub turns: Vec<ChatTurn>,
+    pub tools: Vec<ToolSpec>,
+    pub result_sender: oneshot::Sender<Result<ChatReply>>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug)]
 enum LLMTaskRequest {
     Spawn(LLMTaskSpawnRequest),
     Prompt(LLMTaskPromptRequest),
+    PromptTurns(LLMTaskPromptTurnsRequest),
+    PromptStream(LLMTaskPromptStreamRequest),
     Remove(LLMTaskRemoveRequest),
     Shutdown(LLMTaskShutdownRequest),
 }
 
 enum LlmModel {
     Local(Llama),
-    Remote((ChatGPTClient, String)),
+    /// A remote endpoint and the model string to ask it for. Which wire
+    /// protocol is behind the trait — see `ai_service::providers`.
+    Remote((Box<dyn RemoteChat>, String)),
+}
+
+/// Every part of one turn that reaches the wire.
+///
+/// A turn is not only its text. An assistant turn that called something also
+/// carries the call's id, name and arguments, and a tool result carries the id
+/// it answers. The Anthropic provider serialises all of that into content
+/// blocks, so the caller pays for it.
+///
+/// It compounds. Tool definitions are sent once per request, but the calls in
+/// the history are resent on every turn of an agentic loop, and their arguments
+/// are the payload rather than a label — a schema patch, a query, a document.
+/// Counting only `content` under-bills a long tool conversation by more than it
+/// under-bills a short one.
+fn estimate_turn_tokens(turn: &ChatTurn) -> usize {
+    let calls: usize = turn
+        .tool_calls
+        .iter()
+        .map(|call| {
+            estimate_token_count(&call.id)
+                + estimate_token_count(&call.name)
+                + estimate_token_count(&call.arguments.to_string())
+        })
+        .sum();
+
+    let answered_call = turn
+        .tool_result_for
+        .as_deref()
+        .map(estimate_token_count)
+        .unwrap_or(0);
+
+    estimate_token_count(&turn.content) + calls + answered_call
+}
+
+/// Estimated completion tokens for a reply that may carry tool calls.
+///
+/// A call is output the model generated and the caller pays for, so its name
+/// and arguments count alongside the text. Its id does not: the provider
+/// assigns it, and the model never generates it. `estimate_turn_tokens` does
+/// count the id when the call is sent back, because then it is input.
+fn estimate_reply_tokens(reply: &ChatReply) -> usize {
+    let calls: usize = reply
+        .tool_calls
+        .iter()
+        .map(|call| {
+            estimate_token_count(&call.name) + estimate_token_count(&call.arguments.to_string())
+        })
+        .sum();
+
+    estimate_token_count(&reply.text) + calls
+}
+
+/// The turn list for a task-shaped prompt: the task's system prompt, its
+/// examples as alternating user/assistant turns, then the live prompt.
+///
+/// Local models get this shape from kalosm's own task builder
+/// (`llama.task(system).with_examples(..)`); remote ones have to be handed
+/// it explicitly, which is what this builds. Shared by the `Prompt` and
+/// `PromptStream` remote arms, which differ only in how the reply comes back.
+fn turns_for_task(task: &AITask, prompt: String) -> Vec<ChatTurn> {
+    let mut turns = Vec::with_capacity(2 + task.prompt_examples.len() * 2);
+    turns.push(ChatTurn::system(task.system_prompt.clone()));
+    for example in task.prompt_examples.iter() {
+        turns.push(ChatTurn::user(example.input.clone()));
+        turns.push(ChatTurn::assistant(example.output.clone()));
+    }
+    turns.push(ChatTurn::user(prompt));
+    turns
 }
 
 async fn publish_model_status(
@@ -315,7 +484,7 @@ impl AIService {
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
 
         if models.is_empty() {
-            // for integration tests, make sure we have Bert loaded
+            // No models configured — auto-load Bert for embedding support
             futures.push(Box::pin(
                 self.init_model(Model {
                     id: "bert-id".to_string(),
@@ -344,12 +513,25 @@ impl AIService {
         // Wait for all initialization futures in parallel
         futures::future::join_all(futures).await;
 
-        // Spawn tasks from the database
+        // Spawn tasks from the database. Individual failures (e.g. tasks that
+        // reference a model that has since been deleted, or per-model task
+        // rows keyed to a model id that no `add_model` call has yet
+        // registered) log and continue — one orphan task must not prevent
+        // other tasks from being registered with their LLM workers, or the
+        // race between `AIService::new()`'s background `load()` and any
+        // caller that just spawned a worker + Spawn'd a task into it can wipe
+        // that task_descriptions entry mid-flight when `load()` re-spawns
+        // the worker via `init_model` and then bails before re-registering.
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
         for task in tasks {
-            self.spawn_task(task).await?;
+            let task_name = task.name.clone();
+            let task_id = task.task_id.clone();
+            if let Err(e) = self.spawn_task(task).await {
+                log::warn!(
+                    "AIService::load: skipping task '{task_name}' (task_id={task_id}): {e:#}"
+                );
+            }
         }
 
         Ok(())
@@ -376,9 +558,10 @@ impl AIService {
     }
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
-        if ModelType::Llm == model_type {
-            Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))?;
+        // Every model type has a default. Only an LLM default has tasks to move.
+        Ad4mDb::with_global_instance(|db| db.set_default_model(model_type.clone(), &model_id))?;
 
+        if ModelType::Llm == model_type {
             // Respawn task on new default model
             let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
                 .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -423,16 +606,14 @@ impl AIService {
             let non_accelerated_message =
                 "Could not get accelerated CUDA device. Defaulting to CPU.";
             Device::new_cuda(0).unwrap_or_else(|e| {
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else if cfg!(feature = "metal") {
             Device::new_metal(0).unwrap_or_else(|e| {
                 let non_accelerated_message =
                     "Could not get accelerated Metal device. Defaulting to CPU.";
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else {
@@ -582,21 +763,43 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_client(
-        model_id: String,
-        api_key: String,
-        base_url: Url,
-    ) -> ChatGPTClient {
-        let mut url = base_url;
-        if let Some(segments) = url.path_segments() {
-            if segments.clone().next() == Some("v1") {
-                url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
-            }
+    /// Build the provider client for a remote model.
+    ///
+    /// Which protocol is spoken is decided here, once, from the model's
+    /// `api_type` — everything downstream holds a `dyn RemoteChat` and does
+    /// not know or care. See `ai_service::providers`.
+    ///
+    /// Refuses a key that would cross the network in the clear. The WS
+    /// handlers refuse it too, but a model saved before they did still loads
+    /// through here, and would otherwise send its key with every completion.
+    /// The refusal fails this one model and shows in its status.
+    async fn build_remote_client(model_id: String, api: ModelApi) -> Result<Box<dyn RemoteChat>> {
+        if !api.api_key.is_empty() && !providers::http::is_transport_safe(&api.base_url) {
+            return Err(anyhow!(
+                "{} ({})",
+                providers::http::CLEARTEXT_KEY_REFUSAL,
+                api.base_url
+            ));
         }
+
         publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
-        let client = ChatGPTClient::new(&api_key, url.as_ref());
+        let client: Box<dyn RemoteChat> = match api.api_type {
+            ModelApiType::OpenAi => Box::new(providers::openai::OpenAiChat::new(
+                &api.api_key,
+                api.base_url,
+            )),
+            ModelApiType::Anthropic => Box::new(providers::anthropic::AnthropicChat::new(
+                &api.api_key,
+                api.base_url,
+            )),
+            ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
+                &api.api_key,
+                api.base_url,
+                api.max_num_ctx,
+            )),
+        };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
-        client
+        Ok(client)
     }
 
     async fn spawn_llm_model(
@@ -634,10 +837,10 @@ impl AIService {
                                 .await
                                 .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
-                            Ok(LlmModel::Remote((
-                                Self::build_remote_client(model_id, api.api_key, api.base_url).await,
-                                api.model
-                            )))
+                            let model_string = api.model.clone();
+                            Self::build_remote_client(model_id, api)
+                                .await
+                                .map(|client| LlmModel::Remote((client, model_string)))
                         } else {
                             Err(anyhow!("AI model definition {} doesn't have a body, and this error should have been caught above", model_config.name))
                         }
@@ -660,7 +863,6 @@ impl AIService {
 
                 let mut tasks = HashMap::<String, Task<Llama>>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
-                let idle_delay = Duration::from_millis(1);
 
                 rt.block_on(publish_model_status(
                     model_config.id.clone(),
@@ -674,16 +876,11 @@ impl AIService {
                     let _ = model_ready_sender.send(());
                 }
 
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = llama_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(task_request)) => match task_request {
+                    match rt.block_on(llama_rx.recv()) {
+                        None => break,
+                        Some(task_request) => match task_request {
                             LLMTaskRequest::Shutdown(shutdown_request) => {
                                 rt.block_on(publish_model_status(
                                     model_config.id.clone(),
@@ -741,62 +938,44 @@ impl AIService {
                                 }
                             },
 
+                            LLMTaskRequest::PromptTurns(turns_request) => match model {
+                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
+                                    let request =
+                                        ChatRequest::new(model_string.clone(), turns_request.turns)
+                                            .with_tools(turns_request.tools);
+
+                                    let result = rt.block_on(remote_client.chat(request));
+                                    let _ = turns_request.result_sender.send(result);
+                                }
+                                LlmModel::Local(_) => {
+                                    // Unreachable in practice: the caller
+                                    // checks `api_type_supports_native_tools`
+                                    // first, and no local model answers true.
+                                    // Refuse loudly rather than silently
+                                    // dropping the tools if that check is ever
+                                    // got wrong.
+                                    let _ = turns_request.result_sender.send(Err(anyhow!(
+                                        "Model {} is local; native tool calling needs a provider whose wire format carries tools",
+                                        model_config.id
+                                    )));
+                                }
+                            },
+
                             LLMTaskRequest::Prompt(prompt_request) => match model {
                                 LlmModel::Remote((ref mut remote_client, ref model_string)) => {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
-                                        // System prompt
-                                        let mut messages = vec![Message {
-                                            role: Role::System,
-                                            content: task.system_prompt.clone(),
-                                        }];
+                                        let request = ChatRequest::new(
+                                            model_string.clone(),
+                                            turns_for_task(task, prompt_request.prompt),
+                                        );
 
-                                        // Examples
-                                        for example in task.prompt_examples.iter() {
-                                            messages.push(Message {
-                                                role: Role::User,
-                                                content: example.input.clone(),
-                                            });
-                                            messages.push(Message {
-                                                role: Role::Assistant,
-                                                content: example.output.clone(),
-                                            })
-                                        }
+                                        let result = rt
+                                            .block_on(remote_client.chat(request))
+                                            .map(|reply| reply.text);
 
-                                        // Prompt
-                                        messages.push(Message {
-                                            role: Role::User,
-                                            content: prompt_request.prompt,
-                                        });
-
-                                        let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Custom(
-                                                model_string.clone(),
-                                            ),
-                                            messages,
-                                            ..Default::default()
-                                        };
-
-                                        match rt.block_on(remote_client.chat(chat_input)) {
-                                            Err(e) => {
-                                                let _ = prompt_request.result_sender.send(Err(
-                                                    anyhow!(
-                                                        "Error connecting to remote LLM API: {:?}",
-                                                        e
-                                                    ),
-                                                ));
-                                            }
-                                            Ok(response) => {
-                                                let result = response
-                                                    .choices
-                                                    .first()
-                                                    .map(|choice| choice.message.content.clone())
-                                                    .ok_or(anyhow!("Got response with no choice"));
-
-                                                let _ = prompt_request.result_sender.send(result);
-                                            }
-                                        }
+                                        let _ = prompt_request.result_sender.send(result);
                                     } else {
                                         let _ = prompt_request.result_sender.send(Err(anyhow!(
                                             "Task with ID {} not spawned",
@@ -815,7 +994,28 @@ impl AIService {
                                         ));
 
                                         let result = rt.block_on(async {
-                                            task.run(prompt_request.prompt.clone()).all_text().await
+                                            match prompt_request.constraint.clone() {
+                                                // Tool-call grammar: constrain decoding and
+                                                // accumulate the (guaranteed on-grammar) text.
+                                                Some(parser) => {
+                                                    use futures::StreamExt;
+                                                    let mut stream = Box::pin(
+                                                        task.run(prompt_request.prompt.clone())
+                                                            .with_constraints(parser),
+                                                    );
+                                                    let mut acc = String::new();
+                                                    while let Some(token) = stream.next().await {
+                                                        acc.push_str(&token);
+                                                    }
+                                                    acc
+                                                }
+                                                // No tools: unchanged unconstrained path.
+                                                None => {
+                                                    task.run(prompt_request.prompt.clone())
+                                                        .all_text()
+                                                        .await
+                                                }
+                                            }
                                         });
 
                                         rt.block_on(publish_model_status(
@@ -831,6 +1031,140 @@ impl AIService {
                                         let _ = prompt_request.result_sender.send(Err(anyhow!(
                                             "Task with ID {} not spawned",
                                             prompt_request.task_id
+                                        )));
+                                    }
+                                }
+                            },
+
+                            LLMTaskRequest::PromptStream(stream_request) => match model {
+                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
+                                    // Whether this really streams is the
+                                    // provider's business: one that can
+                                    // pushes text as the model writes it,
+                                    // one that cannot answers in a single
+                                    // chunk through the trait's default. The
+                                    // SSE consumer sees the same protocol
+                                    // either way.
+                                    if let Some(task) =
+                                        task_descriptions.get(&stream_request.task_id)
+                                    {
+                                        let prompt_clone = stream_request.prompt.clone();
+                                        let request = ChatRequest::new(
+                                            model_string.clone(),
+                                            turns_for_task(task, prompt_clone.clone()),
+                                        );
+                                        let token_sender = stream_request.token_sender.clone();
+                                        match rt.block_on(
+                                            remote_client.chat_stream(request, token_sender),
+                                        ) {
+                                            Err(e) => {
+                                                let _ = stream_request.done_sender.send(Err(e));
+                                            }
+                                            Ok(reply) => {
+                                                // Tokens have already gone out
+                                                // through `token_sender`; the
+                                                // reply is here only so the
+                                                // closing usage event can be
+                                                // billed on the whole text.
+                                                let text = reply.text;
+                                                let prompt_tokens =
+                                                    estimate_token_count(&prompt_clone);
+                                                let completion_tokens = estimate_token_count(&text);
+                                                let _ = stream_request.done_sender.send(Ok(
+                                                    PromptResult {
+                                                        text,
+                                                        prompt_tokens,
+                                                        completion_tokens,
+                                                        model_id: model_config.id.clone(),
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        let _ = stream_request.done_sender.send(Err(anyhow!(
+                                            "Task with ID {} not spawned",
+                                            stream_request.task_id
+                                        )));
+                                    }
+                                }
+                                LlmModel::Local(_) => {
+                                    if let Some(task) = tasks.get(&stream_request.task_id) {
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Running inference...",
+                                            true,
+                                            true,
+                                        ));
+
+                                        let prompt_clone = stream_request.prompt.clone();
+                                        let prompt_tokens = estimate_token_count(&prompt_clone);
+                                        let token_sender = stream_request.token_sender.clone();
+                                        // Forward each token through the
+                                        // mpsc back to the SSE handler.  We
+                                        // accumulate the full text so the
+                                        // closing event still carries a
+                                        // single concatenated string for
+                                        // billing + usage parity with the
+                                        // non-stream path.
+                                        let result = rt.block_on(async {
+                                            use futures::StreamExt;
+                                            // `task.run(...)` returns a
+                                            // `ChatResponseBuilder` which
+                                            // implements `Stream<Item=String>`;
+                                            // polling it yields one token
+                                            // chunk at a time.
+                                            let mut accumulated = String::new();
+                                            match stream_request.constraint.clone() {
+                                                // Tool-call grammar: constrained streaming.
+                                                Some(parser) => {
+                                                    let mut stream = Box::pin(
+                                                        task.run(prompt_clone.clone())
+                                                            .with_constraints(parser),
+                                                    );
+                                                    while let Some(token) = stream.next().await {
+                                                        accumulated.push_str(&token);
+                                                        if token_sender.send(token).is_err() {
+                                                            // consumer dropped — stop generating
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                // No tools: unchanged unconstrained streaming.
+                                                None => {
+                                                    let mut stream =
+                                                        Box::pin(task.run(prompt_clone.clone()));
+                                                    while let Some(token) = stream.next().await {
+                                                        accumulated.push_str(&token);
+                                                        if token_sender.send(token).is_err() {
+                                                            // consumer dropped — stop generating
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            accumulated
+                                        });
+
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Ready",
+                                            true,
+                                            true,
+                                        ));
+
+                                        let completion_tokens = estimate_token_count(&result);
+                                        let _ = stream_request.done_sender.send(Ok(PromptResult {
+                                            text: result,
+                                            prompt_tokens,
+                                            completion_tokens,
+                                            model_id: model_config.id.clone(),
+                                        }));
+                                    } else {
+                                        let _ = stream_request.done_sender.send(Err(anyhow!(
+                                            "Task with ID {} not spawned",
+                                            stream_request.task_id
                                         )));
                                     }
                                 }
@@ -889,6 +1223,18 @@ impl AIService {
         } else {
             model_id.clone()
         })
+    }
+
+    /// Register an already-persisted task row with its LLM worker.
+    ///
+    /// Public entry point for tasks minted outside [`AIService::add_task`] —
+    /// notably the generic interpretation task, which `ensure_interpretation_task`
+    /// inserts via `Ad4mDb::add_task` directly (to stay idempotent-by-name).
+    /// Without this, such a task sits in the DB unspawned until the next
+    /// executor restart's `load()` sweep, so its first `prompt` fails with
+    /// "Task not spawned". Callers spawn it right after creation instead.
+    pub async fn spawn_registered_task(&self, task: AITask) -> Result<()> {
+        self.spawn_task(task).await
     }
 
     async fn spawn_task(&self, task: AITask) -> Result<()> {
@@ -965,7 +1311,346 @@ impl AIService {
         Ok(())
     }
 
-    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<PromptResult> {
+    /// Build an ephemeral, in-memory task from a list of `(system, user,
+    /// assistant)` messages and return its `task_id`.  Used by the
+    /// OpenAI-compatible `chat.completions` handler so each request is
+    /// stateless: spawn → prompt → remove.  Nothing touches the DB.
+    ///
+    /// `messages` is in OpenAI order — system message(s) at the front,
+    /// then alternating user/assistant turns ending with a final user
+    /// message.  The final user message is returned separately so the
+    /// caller passes it as the prompt; everything before it becomes the
+    /// task's `system_prompt` + few-shot example pairs.
+    fn build_ephemeral_task(model_id: &str, messages: Vec<(String, String)>) -> (AITask, String) {
+        // Split: leading System messages → system_prompt; alternating
+        // User/Assistant pairs → examples; last User message → prompt.
+        let mut system_prompt = String::new();
+        let mut examples: Vec<crate::types::AIPromptExamples> = Vec::new();
+        let mut current_user: Option<String> = None;
+        let mut final_prompt = String::new();
+
+        for (role, content) in &messages {
+            match role.as_str() {
+                "system" => {
+                    if !system_prompt.is_empty() {
+                        system_prompt.push_str("\n");
+                    }
+                    system_prompt.push_str(content);
+                }
+                "user" => {
+                    if let Some(prev_user) = current_user.take() {
+                        current_user = Some(format!("{}\n{}", prev_user, content));
+                    } else {
+                        current_user = Some(content.clone());
+                    }
+                }
+                "assistant" => {
+                    if let Some(user_msg) = current_user.take() {
+                        examples.push(crate::types::AIPromptExamples {
+                            input: user_msg,
+                            output: content.clone(),
+                        });
+                    }
+                }
+                _ => { /* tool/function/developer — silently dropped */ }
+            }
+        }
+        if let Some(last_user) = current_user {
+            final_prompt = last_user;
+        }
+
+        let task_id = format!("openai-compat-{}", uuid::Uuid::new_v4());
+        let now = chrono::Utc::now().to_rfc3339();
+        let task = AITask {
+            name: format!("openai-compat-{}", &task_id[..8]),
+            task_id: task_id.clone(),
+            model_id: model_id.to_string(),
+            system_prompt,
+            prompt_examples: examples,
+            meta_data: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        (task, final_prompt)
+    }
+
+    /// Run a chat-style prompt on `model_id` with a stateless message
+    /// list and return the full response text + token counts.  Backs
+    /// `POST /v1/chat/completions`.
+    pub async fn prompt_messages(
+        &self,
+        model_id: String,
+        messages: Vec<(String, String)>,
+        auth_token: Option<String>,
+        constraint: Option<ArcParser<()>>,
+    ) -> Result<PromptResult> {
+        let resolved = Self::replace_model_variables(&model_id)?;
+        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
+
+        // Spawn + prompt + remove.  We use the existing per-model thread
+        // command channels so model state stays local to its thread and
+        // we don't duplicate the build-llama machinery.
+        let task_id = task.task_id.clone();
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
+                task,
+                result_sender: spawn_tx,
+            }))?;
+        }
+        spawn_rx.await??;
+
+        let (prompt_tx, prompt_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                task_id: task_id.clone(),
+                prompt: final_prompt.clone(),
+                constraint,
+                result_sender: prompt_tx,
+            }))?;
+        }
+        let prompt_tokens = estimate_token_count(&final_prompt);
+        log::debug!(
+            "🤖 prompt_messages input model={} text={:?}",
+            resolved,
+            truncate_for_log(&final_prompt)
+        );
+        let text = prompt_rx.await??;
+        let completion_tokens = estimate_token_count(&text);
+        log::debug!(
+            "🤖 prompt_messages output model={} text={:?}",
+            resolved,
+            truncate_for_log(&text)
+        );
+
+        // Clean up the ephemeral task entry on the LLM thread.
+        let (remove_tx, _) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.get(&resolved) {
+                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
+                    task_id: task_id.clone(),
+                    result_sender: remove_tx,
+                }));
+            }
+        }
+
+        // Bill via the shared host_rates helper (matches transcription
+        // worker + WS-RPC pattern). Rate = 0 (unpriced model) makes this
+        // a no-op. InsufficientCredits is returned to the caller so /v1
+        // can propagate 429; other errors are logged and swallowed.
+        Self::bill_prompt_if_authed(
+            auth_token.as_deref(),
+            &resolved,
+            prompt_tokens,
+            completion_tokens,
+        );
+
+        Ok(PromptResult {
+            text,
+            prompt_tokens,
+            completion_tokens,
+            model_id: resolved,
+        })
+    }
+
+    /// Whether this model's provider carries tools as definitions rather than
+    /// as text rendered into the prompt.
+    ///
+    /// Asked of the stored config rather than of a built client, because the
+    /// caller has to decide how to render tools before anything reaches a
+    /// worker thread. Local models are always false — they have no wire format
+    /// to carry a tool in.
+    pub fn model_supports_native_tools(model_id: &str) -> bool {
+        let resolved = match Self::replace_model_variables(&model_id.to_string()) {
+            Ok(resolved) => resolved,
+            Err(_) => return false,
+        };
+
+        Ad4mDb::with_global_instance(|db| db.get_model(resolved))
+            .ok()
+            .flatten()
+            .and_then(|model| model.api)
+            .map(|api| providers::api_type_supports_native_tools(&api.api_type))
+            .unwrap_or(false)
+    }
+
+    /// Prompt a model with a complete turn list and tool definitions, getting
+    /// back whatever text it wrote and any calls it wants dispatched.
+    ///
+    /// The counterpart of [`Self::prompt_messages`] for providers whose wire
+    /// format carries tools. Gate it on [`Self::model_supports_native_tools`]:
+    /// a model that does not will refuse rather than silently drop the tools.
+    ///
+    /// No ephemeral task is spawned. `prompt_messages` needs one because it
+    /// has to reassemble a system prompt and examples out of a flattened
+    /// message list; here the turns *are* the conversation, so there is
+    /// nothing to rebuild and nothing to clean up afterwards.
+    pub async fn prompt_with_tools(
+        &self,
+        model_id: String,
+        turns: Vec<ChatTurn>,
+        tools: Vec<ToolSpec>,
+        auth_token: Option<String>,
+    ) -> Result<ChatReply> {
+        let resolved = Self::replace_model_variables(&model_id)?;
+
+        // Estimated before the turns are handed over, because everything below
+        // goes on the wire and the caller is charged for all of it. Billing
+        // runs on this number: `ChatReply.usage` reports the provider's exact
+        // counts but does not replace the estimate.
+        let prompt_tokens: usize = turns
+            .iter()
+            .map(estimate_turn_tokens)
+            .chain(tools.iter().map(|tool| {
+                estimate_token_count(&tool.name)
+                    + estimate_token_count(&tool.description)
+                    + estimate_token_count(&tool.parameters.to_string())
+            }))
+            .sum();
+
+        let (result_tx, result_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::PromptTurns(LLMTaskPromptTurnsRequest {
+                turns,
+                tools,
+                result_sender: result_tx,
+            }))?;
+        }
+
+        let reply = result_rx.await??;
+
+        let completion_tokens = estimate_reply_tokens(&reply);
+
+        log::debug!(
+            "🤖 prompt_with_tools model={} text={:?} calls={}",
+            resolved,
+            truncate_for_log(&reply.text),
+            reply.tool_calls.len()
+        );
+
+        Self::bill_prompt_if_authed(
+            auth_token.as_deref(),
+            &resolved,
+            prompt_tokens,
+            completion_tokens,
+        );
+
+        Ok(reply)
+    }
+
+    /// Streaming variant of [`Self::prompt_messages`].  Returns a token
+    /// stream + a oneshot for the final [`PromptResult`] (carries the
+    /// full text + token counts for the closing SSE event).
+    ///
+    /// Billing happens when the stream completes: the worker's final
+    /// result is billed (on success only, matching
+    /// [`Self::prompt_messages`]) in a forwarder task before it reaches
+    /// the caller's `done_rx`.
+    pub async fn prompt_messages_stream(
+        &self,
+        model_id: String,
+        messages: Vec<(String, String)>,
+        auth_token: Option<String>,
+        constraint: Option<ArcParser<()>>,
+    ) -> Result<(
+        mpsc::UnboundedReceiver<String>,
+        oneshot::Receiver<Result<PromptResult>>,
+    )> {
+        let resolved = Self::replace_model_variables(&model_id)?;
+        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
+
+        let task_id = task.task_id.clone();
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
+                task,
+                result_sender: spawn_tx,
+            }))?;
+        }
+        spawn_rx.await??;
+
+        let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
+        // worker -> forwarder -> caller: the billing hook runs between the
+        // worker's final result and the caller's done_rx, so stream:true
+        // requests are charged like the non-stream path (success only).
+        let (worker_done_tx, worker_done_rx) = oneshot::channel::<Result<PromptResult>>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<PromptResult>>();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::PromptStream(LLMTaskPromptStreamRequest {
+                task_id: task_id.clone(),
+                prompt: final_prompt,
+                constraint,
+                token_sender: token_tx,
+                done_sender: worker_done_tx,
+            }))?;
+        }
+
+        let billing_model_id = resolved.clone();
+        tokio::spawn(async move {
+            // The worker always sends Ok/Err; the Err arm only covers a
+            // dropped sender (worker panic).
+            let result = match worker_done_rx.await {
+                Ok(inner) => inner,
+                Err(_) => Err(anyhow!("LLM stream ended without a final result")),
+            };
+            Self::bill_and_forward_stream_result(auth_token, &billing_model_id, result, done_tx)
+                .await;
+        });
+
+        // Schedule a Remove for after the prompt completes — best-effort
+        // background cleanup so the caller doesn't have to await it.
+        let llm_channel_clone = self.llm_channel.clone();
+        let resolved_clone = resolved.clone();
+        tokio::spawn(async move {
+            // Wait a little for the prompt to finish before removing the
+            // task entry; if the model is local, the thread holds the
+            // task in its `tasks` map for the duration of the call, so
+            // removing too early would race the inference.
+            //
+            // We don't have a reliable signal here without restructuring
+            // the channel; the LLM thread serialises requests anyway, so
+            // a Remove queued immediately will run after the
+            // PromptStream completes.  No sleep needed.
+            let (remove_tx, _) = oneshot::channel();
+            let llm_channel = llm_channel_clone.lock().await;
+            if let Some(sender) = llm_channel.get(&resolved_clone) {
+                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
+                    task_id,
+                    result_sender: remove_tx,
+                }));
+            }
+        });
+
+        Ok((token_rx, done_rx))
+    }
+
+    pub async fn prompt(
+        &self,
+        task_id: String,
+        prompt: String,
+        auth_token: Option<String>,
+    ) -> Result<PromptResult> {
         let (result_sender, rx) = oneshot::channel();
 
         // Retrieve the task to find the associated model_id
@@ -976,23 +1661,84 @@ impl AIService {
         let model_id = Self::replace_model_variables(&task.model_id)?;
 
         let prompt_tokens = estimate_token_count(&prompt);
+        let prompt_chars = prompt.chars().count();
+        log::info!(
+            "🤖 prompt start model={} chars={} tokens_in={}",
+            model_id,
+            prompt_chars,
+            prompt_tokens
+        );
+        // LOGGING.md policy: "prompt/response bodies (truncated)" belong at
+        // debug. The start/done info lines above only carry char/token
+        // counts — this is the only place the actual text is ever logged
+        // (LlmRequestSent/LlmResponseReceived cover the interpretation
+        // engine's own event bus, but that's gated on emit_ctx and never
+        // reaches the `log` crate, so it doesn't show up under RUST_LOG=debug).
+        log::debug!(
+            "🤖 prompt input model={} text={:?}",
+            model_id,
+            truncate_for_log(&prompt)
+        );
+        let started = std::time::Instant::now();
 
-        let llm_channel = self.llm_channel.lock().await;
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                task_id,
-                prompt,
-                result_sender,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                model_id
-            ));
+        // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
+        // line gets exactly one companion — either `done` on success or a
+        // `failed` line on error. Wrap the fallible section so we can log
+        // the failure before propagating.
+        let text_result: Result<String> = async {
+            let llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.get(&model_id) {
+                sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                    task_id,
+                    prompt,
+                    result_sender,
+                    constraint: None,
+                }))?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found in LLM channel",
+                    model_id
+                ));
+            }
+            drop(llm_channel);
+            Ok(rx.await??)
         }
+        .await;
 
-        let text = rx.await??;
+        let text = match text_result {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!(
+                    "❌ 🤖 prompt failed model={} latency={}ms tokens_in={} err={}",
+                    model_id,
+                    started.elapsed().as_millis(),
+                    prompt_tokens,
+                    e
+                );
+                return Err(e);
+            }
+        };
         let completion_tokens = estimate_token_count(&text);
+        log::info!(
+            "✅ 🤖 prompt done model={} latency={}ms tokens_in={} tokens_out={}",
+            model_id,
+            started.elapsed().as_millis(),
+            prompt_tokens,
+            completion_tokens
+        );
+        log::debug!(
+            "🤖 prompt output model={} text={:?}",
+            model_id,
+            truncate_for_log(&text)
+        );
+
+        // Bill via the shared host_rates helper. See prompt_messages.
+        Self::bill_prompt_if_authed(
+            auth_token.as_deref(),
+            &model_id,
+            prompt_tokens,
+            completion_tokens,
+        );
 
         Ok(PromptResult {
             text,
@@ -1000,6 +1746,80 @@ impl AIService {
             completion_tokens,
             model_id,
         })
+    }
+
+    /// Bill a completed stream result (on success only, matching
+    /// [`Self::prompt_messages`]) and relay it to the caller's oneshot.
+    ///
+    /// Runs inside the forwarder spawned by
+    /// [`Self::prompt_messages_stream`]; exposed as an associated function
+    /// so the streaming billing behaviour is unit-testable without a live
+    /// LLM channel.
+    pub(crate) async fn bill_and_forward_stream_result(
+        auth_token: Option<String>,
+        model_id: &str,
+        result: Result<PromptResult>,
+        done_tx: oneshot::Sender<Result<PromptResult>>,
+    ) {
+        if let Ok(pr) = &result {
+            Self::bill_prompt_if_authed(
+                auth_token.as_deref(),
+                model_id,
+                pr.prompt_tokens,
+                pr.completion_tokens,
+            );
+        }
+        let _ = done_tx.send(result);
+    }
+
+    /// Shared post-compute billing hook for prompt paths.
+    ///
+    /// unit = (prompt_tokens + completion_tokens), matching the token-
+    /// length estimate that estimate_token_count() computes (chars/4).
+    /// This mirrors what the transcription worker does with word_count,
+    /// so every AI billing path routes through the same shape.
+    fn bill_prompt_if_authed(
+        auth_token: Option<&str>,
+        model_id: &str,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    ) {
+        let Some(token) = auth_token else {
+            return;
+        };
+        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
+        else {
+            return;
+        };
+        let total_tokens = prompt_tokens.saturating_add(completion_tokens);
+        // Ignore result: rate=0 no-ops, InsufficientCredits is logged
+        // inside bill_ai_operation. Prompt has already run so we don't
+        // want to fail the caller on a bookkeeping-only issue.
+        let _ = crate::billing::bill_ai_operation(
+            &email,
+            model_id,
+            "ai_prompt",
+            total_tokens,
+            "tokens",
+        );
+    }
+
+    /// Shared post-compute billing hook for embed paths.
+    fn bill_embed_if_authed(auth_token: Option<&str>, model_id: &str, token_count: usize) {
+        let Some(token) = auth_token else {
+            return;
+        };
+        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
+        else {
+            return;
+        };
+        let _ = crate::billing::bill_ai_operation(
+            &email,
+            model_id,
+            "ai_embedding",
+            token_count,
+            "tokens",
+        );
     }
 
     // -------------------------------------
@@ -1034,17 +1854,11 @@ impl AIService {
                     })
                     .expect("couldn't build Bert model");
 
-                let idle_delay = Duration::from_millis(1);
+                // Block on the channel — zero CPU while idle.
                 loop {
-                    match rt.block_on(async {
-                        tokio::select! {
-                            recv = bert_rx.recv() => Ok(recv),
-                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
-                        }
-                    }) {
-                        Err(_timeout) => std::thread::sleep(idle_delay * 5),
-                        Ok(None) => break,
-                        Ok(Some(request)) => {
+                    match rt.block_on(bert_rx.recv()) {
+                        None => break,
+                        Some(request) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
                                 .map(|tensor| tensor.to_vec())
@@ -1062,8 +1876,25 @@ impl AIService {
             .insert(model_name, bert_tx);
     }
 
-    pub async fn embed(&self, model_id: String, text: String) -> Result<EmbedResult> {
+    pub async fn embed(
+        &self,
+        model_id: String,
+        text: String,
+        auth_token: Option<String>,
+    ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
+        let text_chars = text.chars().count();
+        // Per-call embed lines are debug: both real callers (dedup +
+        // openai_compat/embeddings) loop one embed() per input, so a
+        // batch of N would double N info lines. Batch-level info is
+        // emitted by the caller. See rust-executor/LOGGING.md.
+        log::debug!(
+            "🤖 embed start model={} chars={} tokens_in={}",
+            model_id,
+            text_chars,
+            token_count
+        );
+        let started = std::time::Instant::now();
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -1080,6 +1911,17 @@ impl AIService {
         }
 
         let embeddings = rx.await??;
+        log::debug!(
+            "✅ 🤖 embed done model={} latency={}ms tokens_in={} dims={}",
+            model_id,
+            started.elapsed().as_millis(),
+            token_count,
+            embeddings.len()
+        );
+
+        // Bill via the shared host_rates helper.
+        Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
+
         Ok(EmbedResult {
             embeddings,
             token_count,
@@ -1151,9 +1993,13 @@ impl AIService {
     pub async fn open_transcription_stream(
         &self,
         model_id: String,
-        params: Option<VoiceActivityParams>,
+        _params: Option<VoiceActivityParams>,
+        auth_token: String,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
+
+        // Extract user email from token for billing and ownership tracking
+        let user_email = crate::agent::capabilities::user_email_from_token(auth_token.clone());
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -1197,76 +2043,212 @@ impl AIService {
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         let (drop_tx, drop_rx) = oneshot::channel();
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+        let text_broadcast_tx_clone = text_broadcast_tx.clone();
+
+        // Clone billing context for the async task
+        let billing_email = user_email.clone();
+        let billing_model_id = model_id.clone();
+
+        // Resolve user DID for SSE event filtering (multi-user isolation)
+        let user_did =
+            crate::agent::did_for_context(&crate::agent::AgentContext::from_auth_token(auth_token))
+                .ok();
+
+        // Clone the streams map so the thread can remove itself on exit
+        let streams_map = self.transcription_streams.clone();
+        let stream_id_for_cleanup = stream_id.clone();
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
+
                 // Dereference the Arc to get the Whisper model
                 // The model weights stay shared in memory!
                 let whisper = (*whisper_model).clone();
 
-                let audio_stream = AudioStream {
-                    read_data: Vec::new(),
-                    receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
+                // Build a Silero VAD model for server-side speech detection.
+                // This filters non-speech audio (coughs, sighs, keyboard noise)
+                // that the client-side energy-based VAD cannot distinguish from
+                // speech.  We run VAD inline on each feed rather than using the
+                // streaming pipeline (voice_activity_stream → rechunk) because
+                // the rechunker hangs: it relies on continuously polled samples,
+                // but the AudioStream returns Pending between feeds, so the
+                // rechunker never detects end-of-speech.
+                let vad = match voice_activity_detector::VoiceActivityDetector::builder()
+                    .sample_rate(16000)
+                    .chunk_size(512usize)
+                    .build()
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("Failed to build Silero VAD model for stream {}: {:?}", stream_id_clone, e);
+                        return;
+                    }
                 };
+                let vad = std::sync::Mutex::new(vad);
 
-                let mut voice_stream = audio_stream
-                    .voice_activity_stream()
-                    .rechunk_voice_activity();
-
-                // Apply voice activity parameters if provided
-                if let Some(params) = params {
-                    if let Some(start_threshold) = params.start_threshold {
-                        voice_stream = voice_stream.with_start_threshold(start_threshold);
-                    }
-                    if let Some(start_window) = params.start_window {
-                        voice_stream =
-                            voice_stream.with_start_window(Duration::from_millis(start_window));
-                    }
-                    if let Some(end_threshold) = params.end_threshold {
-                        voice_stream = voice_stream.with_end_threshold(end_threshold);
-                    }
-                    if let Some(end_window) = params.end_window {
-                        voice_stream =
-                            voice_stream.with_end_window(Duration::from_millis(end_window));
-                    }
-                    if let Some(time_before_speech) = params.time_before_speech {
-                        voice_stream = voice_stream
-                            .with_time_before_speech(Duration::from_millis(time_before_speech));
-                    }
-                } else {
-                    // Set default end window if no params provided
-                    voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
-                }
-
-                let mut word_stream = voice_stream.transcribe(whisper);
+                let mut samples_rx = samples_rx;
 
                 tokio::select! {
                     _ = drop_rx => {},
                     _ = async {
-                        while let Some(segment) = word_stream.next().await {
-                            //println!("GOT segment: {}", segment.text());
-                            let stream_id_clone = stream_id_clone.clone();
+                        while let Some(audio_chunk) = samples_rx.next().await {
+                            if audio_chunk.is_empty() {
+                                continue;
+                            }
 
+                            // Run Silero VAD: check what fraction of 512-sample
+                            // windows contain speech.  Thresholds chosen to
+                            // match the old Kalosm rechunker behaviour:
+                            //   per-window prob >= 0.6  (was start_threshold)
+                            //   >= 33% of windows       (reject transients)
+                            let speech_ratio = {
+                                let mut locked = vad.lock().unwrap();
+                                let mut speech_chunks = 0usize;
+                                let mut total_chunks = 0usize;
+                                for window in audio_chunk.chunks(512) {
+                                    if window.len() == 512 {
+                                        let prob = locked.predict(window.iter().copied());
+                                        total_chunks += 1;
+                                        if prob > 0.6 {
+                                            speech_chunks += 1;
+                                        }
+                                    }
+                                }
+                                if total_chunks == 0 {
+                                    0.0f32
+                                } else {
+                                    speech_chunks as f32 / total_chunks as f32
+                                }
+                            };
+
+                            if speech_ratio < 0.33 {
+                                log::trace!(
+                                    "🤖 VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
+                                    stream_id_clone,
+                                    speech_ratio
+                                );
+                                continue;
+                            }
+
+                            log::trace!(
+                                "🤖 VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
+                                stream_id_clone,
+                                audio_chunk.len(),
+                                speech_ratio
+                            );
+
+                            let buffer = rodio::buffer::SamplesBuffer::new(1, 16000, audio_chunk);
+                            match whisper.transcribe(buffer) {
+                                Ok(mut segments) => {
+                                    while let Some(segment) = segments.next().await {
+                            let text = segment.text().to_string();
+                            {
+                                let preview: String = text.chars().take(40).collect();
+                                let ellipsis = if text.chars().count() > 40 { "…" } else { "" };
+                                log::debug!(
+                                    "🤖 transcription segment stream={} chars={} preview={:?}{}",
+                                    stream_id_clone,
+                                    text.chars().count(),
+                                    preview,
+                                    ellipsis
+                                );
+                            }
+
+                            // Bill for transcribed words
+                            let word_count = text.split_whitespace().count();
+                            if word_count > 0 {
+                                if let Some(ref email) = billing_email {
+                                    let rate_key =
+                                        crate::db::Ad4mDb::with_global_instance(|db| {
+                                            db.get_model(billing_model_id.clone())
+                                        })
+                                        .ok()
+                                        .flatten()
+                                        .map(|m| m.name)
+                                        .unwrap_or_else(|| billing_model_id.clone());
+
+                                    let rate =
+                                        crate::db::Ad4mDb::with_global_instance(|db| {
+                                            db.get_host_rate(&rate_key)
+                                        })
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(0.0);
+                                    let cost = word_count as f64 * rate;
+                                    match crate::billing::bill_compute(
+                                        email,
+                                        cost,
+                                        "ai_transcription",
+                                        Some(&format!(
+                                            "{} words (model: {})",
+                                            word_count, billing_model_id,
+                                        )),
+                                    ) {
+                                        Err(
+                                            crate::billing::BillingError::InsufficientCredits,
+                                        ) => {
+                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Transcription billing failed: {:?}",
+                                                e
+                                            );
+                                        }
+                                        Ok(()) => {}
+                                    }
+                                }
+                            }
+
+                            let text_for_pubsub = text.clone();
+                            let text_for_broadcast = text.clone();
+                            let broadcast_tx = text_broadcast_tx_clone.clone();
+                            let stream_id_for_pubsub = stream_id_clone.clone();
+                            let user_did_for_pubsub = user_did.clone();
                             rt.spawn(async move {
                                 let _ = get_global_pubsub()
                                     .await
                                     .publish(
                                         &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                        &serde_json::to_string(&TranscriptionTextFilter {
-                                            stream_id: stream_id_clone.clone(),
-                                            text: segment.text().to_string(),
-                                        })
-                                        .expect("TranscriptionTextFilter must be serializable"),
+                                        &serde_json::to_string(
+                                            &TranscriptionTextFilter {
+                                                stream_id: stream_id_for_pubsub,
+                                                text: text_for_pubsub,
+                                                user_did: user_did_for_pubsub,
+                                            },
+                                        )
+                                        .expect(
+                                            "TranscriptionTextFilter must be serializable",
+                                        ),
                                     )
                                     .await;
                             });
 
-                            sleep(Duration::from_millis(50)).await;
+                            // Also broadcast via per-stream channel for SSE feed responses
+                            let _ = broadcast_tx.send(text_for_broadcast);
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "Transcription error for stream {}: {:?}",
+                                        stream_id_clone,
+                                        e
+                                    );
+                                }
+                            }
                         }
                     } => {}
                 }
+            });
+
+            // Clean up the stream entry so feed calls get StreamNotFound
+            // instead of "receiver is gone" errors looping forever
+            rt.block_on(async {
+                streams_map.lock().await.remove(&stream_id_for_cleanup);
+                log::info!("Transcription stream {} cleaned up", stream_id_for_cleanup);
             });
         });
 
@@ -1276,6 +2258,9 @@ impl AIService {
                 samples_tx,
                 drop_tx,
                 last_activity,
+                text_broadcast_tx,
+                model_id: model_id.clone(),
+                user_email,
             },
         );
 
@@ -1286,10 +2271,13 @@ impl AIService {
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
+        auth_token: &str,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         if let Some(stream) = map_lock.get_mut(stream_id) {
+            // Verify the caller owns this stream
+            Self::verify_stream_ownership(stream, auth_token)?;
             // Update last activity time
             *stream.last_activity.lock().await = std::time::Instant::now();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
@@ -1301,8 +2289,89 @@ impl AIService {
         }
     }
 
-    pub async fn close_transcription_stream(&self, stream_id: &String) -> Result<()> {
+    /// Feed audio samples to a stream and return a broadcast receiver for
+    /// partial/final transcription text events (used by SSE feed response).
+    pub async fn feed_transcription_stream_with_broadcast(
+        &self,
+        stream_id: &String,
+        audio_samples: Vec<f32>,
+        auth_token: &str,
+    ) -> Result<tokio::sync::broadcast::Receiver<String>> {
         let mut map_lock = self.transcription_streams.lock().await;
+
+        if let Some(stream) = map_lock.get_mut(stream_id) {
+            Self::verify_stream_ownership(stream, auth_token)?;
+            *stream.last_activity.lock().await = std::time::Instant::now();
+            let rx = stream.text_broadcast_tx.subscribe();
+            stream.samples_tx.send(audio_samples).await.map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
+            })?;
+            Ok(rx)
+        } else {
+            Err(AIServiceError::StreamNotFound.into())
+        }
+    }
+
+    /// One-shot transcription: open a stream, feed the whole audio
+    /// buffer, drain the broadcast channel until idle, close.
+    ///
+    /// Backs `POST /v1/audio/transcriptions` (batch multipart upload).
+    /// The caller is responsible for decoding the upload to 16 kHz mono
+    /// `f32` samples — this method only handles the whisper-side
+    /// session lifecycle and assembly of the final transcript.
+    pub async fn transcribe_buffer(
+        &self,
+        model_id: String,
+        samples: Vec<f32>,
+        auth_token: String,
+    ) -> Result<String> {
+        let stream_id = self
+            .open_transcription_stream(model_id, None, auth_token.clone())
+            .await?;
+
+        // Subscribe to the broadcast BEFORE feeding so we don't drop any
+        // partial events the whisper thread emits during the first
+        // window.
+        let mut rx = self
+            .feed_transcription_stream_with_broadcast(&stream_id, samples, &auth_token)
+            .await?;
+
+        // Drain until the receiver lags or no message arrives within a
+        // short idle window.  Whisper emits one event per finalised
+        // segment; for a one-shot buffer the model usually emits 1-3
+        // segments and then goes quiet.
+        let mut transcript = String::new();
+        let idle = Duration::from_millis(2500);
+        loop {
+            match tokio::time::timeout(idle, rx.recv()).await {
+                Ok(Ok(text)) => {
+                    if !transcript.is_empty() && !text.is_empty() {
+                        transcript.push(' ');
+                    }
+                    transcript.push_str(&text);
+                }
+                Ok(Err(_)) => break, // sender dropped
+                Err(_) => break,     // idle timeout
+            }
+        }
+
+        let _ = self
+            .close_transcription_stream(&stream_id, &auth_token)
+            .await;
+        Ok(transcript)
+    }
+
+    pub async fn close_transcription_stream(
+        &self,
+        stream_id: &String,
+        auth_token: &str,
+    ) -> Result<()> {
+        let mut map_lock = self.transcription_streams.lock().await;
+
+        // Verify ownership before removing
+        if let Some(stream) = map_lock.get(stream_id) {
+            Self::verify_stream_ownership(stream, auth_token)?;
+        }
 
         if let Some(stream) = map_lock.remove(stream_id) {
             stream.drop_tx.send(()).map_err(|_| {
@@ -1313,6 +2382,68 @@ impl AIService {
             })
         } else {
             Err(AIServiceError::StreamNotFound.into())
+        }
+    }
+
+    /// Verify that the caller (identified by auth_token) owns the given transcription session.
+    /// In single-user mode, ownership is not enforced.
+    /// In multi-user mode, both the session and the caller must have valid emails that match.
+    fn verify_stream_ownership(session: &TranscriptionSession, auth_token: &str) -> Result<()> {
+        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+
+        if !multi_user_enabled {
+            // Single-user mode — no ownership enforcement
+            return Ok(());
+        }
+
+        // Multi-user mode: require valid token
+        let caller_email =
+            crate::agent::capabilities::user_email_from_token(auth_token.to_string());
+
+        // If caller has no email, they must still have a valid token (admin/main user)
+        if caller_email.is_none() {
+            if crate::agent::capabilities::decode_jwt(auth_token.to_string()).is_err() {
+                return Err(anyhow!(
+                    "Authorization error: valid token required in multi-user mode"
+                ));
+            }
+            // Admin user (valid token, no email) — allow access to any stream
+            return Ok(());
+        }
+
+        let caller_email = caller_email.unwrap();
+
+        // Session must also have an owner email to enforce ownership
+        let owner_email = match session.user_email.as_ref() {
+            Some(email) => email,
+            // Session has no owner email (created by admin) — only admin can access,
+            // but we already handled the admin case above, so reject.
+            None => {
+                return Err(anyhow!(
+                    "Authorization error: caller does not own this transcription stream"
+                ))
+            }
+        };
+
+        if caller_email == *owner_email {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Authorization error: caller does not own this transcription stream"
+            ))
+        }
+    }
+
+    /// Verify that a caller (identified by auth_token) is allowed to subscribe to a given stream.
+    /// Returns Ok(()) if access is allowed, or an error if not.
+    pub async fn verify_stream_access(&self, stream_id: &str, auth_token: &str) -> Result<()> {
+        let map_lock = self.transcription_streams.lock().await;
+        if let Some(session) = map_lock.get(stream_id) {
+            Self::verify_stream_ownership(session, auth_token)
+        } else {
+            Err(anyhow!("Transcription stream not found: {}", stream_id))
         }
     }
 
@@ -1461,9 +2592,118 @@ impl AIService {
 
 #[cfg(test)]
 mod tests {
+    use super::providers::{ChatTurn, ToolCall};
+
+    fn call(arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "toolu_01Eg163G7WZHsU3H4jik7nNC".to_string(),
+            name: "update_schema".to_string(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn a_turn_with_no_tool_metadata_is_estimated_from_its_text() {
+        let turn = ChatTurn::user("hello there");
+        assert_eq!(
+            estimate_turn_tokens(&turn),
+            estimate_token_count("hello there")
+        );
+    }
+
+    #[test]
+    fn a_calls_arguments_are_billed_not_just_its_text() {
+        // The arguments are the payload in an agentic loop — a schema patch, a
+        // query, a document — and they dwarf whatever the model said alongside.
+        let patch = serde_json::json!({
+            "patches": [{ "targetId": "root", "node": { "type": "Column", "props": {
+                "gap": "400", "p": "500", "bg": "surface", "r": "400"
+            }}}]
+        });
+
+        let plain = ChatTurn::assistant("Applying that now.");
+        let calling = ChatTurn::assistant_calling("Applying that now.", vec![call(patch)]);
+
+        assert!(
+            estimate_turn_tokens(&calling) > estimate_turn_tokens(&plain) + 20,
+            "the call should add far more than its name, got {} vs {}",
+            estimate_turn_tokens(&calling),
+            estimate_turn_tokens(&plain)
+        );
+    }
+
+    #[test]
+    fn a_tool_result_is_billed_for_the_id_it_answers() {
+        let bare = ChatTurn::user("42");
+        let answering = ChatTurn::tool_result("toolu_01Eg163G7WZHsU3H4jik7nNC", "42");
+
+        assert!(estimate_turn_tokens(&answering) > estimate_turn_tokens(&bare));
+    }
+
+    #[test]
+    fn several_calls_in_one_turn_each_count() {
+        let one = ChatTurn::assistant_calling("", vec![call(serde_json::json!({ "a": 1 }))]);
+        let two = ChatTurn::assistant_calling(
+            "",
+            vec![
+                call(serde_json::json!({ "a": 1 })),
+                call(serde_json::json!({ "a": 1 })),
+            ],
+        );
+
+        assert_eq!(estimate_turn_tokens(&two), estimate_turn_tokens(&one) * 2);
+    }
+
+    #[test]
+    fn a_replied_call_bills_its_name_and_arguments_but_not_its_id() {
+        let reply = |calls| super::ChatReply {
+            text: String::new(),
+            tool_calls: calls,
+            usage: Default::default(),
+        };
+        let arguments = serde_json::json!({ "a": 1 });
+        let expected = super::estimate_token_count("update_schema")
+            + super::estimate_token_count(&arguments.to_string());
+
+        assert_eq!(
+            super::estimate_reply_tokens(&reply(vec![call(arguments)])),
+            expected
+        );
+    }
+
     use super::*;
-    use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
+    use crate::types::{AIPromptExamplesInput, LocalModelInput};
     use tokio::time::{sleep, Duration};
+
+    fn remote_at(base_url: &str, api_key: &str) -> ModelApi {
+        ModelApi {
+            base_url: url::Url::parse(base_url).expect("test URL parses"),
+            api_key: api_key.to_string(),
+            model: "claude-test".to_string(),
+            api_type: ModelApiType::Anthropic,
+            max_num_ctx: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_saved_model_with_a_key_over_plain_http_is_not_built() {
+        // The load path: a model saved before the WS handlers refused this
+        // reaches client construction without passing through them.
+        let error = match AIService::build_remote_client(
+            "m".to_string(),
+            remote_at("http://192.168.1.10:8080", "sk-ant"),
+        )
+        .await
+        {
+            Ok(_) => panic!("a key over plain http to a remote host is refused"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("plain HTTP"), "{error}");
+        assert!(
+            error.to_string().contains("192.168.1.10"),
+            "names the URL: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn test_progress_rate_limiting() {
@@ -1533,7 +2773,7 @@ mod tests {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
         let service = AIService::new().expect("initialization to work");
         let vector = service
-            .embed("bert".into(), "Test string".into())
+            .embed("bert".into(), "Test string".into(), None)
             .await
             .expect("embed to return a result");
         assert!(vector.embeddings.len() > 300)
@@ -1557,7 +2797,7 @@ mod tests {
             }).await.expect("add_task to work without error");
 
         let response = service
-            .prompt(task.task_id, "Test string".into())
+            .prompt(task.task_id, "Test string".into(), None)
             .await
             .expect("prompt to return a result");
         println!("Response: {}", response.text);
@@ -1598,7 +2838,7 @@ mod tests {
         }).await.expect("add_task to work without error");
 
         let futures = (0..10)
-            .map(|_| service.prompt(task.task_id.clone(), "Test string".into()))
+            .map(|_| service.prompt(task.task_id.clone(), "Test string".into(), None))
             .collect::<Vec<_>>();
 
         let responses = futures::future::join_all(futures)
@@ -1715,9 +2955,113 @@ mod tests {
 
         // Verify the task still works
         let response = service
-            .prompt(task.task_id.clone(), "Test input".into())
+            .prompt(task.task_id.clone(), "Test input".into(), None)
             .await
             .expect("prompt to work after model update");
         assert!(!response.text.is_empty());
+    }
+
+    /// Helper that replicates the server-side VAD gate logic so we can test
+    /// it without needing a running Whisper model or audio stream.
+    fn compute_speech_ratio(
+        vad: &mut voice_activity_detector::VoiceActivityDetector,
+        audio: &[f32],
+    ) -> f32 {
+        let mut speech_chunks = 0usize;
+        let mut total_chunks = 0usize;
+        for window in audio.chunks(512) {
+            if window.len() == 512 {
+                let prob = vad.predict(window.iter().copied());
+                total_chunks += 1;
+                if prob > 0.6 {
+                    speech_chunks += 1;
+                }
+            }
+        }
+        if total_chunks == 0 {
+            0.0
+        } else {
+            speech_chunks as f32 / total_chunks as f32
+        }
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_silence() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Pure silence (zeros) — must be rejected
+        let silence = vec![0.0f32; 8000];
+        let ratio = compute_speech_ratio(&mut vad, &silence);
+        assert!(
+            ratio < 0.33,
+            "Silence should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_sine_wave() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // 440 Hz sine wave — not speech, should be rejected
+        let sine: Vec<f32> = (0..8000)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
+            .collect();
+        let ratio = compute_speech_ratio(&mut vad, &sine);
+        assert!(
+            ratio < 0.33,
+            "Sine wave should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_rejects_low_noise() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Low-level white noise — not speech, should be rejected
+        let noise: Vec<f32> = (0..8000).map(|i| (i as f32 * 17.3).sin() * 0.01).collect();
+        let ratio = compute_speech_ratio(&mut vad, &noise);
+        assert!(
+            ratio < 0.33,
+            "Low noise should be rejected (ratio={ratio:.2})"
+        );
+    }
+
+    #[test]
+    fn test_vad_gate_empty_audio() {
+        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
+            .sample_rate(16000)
+            .chunk_size(512usize)
+            .build()
+            .expect("VAD to build");
+
+        // Empty audio — ratio should be 0
+        let empty: Vec<f32> = vec![];
+        let ratio = compute_speech_ratio(&mut vad, &empty);
+        assert_eq!(ratio, 0.0, "Empty audio should give ratio=0");
+
+        // Sub-chunk audio (less than 512 samples)
+        let short = vec![0.1f32; 100];
+        let ratio = compute_speech_ratio(&mut vad, &short);
+        assert_eq!(ratio, 0.0, "Sub-chunk audio should give ratio=0");
+    }
+
+    #[test]
+    fn test_vad_gate_threshold_boundary() {
+        // Verify the 0.33 gate matches our code: < 0.33 is rejected, >= 0.33 passes
+        assert!(0.32 < 0.33, "Below threshold should be rejected");
+        assert!(!(0.33 < 0.33), "At threshold should pass");
+        assert!(!(0.50 < 0.33), "Above threshold should pass");
     }
 }

@@ -1,6 +1,7 @@
 import { ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, apolloClient } from "../utils/utils.js";
+import { startExecutor, baseUrl, quitExecutor } from "../utils/utils.js";
 import { getFreePorts, registerPorts, deregisterPorts } from "./ports.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -44,8 +45,8 @@ const BOOTSTRAP_SEED = path.join(__dirname, "..", "bootstrapSeed.json");
 export type AgentHandle = {
   /** Connected Ad4mClient ready for use */
   client: Ad4mClient;
-  /** gqlPort — useful if a second client needs to connect to the same executor */
-  gqlPort: number;
+  /** apiPort — useful if a second client needs to connect to the same executor */
+  apiPort: number;
   /** Kills the executor process; safe to call multiple times */
   stop(): Promise<void>;
 };
@@ -68,69 +69,85 @@ export async function startAgent(
     /** When set, starts the executor in admin-credential mode and connects
      *  the returned client using that credential as the bearer token. */
     adminCredential?: string;
+    /** Start the Holochain conductor. Defaults to false when
+     *  LOCAL_MODE=true, true otherwise. */
+    runHolochain?: boolean;
   } = {},
 ): Promise<AgentHandle> {
-  const [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+  const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
 
   // Register so cleanup.js can kill stray executors if mocha is force-killed
-  registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+  registerPorts([apiPort, hcAdminPort, hcAppPort]);
 
   const appDataPath = path.join(TEST_DIR, "agents", agentName);
+
+  // Remove stale agent data — Oxigraph DB format may change between branches
+  // and the self-hosted CI runner retains tst-tmp/ across jobs.
+  fs.rmSync(appDataPath, { recursive: true, force: true });
+
   const bootstrapSeedPath = opts.bootstrapSeedPath ?? BOOTSTRAP_SEED;
+  const runHolochain = opts.runHolochain ?? (process.env.LOCAL_MODE !== 'true');
 
   const executorProcess = await startExecutor(
     appDataPath,
     bootstrapSeedPath,
-    gqlPort,
+    apiPort,
     hcAdminPort,
     hcAppPort,
     false,
     opts.adminCredential,
+    undefined,   // proxyUrl
+    undefined,   // bootstrapUrl
+    undefined,   // relayUrl
+    false,       // enableMcp
+    undefined,   // mcpPort
+    undefined,   // dynamicClassTools
+    runHolochain,
   );
   _activeExecutors.add(executorProcess);
 
-  const client = new Ad4mClient(apolloClient(gqlPort, opts.adminCredential));
+  const client = new Ad4mClient(baseUrl(apiPort), opts.adminCredential);
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
   await client.runtime.setMultiUserEnabled(true);
 
   async function stop(): Promise<void> {
     _activeExecutors.delete(executorProcess);
-    deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
-    await new Promise<void>((resolve) => {
-      // Already exited?
-      if (executorProcess.exitCode !== null) {
-        resolve();
-        return;
+    deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
+
+    // Close the Ad4mClient first so its WebSocket ping timer and reconnect
+    // schedule stop running.  Without this, the un-unref'd timers in
+    // ApiClient keep the Node event loop alive past mocha's `--exit`
+    // boundary in the shared-agent suite (model), and the job hangs until
+    // CircleCI's 30 minute no-output deadline.
+    try {
+      client.close();
+    } catch {}
+
+    // Prefer the REST `/runtime/quit` endpoint over a raw SIGTERM here.
+    // `quitExecutor` matches the shutdown pattern that the other passing
+    // suites (prolog-and-literals, app, etc.) already use and falls back
+    // to SIGTERM → SIGKILL on its own.
+    try {
+      await quitExecutor(executorProcess, apiPort, opts.adminCredential);
+    } catch {
+      // quitExecutor already escalates internally; the only way to land here
+      // is a programming error, in which case kill is still the right thing.
+      if (executorProcess.exitCode === null && !executorProcess.killed) {
+        try { executorProcess.kill("SIGKILL"); } catch {}
       }
-      // Resolve when the process actually exits (not just when the signal is sent).
-      // This prevents the next test from starting while SurrealDB/HC ports are still held.
-      const fallbackTimer = setTimeout(() => {
-        try {
-          executorProcess.kill("SIGKILL");
-        } catch {}
-        resolve();
-      }, 15_000);
-      fallbackTimer.unref();
-      executorProcess.once("exit", () => {
-        clearTimeout(fallbackTimer);
-        resolve();
-      });
-      if (!executorProcess.killed) {
-        executorProcess.kill("SIGTERM");
-      }
-    });
+    }
   }
 
-  return { client, gqlPort, stop };
+  return { client, apiPort, stop };
 }
 
 /**
  * Starts a second Ad4mClient that connects to an already-running executor
- * (identified by its gqlPort).  Useful for testing multi-client scenarios
+ * (identified by its apiPort).  Useful for testing multi-client scenarios
  * without spawning an extra executor process.
  */
-export function connectClient(gqlPort: number, token?: string): Ad4mClient {
-  return new Ad4mClient(apolloClient(gqlPort, token));
+export function connectClient(apiPort: number, token?: string): Ad4mClient {
+  return new Ad4mClient(baseUrl(apiPort), token);
 }
 
 export { TEST_DIR, BOOTSTRAP_SEED };

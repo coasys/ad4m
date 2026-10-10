@@ -1,1 +1,1 @@
-export const AD4M_ENDPOINT = "ws://localhost:4000/graphql";
+export const AD4M_ENDPOINT = "http://localhost:4000";

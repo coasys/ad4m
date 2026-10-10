@@ -1,0 +1,141 @@
+use axum::{extract::FromRequestParts, http::request::Parts};
+
+use super::errors::ApiError;
+use crate::agent::capabilities::{
+    capabilities_on, is_admin_credential_token_on, user_email_from_token, Capability, ListenerReach,
+};
+use crate::agent::AgentService;
+use crate::types::RequestContext;
+
+/// Auth context extracted from the Authorization header.
+/// Constructs the RequestContext from auth headers.
+#[derive(Clone)]
+pub struct AuthContext {
+    pub capabilities: Result<Vec<Capability>, String>,
+    pub auto_permit_cap_requests: bool,
+    pub auth_token: String,
+    pub is_admin_credential: bool,
+}
+
+impl AuthContext {
+    /// Convert to the existing RequestContext used by internal functions.
+    pub fn to_request_context(&self) -> RequestContext {
+        let user_email = user_email_from_token(self.auth_token.clone());
+        let user_did = user_email
+            .as_ref()
+            .and_then(|email| AgentService::get_user_did_by_email(email).ok());
+        RequestContext {
+            capabilities: self.capabilities.clone(),
+            auto_permit_cap_requests: self.auto_permit_cap_requests,
+            auth_token: self.auth_token.clone(),
+            is_admin_credential: self.is_admin_credential,
+            user_email,
+            user_did,
+            cancel_token: None,
+        }
+    }
+}
+
+/// AppState shared across all API handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub admin_credential: Option<String>,
+    pub auto_permit_cap_requests: bool,
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for AuthContext
+where
+    AppState: FromRef<S>,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+
+        let auth_header = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.strip_prefix("Bearer ").unwrap_or(s))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                parts
+                    .uri
+                    .query()
+                    .and_then(|q| {
+                        url::form_urlencoded::parse(q.as_bytes())
+                            .find(|(k, _)| k == "token")
+                            .map(|(_, v)| v.to_string())
+                    })
+                    .unwrap_or_default()
+            });
+
+        // Track last_seen for multi-user mode
+        crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;
+
+        let reach = listener_reach(parts);
+        let capabilities = capabilities_on(
+            auth_header.clone(),
+            app_state.admin_credential.clone(),
+            reach,
+        );
+        let is_admin_credential =
+            is_admin_credential_token_on(&auth_header, &app_state.admin_credential, reach);
+
+        Ok(AuthContext {
+            capabilities,
+            auto_permit_cap_requests: app_state.auto_permit_cap_requests,
+            auth_token: auth_header,
+            is_admin_credential,
+        })
+    }
+}
+
+/// Headers a reverse proxy sets to name the client it forwards for.
+const FORWARDING_HEADERS: [&str; 3] = ["forwarded", "x-forwarded-for", "x-real-ip"];
+
+/// The reach of the caller behind a request: the listener's, as `api::listener_router` marked
+/// it, unless the request says a proxy forwarded it.
+///
+/// An unmarked router reads as `Network`: nothing has shown that its callers are on this
+/// machine, so an anonymous caller there is not the operator.
+///
+/// A proxy on this machine (nginx, Caddy, cloudflared) connects to a loopback listener, so
+/// its clients would read as `Loopback`. A request to a loopback listener that carries a
+/// forwarding header is `Network`. Local tools do not send these headers, and a caller that
+/// forges one can only make itself anonymous. A proxy that sets none of them (a raw TCP
+/// forward, `ssh -R`) still reads as `Loopback`: only an admin credential covers that.
+pub fn listener_reach(parts: &Parts) -> ListenerReach {
+    let marked = parts
+        .extensions
+        .get::<ListenerReach>()
+        .copied()
+        .unwrap_or(ListenerReach::Network);
+    let forwarded = FORWARDING_HEADERS
+        .iter()
+        .any(|name| parts.headers.contains_key(*name));
+    if forwarded {
+        ListenerReach::Network
+    } else {
+        marked
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ListenerReach {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(listener_reach(parts))
+    }
+}
+
+/// Needed for axum's FromRef to extract AppState from the router state.
+pub trait FromRef<T> {
+    fn from_ref(input: &T) -> Self;
+}
+
+impl FromRef<AppState> for AppState {
+    fn from_ref(input: &AppState) -> Self {
+        input.clone()
+    }
+}

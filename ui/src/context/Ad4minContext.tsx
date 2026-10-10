@@ -1,8 +1,4 @@
-import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
-import {
-  ExceptionInfo,
-  Notification as NotificationType,
-} from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { Ad4mClient, ExceptionType, Notification as NotificationType } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { sendNotification } from "@tauri-apps/plugin-notification";
@@ -162,7 +158,7 @@ export function Ad4minProvider({ children }: any) {
       }));
 
       if (login) {
-        client.runtime.addExceptionCallback((exception: ExceptionInfo) => {
+        client.on("exception-occurred", ({ exception }) => {
           if (exception.type === ExceptionType.AgentIsUntrusted) {
             setState((prev) => ({
               ...prev,
@@ -193,11 +189,9 @@ export function Ad4minProvider({ children }: any) {
           });
           console.log(exception);
           invoke("show_main_window");
-          return null;
         });
 
-        // @ts-ignore
-        client.runtime.addNotificationTriggeredCallback((notification) => {
+        client.on("notification-triggered", ({ notification }) => {
           console.log("Notification triggered: ", notification);
           const match = notification.triggerMatch;
           const parsed = JSON.parse(match);
@@ -271,9 +265,7 @@ export function Ad4minProvider({ children }: any) {
     } else {
       invoke<{ port: number; tls_enabled: boolean }>("get_port").then((portInfo) => {
         if (portInfo) {
-          // Always use ws://localhost since we run a plain HTTP server
-          // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
-          const url = `ws://localhost:${portInfo.port}/graphql`;
+          const url = `http://localhost:${portInfo.port}`;
           connect(url);
         }
       });
@@ -284,9 +276,7 @@ export function Ad4minProvider({ children }: any) {
     appWindow.listen("ready", async () => {
       const portInfo = await invoke<{ port: number; tls_enabled: boolean }>("get_port");
       if (portInfo) {
-        // Always use ws://localhost since we run a plain HTTP server
-        // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
-        const url = `ws://localhost:${portInfo.port}/graphql`;
+        const url = `http://localhost:${portInfo.port}`;
         connect(url);
       }
     });

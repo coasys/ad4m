@@ -60,7 +60,7 @@ jobs:
   generate-deno-snapshot:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
     needs:
       - create-release
@@ -79,12 +79,9 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
-    - name: Generate schema.gql (required for rust-client compilation)
-      # rust-client/schema.gql is a symlink to core/lib/src/schema.gql which is
-      # generated (not in git). We must build it before cargo compiles rust-client.
-      run: cd core && pnpm exec tsc && pnpm exec tsx lib/src/buildSchema.js
-
     - name: Create placeholder dapp/dist (include_dir! panics if dir missing)
+      # rust-executor/src/dapp_server.rs embeds include_dir!("dapp/dist");
+      # rust-executor/dapp is a symlink to the root dapp/ package.
       run: mkdir -p dapp/dist
 
     - name: Generate deno snapshot
@@ -105,7 +102,7 @@ jobs:
   build-launcher-binary-linux:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
     needs:
       - create-release
@@ -212,7 +209,7 @@ jobs:
   build-launcher-binary-linux-cuda:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
     needs:
       - create-release
@@ -704,7 +701,7 @@ jobs:
   crates-publish:
     runs-on: ubuntu-latest
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:a0ab4b6358b7314a2ad49e232ba6c53b28a56e7f02641f226b2ed05544cc66d8
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
     steps:
       - uses: actions/checkout@v3
 
@@ -713,9 +710,6 @@ jobs:
         run: rustc --version && cargo --version
 
       - run: pnpm install --no-frozen-lockfile
-      # Generate schema.gql (required for rust-client compilation)
-      # build-core-executor no longer exists since Phase 7 removed the JS executor
-      - run: cd core && pnpm exec tsc && pnpm exec tsx lib/src/buildSchema.js
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Publish ad4m-client crate
         working-directory: rust-client

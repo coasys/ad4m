@@ -1,4 +1,3 @@
-import { ApolloClient } from '@apollo/client/core'
 import { AgentClient } from './agent/AgentClient'
 import { LanguageClient } from './language/LanguageClient'
 import { NeighbourhoodClient } from './neighbourhood/NeighbourhoodClient'
@@ -6,18 +5,25 @@ import { PerspectiveClient } from './perspectives/PerspectiveClient'
 import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
+import { ApiClient, EventFilter } from './apiClient'
+import type { EventMap, EventName } from './generated/api/Events'
+import { Ad4mModel } from './model/Ad4mModel'
 
 /**
- * Client for the Ad4m interface wrapping GraphQL queryies
+ * Client for the Ad4m interface wrapping WebSocket RPC calls
  * for convenient use in user facing code.
  * 
  * Aggregates the six sub-clients:
  * AgentClient, ExpressionClient, LanguageClient,
  * NeighbourhoodClient, PerspectiveClient and RuntimeClient
  * for the respective functionality.
+ *
+ * {@link Ad4mClient.on} receives executor events from the moment of registration.
  */
 export class Ad4mClient {
-    #apolloClient: ApolloClient<any>
+    #baseUrl: string
+    #token?: string
+    #apiClient: ApiClient
     #agentClient: AgentClient
     #expressionClient: ExpressionClient
     #languageClient: LanguageClient
@@ -26,20 +32,33 @@ export class Ad4mClient {
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
 
-
-    constructor(client: ApolloClient<any>, subscribe: boolean = true) {
-        this.#apolloClient = client
-        this.#agentClient = new AgentClient(this.#apolloClient, subscribe)
-        this.#expressionClient = new ExpressionClient(this.#apolloClient)
-        this.#languageClient = new LanguageClient(this.#apolloClient)
-        this.#neighbourhoodClient = new NeighbourhoodClient(this.#apolloClient)
-        this.#aiClient = new AIClient(this.#apolloClient, subscribe)
-        this.#perspectiveClient = new PerspectiveClient(this.#apolloClient, subscribe)
+    constructor(
+        baseUrl: string,
+        token?: string,
+        options?: { webSocketImpl?: new (url: string) => WebSocket; fetchImpl?: typeof fetch }
+    ) {
+        this.#baseUrl = baseUrl
+        this.#token = token
+        this.#apiClient = new ApiClient(baseUrl, token, options?.webSocketImpl, options?.fetchImpl)
+        this.#agentClient = new AgentClient(baseUrl, token, this.#apiClient)
+        this.#expressionClient = new ExpressionClient(baseUrl, token, this.#apiClient)
+        this.#languageClient = new LanguageClient(baseUrl, token, this.#apiClient)
+        this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token, this.#apiClient)
+        this.#aiClient = new AIClient(baseUrl, token, this.#apiClient)
+        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, this.#apiClient)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
-        this.#runtimeClient = new RuntimeClient(this.#apolloClient, subscribe)
-        
+        this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
+
+        // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
+        try {
+            const dt = (globalThis as any).__AD4M_DEVTOOLS__;
+            if (dt) {
+                dt._client = this;
+                dt._Ad4mModel = Ad4mModel;
+            }
+        } catch {}
     }
 
     get agent(): AgentClient {
@@ -68,5 +87,21 @@ export class Ad4mClient {
 
     get ai(): AIClient {
         return this.#aiClient
+    }
+
+    /**
+     * Call `handler` with every `type` event, or only those about
+     * `filter.perspective`. The payload is typed by the executor's event
+     * table (`generated/api/Events.ts`). Returns a function that removes the
+     * handler.
+     */
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        return this.#apiClient.on(type, handler, filter)
+    }
+
+    /** Close all event connections and clear in-memory caches */
+    close(): void {
+        this.#agentClient.clearByDidCache()
+        this.#apiClient.closeAll()
     }
 }

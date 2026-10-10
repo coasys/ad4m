@@ -135,8 +135,8 @@ enum Domain {
         language_language_only: Option<bool>,
         #[arg(long, action)]
         run_dapp_server: Option<bool>,
-        #[arg(short, long, action)]
-        gql_port: Option<u16>,
+        #[arg(short = 'p', long = "port", action)]
+        port: Option<u16>,
         #[arg(long, action)]
         hc_admin_port: Option<u16>,
         #[arg(long, action)]
@@ -163,11 +163,14 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Expose dynamic per-class SHACL tools over MCP in addition to the
+        /// static instance_* tools. Default: false.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        dynamic_class_tools: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         #[arg(long)]
         pid_file: Option<String>,
     },
-    RunLocalHcServices {},
     Eve {
         #[command(subcommand)]
         command: EveCommands,
@@ -232,7 +235,7 @@ async fn main() -> Result<()> {
         network_bootstrap_seed,
         language_language_only,
         run_dapp_server,
-        gql_port,
+        port,
         hc_admin_port,
         hc_app_port,
         hc_use_bootstrap,
@@ -246,16 +249,21 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        dynamic_class_tools,
         pid_file,
     } = args.domain
     {
-        let _ = tokio::spawn(async move {
+        // Not compiled: cli/Cargo.toml's [[bin]] "ad4m" is src/ad4m.rs, which
+        // replaces this auto-discovered main.rs (and its `mod eve` no longer
+        // exists). Kept in line with ad4m_executor.rs so a revival does not
+        // bring back a process that runs on with no API.
+        let startup = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
                 language_language_only,
                 run_dapp_server,
-                gql_port,
+                port,
                 hc_admin_port,
                 hc_app_port,
                 hc_use_bootstrap,
@@ -269,6 +277,7 @@ async fn main() -> Result<()> {
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,
+                dynamic_class_tools,
                 pid_file,
                 localhost: None,
                 auto_permit_cap_requests: None,
@@ -276,8 +285,12 @@ async fn main() -> Result<()> {
                 log_holochain_metrics: None,
                 hc_relay_url: None,
                 smtp_config: None,
+                ..Default::default()
             }).await
         }).await;
+        if let Ok(api_thread) = startup {
+            rust_executor::exit_when_api_fails(api_thread);
+        }
         
         let _ = ctrlc::set_handler(move || {
             println!("Received CTRL-C! Exiting...");
@@ -293,11 +306,6 @@ async fn main() -> Result<()> {
             sleep(Duration::from_secs(2)).await;
         }
     };
-
-    if let Domain::RunLocalHcServices {} = args.domain {
-        rust_executor::run_local_hc_services().await?;
-        return Ok(());
-    }
 
     if let Domain::Eve { command } = args.domain {
         eve::run(command).await?;
@@ -333,7 +341,7 @@ async fn main() -> Result<()> {
             network_bootstrap_seed: _,
             language_language_only: _,
             run_dapp_server: _,
-            gql_port: _,
+            port: _,
             hc_admin_port: _,
             hc_app_port: _,
             hc_use_bootstrap: _,
@@ -347,9 +355,9 @@ async fn main() -> Result<()> {
             enable_multi_user: _,
             enable_mcp: _,
             mcp_port: _,
+            dynamic_class_tools: _,
             pid_file: _,
         } => unreachable!(),
-        Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
     }
 

@@ -1,5 +1,5 @@
-import { Field, ObjectType, InputType } from "type-graphql";
 import { Perspective } from "../perspectives/Perspective";
+import type { Agent as WireAgent } from "../generated/api/Agent";
 import { ExpressionGeneric } from "../expression/Expression";
 
 /**  AD4M's representation of an Agent
@@ -18,13 +18,11 @@ import { ExpressionGeneric } from "../expression/Expression";
  * DIDs are resolved to Expressions that are objects of this class.
  * Thus, this is how agents see (other) agents.
  */
-@ObjectType()
 export class Agent {
   /** The DID of the Agent
    * All epxressions authored by them are signed with the keys mentioned
    * in the DID document behind this DID URI.
    */
-  @Field()
   did: string;
 
   /** The Perspective that holds the public-facing semantics/statements of the Agent
@@ -32,11 +30,9 @@ export class Agent {
    * this agent wants to offer as public-facing semantics.
    * This should be used for any kind of user profile information.
    */
-  @Field((type) => Perspective, { nullable: true })
   perspective?: Perspective;
 
   /** Address of the Language by which the Agent will receive DMs */
-  @Field({ nullable: true })
   directMessageLanguage?: string;
 
   constructor(did: string, perspective?: Perspective) {
@@ -47,29 +43,21 @@ export class Agent {
       this.perspective = new Perspective();
     }
   }
+
+  /** Build an Agent (with its perspective's query helpers) from the executor's wire shape. */
+  static fromWire(wire: WireAgent): Agent {
+    const agent = new Agent(wire.did, Perspective.fromWire(wire.perspective));
+    agent.directMessageLanguage = wire.directMessageLanguage;
+    return agent;
+  }
 }
-
-@ObjectType()
 export class AgentExpression extends ExpressionGeneric(Agent) {}
-
-@ObjectType()
 export class EntanglementProof {
-  @Field()
   did: string;
-
-  @Field()
   didSigningKeyId: string;
-
-  @Field()
   deviceKeyType: string;
-
-  @Field()
   deviceKey: string;
-
-  @Field()
   deviceKeySignedByDid: string;
-
-  @Field({ nullable: true })
   didSignedByDeviceKey?: string;
 
   constructor(
@@ -88,25 +76,12 @@ export class EntanglementProof {
     this.didSignedByDeviceKey = didSignedByDeviceKey;
   }
 }
-
-@InputType()
 export class EntanglementProofInput {
-  @Field()
   did: string;
-
-  @Field()
   didSigningKeyId: string;
-
-  @Field()
   deviceKeyType: string;
-
-  @Field()
   deviceKey: string;
-
-  @Field()
   deviceKeySignedByDid: string;
-
-  @Field()
   didSignedByDeviceKey: string;
 
   constructor(
@@ -125,13 +100,8 @@ export class EntanglementProofInput {
     this.didSignedByDeviceKey = didSignedByDeviceKey;
   }
 }
-
-@ObjectType()
 export class AgentSignature {
-  @Field()
   signature: string;
-
-  @Field()
   publicKey: string;
 
   constructor(signature: string, publicKey: string) {
@@ -139,13 +109,8 @@ export class AgentSignature {
     this.publicKey = publicKey;
   }
 }
-
-@ObjectType()
 export class Resource {
-  @Field()
   domain: string;
-
-  @Field((type) => [String])
   pointers: string[];
 
   constructor(domain: string, pointers: string[]) {
@@ -153,13 +118,8 @@ export class Resource {
     this.pointers = pointers;
   }
 }
-
-@ObjectType()
 export class Capability {
-  @Field((type) => Resource)
   with: Resource;
-
-  @Field((type) => [String])
   can: string[];
 
   constructor(withF: Resource, can: string[]) {
@@ -167,22 +127,11 @@ export class Capability {
     this.can = can;
   }
 }
-
-@ObjectType()
 export class AuthInfo {
-  @Field()
   appName: string;
-
-  @Field()
   appDesc: string;
-
-  @Field()
   appUrl: string;
-
-  @Field({nullable: true})
   appIconPath?: string;
-
-  @Field((type) => [Capability])
   capabilities: Capability[];
 
   constructor(
@@ -199,19 +148,10 @@ export class AuthInfo {
     this.capabilities = capabilities;
   }
 }
-
-@ObjectType()
 export class Apps {
-  @Field()
   requestId: string;
-
-  @Field()
   token: string;
-
-  @Field({ nullable: true })
   revoked?: boolean;
-
-  @Field()
   auth: AuthInfo;
 
   constructor(
@@ -226,13 +166,8 @@ export class Apps {
     this.revoked = revoked;
   }
 }
-
-@InputType()
 export class ResourceInput {
-  @Field()
   domain: string;
-
-  @Field((type) => [String])
   pointers: string[];
 
   constructor(domain: string, pointers: string[]) {
@@ -240,13 +175,8 @@ export class ResourceInput {
     this.pointers = pointers;
   }
 }
-
-@InputType()
 export class CapabilityInput {
-  @Field((type) => ResourceInput)
   with: ResourceInput;
-
-  @Field((type) => [String])
   can: string[];
 
   constructor(withF: ResourceInput, can: string[]) {
@@ -254,25 +184,12 @@ export class CapabilityInput {
     this.can = can;
   }
 }
-
-@InputType()
 export class AuthInfoInput {
-  @Field()
   appName: string;
-
-  @Field()
   appDesc: string;
-
-  @Field()
   appDomain: string;
-
-  @Field({ nullable: true })
   appUrl?: string;
-
-  @Field({ nullable: true })
   appIconPath?: string;
-
-  @Field((type) => [CapabilityInput], { nullable: true })
   capabilities?: CapabilityInput[];
 
   constructor(
@@ -291,17 +208,9 @@ export class AuthInfoInput {
     this.appIconPath = appIconPath;
   }
 }
-
-
-@ObjectType()
 export class UserCreationResult {
-  @Field()
   did: string;
-
-  @Field()
   success: boolean;
-
-  @Field({ nullable: true })
   error?: string;
 
   constructor(did: string, success: boolean, error?: string) {

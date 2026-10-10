@@ -1,0 +1,683 @@
+/**
+ * SPARQL query building utilities for Ad4mModel.
+ *
+ * Uses the RDF 1.2 reifier storage model where each AD4M link is stored as:
+ * 1. Direct triple: <source> <predicate> <target> . (default graph)
+ * 2. Reifier: <link:HASH> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( source predicate target )>> .
+ * 3. Metadata: <link:HASH> ad4m://ontology/* "value" . (default graph)
+ *
+ * All AD4M URIs (source, predicate, target) become RDF IRIs.
+ *
+ * @module
+ */
+
+import { Literal } from "../Literal";
+import { resolveParentPredicate } from "./query-common";
+import type { RelationMetadataEntry } from "./decorators";
+import type { Where, Query, ModelMetadata, PropertyMetadata } from "./types";
+import { isTraverseScope } from "./types";
+
+/**
+ * Check whether a `where` clause contains filters that cannot be pushed down
+ * to SPARQL and must be evaluated in JS after hydration.
+ *
+ * JS-only filters include:
+ * - Literal-stored properties (equality, comparison, contains, etc.)
+ * - Reverse relations (belongsToOne / belongsToMany)
+ * - author / timestamp filters (skipped by buildSPARQLWhereFilters)
+ * - OR / AND / NOT combinators (skipped by buildSPARQLWhereFilters — see below)
+ *
+ * When JS-only filters exist, SPARQL-level LIMIT/OFFSET must NOT be applied
+ * because the database would cap the candidate set before JS filters run,
+ * potentially discarding matches beyond the LIMIT.
+ */
+export function hasJsOnlyWhereFilters(
+  metadata: ModelMetadata,
+  allRelationsMetadata: Record<string, RelationMetadataEntry>,
+  where?: Where,
+): boolean {
+  if (!where) return false;
+
+  for (const [propertyName, condition] of Object.entries(where)) {
+    if (propertyName === "base" || propertyName === "id") continue;
+
+    // OR/AND/NOT: buildSPARQLWhereFilters never emits a SPARQL translation
+    // for these regardless of what their branches contain, so their mere
+    // presence — not just JS-only conditions within a branch — must block
+    // SPARQL-level pagination. Otherwise LIMIT/OFFSET would be applied
+    // before the (Rust-side, post-hydration) combinator filter ever runs.
+    if (propertyName === "OR" || propertyName === "AND" || propertyName === "NOT") {
+      return true;
+    }
+
+    // author/timestamp filters are handled in JS
+    if (propertyName === "author" || propertyName === "timestamp") return true;
+
+    const propMeta = metadata.properties[propertyName];
+    if (!propMeta) continue;
+
+    // Reverse relations are JS-only
+    const relMeta = allRelationsMetadata[propertyName];
+    if (relMeta && (relMeta.kind === 'belongsToOne' || relMeta.kind === 'belongsToMany')) {
+      return true;
+    }
+
+    // Literal-stored properties: equality/IN/NOT can be pushed to SPARQL via
+    // <ad4m://fn/parse_literal>(), but comparison operators (gt/lt/gte/lte/between/contains)
+    // must remain JS-only because parse_literal returns strings.
+    if (isLiteralStoredProperty(propMeta)) {
+      if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
+        const ops = condition as any;
+        const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
+          ops.lt !== undefined || ops.lte !== undefined ||
+          ops.between !== undefined || ops.contains !== undefined;
+        if (hasCompOps) return true;
+        // NOT with simple value can be pushed to SPARQL — not JS-only
+      }
+      // Simple equality and IN filters can be pushed to SPARQL — not JS-only
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Prepare a `where` for this client-side SPARQL builder: unwrap `{ eq: X }`
+ * to the bare `X`, and refuse a per-link `author`.
+ *
+ * A per-link `author` (nested, `{ agent: { eq: X, author: A } }`, or a
+ * top-level `author` beside link-backed property or relation conditions) is
+ * answered by the executor, which joins each matched link's reifier (#1114). This builder
+ * has no such join, and treating the author as instance-level here would
+ * answer a different, wider question. `findAll()`/`count()` answer it.
+ */
+export function normalizeWhereForSparql(metadata: ModelMetadata, where?: Where): Where | undefined {
+  if (!where) return where;
+  assertNoPerLinkAuthor(metadata, where);
+  const out: Where = {};
+  for (const [key, condition] of Object.entries(where)) {
+    out[key] = unwrapEq(key, condition);
+  }
+  return out;
+}
+
+function isOpsObject(condition: unknown): condition is Record<string, unknown> {
+  return typeof condition === "object" && condition !== null && !Array.isArray(condition);
+}
+
+function unwrapEq(key: string, condition: any): any {
+  if (key === "OR" || key === "AND" || key === "NOT" || !isOpsObject(condition) || condition.eq === undefined) {
+    return condition;
+  }
+  if (Object.keys(condition).some((k) => k !== "eq")) {
+    throw new Error(`where.${key}: \`eq\` cannot be combined with another operator`);
+  }
+  return condition.eq;
+}
+
+function assertNoPerLinkAuthor(metadata: ModelMetadata, where: Where): void {
+  const refuse = (what: string) => {
+    throw new Error(
+      `buildSPARQLQuery: ${what} is a per-link \`author\`, which the executor answers by ` +
+        "checking who wrote each matched link. This client-side SPARQL builder cannot express " +
+        "it. Use the model query path (findAll/count).",
+    );
+  };
+  // A property or a relation with a predicate, as the executor's `is_link_leaf`.
+  const linkBacked = (key: string) => {
+    const field = metadata.properties[key] ?? metadata.relations?.[key];
+    return !!field && !!field.predicate && !field.getter;
+  };
+  for (const [key, condition] of Object.entries(where)) {
+    if (key === "OR" || key === "AND") {
+      for (const branch of (condition as Where[]) ?? []) assertNoPerLinkAuthor(metadata, branch);
+    } else if (key === "NOT") {
+      if (condition) assertNoPerLinkAuthor(metadata, condition as Where);
+    } else if (key === "author") {
+      const sibling = Object.keys(where).find((k) => k !== "author" && linkBacked(k));
+      if (sibling) refuse(`\`author\` beside \`${sibling}\``);
+    } else if (isOpsObject(condition) && (condition as Record<string, unknown>).author !== undefined) {
+      refuse(`\`${key}.author\``);
+    }
+  }
+}
+
+/**
+ * Check whether a string value is a well-formed absolute IRI that can be
+ * stored verbatim as a link target (raw `NamedNode`) instead of being
+ * wrapped in a `literal:string:*` URI.
+ *
+ * This mirrors the Rust `is_safe_iri_target` /
+ * `looks_like_absolute_iri` predicate in
+ * `rust-executor/src/perspectives/model_query/utils.rs` and is
+ * **load-bearing**: a value that returns `true` here MUST also be safely
+ * queryable on the Rust side (`validate_iri` gate on the SPARQL
+ * `UNION { ?s <pred> <val> }` IRI arm), otherwise scheme-lookalike prose
+ * such as `"Note: buy milk"`, `"Re: standup"`, `"TODO: fix this"` slips
+ * through the write regex, is stored as an invalid `NamedNode`, and
+ * becomes a silent no-match on read.
+ *
+ * Fast-path scheme check (`^[a-zA-Z][a-zA-Z0-9+\-._]*:`) followed by the
+ * same rejection set the Rust `validate_iri` applies: any Unicode
+ * whitespace, C0/C1 control chars, and the SPARQL-breaking characters
+ * `< > { } "`.
+ */
+export function looksLikeUri(value: string): boolean {
+  if (!/^[a-zA-Z][a-zA-Z0-9+\-._]*:/.test(value)) return false;
+  // Reject anything the Rust-side `validate_iri` rejects so the two
+  // predicates stay in sync. `\s` covers ASCII whitespace *and*
+  // U+00A0/other Unicode whitespace under the default JS regex semantics.
+  if (/[\s<>{}"\u0000-\u001F\u007F-\u009F]/.test(value)) return false;
+  return true;
+}
+
+/**
+ * Convert a JS value to its literal: IRI form, matching how the Rust executor
+ * stores property values in the default deterministic-literal path
+ * (`resolveLanguage` unset). Strings that already look like URIs are returned
+ * as-is.
+ *
+ * Exported so write-side helpers (e.g. `Ad4mModel.setProperty`'s literal
+ * resolve path) can keep their on-disk form aligned with what
+ * `queryToSPARQL()` filters against — otherwise the same value can be
+ * stored as `<literal:string:https%3A...>` from one path while WHERE
+ * builders probe `<https://example.com>` from the other.
+ *
+ * The object/array arm mirrors Rust's `Literal::from_json` in
+ * `perspective_instance.rs::resolve_property_value` (which routes
+ * `Value::Object | Value::Array` through JSON encoding). Without it, JS
+ * would fall through to `String(value)` and turn `{a: 1}` into
+ * `"[object Object]"` and `[1, 2, 3]` into `"1,2,3"` before wrapping.
+ */
+export function valueToLiteralIri(value: any): string {
+  if (typeof value === 'string') {
+    if (looksLikeUri(value)) return value;
+    return Literal.from(value).toUrl();
+  }
+  if (typeof value === 'number') {
+    return Literal.from(value).toUrl();
+  }
+  if (typeof value === 'boolean') {
+    return Literal.from(value).toUrl();
+  }
+  // Objects and arrays: route through Literal.from so we emit
+  // `literal:json:*` (mirrors Rust `Literal::from_json`). Without this
+  // arm we fall through to `String(value)` which turns objects into
+  // `"[object Object]"` and arrays into `"1,2"` — silently storing the
+  // wrong shape and breaking equality filters (`findAll({ where:
+  // { config: {...} } })` would match against `"[object Object]"`).
+  // The `value !== null` guard keeps the historical encoding of `null`,
+  // `literal:string:null`, rather than `literal:json:null`.
+  if (value !== null && typeof value === 'object') {
+    return Literal.from(value).toUrl();
+  }
+  return Literal.from(String(value)).toUrl();
+}
+
+/** How a property's value is stored / resolved. */
+export type LiteralStorageMode =
+  | { kind: "deterministic" }            // deterministic literal: IRI (POS-index friendly, no signature)
+  | { kind: "envelope" }                 // signed expression on the built-in literal language
+  | { kind: "custom"; language: string }; // signed expression on a custom language
+
+/**
+ * Derive the effective storage mode from a property's explicit options.
+ * `resolveLanguage` is the sole selector and is NOT defaulted at the
+ * decorator level:
+ *   - unset               → deterministic typed literal (the perf default
+ *                            for a plain `@Property()`)
+ *   - `"literal"`         → signed envelope on the built-in literal language
+ *                            (per-value provenance, e.g. Flux message bodies)
+ *   - `<custom address>`  → signed expression on that custom language
+ */
+export function effectiveLiteralStorage(meta: {
+  resolveLanguage?: string;
+}): LiteralStorageMode {
+  const lang = meta.resolveLanguage;
+  if (lang === undefined) return { kind: "deterministic" };
+  if (lang === "literal") return { kind: "envelope" };
+  return { kind: "custom", language: lang };
+}
+
+/**
+ * Determine if a property stores values as deterministic literal: IRIs (so WHERE
+ * filters can match typed literals directly). Envelope / custom-language
+ * properties resolve through expressions, and flag properties store raw URIs —
+ * none is a deterministic literal.
+ */
+function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
+  if (propMeta.flag) return false;
+  return effectiveLiteralStorage(propMeta).kind === "deterministic";
+}
+
+/**
+ * Escape a string for use as a SPARQL string literal.
+ */
+function escapeSPARQL(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
+    .replace(/\0/g, "")
+    .replace(/\f/g, "\\u000C");
+}
+
+/**
+ * Format a value as a SPARQL string literal (double-quoted).
+ */
+export function formatSPARQLValue(value: any): string {
+  if (typeof value === "string") {
+    return `"${escapeSPARQL(value)}"`;
+  }
+  return `"${String(value)}"`;
+}
+
+/**
+ * Format an AD4M URI as an RDF IRI for use in SPARQL triple patterns.
+ * All AD4M link source/predicate/target values become IRIs in angle brackets.
+ * The Rust SPARQL service transparently transforms these to valid IRI format.
+ *
+ * Rejects characters that would break or inject into a SPARQL IRI token,
+ * matching the Rust-side `validate_iri()` function.
+ */
+function iri(value: string): string {
+  if (/[<>{}" ]/.test(value)) {
+    throw new Error(`Invalid IRI component: '${value}'`);
+  }
+  return `<${value}>`;
+}
+
+/**
+ * Map a user-facing property name to the SPARQL variable alias used in the query.
+ *
+ * Properties appear in the query as:
+ * - Required properties: `?cfTarget_${name}`
+ * - Where-clause joins: `?wTarget_${name}`
+ * - Initial-value fallback: `?cfInitTarget_${name}`
+ *
+ * For ORDER BY, we prefer the conformance variable (always present for required props),
+ * then the where-target variable.
+ */
+function mapPropertyToSPARQLVar(propertyName: string, metadata: ModelMetadata): string {
+  const propMeta = metadata.properties[propertyName];
+  if (propMeta) {
+    if (propMeta.required && !propMeta.getter && !(propMeta.flag && propMeta.initial)) {
+      return `?cfTarget_${propertyName}`;
+    }
+    if (propMeta.initial && !propMeta.flag) {
+      return `?cfInitTarget_${propertyName}`;
+    }
+  }
+  // Fallback: where-clause variable or raw name
+  return `?wTarget_${propertyName}`;
+}
+
+/**
+ * Build a SPARQL query that returns all links belonging to instances of
+ * the given model class, optionally filtered by `where` conditions.
+ *
+ * Uses direct triple patterns: ?source ?predicate ?target
+ * with named graph storage and metadata keyed by graph IRI.
+ */
+export function buildSPARQLQuery(
+  metadata: ModelMetadata,
+  allRelationsMetadata: Record<string, RelationMetadataEntry>,
+  query: Query,
+  modelClass: any,
+): string {
+  const joinPatterns: string[] = [];
+  const filterExpressions: string[] = [];
+  query = { ...query, where: normalizeWhereForSparql(metadata, query.where) };
+
+  // Parent filter — direct triple pattern
+  if (query.parent) {
+    const parentPredicate = resolveParentPredicate(query.parent, modelClass);
+    if (isTraverseScope(query.parent)) {
+      const { ids, transitive, direction, limitPerAnchor, levels } = query.parent;
+      // `limitPerAnchor` and `levels` are applied by the executor between
+      // selecting ids and hydrating them, which is a shape this path does not
+      // have — it builds one query and reads the rows. Refused rather than
+      // ignored: quietly returning every reply where five per parent were
+      // asked for — or one unbounded level where a walk was asked for — is a
+      // wrong answer that looks like a right one.
+      if (limitPerAnchor !== undefined) {
+        throw new Error(
+          'buildSPARQLQuery: limitPerAnchor is applied by the executor between query phases and ' +
+            'has no equivalent here. Use the model query path for per-anchor limits.',
+        );
+      }
+      if (levels !== undefined) {
+        throw new Error(
+          'buildSPARQLQuery: levels is walked by the executor between query phases and ' +
+            'has no equivalent here. Use the model query path for level walks.',
+        );
+      }
+      const anchors = (Array.isArray(ids) ? ids : [ids]).map(iri).join(' ');
+      const path = transitive ? '+' : '';
+      joinPatterns.push(`
+      VALUES ?_anchor { ${anchors} }`);
+      joinPatterns.push(
+        direction === 'in'
+          ? `
+      ?source ${iri(parentPredicate)}${path} ?_anchor .`
+          : `
+      ?_anchor ${iri(parentPredicate)}${path} ?source .`,
+      );
+    } else {
+      joinPatterns.push(`
+      ${iri(query.parent.id)} ${iri(parentPredicate)} ?source .`);
+    }
+  }
+
+  // Required property JOIN patterns — direct triple patterns
+  let hasConformance = false;
+  for (const [, propMeta] of Object.entries(metadata.properties)) {
+    if (propMeta.required) {
+      if (propMeta.getter) continue;
+      hasConformance = true;
+      if (propMeta.flag && propMeta.initial) {
+        joinPatterns.push(`
+      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
+      } else {
+        joinPatterns.push(`
+      ?source ${iri(propMeta.predicate)} ?cfTarget_${propMeta.name} .`);
+      }
+    }
+  }
+
+  // Fallback: initial-value JOIN patterns
+  if (!hasConformance) {
+    for (const [, propMeta] of Object.entries(metadata.properties)) {
+      if (propMeta.initial) {
+        hasConformance = true;
+        if (propMeta.flag) {
+          joinPatterns.push(`
+      ?source ${iri(propMeta.predicate)} ${iri(propMeta.initial)} .`);
+        } else {
+          joinPatterns.push(`
+      ?source ${iri(propMeta.predicate)} ?cfInitTarget_${propMeta.name} .`);
+        }
+        break;
+      }
+    }
+  }
+
+  // Fallback: open-world structural matching
+  // Use a subquery with DISTINCT to avoid row multiplication when the main
+  // ?source ?predicate ?target pattern cross-joins with multiple structural matches.
+  if (!hasConformance && joinPatterns.length === 0) {
+    const knownPredicates: string[] = [];
+    for (const [, propMeta] of Object.entries(metadata.properties)) {
+      if (propMeta.predicate) {
+        knownPredicates.push(iri(propMeta.predicate));
+      }
+    }
+    if (metadata.relations) {
+      for (const [, relMeta] of Object.entries(metadata.relations)) {
+        if (relMeta.predicate) {
+          knownPredicates.push(iri(relMeta.predicate));
+        }
+      }
+    }
+    if (knownPredicates.length > 0) {
+      joinPatterns.push(`
+      { SELECT DISTINCT ?source WHERE { ?source ?cf_structPred ?cf_structTarget . FILTER(?cf_structPred IN (${knownPredicates.join(", ")})) } }`);
+    }
+  }
+
+  // Build WHERE clause filters from user query
+  const { joins: userJoins, filters: userFilters } = buildSPARQLWhereFilters(metadata, allRelationsMetadata, query.where);
+  joinPatterns.push(...userJoins);
+  filterExpressions.push(...userFilters);
+
+  // Main triple pattern — fetches all links for matched sources
+  // Direct triple in default graph + RDF 1.2 reifier for link metadata
+  // FILTER(isIRI(?source)) excludes non-IRI subjects
+  const joinClause = joinPatterns.join("\n");
+  const filterClause = filterExpressions.length > 0
+    ? `FILTER(\n      ${filterExpressions.join(" &&\n      ")}\n    )`
+    : "";
+
+  // Determine if SPARQL-level pagination is safe.
+  // When JS-only where filters exist, we must NOT limit at the SPARQL level
+  // because the database would cap candidates before JS filters run.
+  const canPaginateInSPARQL = !hasJsOnlyWhereFilters(metadata, allRelationsMetadata, query.where)
+    && (query.limit !== undefined || query.offset !== undefined);
+
+  // Build a pagination subquery that constrains ?source to only the page
+  // of interest.  This avoids fetching all links for all matching instances.
+  const paginationSubquery = canPaginateInSPARQL
+    ? buildPaginationSubquery(joinPatterns, filterExpressions, metadata, query)
+    : '';
+
+  if (paginationSubquery) {
+    // Use the pagination subquery to constrain ?source, then fetch all links
+    // for those sources only.
+    return `
+
+    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+      ${paginationSubquery}${joinClause}
+      ?source ?predicate ?target .
+      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+      FILTER(isIRI(?source) && isIRI(?predicate))
+      ?_reifier <ad4m://ontology/author> ?author .
+      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+      ${filterClause}
+    }
+  `.trim();
+  }
+
+  return `
+
+    SELECT ?source ?predicate ?target ?author ?timestamp WHERE {${joinClause}
+      ?source ?predicate ?target .
+      ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+      FILTER(isIRI(?source) && isIRI(?predicate))
+      ?_reifier <ad4m://ontology/author> ?author .
+      ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+      ${filterClause}
+    }
+  `.trim();
+}
+
+/**
+ * Build an inner subquery that selects DISTINCT ?source URIs with
+ * ORDER BY, LIMIT, and OFFSET applied at the instance level.
+ *
+ * Because the outer SELECT returns multiple rows per instance (one per link),
+ * we cannot apply LIMIT/OFFSET there.  Instead this subquery constrains
+ * ?source to only the instances on the requested page.
+ *
+ * @internal — used by buildSPARQLQuery when SPARQL-level pagination is safe.
+ */
+export function buildPaginationSubquery(
+  joinPatterns: string[],
+  filterExpressions: string[],
+  metadata: ModelMetadata,
+  query: Query,
+): string {
+  const innerJoin = joinPatterns.join('\n');
+  const innerFilter = filterExpressions.length > 0
+    ? `FILTER(\n      ${filterExpressions.join(' &&\n      ')}\n    )`
+    : '';
+
+  // Build ORDER BY clause from query.order
+  let orderByClause = '';
+  const orderJoinPatterns: string[] = [];
+  if (query.order) {
+    const orderTerms = Object.entries(query.order).map(([prop, dir]) => {
+      const sparqlVar = mapPropertyToSPARQLVar(prop, metadata);
+      // Check if this order property's variable is already bound by existing
+      // join patterns. If not, add an OPTIONAL join so ORDER BY is deterministic.
+      const varAlreadyBound = innerJoin.includes(sparqlVar);
+      if (!varAlreadyBound) {
+        const propMeta = metadata.properties[prop];
+        if (propMeta && propMeta.predicate && !propMeta.getter) {
+          orderJoinPatterns.push(`\n      OPTIONAL { ?source <${propMeta.predicate}> ${sparqlVar} . }`);
+        }
+      }
+      return dir === 'DESC' ? `DESC(${sparqlVar})` : `ASC(${sparqlVar})`;
+    });
+    if (orderTerms.length > 0) {
+      orderByClause = `ORDER BY ${orderTerms.join(' ')}`;
+    }
+  }
+
+  // No default ordering — when no explicit order is specified, results come in
+  // natural (insertion) order.
+  const tsSelect = '';
+  const tsPattern = '';
+
+  const limitClause = query.limit !== undefined ? `LIMIT ${query.limit}` : '';
+  const offsetClause = query.offset !== undefined && query.offset > 0 ? `OFFSET ${query.offset}` : '';
+
+  return `
+      { SELECT DISTINCT ?source${tsSelect} WHERE {${innerJoin}${orderJoinPatterns.join('')}${tsPattern}
+        FILTER(isIRI(?source))
+        ${innerFilter}
+      } ${orderByClause} ${limitClause} ${offsetClause} }\n`;
+}
+
+/**
+ * Build SPARQL FILTER expressions from user `where` conditions.
+ * Uses direct triple patterns instead of link-node reification.
+ */
+function buildSPARQLWhereFilters(
+  metadata: ModelMetadata,
+  _allRelationsMetadata: Record<string, RelationMetadataEntry>,
+  where?: Where,
+): { joins: string[]; filters: string[] } {
+  if (!where) return { joins: [], filters: [] };
+
+  const joins: string[] = [];
+  const filters: string[] = [];
+
+  for (const [propertyName, condition] of Object.entries(where)) {
+    // OR/AND/NOT are evaluated Rust-side after hydration; no SPARQL emission needed.
+    if (propertyName === "OR" || propertyName === "AND" || propertyName === "NOT") {
+      continue;
+    }
+
+    // 'base' maps to ?source
+    if (propertyName === "base" || propertyName === "id") {
+      if (Array.isArray(condition)) {
+        const formatted = (condition as any[]).map(v => iri(v)).join(", ");
+        filters.push(`?source IN (${formatted})`);
+      } else if (typeof condition === "object" && condition !== null) {
+        const ops = condition as any;
+        if (ops.not !== undefined) {
+          if (Array.isArray(ops.not)) {
+            const formatted = (ops.not as any[]).map(v => iri(v)).join(", ");
+            filters.push(`!(?source IN (${formatted}))`);
+          } else {
+            filters.push(`?source != ${iri(ops.not)}`);
+          }
+        }
+      } else {
+        filters.push(`?source = ${iri(String(condition))}`);
+      }
+      continue;
+    }
+
+    if (propertyName === "author" || propertyName === "timestamp") {
+      continue;
+    }
+
+    const propMeta = metadata.properties[propertyName];
+    if (!propMeta) continue;
+
+    // Skip reverse relations (belongsToOne / belongsToMany) — these are registered as
+    // read-only properties but the link direction is reversed (target→source, not source→target).
+    // Adding a forward join pattern would match nothing. These are filtered in JS post-filter.
+    const relMeta = _allRelationsMetadata[propertyName];
+    if (relMeta && (relMeta.kind === 'belongsToOne' || relMeta.kind === 'belongsToMany')) {
+      continue;
+    }
+
+    // Determine if this property stores values as literal: IRIs
+    const useParseLiteral = isLiteralStoredProperty(propMeta);
+
+    // For literal-stored properties, push equality/IN/NOT filters to SPARQL using
+    // <ad4m://fn/parse_literal>() which extracts the raw value from literal: IRIs.
+    // Use IRI form <ad4m://fn/parse_literal>(?var); the namespaced form
+    // fn::parse_literal is invalid SPARQL and Oxigraph rejects it at parse time.
+    // Comparison operators (gt/lt/gte/lte/between/contains) remain JS-only because
+    // parse_literal returns strings and numeric/date comparisons would be unreliable.
+    // JS post-filter in instancesFromQueryResult remains as a safety net for all cases.
+    if (useParseLiteral) {
+      if (typeof condition === "object" && condition !== null && !Array.isArray(condition)) {
+        const ops = condition as any;
+        const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
+          ops.lt !== undefined || ops.lte !== undefined ||
+          ops.between !== undefined || ops.contains !== undefined;
+        if (hasCompOps) {
+          // Comparison operators: join only, filter in JS
+          joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_cmp_${propertyName} .`);
+        }
+        if (ops.not !== undefined) {
+          // NOT filter: push down to SPARQL
+          joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+          if (Array.isArray(ops.not)) {
+            const formatted = (ops.not as any[]).map((v: any) => formatSPARQLValue(v)).join(", ");
+            filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) NOT IN (${formatted})`);
+          } else {
+            filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) != ${formatSPARQLValue(ops.not)}`);
+          }
+        }
+      } else if (Array.isArray(condition)) {
+        // IN filter: push down to SPARQL
+        joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        const formatted = (condition as any[]).map((v: any) => formatSPARQLValue(v)).join(", ");
+        filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) IN (${formatted})`);
+      } else {
+        // Simple equality: push down to SPARQL
+        joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+        filters.push(`STR(<ad4m://fn/parse_literal>(?wTarget_${propertyName})) = ${formatSPARQLValue(condition)}`);
+      }
+    } else if (Array.isArray(condition)) {
+      const formatted = (condition as any[]).map(v => iri(v)).join(", ");
+      joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_${propertyName} .`);
+      filters.push(`?wTarget_${propertyName} IN (${formatted})`);
+    } else if (typeof condition === "object" && condition !== null) {
+      const ops = condition as any;
+      if (ops.not !== undefined) {
+        if (Array.isArray(ops.not)) {
+          const formatted = (ops.not as any[]).map(v => iri(v)).join(", ");
+          filters.push(`
+          NOT EXISTS {
+            ?source ${iri(propMeta.predicate)} ?wTarget_not_${propertyName} .
+            FILTER(?wTarget_not_${propertyName} IN (${formatted}))
+          }
+        `);
+        } else {
+          filters.push(`
+          NOT EXISTS {
+            ?source ${iri(propMeta.predicate)} ${iri(ops.not)} .
+          }
+        `);
+        }
+      }
+
+      const hasCompOps = ops.gt !== undefined || ops.gte !== undefined ||
+        ops.lt !== undefined || ops.lte !== undefined ||
+        ops.between !== undefined || ops.contains !== undefined;
+      if (hasCompOps) {
+        joins.push(`
+      ?source ${iri(propMeta.predicate)} ?wTarget_cmp_${propertyName} .`);
+      }
+    } else {
+      // Simple equality — non-literal property, use exact IRI match
+      joins.push(`
+      ?source ${iri(propMeta.predicate)} ${iri(String(condition))} .`);
+    }
+  }
+
+  return { joins, filters };
+}

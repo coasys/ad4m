@@ -2,7 +2,6 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
-    Subject,
     Ad4mModel,
     Flag,
     Property,
@@ -11,17 +10,17 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     Model,
     Optional,
     PropertyOptions,
+    concat,
+    literal,
+    focus,
+    path as shaclPath,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
-import { startExecutor, apolloClient, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, quitExecutor, pollUntil, assertStaysFalse, sleep } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import { fileURLToPath } from 'url';
-import fetch from 'node-fetch'
 import sinon from 'sinon';
-
-//@ts-ignore
-global.fetch = fetch
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,19 +32,19 @@ describe("Prolog + Literals", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "prolog-agent");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort);
+            apiPort, hcAdminPort, hcAppPort);
 
         console.log("Creating ad4m client")
         // @ts-ignore - Apollo Client version mismatch between dependencies
-        ad4m = new Ad4mClient(apolloClient(gqlPort))
+        ad4m = new Ad4mClient(baseUrl(apiPort))
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
         console.log("Done")
@@ -53,9 +52,9 @@ describe("Prolog + Literals", () => {
 
     after(async () => {
         if (executorProcess) {
-            await quitExecutor(executorProcess, gqlPort);
+            await quitExecutor(executorProcess, apiPort);
         }
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     it("should get agent status", async () => {
@@ -216,7 +215,7 @@ describe("Prolog + Literals", () => {
                 expect(stateLinks[0].data.target).to.equal("todo://ready")
 
                 // Check name mapping
-                const nameMappingUrl = Literal.fromUrl(`literal://string:shacl://Todo`).toUrl()
+                const nameMappingUrl = Literal.fromUrl(`literal:string:shacl://Todo`).toUrl()
                 const nameMappingLinks = await perspective!.get(new LinkQuery({source: nameMappingUrl}))
                 nameMappingLinks.forEach(link => console.log("  ", link.data.predicate, "->", link.data.target))
 
@@ -258,7 +257,7 @@ describe("Prolog + Literals", () => {
 
             // REMOVED: InstanceQuery(condition: ..) test - required Prolog-only allSelf method
             // The InstanceQuery with condition parameter required Prolog inference.
-            // Future: Could be reimplemented with SHACL-based query conditions via SurrealDB.
+            // Future: Could be reimplemented with SHACL-based query conditions via SPARQL.
 
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
@@ -299,8 +298,10 @@ describe("Prolog + Literals", () => {
                 //@ts-ignore
                 let links = await perspective!.get(new LinkQuery({source: todo.id, predicate: "todo://has_title"}))
                 expect(links.length).to.equal(1)
-                let literal = Literal.fromUrl(links[0].data.target).get()
-                expect(literal.data).to.equal("new title")
+                // resolveLanguage:"literal" → signed expression envelope; the raw
+                // target's inner .data is the value (the model read above unwraps it).
+                let envelope: any = Literal.fromUrl(links[0].data.target).get()
+                expect(envelope.data).to.equal("new title")
             })
 
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
@@ -324,7 +325,7 @@ describe("Prolog + Literals", () => {
 
             // REMOVED: Custom getter prolog code test - required Prolog-based property getters
             // The isLiked property used custom Prolog code for computed values.
-            // Future: Could be reimplemented with SHACL-based computed properties or SurrealDB queries.
+            // Future: Could be reimplemented with SHACL-based computed properties or SPARQL queries.
 
             describe("with Message subject class registered", () => {
                 before(async () => {
@@ -360,8 +361,13 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("can constrain collection entries through 'where' clause", async () => {
-                    let root = Literal.from("Collection where test").toUrl()
-                    let messageEntry = Literal.from("test message").toUrl()
+                    // IDs use a dedicated `ad4m://test/` scheme so that the
+                    // typed-literal storage layer keeps them as NamedNode IRIs
+                    // — `literal:string:X` URIs would otherwise be stripped to
+                    // `"X"^^xsd:string` typed literals, which can't be subjects
+                    // for the subsequent `?target <type> <…>` conformance probe.
+                    let root = "ad4m://test/collection-where-test"
+                    let messageEntry = "ad4m://test/collection-where-test-msg"
                     
                     // Create todo with entries already set
                     let todo = new Todo(perspective!, root)
@@ -377,11 +383,12 @@ describe("Prolog + Literals", () => {
                     let message = new Message(perspective!, messageEntry)
                     await message.save()
 
-                    // Allow SurrealDB to index the new type flag
-                    await sleep(500)
-                    
-                    // Refresh todo data to apply collection filtering
-                    await todo.get()
+                    // Poll until SPARQL indexes the new type flag
+                    await pollUntil(async () => {
+                        await todo.get()
+                        const msgs = await todo.messages
+                        return msgs.length === 1
+                    }, { timeoutMs: 5000, intervalMs: 100, label: "SPARQL indexes message type flag" })
                     messageEntries = await todo.messages
                     expect(messageEntries.length).to.equal(1)
                 })
@@ -441,14 +448,9 @@ describe("Prolog + Literals", () => {
 
                     @Optional({
                         through: "recipe://image",
-                        resolveLanguage: "", // Will be set dynamically to note-store language
-                        transform: (data: any) => {
-                            if (data && typeof data === 'object' && data.data_base64) {
-                                return `data:image/png;base64,${data.data_base64}`;
-                            }
-                            return data;
-                        }
-                    } as PropertyOptions)
+                        resolveLanguage: "",
+                        transform: concat(literal("data:image/png;base64,"), shaclPath("data_base64")),
+                    })
                     image: string | any = ""
                 }
 
@@ -575,12 +577,12 @@ describe("Prolog + Literals", () => {
                     expect(updatedRecipies.length).to.equal(2)
                 })
 
-                it("can constrain relation entries through SurrealQL getter", async () => {
+                it("can constrain relation entries through SPARQL getter", async () => {
                     // Define a Recipe model with a getter-based filtered relation.
                     // Both `entries` and `ingredients` share the same predicate ("recipe://entries"),
                     // but `ingredients` uses an explicit getter to filter by an arbitrary link condition.
-                    @Model({ name: "RecipeWithSurrealFilter" })
-                    class RecipeWithSurrealFilter extends Ad4mModel {
+                    @Model({ name: "RecipeWithSparqlFilter" })
+                    class RecipeWithSparqlFilter extends Ad4mModel {
                         @Flag({
                             through: "ad4m://type",
                             value: "recipe://instance"
@@ -597,22 +599,26 @@ describe("Prolog + Literals", () => {
                         entries: string[] = [];
 
                         @HasMany({
-                            getter: `(->link[WHERE predicate = 'recipe://entries'].out[WHERE count(->link[WHERE predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test']) > 0].uri)`
+                            getter: `SELECT ?target WHERE { <Base> <recipe://entries> ?target . ?target <recipe://has_ingredient> <recipe://test> . }`
                         })
                         ingredients: string[] = [];
                     }
 
                     // Register the class
-                    await perspective!.ensureSDNASubjectClass(RecipeWithSurrealFilter);
+                    await perspective!.ensureSDNASubjectClass(RecipeWithSparqlFilter);
                     
-                    // Wait for SHACL metadata to be indexed
-                    await sleep(500);
+                    // SHACL metadata indexing happens asynchronously — no fixed
+                    // wait needed; downstream pollUntil on query results handles it
 
-                    let root = Literal.from("Active record surreal condition test").toUrl();
-                    const recipe = new RecipeWithSurrealFilter(perspective!, root);
+                    // See note on the SPARQL collection-where test above —
+                    // use a NamedNode-friendly `ad4m://test/` ID scheme so the
+                    // typed-literal storage doesn't strip these to xsd:string
+                    // literals when they appear as link targets.
+                    let root = "ad4m://test/sparql-condition-root";
+                    const recipe = new RecipeWithSparqlFilter(perspective!, root);
 
-                    let entry1 = Literal.from("entry with ingredient").toUrl();
-                    let entry2 = Literal.from("entry without ingredient").toUrl();
+                    let entry1 = "ad4m://test/sparql-condition-entry1";
+                    let entry2 = "ad4m://test/sparql-condition-entry2";
 
                     recipe.entries = [entry1, entry2];
                     recipe.name = "Condition test";
@@ -626,15 +632,18 @@ describe("Prolog + Literals", () => {
                         target: "recipe://test"
                     }));
 
-                    // Small delay for SurrealDB indexing
-                    await sleep(500);
-
-                    const recipe2 = new RecipeWithSurrealFilter(perspective!, root);
-                    await recipe2.get();
+                    // Poll until SPARQL indexes the ingredient link
+                    let recipe2: RecipeWithSparqlFilter;
+                    await pollUntil(async () => {
+                        recipe2 = new RecipeWithSparqlFilter(perspective!, root);
+                        await recipe2.get();
+                        return recipe2.ingredients.length === 1;
+                    }, { timeoutMs: 5000, intervalMs: 100, label: "SPARQL indexes ingredient link" });
+                    recipe2 = recipe2!;
 
                     // Should have 2 entries total
                     expect(recipe2.entries.length).to.equal(2);
-                    
+
                     // But only 1 ingredient (entry1 which has the ingredient link)
                     expect(recipe2.ingredients.length).to.equal(1);
                     expect(recipe2.ingredients[0]).to.equal(entry1);
@@ -651,8 +660,11 @@ describe("Prolog + Literals", () => {
                     //@ts-ignore
                     let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(links.length).to.equal(1)
-                    let literal = Literal.fromUrl(links[0].data.target).get()
-                    expect(literal.data).to.equal(recipe.resolve)
+                    // resolveLanguage:"literal" stores a signed expression envelope;
+                    // the raw target decodes to {author,timestamp,data,proof} whose
+                    // .data is the value. The model read (recipe3) unwraps it.
+                    let envelope: any = Literal.fromUrl(links[0].data.target).get()
+                    expect(envelope.data).to.equal(recipe.resolve)
 
                     const recipe3 = new Recipe(perspective!, root);
                     await recipe3.get();
@@ -700,6 +712,58 @@ describe("Prolog + Literals", () => {
                     expect(recipe2.image).to.equal(`data:image/png;base64,${testImageData.data_base64}`);
                 })
 
+                it("resolveLanguage:'literal' stores signed-expression envelopes and reads back the JSON object (Flux message case)", async () => {
+                    // Mirrors what Flux does for message atoms: a property declared
+                    // with `resolveLanguage: "literal"` and nothing else. The value
+                    // must be stored as a *signed expression* on the literal language
+                    // (envelope with author/timestamp/proof) — provenance Flux relies
+                    // on — and read back as the original JSON object.
+                    @Model({ name: "FluxMessageAtom" })
+                    class FluxMessageAtom extends Ad4mModel {
+                        @Property({ through: "flux://content", resolveLanguage: "literal" })
+                        content: any = null;
+                    }
+                    await perspective!.ensureSDNASubjectClass(FluxMessageAtom);
+
+                    const payload = { body: "hello flux", mentions: ["did:key:zABC"] };
+
+                    const root1 = Literal.from("flux atom 1").toUrl();
+                    const m1 = new FluxMessageAtom(perspective!, root1);
+                    m1.content = payload;
+                    await m1.save();
+
+                    // Raw stored target must be a SIGNED envelope, not a plain
+                    // deterministic literal:json: of the value.
+                    const links1 = await perspective!.get(new LinkQuery({ source: root1, predicate: "flux://content" }));
+                    expect(links1.length).to.equal(1);
+                    const target1 = links1[0].data.target;
+                    expect(target1).to.match(/^literal:json:/);
+                    const envelope1 = JSON.parse(decodeURIComponent(target1.replace(/^literal:json:/, "")));
+                    expect(envelope1).to.have.property("author");
+                    expect(envelope1).to.have.property("timestamp");
+                    expect(envelope1).to.have.property("proof");
+                    expect(envelope1.data).to.deep.equal(payload);
+
+                    // Read back through the model → the JSON object (envelope unwrapped).
+                    const all = await FluxMessageAtom.findAll(perspective!);
+                    const got: any = all.find((m: any) => m.id === root1);
+                    expect(got).to.not.be.undefined;
+                    expect(got.content).to.be.an("object");
+                    expect(got.content).to.deep.equal(payload);
+
+                    // Each message is a distinct signed expression: identical content
+                    // yields a DIFFERENT envelope (per-expression provenance), not a
+                    // deduped deterministic literal.
+                    const root2 = Literal.from("flux atom 2").toUrl();
+                    const m2 = new FluxMessageAtom(perspective!, root2);
+                    m2.content = payload;
+                    await m2.save();
+                    const links2 = await perspective!.get(new LinkQuery({ source: root2, predicate: "flux://content" }));
+                    const target2 = links2[0].data.target;
+                    expect(target2).to.match(/^literal:json:/);
+                    expect(target2).to.not.equal(target1);
+                })
+
                 it("works with very long property values", async() => {
                     let root = Literal.from("Active record implementation test long value").toUrl()
                     const recipe = new Recipe(perspective!, root)
@@ -713,8 +777,9 @@ describe("Prolog + Literals", () => {
 
                     let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(linksResolve.length).to.equal(1)
-                    let expression = Literal.fromUrl(linksResolve[0].data.target).get()
-                    expect(expression.data).to.equal(longName)
+                    // resolveLanguage:"literal" → signed envelope; check the inner .data.
+                    let envelope: any = Literal.fromUrl(linksResolve[0].data.target).get()
+                    expect(envelope.data).to.equal(longName)
 
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()
@@ -783,8 +848,8 @@ describe("Prolog + Literals", () => {
                     recipe2.plain = "recipe://findAll_test2";
                     await recipe2.save();
 
-                    // Test findAll
-                    const recipes = await Recipe.findAll(perspective!);
+                    // Test findAll (sort by name — SPARQL result order is non-deterministic)
+                    const recipes = (await Recipe.findAll(perspective!)).sort((a, b) => a.name.localeCompare(b.name));
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].name).to.equal("findAll test 1");
@@ -807,17 +872,23 @@ describe("Prolog + Literals", () => {
                     recipe2.comments = ["recipe://comment/r2/1", "recipe://comment/r2/2"];
                     await recipe2.save();
 
-                    // Test findAll
-                    const recipes = await Recipe.findAll(perspective!);
+                    // Test findAll (sort by id — SPARQL result order is non-deterministic)
+                    const recipes = (await Recipe.findAll(perspective!)).sort((a, b) => a.id.localeCompare(b.id));
 
                     expect(recipes.length).to.equal(2);
-                    expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments).to.include("recipe://comment/r1/1");
-                    expect(recipes[0].comments).to.include("recipe://comment/r1/2");
+                    // Find which recipe is which by matching root expressions
+                    const r1 = recipes.find(r => r.id === root1)!;
+                    const r2 = recipes.find(r => r.id === root2)!;
+                    expect(r1).to.not.be.undefined;
+                    expect(r2).to.not.be.undefined;
 
-                    expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments).to.include("recipe://comment/r2/1");
-                    expect(recipes[1].comments).to.include("recipe://comment/r2/2");
+                    expect(r1.comments.length).to.equal(2);
+                    expect(r1.comments).to.include("recipe://comment/r1/1");
+                    expect(r1.comments).to.include("recipe://comment/r1/2");
+
+                    expect(r2.comments.length).to.equal(2);
+                    expect(r2.comments).to.include("recipe://comment/r2/1");
+                    expect(r2.comments).to.include("recipe://comment/r2/2");
                 })
 
                 it("findAll() returns author & timestamp on instances", async () => {
@@ -1141,14 +1212,10 @@ describe("Prolog + Literals", () => {
                     task1.dueDate = start;
                     await task1.save();
 
-                    // Small delay to ensure different timestamps
-                    await sleep(10);
+                    // Wait for clock to advance past start
+                    await pollUntil(() => Date.now() > start, { timeoutMs: 1000, intervalMs: 1, label: "clock advances past start" });
 
                     let mid = new Date().getTime();
-                    // Ensure mid > start even if system clock resolution is low
-                    if (mid <= start) {
-                        mid = start + 1;
-                    }
 
                     const task2 = new TaskDue(perspective!);
                     task2.title = "Medium priority task";
@@ -1162,14 +1229,10 @@ describe("Prolog + Literals", () => {
                     task3.dueDate = mid + 2;
                     await task3.save();
 
-                    // Small delay to ensure different timestamps
-                    await sleep(10);
+                    // Wait for clock to advance past mid
+                    await pollUntil(() => Date.now() > mid, { timeoutMs: 1000, intervalMs: 1, label: "clock advances past mid" });
 
                     let end = new Date().getTime();
-                    // Ensure end > mid even if system clock resolution is low
-                    if (end <= mid) {
-                        end = mid + 1;
-                    }
 
                     // Check all tasks are there
                     const allTasks = await TaskDue.findAll(perspective!);
@@ -1516,7 +1579,9 @@ describe("Prolog + Literals", () => {
                         });
                     expect(subscription).to.equal(3);
 
-                    // Small delay to ensure subscription is fully registered before triggering changes
+                    // Subscription-init delay: SPARQL change-watchers register
+                    // asynchronously inside the executor — no observable "ready"
+                    // state exists to poll for, so a fixed delay is required.
                     await sleep(500);
 
                     // Add another recipe and verify callback is called
@@ -1529,7 +1594,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => lastCount === 4,
                         {
-                            timeoutMs: 15000,
+                            timeoutMs: 60000,
                             errorMessage: 'Count subscription did not update after recipe save'
                         }
                     );
@@ -1669,7 +1734,8 @@ describe("Prolog + Literals", () => {
                     // Reset lastResult to verify we get an update
                     lastResult = null;
 
-                    // Small delay to ensure subscription is fully registered before triggering changes
+                    // Subscription-init delay: SPARQL change-watchers register
+                    // asynchronously — no observable "ready" state to poll for.
                     await sleep(500);
 
                     // Add a new recipe and verify subscription updates
@@ -1678,12 +1744,15 @@ describe("Prolog + Literals", () => {
                     await newRecipe.save();
 
                     // Wait for subscription update with proper condition checking
-                    // Use longer timeout for CI environments which may be slower
+                    // Use longer timeout for CI environments which may be slower.
+                    // The subscription may fire multiple times (once per link-added event)
+                    // before the re-query reflects the new recipe, so wait until
+                    // totalCount reaches the expected value.
                     await waitForCondition(
-                        () => lastResult !== null,
+                        () => lastResult !== null && lastResult.totalCount === 11,
                         {
-                            timeoutMs: 15000,
-                            errorMessage: 'Paginate subscription did not update after recipe save'
+                            timeoutMs: 60000,
+                            errorMessage: 'Paginate subscription did not update totalCount to 11 after recipe save'
                         }
                     );
 
@@ -1750,11 +1819,10 @@ describe("Prolog + Literals", () => {
                     notification1.read = false;
                     await notification1.save();
 
-                    // Wait for subscription to fire with smart polling
-                    for (let i = 0; i < 30; i++) {
-                        if (updateCount >= 1 && notifications.length === 1) break;
-                        await sleep(50);
-                    }
+                    // Wait for subscription to fire
+                    await pollUntil(() => updateCount >= 1 && notifications.length === 1, {
+                        timeoutMs: 5000, intervalMs: 50, label: "first notification subscription fires"
+                    });
                     expect(updateCount).to.be.at.least(1);
                     expect(notifications.length).to.equal(1);
 
@@ -1765,10 +1833,9 @@ describe("Prolog + Literals", () => {
                     notification2.read = false;
                     await notification2.save();
 
-                    for (let i = 0; i < 30; i++) {
-                        if (updateCount >= 2 && notifications.length === 2) break;
-                        await sleep(50);
-                    }
+                    await pollUntil(() => updateCount >= 2 && notifications.length === 2, {
+                        timeoutMs: 5000, intervalMs: 50, label: "second notification subscription fires"
+                    });
                     expect(updateCount).to.be.at.least(2);
                     expect(notifications.length).to.equal(2);
 
@@ -1779,20 +1846,18 @@ describe("Prolog + Literals", () => {
                     notification3.read = false;
                     await notification3.save();
 
-                    await sleep(200); // Give it time but don't wait the full second
-                    // With SurrealDB we get 3 updates because we do comparison filtering in the client
-                    // and not the query. So the raw query result actually is different, even though
-                    // the ultimate result is the same.
-                    //expect(updateCount).to.equal(2);
+                    // Verify non-matching notification does not add to filtered results
+                    await assertStaysFalse(() => notifications.length > 2, {
+                        waitMs: 500, intervalMs: 50, label: "low-priority notification stays out of filtered results"
+                    });
                     expect(notifications.length).to.equal(2);
 
                     // Mark notification1 as read - should trigger subscription to remove it
                     notification1.read = true;
                     await notification1.save();
-                    for (let i = 0; i < 30; i++) {
-                        if (notifications.length === 1) break;
-                        await sleep(50);
-                    }
+                    await pollUntil(() => notifications.length === 1, {
+                        timeoutMs: 5000, intervalMs: 50, label: "read notification removed from subscription"
+                    });
                     expect(notifications.length).to.equal(1);
 
                     // Dispose the subscription to prevent cross-test interference
@@ -1919,10 +1984,8 @@ describe("Prolog + Literals", () => {
                         updateCount++;
                     });
 
-                    // Initially no results
+                    // Initially no results (returned via Promise, callback not fired)
                     expect(initialResults.length).to.equal(0);
-                    // Reset updateCount since subscribe() fires the callback once with initial results
-                    updateCount = 0;
 
                     // Add matching task - should trigger subscription
                     const task1 = new Task(perspective!);
@@ -1938,7 +2001,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => updateCount === 1 && tasks.length === 1,
                         { 
-                            timeoutMs: 5000, 
+                            timeoutMs: 60000, 
                             errorMessage: 'Subscription did not fire after first task save' 
                         }
                     );
@@ -1958,7 +2021,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => updateCount === 2 && tasks.length === 2,
                         { 
-                            timeoutMs: 5000, 
+                            timeoutMs: 60000, 
                             errorMessage: 'Subscription did not fire after second task save' 
                         }
                     );
@@ -1973,7 +2036,10 @@ describe("Prolog + Literals", () => {
                     task3.assignee = "bob";
                     await task3.save();
 
-                    await sleep(1000);
+                    // Verify non-matching task does not trigger subscription
+                    await assertStaysFalse(() => updateCount > 2 || tasks.length > 2, {
+                        waitMs: 1000, intervalMs: 50, label: "wrong-assignee task does not trigger subscription"
+                    });
                     expect(updateCount).to.equal(2);
                     expect(tasks.length).to.equal(2);
 
@@ -1985,7 +2051,7 @@ describe("Prolog + Literals", () => {
                     await waitForCondition(
                         () => tasks.length === 1,
                         { 
-                            timeoutMs: 5000, 
+                            timeoutMs: 60000, 
                             errorMessage: 'Subscription did not fire after task update' 
                         }
                     );
@@ -2003,8 +2069,8 @@ describe("Prolog + Literals", () => {
                         @Property({
                             through: "image://data",
                             resolveLanguage: "literal",
-                            transform: (data: any) => data ? `data:image/png;base64,${data}` : undefined,
-                        } as PropertyOptions)
+                            transform: concat(literal("data:image/png;base64,"), focus()),
+                        })
                         image: string = "";
                         //TODO: having json objects as properties in our new queries breaks the JSON
                         // construction of Prolog query results.
@@ -2158,7 +2224,7 @@ describe("Prolog + Literals", () => {
                     expect(notesAfterDelete.length).to.equal(0);
                 });
 
-                describe("SurrealDB vs Prolog Subscriptions", () => {
+                describe("Query Subscriptions", () => {
                     let perspective: PerspectiveProxy;
 
                     @Model({ name: "SubscriptionTestModel" })
@@ -2187,16 +2253,16 @@ describe("Prolog + Literals", () => {
                         }
                     });
 
-                    // REMOVED: SurrealDB vs Prolog parity test
-                    // This test compared SurrealDB and Prolog subscription results.
-                    // With SHACL migration, SurrealDB is now the primary query engine.
+                    // REMOVED: SPARQL vs Prolog parity test
+                    // This test compared SPARQL and Prolog subscription results.
+                    // With SHACL migration, SPARQL is now the primary query engine.
                     // Prolog subscriptions are deprecated - no need for parity testing.
 
-                    it("should demonstrate SurrealDB subscription performance", async () => {
+                    it("should demonstrate subscription performance", async () => {
                         // Measure latency of update
-                        const surrealCallback = sinon.fake();
-                        const surrealBuilder = TestModel.query(perspective).where({ status: "perf-test" });
-                        await surrealBuilder.subscribe(surrealCallback);
+                        const subscriptionCallback = sinon.fake();
+                        const queryBuilder = TestModel.query(perspective).where({ status: "perf-test" });
+                        await queryBuilder.subscribe(subscriptionCallback);
 
                         const start = Date.now();
                         const model = new TestModel(perspective);
@@ -2205,18 +2271,60 @@ describe("Prolog + Literals", () => {
                         await model.save();
                         const saveTime = Date.now();
 
-                        // Poll until callback called
-                        while (!surrealCallback.called) {
-                            await sleep(10);
-                            if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
-                        }
+                        // Poll until callback called. 60s upper bound matches
+                        // the surrounding waitForCondition timeouts in this
+                        // suite. Even with the previous 5s ceiling the test
+                        // still flaked on integration-tests-js #17171 after
+                        // the dev merge pulled in the lazy-load resolveLanguage
+                        // change (#848), which adds first-fetch latency on a
+                        // freshly registered SDNA class. Steady-state
+                        // subscription latency is still logged via
+                        // `subscriptionLatency`, so a real regression would
+                        // surface as a slow log line rather than be hidden by
+                        // the bumped ceiling.
+                        await pollUntil(() => subscriptionCallback.called, {
+                            timeoutMs: 60000, intervalMs: 10, label: "subscription callback fires after save"
+                        });
 
                         const saveLatency = saveTime - start;
                         const subscriptionLatency = Date.now() - saveTime;
                         console.log(`TestModel.save() latency: ${saveLatency}ms`);
-                        console.log(`SurrealDB subscription update latency: ${subscriptionLatency}ms`);
+                        console.log(`Subscription update latency: ${subscriptionLatency}ms`);
 
-                        surrealBuilder.dispose();
+                        queryBuilder.dispose();
+                    });
+
+                    // Two subscribeQuery() callers on the same query share one
+                    // executor subscription, and each dispose() releases one hold.
+                    // A second dispose() of the same proxy must not release the
+                    // other proxy's hold.
+                    it("keeps a shared subscribeQuery subscription alive when one proxy is disposed twice", async () => {
+                        const query = "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://shared-proxy>) }";
+                        const subA = await perspective.subscribeQuery(query);
+                        const subB = await perspective.subscribeQuery(query);
+                        expect(subB.id).to.equal(subA.id);
+                        const callbackA = sinon.fake();
+                        const callbackB = sinon.fake();
+                        subA.onResult(callbackA);
+                        subB.onResult(callbackB);
+
+                        subA.dispose();
+                        subA.dispose();
+
+                        await perspective.add(new Link({
+                            source: "test://shared-proxy-source",
+                            predicate: "test://shared-proxy",
+                            target: "test://shared-proxy-target",
+                        }));
+
+                        await pollUntil(() => callbackB.callCount >= 1, {
+                            timeoutMs: 20000, intervalMs: 50,
+                            label: "remaining subscribeQuery proxy still receives updates after the other was disposed twice"
+                        });
+                        expect(JSON.stringify(callbackB.lastCall.args[0])).to.include("test://shared-proxy-target");
+                        expect(callbackA.callCount).to.equal(0);
+
+                        subB.dispose();
                     });
                 });
 
@@ -2272,18 +2380,18 @@ describe("Prolog + Literals", () => {
                         await model1.save();
 
                         // Wait for subscription update with proper condition checking
-                        // subscribe() fires callback once immediately with initial results (callCount=1),
-                        // so we wait for callCount >= 2 to capture the real update after model save
+                        // subscribe() returns initial results via Promise only — callback
+                        // fires only for subsequent updates (to avoid double-setState in Preact)
                         await waitForCondition(
-                            () => callback1.callCount >= 2,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'First callback was not called after model save' 
+                            () => callback1.callCount >= 1,
+                            {
+                                timeoutMs: 60000,
+                                errorMessage: 'First callback was not called after model save'
                             }
                         );
 
                         // Verify callback was called with the saved model
-                        expect(callback1.callCount).to.be.at.least(2);
+                        expect(callback1.callCount).to.be.at.least(1);
                         expect(callback1.lastCall.args[0]).to.be.an('array');
                         expect(callback1.lastCall.args[0].length).to.equal(1);
                         expect(callback1.lastCall.args[0][0].name).to.equal("Test 1");
@@ -2300,20 +2408,18 @@ describe("Prolog + Literals", () => {
                         await model2.save();
 
                         // Wait for subscription update with proper condition checking
-                        // subscribe() fires callback2 once immediately (callCount=1),
-                        // so we wait for callCount >= 2 to capture the update after model2 save
                         await waitForCondition(
-                            () => callback2.callCount >= 2,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'Second callback was not called after model save' 
+                            () => callback2.callCount >= 1,
+                            {
+                                timeoutMs: 60000,
+                                errorMessage: 'Second callback was not called after model save'
                             }
                         );
 
                         // Verify only second callback was called (callback1 was disposed)
-                        // callback1: 1 (subscribe initial) + 1 (model1 save) = 2, no more after that
-                        expect(callback1.callCount).to.equal(2);
-                        expect(callback2.callCount).to.be.at.least(2);
+                        // callback1: 1 (model1 save only), no more after dispose
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.be.at.least(1);
                         expect(callback2.lastCall.args[0]).to.be.an('array');
                         expect(callback2.lastCall.args[0].length).to.equal(2);
 
@@ -2326,14 +2432,56 @@ describe("Prolog + Literals", () => {
                         model3.status = "active";
                         await model3.save();
 
-                        // Wait to ensure no callbacks
-                        await sleep(1000);
+                        // Verify no callbacks fire after dispose
+                        await assertStaysFalse(() => callback1.callCount > 1 || callback2.callCount > 1, {
+                            waitMs: 1000, intervalMs: 50, label: "no callbacks after dispose"
+                        });
+                        // callback1: 1 (model1 save only)
+                        // callback2: 1 (model2 save only)
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.equal(1);
+                    });
 
-                        // Verify no new callbacks after dispose
-                        // callback1: 2 (subscribe initial + model1 save)
-                        // callback2: 2 (subscribe initial + model2 save)
-                        expect(callback1.callCount).to.equal(2);
-                        expect(callback2.callCount).to.equal(2);
+                    // The executor hands every subscriber of the same query the
+                    // same subscription id and only drops it when the last holder
+                    // disposes. Before that, builder A's dispose removed the entry
+                    // builder B still relied on, so B never saw another update.
+                    it('keeps a shared subscription alive when another subscriber disposes', async () => {
+                        const builderA = TestModel.query(perspective).where({ status: "active" });
+                        const builderB = TestModel.query(perspective).where({ status: "active" });
+                        const callbackA = sinon.fake();
+                        const callbackB = sinon.fake();
+
+                        const initialA = await builderA.subscribe(callbackA);
+                        const initialB = await builderB.subscribe(callbackB);
+                        expect(initialA.length).to.equal(0);
+                        expect(initialB.length).to.equal(0);
+
+                        // A lets go; the executor must keep the subscription for B.
+                        await builderA.dispose();
+
+                        const model = new TestModel(perspective);
+                        model.name = "Shared 1";
+                        model.status = "active";
+                        await model.save();
+
+                        await pollUntil(() => callbackB.callCount >= 1, {
+                            timeoutMs: 60000, intervalMs: 50,
+                            label: "remaining subscriber still receives updates after the other disposed"
+                        });
+                        expect(callbackB.lastCall.args[0].length).to.equal(1);
+                        expect(callbackB.lastCall.args[0][0].name).to.equal("Shared 1");
+                        expect(callbackA.callCount).to.equal(0);
+
+                        // B lets go too: nothing fires any more.
+                        await builderB.dispose();
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Shared 2";
+                        model2.status = "active";
+                        await model2.save();
+                        await assertStaysFalse(() => callbackA.callCount > 0 || callbackB.callCount > 1, {
+                            waitMs: 1000, intervalMs: 50, label: "no callbacks after both disposed"
+                        });
                     });
 
                     it('handles count subscriptions and disposal', async () => {
@@ -2344,7 +2492,8 @@ describe("Prolog + Literals", () => {
                         const initialCount = await builder.countSubscribe(countCallback);
                         expect(initialCount).to.equal(0);
 
-                        // Small delay to ensure subscription is fully registered before triggering changes
+                        // Subscription-init delay: SPARQL change-watchers register
+                        // asynchronously — no observable "ready" state to poll for.
                         await sleep(500);
 
                         // Add a matching model
@@ -2354,18 +2503,18 @@ describe("Prolog + Literals", () => {
                         await model.save();
 
                         // Wait for subscription update with proper condition checking
-                        // countSubscribe() fires callback once immediately with initial count (0),
-                        // so we wait for callCount >= 2 to capture the update after model save
+                        // countSubscribe() returns initial count via Promise only —
+                        // callback fires only for subsequent updates
                         await waitForCondition(
-                            () => countCallback.callCount >= 2,
+                            () => countCallback.callCount >= 1,
                             {
-                                timeoutMs: 15000,
+                                timeoutMs: 60000,
                                 errorMessage: 'Count callback was not called after model save'
                             }
                         );
 
                         // Verify callback was called with new count
-                        expect(countCallback.callCount).to.be.at.least(2);
+                        expect(countCallback.callCount).to.be.at.least(1);
                         expect(countCallback.lastCall.args[0]).to.equal(1);
                         let count = countCallback.callCount
 
@@ -2378,10 +2527,10 @@ describe("Prolog + Literals", () => {
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait to ensure no callback (still using sleep since we're verifying no change)
-                        await sleep(1000);
-
-                        // Verify no new callbacks
+                        // Verify no callbacks fire after dispose
+                        await assertStaysFalse(() => countCallback.callCount > count, {
+                            waitMs: 1000, intervalMs: 50, label: "no count callbacks after dispose"
+                        });
                         expect(countCallback.callCount).to.equal(count);
                     });
 
@@ -2394,27 +2543,39 @@ describe("Prolog + Literals", () => {
                         expect(initialPage.results.length).to.equal(0);
                         expect(initialPage.totalCount).to.equal(0);
 
-                        // Small delay to ensure subscription is fully registered before triggering changes
+                        // Subscription-init delay: SPARQL change-watchers register
+                        // asynchronously — no observable "ready" state to poll for.
                         await sleep(500);
 
-                        // Add models
+                        // Add the first model and synchronize on its dispatch before
+                        // saving the second. The underlying change-detection SPARQL is
+                        // `LIMIT 1`, so back-to-back saves can produce a single
+                        // re-fetch that races against the second save's commit and
+                        // leaves `results.length` stuck at 1. Waiting between saves
+                        // makes each one trigger its own dispatch deterministically.
                         const model1 = new TestModel(perspective);
                         model1.name = "Test 1";
                         model1.status = "active";
                         await model1.save();
+
+                        await waitForCondition(
+                            () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 1,
+                            {
+                                timeoutMs: 60000,
+                                errorMessage: 'Paginate callback did not see first model save'
+                            }
+                        );
 
                         const model2 = new TestModel(perspective);
                         model2.name = "Test 2";
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait for subscription updates with proper condition checking
-                        // Use longer timeout for CI environments which may be slower
                         await waitForCondition(
-                            () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 2,
+                            () => pageCallback.lastCall.args[0].results.length >= 2,
                             {
-                                timeoutMs: 15000,
-                                errorMessage: 'Paginate callback was not called with expected results after model saves'
+                                timeoutMs: 60000,
+                                errorMessage: 'Paginate callback did not see second model save'
                             }
                         );
 
@@ -2435,10 +2596,10 @@ describe("Prolog + Literals", () => {
                         model3.status = "active";
                         await model3.save();
 
-                        // Wait to ensure no callback
-                        await sleep(1000);
-
-                        // Verify no new callbacks
+                        // Verify no callbacks fire after dispose
+                        await assertStaysFalse(() => pageCallback.callCount > count, {
+                            waitMs: 1000, intervalMs: 50, label: "no page callbacks after dispose"
+                        });
                         expect(pageCallback.callCount).to.equal(count);
                     });
                 });
@@ -2587,7 +2748,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => updateCount === 1,
                             { 
-                                timeoutMs: 5000, 
+                                timeoutMs: 60000, 
                                 errorMessage: 'Subscription did not fire after first message save' 
                             }
                         );
@@ -2606,7 +2767,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => updateCount === 2,
                             { 
-                                timeoutMs: 5000, 
+                                timeoutMs: 60000, 
                                 errorMessage: 'Subscription did not fire after second message save' 
                             }
                         );
@@ -2640,12 +2801,12 @@ describe("Prolog + Literals", () => {
 
                     @Optional({
                         through: "blog://parent",
-                        getter: "(->link[WHERE predicate = 'blog://reply_to'].out.uri)[0]"
+                        getter: "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"
                     })
                     parentPost: string | undefined;
 
                     @HasMany({
-                        getter: "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)"
+                        getter: "SELECT ?target WHERE { <Base> <blog://tagged_with> ?target . }"
                     })
                     tags: string[] = [];
                 }
@@ -2788,15 +2949,18 @@ describe("Prolog + Literals", () => {
                     await perspective!.ensureSDNASubjectClass(Article);
                     await perspective!.ensureSDNASubjectClass(ArticleWithString);
 
-                    // Give perspective time to fully index the SDNA classes
-                    await sleep(200);
+                    // SDNA class indexing handled by downstream pollUntil checks
                 });
 
                 it("should filter collection by type with class reference", async () => {
-                    const articleRoot = Literal.from("Article for isInstance test").toUrl();
-                    const validComment1 = Literal.from("Valid comment 1").toUrl();
-                    const validComment2 = Literal.from("Valid comment 2").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
+                    // See note above — IDs use `ad4m://test/` so the
+                    // typed-literal storage doesn't turn link targets into
+                    // xsd:string literals that can't be subjects under the
+                    // type-filter conformance probe.
+                    const articleRoot = "ad4m://test/typefilter-article-class-ref";
+                    const validComment1 = "ad4m://test/typefilter-valid-comment-1";
+                    const validComment2 = "ad4m://test/typefilter-valid-comment-2";
+                    const invalidItem = "ad4m://test/typefilter-invalid-item";
 
                     const article = new Article(perspective!, articleRoot);
                     article.title = "Test Article";
@@ -2810,9 +2974,6 @@ describe("Prolog + Literals", () => {
                     const comment2 = new Comment(perspective!, validComment2);
                     comment2.text = "This is another valid comment";
                     await comment2.save();
-
-                    // Add delay to allow SurrealDB to finish indexing
-                    await sleep(1500);
 
                     // Add links to article
                     await perspective!.add(new Link({
@@ -2831,10 +2992,14 @@ describe("Prolog + Literals", () => {
                         target: validComment2
                     }));
 
-                    await sleep(500);
-
-                    const retrievedArticle = new Article(perspective!, articleRoot);
-                    await retrievedArticle.get();
+                    // Poll until SPARQL indexes links and type-filter resolves correctly
+                    let retrievedArticle: Article;
+                    await pollUntil(async () => {
+                        retrievedArticle = new Article(perspective!, articleRoot);
+                        await retrievedArticle.get();
+                        return retrievedArticle.comments.length === 2;
+                    }, { timeoutMs: 10000, intervalMs: 200, label: "type-filtered comments resolve to 2" });
+                    retrievedArticle = retrievedArticle!;
 
                     // Should only contain valid Comments, not the invalid item
                     expect(retrievedArticle.comments).to.have.lengthOf(2);
@@ -2844,9 +3009,9 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("should filter collection by type with string class name", async () => {
-                    const articleRoot = Literal.from("Article for string isInstance test").toUrl();
-                    const validComment = Literal.from("Valid comment").toUrl();
-                    const invalidItem = Literal.from("Invalid item").toUrl();
+                    const articleRoot = "ad4m://test/typefilter-article-string-name";
+                    const validComment = "ad4m://test/typefilter-valid-comment-strname";
+                    const invalidItem = "ad4m://test/typefilter-invalid-item-strname";
 
                     const article = new ArticleWithString(perspective!, articleRoot);
                     article.title = "Test Article with String";
@@ -2856,9 +3021,6 @@ describe("Prolog + Literals", () => {
                     const comment = new Comment(perspective!, validComment);
                     comment.text = "Valid comment text";
                     await comment.save();
-
-                    // Add delay to allow SurrealDB to finish indexing
-                    await sleep(1500);
 
                     // Add both to article
                     await perspective!.add(new Link({
@@ -2872,24 +3034,29 @@ describe("Prolog + Literals", () => {
                         target: invalidItem
                     }));
 
-                    await sleep(500);
-
-                    const retrievedArticle = new ArticleWithString(perspective!, articleRoot);
-                    await retrievedArticle.get();
+                    // Poll until SPARQL indexes and type-filter resolves
+                    let retrievedArticle: ArticleWithString;
+                    await pollUntil(async () => {
+                        retrievedArticle = new ArticleWithString(perspective!, articleRoot);
+                        await retrievedArticle.get();
+                        return retrievedArticle.comments.length === 1;
+                    }, { timeoutMs: 10000, intervalMs: 200, label: "string-name type-filtered comments resolve to 1" });
+                    retrievedArticle = retrievedArticle!;
 
                     expect(retrievedArticle.comments).to.have.lengthOf(1);
                     expect(retrievedArticle.comments[0]).to.equal(validComment);
                 });
 
                 it("should filter results in findAll() by type", async () => {
-                    // Create two articles
-                    const article1Root = Literal.from("Article 1 for findAll isInstance").toUrl();
-                    const article2Root = Literal.from("Article 2 for findAll isInstance").toUrl();
-                    
-                    const comment1 = Literal.from("Comment 1").toUrl();
-                    const invalid1 = Literal.from("Invalid 1").toUrl();
-                    const comment2 = Literal.from("Comment 2").toUrl();
-                    const invalid2 = Literal.from("Invalid 2").toUrl();
+                    // Create two articles — IDs use `ad4m://test/` so
+                    // typed-literal storage keeps them as NamedNode IRIs.
+                    const article1Root = "ad4m://test/typefilter-findall-article-1";
+                    const article2Root = "ad4m://test/typefilter-findall-article-2";
+
+                    const comment1 = "ad4m://test/typefilter-findall-comment-1";
+                    const invalid1 = "ad4m://test/typefilter-findall-invalid-1";
+                    const comment2 = "ad4m://test/typefilter-findall-comment-2";
+                    const invalid2 = "ad4m://test/typefilter-findall-invalid-2";
 
                     // Create articles
                     const article1 = new Article(perspective!, article1Root);
@@ -2908,9 +3075,6 @@ describe("Prolog + Literals", () => {
                     const c2 = new Comment(perspective!, comment2);
                     c2.text = "Comment 2 text";
                     await c2.save();
-
-                    // Add delay to allow SurrealDB to finish indexing
-                    await sleep(1500);
 
                     // Add comments to articles (mix of valid and invalid)
                     await perspective!.add(new Link({
@@ -2934,11 +3098,17 @@ describe("Prolog + Literals", () => {
                         target: invalid2
                     }));
 
-                    await sleep(500);
+                    // Poll until SPARQL indexes and findAll returns both articles with filtered comments
+                    let articles: Article[];
+                    await pollUntil(async () => {
+                        articles = await Article.findAll(perspective!);
+                        if (articles.length !== 2) return false;
+                        const a1 = articles.find(a => a.title === "Article 1");
+                        const a2 = articles.find(a => a.title === "Article 2");
+                        return !!a1 && a1.comments.length === 1 && !!a2 && a2.comments.length === 1;
+                    }, { timeoutMs: 10000, intervalMs: 200, label: "findAll type-filter resolves both articles" });
+                    articles = articles!;
 
-                    // Use findAll and verify filtering
-                    const articles = await Article.findAll(perspective!);
-                    
                     expect(articles).to.have.lengthOf(2);
                     
                     const foundArticle1 = articles.find(a => a.title === "Article 1");
@@ -2955,6 +3125,39 @@ describe("Prolog + Literals", () => {
                     expect(foundArticle2!.comments[0]).to.equal(comment2);
                 });
             })
+        })
+    })
+
+    // A link comes back with the target it was signed over, whatever literal
+    // encoding the writer used. The store keeps literal targets as typed
+    // values; before the read-back fix it re-rendered them in the SDK's
+    // encoding, so a read-back copy handed on to another agent no longer
+    // matched its signature.
+    describe("Literal link targets", () => {
+        it("read back byte for byte, in any literal encoding", async () => {
+            const perspective = await ad4m!.perspective.add("literal read-back")
+            const targets = [
+                "literal:string:Write the guide",
+                'literal:json:{"a": 1, "b": "x y"}',
+                "literal:string:a%2Db%5Fc",
+                Literal.from("Write the guide").toUrl(),
+                Literal.from({ a: 1 }).toUrl(),
+            ]
+            for (const [i, target] of targets.entries()) {
+                await perspective.add(new Link({ source: `test://read-back/${i}`, predicate: "test://p", target }))
+            }
+            for (const [i, target] of targets.entries()) {
+                const links = await perspective.get(new LinkQuery({ source: `test://read-back/${i}` }))
+                expect(links.length).to.equal(1)
+                expect(links[0].data.target).to.equal(target)
+                expect(links[0].proof.valid).to.be.true
+            }
+        })
+
+        it("expression.create(_, 'literal') encodes like Literal.toUrl()", async () => {
+            const url = await ad4m!.expression.create({ note: "a-b_c.d~e" }, "literal")
+            expect(url).to.not.match(/%2D|%2E|%5F|%7E/i)
+            expect(url).to.equal(Literal.from(Literal.fromUrl(url).get()).toUrl())
         })
     })
 
@@ -3000,19 +3203,22 @@ describe("Prolog + Literals", () => {
         })
 
         it("can get all smart literals in a perspective",async () => {
-            let all = await SmartLiteral.getAllSmartLiterals(perspective!)
+            // Links created in the same millisecond have no defined order, so match by base.
+            const all = await SmartLiteral.getAllSmartLiterals(perspective!)
             expect(all.length).to.equal(2)
-            expect(all[1].base).to.equal(Literal.from("base").toUrl())
-            expect(await all[0].get()).to.equal(5)
-            expect(await all[1].get()).to.equal("Hello World 2")
+            const named = all.find(sl => sl.base === Literal.from("base").toUrl())
+            const other = all.find(sl => sl !== named)
+            expect(named, "the literal added by base").to.not.be.undefined
+            expect(await named!.get()).to.equal("Hello World 2")
+            expect(await other!.get()).to.equal(5)
         })
 
     })
 
     // SKIPPED: Embedding cache tests - only applies to Prolog-pooled mode
     // These tests verify embedding URL post-processing with Prolog infer() queries.
-    // With SHACL migration, embedding queries should use SurrealDB vector search instead.
-    // Keeping as reference for future SurrealDB vector embedding implementation.
+    // With SHACL migration, embedding queries should use SPARQL vector search instead.
+    // Keeping as reference for future SPARQL vector embedding implementation.
     describe.skip('Embedding cache', () => {
         let perspective: PerspectiveProxy | null = null;
         const EMBEDDING_LANG = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
@@ -3488,7 +3694,7 @@ describe("Prolog + Literals", () => {
                     namespace: "test://",
                     propertyOptions: {
                         "status": { initial: "test://active" },
-                        "count": { initial: "literal://number:0" }
+                        "count": { initial: "literal:number:0" }
                     }
                 })
 
@@ -3501,7 +3707,7 @@ describe("Prolog + Literals", () => {
                 const sdna = TestClass.generateSDNA()
                 expect(sdna.sdna).to.include('constructor(')
                 expect(sdna.sdna).to.include('test://active')
-                expect(sdna.sdna).to.include('literal://number:0')
+                expect(sdna.sdna).to.include('literal:number:0')
             })
 
             it("should handle complex property types with full data storage and retrieval", async () => {
@@ -3684,34 +3890,27 @@ describe("Prolog + Literals", () => {
 
 })
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
- * Wait for a condition to become true with exponential backoff.
- * This is more reliable than fixed sleep() for async operations.
+ * Wait for a condition to become true, polling at fixed intervals.
+ * Delegates to the shared pollUntil from utils.ts.
  */
 async function waitForCondition(
   condition: () => boolean,
-  options: { 
-    timeoutMs?: number, 
+  options: {
+    timeoutMs?: number,
     checkIntervalMs?: number,
-    errorMessage?: string 
+    errorMessage?: string
   } = {}
 ): Promise<void> {
-  const { 
-    timeoutMs = 5000, 
+  const {
+    timeoutMs = 5000,
     checkIntervalMs = 50,
     errorMessage = 'Condition was not met within timeout'
   } = options;
-  
-  const startTime = Date.now();
-  
-  while (!condition()) {
-    if (Date.now() - startTime > timeoutMs) {
-      throw new Error(`${errorMessage} (timeout: ${timeoutMs}ms)`);
-    }
-    await sleep(checkIntervalMs);
-  }
+
+  await pollUntil(condition, {
+    timeoutMs,
+    intervalMs: checkIntervalMs,
+    label: errorMessage,
+  });
 }

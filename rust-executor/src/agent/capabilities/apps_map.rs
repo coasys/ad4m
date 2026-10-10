@@ -101,10 +101,10 @@ pub fn get_app(request_key: &str) -> Result<Option<App>, String> {
     Ok(apps.get(request_key).cloned())
 }
 
-pub fn get_apps() -> Vec<crate::graphql::graphql_types::Apps> {
+pub fn get_apps() -> Vec<crate::types::Apps> {
     let apps = APPS.lock().unwrap();
     apps.iter()
-        .map(|(request_id, app)| crate::graphql::graphql_types::Apps {
+        .map(|(request_id, app)| crate::types::Apps {
             auth: app.auth_info_extended.auth.clone(),
             request_id: request_id.clone(),
             revoked: Some(app.revoked),

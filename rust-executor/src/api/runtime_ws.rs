@@ -1,0 +1,935 @@
+//! Runtime WS-native handlers.
+
+use base64::Engine;
+use serde::Deserialize;
+use serde_json::Value;
+use std::sync::Arc;
+use ts_rs::TS;
+
+use crate::agent::capabilities::*;
+use crate::agent::AgentService;
+use crate::db::Ad4mDb;
+use crate::globals::AD4M_VERSION;
+use crate::holochain_service::get_holochain_service;
+use crate::runtime_service::RuntimeService;
+use crate::types::domain::{ComputeLogEntry, ImportResult};
+use crate::types::Notification;
+use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
+
+use super::guards::refuse_user_session;
+use super::types::{
+    AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
+    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
+    SetHostRatesRequest, SetStatusRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
+    VerifySignatureRequest,
+};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
+
+async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let info = AgentService::with_global_instance(|agent_service| {
+        agent_service
+            .agent
+            .clone()
+            .ok_or(WsRpcError::not_found("Agent not found"))?;
+
+        Ok::<RuntimeInfo, WsRpcError>(RuntimeInfo {
+            is_initialized: agent_service.is_initialized(),
+            is_unlocked: agent_service.is_unlocked(),
+            ad4m_executor_version: AD4M_VERSION.clone(),
+        })
+    })?;
+    Ok(serde_json::to_value(info)?)
+}
+
+async fn quit_runtime(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        std::process::exit(0);
+    });
+
+    Ok(Value::Bool(true))
+}
+
+async fn set_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let _ = params;
+    Err(WsRpcError::internal(
+        "Runtime status update not implemented",
+    ))
+}
+
+async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+
+    let body: OpenLinkRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    if !body.url.starts_with("http://") && !body.url.starts_with("https://") {
+        return Err(WsRpcError::bad_request(
+            "URL must start with http:// or https://",
+        ));
+    }
+
+    // Block opening URLs pointing to localhost/private IPs to prevent SSRF
+    let url_lower = body.url.to_lowercase();
+    let host_part = url_lower
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let host = host_part.split('/').next().unwrap_or("");
+    let host_no_port = host.split(':').next().unwrap_or("");
+    if host_no_port == "localhost"
+        || host_no_port == "127.0.0.1"
+        || host_no_port == "0.0.0.0"
+        || host_no_port == "::1"
+        || host_no_port.starts_with("10.")
+        || host_no_port.starts_with("192.168.")
+        || host_no_port.starts_with("169.254.")
+    {
+        return Err(WsRpcError::bad_request(
+            "Cannot open URLs pointing to localhost or private networks",
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(&body.url)
+        .spawn()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    #[cfg(target_os = "linux")]
+    std::process::Command::new("xdg-open")
+        .arg(&body.url)
+        .spawn()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("cmd")
+        .args(["/C", "start", &body.url])
+        .spawn()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
+}
+
+async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.exportData")?;
+
+    let body: ExportRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    match body.export_type.as_str() {
+        "db" => {
+            let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let json_string = serde_json::to_string_pretty(&json_data)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            std::fs::write(&body.file_path, json_string)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        }
+        "perspective" => {
+            let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
+                WsRpcError::bad_request("perspective_uuid required for perspective export")
+            })?;
+            let perspective = crate::perspectives::get_perspective(uuid)
+                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?;
+            let links = perspective
+                .get_links(&crate::types::LinkQuery {
+                    source: None,
+                    target: None,
+                    predicate: None,
+                    from_date: None,
+                    until_date: None,
+                    limit: None,
+                })
+                .await
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let snapshot = crate::types::domain::Perspective { links };
+            let json_string = serde_json::to_string_pretty(&snapshot)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            std::fs::write(&body.file_path, json_string)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        }
+        other => {
+            return Err(WsRpcError::bad_request(format!(
+                "Unknown export type: {}",
+                other
+            )))
+        }
+    }
+
+    Ok(Value::Bool(true))
+}
+
+async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.importData")?;
+
+    let body: ImportRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    match body.import_type.as_str() {
+        "db" => {
+            let data = std::fs::read_to_string(&body.file_path)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let json_data: serde_json::Value =
+                serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+            let result = Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            Ok(serde_json::to_value(result).map_err(|e| WsRpcError::internal(e.to_string()))?)
+        }
+        "perspective" => {
+            let data = std::fs::read_to_string(&body.file_path)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+            Ok(serde_json::json!({"success": true, "snapshot": snapshot}))
+        }
+        other => Err(WsRpcError::bad_request(format!(
+            "Unknown import type: {}. Use 'db' or 'perspective'.",
+            other
+        ))),
+    }
+}
+
+async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
+    // Shuts the running conductor down, waits for its port, and starts it again
+    // from the stored config. The same path the Unyt space override uses.
+    crate::holochain_service::HolochainService::restart_service()
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Holochain restart failed: {e}")))?;
+    Ok(Value::Bool(true))
+}
+
+async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: VerifySignatureRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let result = crate::agent::signatures::verify_string_signed_by_did(
+        &body.did,
+        &body.data,
+        &body.signed_data,
+    )
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(result))
+}
+
+// ── Friends & Messages ──
+// The friend list and the outbox belong to the node's main agent; a user session has
+// neither of its own here, so it may not read or change them.
+
+async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.friends")?;
+
+    let friends = RuntimeService::with_global_instance(|runtime| {
+        Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
+    })?;
+    Ok(serde_json::to_value(friends)?)
+}
+
+async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let _ = params.require_str("did")?;
+    Err(WsRpcError::not_implemented("Friend status not implemented"))
+}
+
+async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.addFriends")?;
+
+    let body: FriendsListRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let friends = RuntimeService::with_global_instance(|runtime| {
+        runtime.add_friend(body.dids);
+        Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
+    })?;
+    Ok(serde_json::to_value(friends)?)
+}
+
+async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.removeFriends")?;
+
+    let body: FriendsListRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let friends = RuntimeService::with_global_instance(|runtime| {
+        runtime.remove_friend(body.dids);
+        Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
+    })?;
+    Ok(serde_json::to_value(friends)?)
+}
+
+/// Not implemented: nothing delivers an outbox message, and the outbox has no owner, so every
+/// user could read every other user's messages through `runtime.outbox`. The params are still
+/// checked against the contract.
+async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    // The main agent's friends and outbox: a user session has neither of its own here.
+    refuse_user_session(&ctx, "runtime.sendFriendMessage")?;
+    let _: RuntimeSendFriendMessageParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    Err(WsRpcError::not_implemented(
+        "Direct messages are not implemented: there is no delivery and no per-user outbox",
+    ))
+}
+
+async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    Ok(serde_json::json!([]))
+}
+
+async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.outbox")?;
+
+    let outbox = RuntimeService::with_global_instance(|runtime| runtime.get_outbox());
+    Ok(serde_json::to_value(outbox).unwrap_or_default())
+}
+
+// ── Notifications ──
+
+async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let user_email = ctx.user_email.clone();
+    let notifications =
+        Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email))
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(notifications)?)
+}
+
+async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: NotificationInput = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let domain_input = crate::types::domain::NotificationInput {
+        description: body.description,
+        app_name: body.app_name,
+        app_url: body.app_url,
+        app_icon_path: body.app_icon_path.unwrap_or_default(),
+        trigger: body.trigger,
+        perspective_ids: body.perspective_ids,
+        webhook_url: body.webhook_url,
+        webhook_auth: body.webhook_auth,
+    };
+
+    let user_email = ctx.user_email.clone();
+    let id = RuntimeService::request_install_notification(domain_input, user_email)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::String(id))
+}
+
+async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let id = params.require_str("id")?;
+    let body: NotificationInput = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let notification = Notification {
+        id: id.clone(),
+        description: body.description,
+        app_name: body.app_name,
+        app_url: body.app_url,
+        app_icon_path: body.app_icon_path.unwrap_or_default(),
+        trigger: body.trigger,
+        perspective_ids: body.perspective_ids,
+        webhook_url: body.webhook_url,
+        webhook_auth: body.webhook_auth,
+        granted: body.granted.unwrap_or(false),
+        user_email: None,
+    };
+
+    Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
+}
+
+async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    if ctx.user_email.is_some() {
+        return Err(WsRpcError::forbidden(
+            "Permission denied: managed users cannot call grantNotification",
+        ));
+    }
+
+    let id = params.require_str("id")?;
+    let body: NotificationGrantRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let existing = notifications
+        .iter()
+        .find(|n| n.id == id)
+        .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))?;
+
+    let mut updated = existing.clone();
+    updated.granted = body.granted;
+
+    Ad4mDb::with_global_instance(|db| db.update_notification(id, &updated))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
+}
+
+async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let id = params.require_str("id")?;
+    Ad4mDb::with_global_instance(|db| db.remove_notification(id))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
+}
+
+// ── Link Language Templates ──
+
+async fn get_link_language_templates(
+    _params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(
+        &ctx.capabilities,
+        &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let templates = RuntimeService::with_global_instance(|runtime| {
+        Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
+    })?;
+    Ok(serde_json::to_value(templates)?)
+}
+
+async fn add_link_language_templates(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(
+        &ctx.capabilities,
+        &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node's list of link-language templates, offered to every user.
+    refuse_user_session(&ctx, "runtime.addLinkLanguageTemplates")?;
+
+    let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let templates = RuntimeService::with_global_instance(|runtime| {
+        runtime.add_know_link_language(body.addresses);
+        Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
+    })?;
+    Ok(serde_json::to_value(templates)?)
+}
+
+async fn remove_link_language_templates(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(
+        &ctx.capabilities,
+        &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.removeLinkLanguageTemplates")?;
+
+    let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let templates = RuntimeService::with_global_instance(|runtime| {
+        runtime.remove_know_link_language(body.addresses);
+        Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
+    })?;
+    Ok(serde_json::to_value(templates)?)
+}
+
+// ── Holochain ──
+
+async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
+
+    let hc = get_holochain_service().await;
+    let infos = hc
+        .agent_infos()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(infos)?)
+}
+
+async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    // Injects peer records into the node's Holochain conductor.
+    refuse_user_session(&ctx, "runtime.addHcAgentInfos")?;
+
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
+
+    let body: AddAgentInfosRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let hc = get_holochain_service().await;
+    hc.add_agent_infos(body.agent_infos)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
+}
+
+async fn get_network_metrics(
+    _params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
+
+    let hc = get_holochain_service().await;
+    let metrics = hc
+        .get_network_metrics()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(metrics))
+}
+
+async fn get_free_hosting_enabled(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let enabled = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(enabled))
+}
+
+async fn set_free_hosting_enabled(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let enabled = params
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| WsRpcError::bad_request("'enabled' boolean required"))?;
+
+    Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(enabled))
+}
+
+async fn get_tls_domain(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(Value::Null)
+}
+
+async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let email = compute_log_email(params.opt_str("userEmail"), &ctx)?;
+    let since = params.opt_str("since");
+    let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
+
+    let logs =
+        Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since.as_deref(), limit))
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(logs).unwrap_or_default())
+}
+
+/// Whose compute log a `runtime.computeLog` call reads. A user session reads only its own
+/// log, and an omitted `userEmail` means its own. The operator may read any user's log.
+fn compute_log_email(
+    requested: Option<String>,
+    ctx: &RequestContext,
+) -> Result<String, WsRpcError> {
+    match (ctx.user_email.clone(), requested) {
+        (Some(own), Some(requested)) if requested != own => Err(WsRpcError::forbidden(
+            "A user session may read only its own compute log",
+        )),
+        (Some(own), _) => Ok(own),
+        (None, requested) => Ok(requested.unwrap_or_default()),
+    }
+}
+
+async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+    let body: SetHostRatesRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let rates = validate_host_rates(body.rates)?;
+
+    Ad4mDb::with_global_instance(|db| db.set_host_rates(&rates))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
+}
+
+fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpcError> {
+    let mut seen = std::collections::HashSet::new();
+    rates
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            if r.description.is_empty() || !r.price_in_hot.is_finite() || r.price_in_hot < 0.0 {
+                return Err(WsRpcError::bad_request(format!(
+                    "Rate {} needs a description and a non-negative priceInHOT",
+                    i
+                )));
+            }
+            // `description` is the table's primary key.
+            if !seen.insert(r.description.clone()) {
+                return Err(WsRpcError::bad_request(format!(
+                    "Rate {} repeats description '{}'",
+                    i, r.description
+                )));
+            }
+            Ok((r.description, r.price_in_hot))
+        })
+        .collect()
+}
+
+async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+
+    let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .into_iter()
+        .map(|(description, price_in_hot)| HostRate {
+            description,
+            price_in_hot,
+        })
+        .collect();
+
+    Ok(serde_json::to_value(rates)?)
+}
+
+/// Stores the membrane proof for the Unyt alliance DNA, then installs the DNA
+/// in the background: installation waits for Holochain and can outlast the call.
+/// `runtime.unytVersionInfo` reports the outcome.
+async fn set_unyt_membrane_proof(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+    let body: SetUnytMembraneProofRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.proof.is_empty() {
+        return Err(WsRpcError::bad_request("'proof' must not be empty"));
+    }
+    // The install decodes it later and, if that fails, installs without a proof.
+    if let Err(e) = base64::engine::general_purpose::STANDARD.decode(&body.proof) {
+        return Err(WsRpcError::bad_request(format!(
+            "'proof' is not valid base64: {}",
+            e
+        )));
+    }
+
+    crate::unyt_service::set_membrane_proof(&body.proof)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    tokio::spawn(async {
+        match crate::unyt_service::ensure_installed().await {
+            Ok(()) => log::info!("Unyt alliance DNA installed after membrane proof was set"),
+            Err(e) => log::error!("Failed to install Unyt alliance DNA: {}", e),
+        }
+    });
+
+    Ok(Value::Bool(true))
+}
+
+async fn unyt_version_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let (installed, bundled) = crate::unyt_service::version_info();
+    Ok(serde_json::to_value(UnytVersionInfo {
+        installed,
+        bundled,
+        install_error: crate::unyt_service::install_error(),
+    })?)
+}
+
+// ── Stubs for unyt endpoints ──
+
+async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Err(WsRpcError::not_implemented(
+        "Not yet implemented on the server",
+    ))
+}
+
+pub fn register_ws_handlers(map: &mut HandlerMap) {
+    map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
+        .read();
+    map.method::<NoParams, bool>("runtime.quit", quit_runtime);
+    // Always errors: status updates have no implementation yet. The contract
+    // is the SDK's call.
+    map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status);
+    map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
+    map.method::<ExportRequest, bool>("runtime.exportData", export_data);
+    map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data);
+    map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
+        .long();
+    map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
+        .read();
+    map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
+        .read();
+    map.method::<RuntimeComputeLogParams, Vec<ComputeLogEntry>>(
+        "runtime.computeLog",
+        get_compute_log,
+    )
+    .read();
+    // Friends & messages
+    map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
+        .read();
+    map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends);
+    map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends);
+    // Always errors: friend status has no implementation yet.
+    map.method::<RuntimeFriendStatusParams, Option<PerspectiveExpression>>(
+        "runtime.friendStatus",
+        get_friend_status,
+    )
+    .read();
+    map.method::<RuntimeSendFriendMessageParams, bool>(
+        "runtime.sendFriendMessage",
+        send_friend_message,
+    );
+    // Always empty: the inbox has no implementation yet.
+    map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
+        .read();
+    map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
+        .read();
+    // Notifications
+    map.method::<NoParams, Vec<Notification>>("runtime.notifications", list_notifications)
+        .read();
+    map.method::<NotificationInput, String>("runtime.createNotification", create_notification);
+    map.method::<RuntimeUpdateNotificationParams, bool>(
+        "runtime.updateNotification",
+        update_notification,
+    );
+    map.method::<RuntimeGrantNotificationParams, bool>(
+        "runtime.grantNotification",
+        grant_notification,
+    );
+    map.method::<RuntimeNotificationIdParams, bool>(
+        "runtime.deleteNotification",
+        delete_notification,
+    );
+    // Link language templates
+    map.method::<NoParams, Vec<String>>(
+        "runtime.linkLanguageTemplates",
+        get_link_language_templates,
+    )
+    .read();
+    map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
+        "runtime.addLinkLanguageTemplates",
+        add_link_language_templates,
+    );
+    map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
+        "runtime.removeLinkLanguageTemplates",
+        remove_link_language_templates,
+    );
+    // Holochain
+    map.method::<NoParams, Vec<String>>("runtime.hcAgentInfos", get_hc_agent_infos)
+        .read();
+    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos);
+    map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
+        .read();
+    // Hosting flags
+    map.method::<NoParams, bool>("runtime.freeHostingEnabled", get_free_hosting_enabled)
+        .read();
+    map.method::<RuntimeSetFreeHostingEnabledParams, bool>(
+        "runtime.setFreeHostingEnabled",
+        set_free_hosting_enabled,
+    );
+    map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
+        .read();
+    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates);
+    map.method::<SetUnytMembraneProofRequest, bool>(
+        "runtime.setUnytMembraneProof",
+        set_unyt_membrane_proof,
+    );
+    map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
+        .read();
+    // Always error: the remaining unyt endpoints have no implementation yet.
+    map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
+        .read();
+    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl);
+    map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
+        .read();
+    map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl);
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUnytWalletHistoryParams {
+    #[ts(optional)]
+    pub page: Option<u32>,
+    #[ts(optional)]
+    pub per_page: Option<u32>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUnytSendHotParams {
+    pub recipient: String,
+    pub amount: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeComputeLogParams {
+    /// Defaults to the caller's own email.
+    #[ts(optional)]
+    pub user_email: Option<String>,
+    /// ISO 8601; only entries after this timestamp.
+    #[ts(optional)]
+    pub since: Option<String>,
+    /// Defaults to 100.
+    #[ts(optional, type = "number")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeFriendStatusParams {
+    pub did: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeSendFriendMessageParams {
+    pub did: String,
+    /// The perspective to sign as this agent.
+    #[ts(as = "super::neighbourhoods_ws::NeighbourhoodSignedPerspective")]
+    pub message: crate::types::PerspectiveInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUpdateNotificationParams {
+    pub id: String,
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub notification: NotificationInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeGrantNotificationParams {
+    pub id: String,
+    pub granted: bool,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeNotificationIdParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeSetFreeHostingEnabledParams {
+    pub enabled: bool,
+}
+
+/// `type: "db"` yields import stats; `type: "perspective"` echoes the file's snapshot.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum RuntimeImportResult {
+    Db(ImportResult),
+    Perspective(RuntimeImportPerspectiveResult),
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeImportPerspectiveResult {
+    pub success: bool,
+    // The file's raw contents: import does not validate the snapshot shape.
+    #[ts(type = "any")]
+    pub snapshot: Value,
+}

@@ -1,5 +1,6 @@
 {
   "$schema": "https://turborepo.org/schema.json",
+  "globalPassThroughEnv": ["CARGO_PROFILE_RELEASE_STRIP"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -13,31 +14,78 @@
     },
     "build-libs": {
       "dependsOn": [
+        "@coasys/ad4m-ldk#build",
         "@coasys/dapp#build",
         "@coasys/ad4m#build",
         "@coasys/ad4m-connect#build",
         "@coasys/rust-ad4m-executor#build",
-        "@coasys/ad4m-cli#build"
+        "@coasys/ad4m-cli#build",
+        "@coasys/link-server#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-languages": {
       "dependsOn": [
+        "@coasys/ad4m-ldk#build",
         "@coasys/perspective-diff-sync#build",
         "@coasys/agent-language#build",
-        "@coasys/direct-message-language#build",
         "@coasys/perspective-language#build",
         "@coasys/language-language#build",
         "@coasys/neighbourhood-language#build",
         "@coasys/file-storage#build",
-        
+
         "@coasys/centralized-perspective-diff-sync#build",
         "@coasys/centralized-agent-language#build",
         "@coasys/centralized-file-storage#build",
         "@coasys/eas#build",
-        "@coasys/embedding-vector-language#build"
+        "@coasys/embedding-vector-language#build",
+        "@coasys/server-link-language#build",
+        "@coasys/local-bootstrap-languages#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
+    },
+    "@coasys/ad4m-ldk#build": {
+      "outputs": ["lib/**"]
+    },
+    "@coasys/perspective-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/perspective-diff-sync#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/agent-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-agent-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-perspective-diff-sync#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/centralized-file-storage#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/language-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/neighbourhood-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/file-storage#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/eas#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/embedding-vector-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/server-link-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/server-link-language#test": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"],
+      "outputs": []
     },
 
     "build-dapp": {

@@ -1,17 +1,25 @@
 # Language: file-storage
 
-This is an example AD4M Language project which implements file storage using Holochain
+Holochain-DHT-backed file storage Language for AD4M. Files are chunked,
+compressed with pako, and stored in a Holochain DNA; retrieval
+reassembles and decompresses them.
 
-## Build overview
+## Build
 
-The whole project compiles and bundles to one file: `build/bundle.js`.
+`./build.sh` produces `build/bundle.js`:
 
-This happens in two steps:
-1. The *Icons* (AD4M-speak for UI components) [ConstructorIcon.svelte](ConstructorIcon.svelte) and (Icon.svelte)[Icon.svelte] get compiled to `build/ConstructorIcon.js` and `build/Icon.js` respectively as web components. This first step is configured with [rollup.config.icons.js](rollup.config.icons.js)
-2. [index.ts](index.ts) gets compiled and bundled to `build/bundle.js`. During this bundling step, `rollup-plugin-string` is used to include the two web component files that represent the Icons as string literals inside the resulting bundle.
+1. The Svelte *Icons* (`ConstructorIcon.svelte` / `Icon.svelte`) compile
+   to `build/ConstructorIcon.js` / `build/Icon.js` as web components.
+2. `esbuild.ts` bundles `index.ts` into `build/bundle.js`, inlining the
+   two compiled icons and marking `ad4m:host` as external (the AD4M
+   executor provides it at load time).
 
-## Injected context
+## Interface
 
-The `create()` function returned by the resulting `bundle.js` will receive a parameter when executed inside Perspectivism: an instance of [LanguageContext](../../ad4m/LanguageContext.ts). This includes the Agent object and interfaces to storage implementations - currently only IPFS but very soon Holochain and others.
-
-Here, the IPFS object gets passed on to the constructor of the [ExpressionAdapter](adapter.ts) so it can be used to store expression in IPFS files.
+`index.ts` uses `defineLanguage({ … })` from
+[`@coasys/ad4m-ldk`](https://www.npmjs.com/package/@coasys/ad4m-ldk)
+and exports the [Expression](https://docs.ad4m.dev/expressions)
+capability. Runtime services (Holochain, signing) come in via named
+imports from `ad4m:host` — see
+[docs.ad4m.dev/languages](https://docs.ad4m.dev/languages) for the
+full picture.

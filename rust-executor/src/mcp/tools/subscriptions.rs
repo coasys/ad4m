@@ -1,6 +1,6 @@
 //! Subscription / waker query tools
 //!
-//! Tools for generating SurrealQL queries for external waker processes.
+//! Tools for generating SPARQL queries for external waker processes.
 //! Queries are derived from SHACL class definitions when available,
 //! avoiding hardcoded type-specific predicates.
 
@@ -25,9 +25,11 @@ pub struct SubscribeToModelParams {
     pub class_name: String,
     /// Parent expression address to scope the subscription (e.g., a channel address).
     /// If provided, only watches for new instances that are children of this parent.
-    pub parent_address: Option<String>,
+    /// Accepts the pre-rename `parent_address` spelling from older clients.
+    #[serde(alias = "parent_address")]
+    pub parent: Option<String>,
     /// Predicate URI to filter by (e.g., "ad4m://has_child").
-    /// If neither parent_address nor predicate is provided, the query is derived
+    /// If neither parent nor predicate is provided, the query is derived
     /// from the SHACL definition — watching for links whose predicates match
     /// any property defined on the subject class.
     pub predicate: Option<String>,
@@ -46,13 +48,48 @@ pub struct MentionWakerConfigParams {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Escape a string for safe interpolation inside a double-quoted SPARQL
+/// string literal. Mention terms come from profile names / `name_override`
+/// — untrusted input, potentially attacker-controlled in a shared
+/// neighbourhood — so without this, a `"` or `\` breaks out of the literal
+/// and can inject arbitrary SPARQL into the mention-matching FILTER. Also
+/// escapes CR/LF/TAB, which SPARQL STRING_LITERAL2 forbids raw.
+fn escape_sparql_literal(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+/// Validate that a value intended to be an IRI is safe for interpolation
+/// inside a SPARQL string literal (`STR(?x) = "..."`).  A well-formed IRI
+/// has a scheme (e.g. `ad4m:`, `did:`, `literal:`) and must not contain
+/// `"` or `\` which would break out of the enclosing double-quoted literal.
+fn validate_sparql_iri(s: &str) -> Result<&str, String> {
+    if !s.contains(':') {
+        return Err(format!("expected IRI (scheme:...), got: {}", s));
+    }
+    if s.contains('"') || s.contains('\\') {
+        return Err(format!(
+            "IRI contains characters unsafe for SPARQL interpolation: {}",
+            s
+        ));
+    }
+    Ok(s)
+}
+
+// ============================================================================
 // Tool Implementations
 // ============================================================================
 
 impl Ad4mMcpHandler {
     /// Generate a waker query config for watching model changes in a perspective
     #[tool(
-        description = "Generate a SurrealQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspectiveSubscribeSurrealQuery (same mechanism as Flux UI) for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. The query is derived from the SHACL class definition — no hardcoded type predicates."
+        description = "Generate a SPARQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspective query subscriptions for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. The query is derived from the SHACL class definition — no hardcoded type predicates."
     )]
     pub async fn generate_waker_query(&self, params: Parameters<SubscribeToModelParams>) -> String {
         let _capabilities = match self.get_capabilities().await {
@@ -67,55 +104,62 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let query = if let Some(ref parent) = p.parent_address {
+        let query = if let Some(ref parent) = p.parent {
             // Scope to children of a specific parent
-            // Use the same encoding logic as add_child/message_create: leave URIs as-is
-            let parent_encoded = if parent.contains("://") {
-                parent.clone()
-            } else {
-                Self::encode_literal(parent)
-            };
+            let parent_encoded = Self::wrap_bare_as_literal(parent);
+            if let Err(e) = validate_sparql_iri(&parent_encoded) {
+                return json!({"error": format!("Invalid parent: {}", e)}).to_string();
+            }
             format!(
-                "SELECT * FROM link WHERE source = '{}' AND predicate = 'ad4m://has_child'",
+                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
                 parent_encoded
             )
         } else if let Some(ref predicate) = p.predicate {
-            // Explicit predicate filter
+            if let Err(e) = validate_sparql_iri(predicate) {
+                return json!({"error": format!("Invalid predicate: {}", e)}).to_string();
+            }
             if let Some(ref target) = p.target_value {
                 format!(
-                    "SELECT * FROM link WHERE predicate = '{}' AND target = '{}'",
-                    predicate, target
+                    "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\" && STR(?target) = \"{}\") }}",
+                    predicate, escape_sparql_literal(target)
                 )
             } else {
-                format!("SELECT * FROM link WHERE predicate = '{}'", predicate)
+                format!(
+                    "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") }}",
+                    predicate
+                )
             }
         } else {
-            // Derive query from SHACL definition: watch for links matching
-            // any predicate defined on the subject class's properties.
+            // Derive query from SHACL definition
             let shacl_class = shacl::load_class(&perspective, &p.class_name).await;
             if let Some(class) = shacl_class {
                 let predicates: Vec<String> = class
                     .properties
                     .iter()
                     .filter_map(|prop| prop.predicate.clone())
+                    .filter(|p| validate_sparql_iri(p).is_ok())
                     .collect();
 
                 if predicates.is_empty() {
-                    // No SHACL predicates found — fall back to broad query
-                    "SELECT * FROM link ORDER BY timestamp DESC LIMIT 50".to_string()
+                    "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) } LIMIT 50".to_string()
                 } else if predicates.len() == 1 {
-                    format!("SELECT * FROM link WHERE predicate = '{}'", predicates[0])
+                    format!(
+                        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") }}",
+                        predicates[0]
+                    )
                 } else {
-                    let predicate_list = predicates
+                    let filter_conditions = predicates
                         .iter()
-                        .map(|p| format!("'{}'", p))
+                        .map(|p| format!("STR(?predicate) = \"{}\"", p))
                         .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("SELECT * FROM link WHERE predicate IN [{}]", predicate_list)
+                        .join(" || ");
+                    format!(
+                        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER({}) }}",
+                        filter_conditions
+                    )
                 }
             } else {
-                // No SHACL definition found — fall back to broad query
-                "SELECT * FROM link ORDER BY timestamp DESC LIMIT 50".to_string()
+                "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) } LIMIT 50".to_string()
             }
         };
 
@@ -125,27 +169,23 @@ impl Ad4mMcpHandler {
             "subscription_id": subscription_id,
             "perspective_id": p.perspective_id,
             "class_name": p.class_name,
-            "parent_address": p.parent_address,
+            "parent": p.parent,
             "predicate": p.predicate,
             "target_value": p.target_value,
-            "surreal_query": query,
-            "waker_config": {
-                "id": subscription_id,
-                "perspective": p.perspective_id,
-                "query": query,
-            },
+            "query": query,
             "message": format!(
-                "Subscription {} created for {} changes{}. Add the waker_config entry to your waker's config file and restart it. The waker uses perspectiveSubscribeSurrealQuery (same as Flux UI) for live change detection. Store this subscription_id in your memory with its context so you know what to do when woken.",
+                "Subscription {} created for {} changes{}.",
                 subscription_id,
                 p.class_name,
-                p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
+                p.parent.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
             ),
-        }).to_string()
+        })
+        .to_string()
     }
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term (using fn::contains + fn::parse_literal for literal decoding). The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term (using SPARQL CONTAINS for substring matching). The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -202,45 +242,6 @@ impl Ad4mMcpHandler {
 
         let perspective_id = &params.0.perspective_id;
 
-        // Build the SurrealQL query using fn::contains + fn::parse_literal.
-        //
-        // fn::parse_literal(target) handles all target types:
-        //   - literal://json: targets (Flux message bodies): parses the expression
-        //     shape and returns only the .data field — e.g. "Hey @Marvin!" — so the
-        //     author DID embedded in the surrounding JSON is never seen by fn::contains,
-        //     preventing false-positive wakes on every message the agent sends.
-        //   - literal://string: targets (profile names etc.): returns the decoded string.
-        //   - Non-literal strings (raw DIDs, URIs): returned unchanged, so explicit
-        //     DID-as-target mention/follow links are still matched correctly.
-        //
-        // fn::contains(parsed, term) → substring check (str.includes).
-        //
-        // Both functions are already defined in SurrealDBService::new().
-        // Case-insensitive matching via string::lowercase() (SurrealDB built-in):
-        //   string::lowercase(<string> fn::parse_literal(target)) casts to string then
-        //   lowercases; the <string> cast is needed because fn::parse_literal can return
-        //   booleans/numbers for literal://boolean: and literal://number: URLs, and
-        //   string::lowercase() throws on non-string input.
-        //   Search terms are also lowercased in Rust before embedding in the query.
-        //   DIDs are already lowercase so .to_lowercase() is a no-op for them.
-        let all_terms: Vec<String> = names
-            .iter()
-            .map(|n| n.to_lowercase())
-            .chain(std::iter::once(did.to_lowercase()))
-            .collect();
-
-        let mention_conditions: Vec<String> = all_terms
-            .iter()
-            .map(|t| {
-                format!(
-                    "fn::contains(string::lowercase(<string> fn::parse_literal(target)), '{}')",
-                    t
-                )
-            })
-            .collect();
-
-        let mention_predicate = format!("({})", mention_conditions.join(" OR "));
-
         // Discover the body property predicate from SHACL to scope the query.
         // Without this, the query scans ALL links which is very slow on large perspectives.
         let perspective = self
@@ -253,26 +254,17 @@ impl Ad4mMcpHandler {
                 .iter()
                 .find(|prop| prop.name.to_lowercase() == "body")
                 .and_then(|prop| prop.predicate.clone())
+                .filter(|p| validate_sparql_iri(p).is_ok())
         } else {
             None
         };
 
-        // Direct body-link query: watch for body links whose target contains a mention term.
-        // Each result has `source` = message address (the base expression).
-        // Parent resolution (finding which channel the message belongs to) is done by the
-        // waker plugin in a second query after the subscription fires.
-        let query = if let Some(ref pred) = body_predicate {
-            format!(
-                "SELECT * FROM link WHERE predicate = '{}' AND {}",
-                pred, mention_predicate
-            )
-        } else {
-            // Fallback: no SHACL body predicate found, scan all links
-            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped query");
-            format!("SELECT * FROM link WHERE {}", mention_predicate)
-        };
+        if body_predicate.is_none() {
+            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped (but ontology-excluded) query");
+        }
+        let query = build_mention_query(&names, &did, body_predicate.as_deref());
 
-        let sub_id = format!("mention-{}", &did[did.len().saturating_sub(12)..]);
+        let sub_id = build_mention_sub_id(perspective_id);
 
         let subscription = json!({
             "id": sub_id,
@@ -299,5 +291,245 @@ impl Ad4mMcpHandler {
             ),
         })
         .to_string()
+    }
+}
+
+/// Build the SPARQL mention-detection query for the waker.
+///
+/// CONTAINS does case-insensitive substring matching on the parsed literal
+/// target, so a message body containing any profile name or the agent DID
+/// matches. `body_predicate` scopes the scan to the message-body predicate when
+/// SHACL resolves it (much faster on large perspectives).
+///
+/// Both the scoped and the unscoped-fallback query exclude `ad4m://ontology/*`
+/// predicates (author DID, timestamp, proofKey — see `sparql_store`). Without
+/// that exclusion the DID search term matches every link the agent itself
+/// authored (its own author-DID proof metadata), so the agent would wake on its
+/// own writes rather than on real mentions.
+///
+/// Search terms (profile names, DID) are interpolated into the query, so each is
+/// escaped as a SPARQL string literal — a name containing `"` or `\` would
+/// otherwise break out of the CONTAINS literal and could inject query syntax.
+///
+/// Pure over its inputs, so it unit-tests without an agent or perspective.
+pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&str>) -> String {
+    let all_terms: Vec<String> = names
+        .iter()
+        .map(|n| n.to_lowercase())
+        .chain(std::iter::once(did.to_lowercase()))
+        .collect();
+    let mention_conditions: Vec<String> = all_terms
+        .iter()
+        .map(|t| {
+            format!(
+                "CONTAINS(LCASE(STR(<ad4m://fn/parse_literal>(?target))), \"{}\")",
+                escape_sparql_literal(t)
+            )
+        })
+        .collect();
+    let mention_predicate = format!("({})", mention_conditions.join(" || "));
+    // Never match proof metadata, else the DID term self-matches authored links.
+    let ontology_guard = "FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))";
+    match body_predicate {
+        Some(pred) => format!(
+            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") {} FILTER({}) }}",
+            pred, ontology_guard, mention_predicate
+        ),
+        None => format!(
+            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({}) }}",
+            ontology_guard, mention_predicate
+        ),
+    }
+}
+
+/// Build a mention-subscription id keyed on the perspective.
+///
+/// Deriving the id from the agent DID alone made it identical across every
+/// neighbourhood the agent joined; the waker's dispose-by-id then evicted a
+/// prior perspective's subscription when the agent subscribed in a second one,
+/// so an agent in N neighbourhoods only woke in the most-recent. Keying on the
+/// full perspective id gives distinct ids for distinct perspectives with no
+/// truncation collision, and matches the plugin's `mention-${perspectiveId}`
+/// dedup guard so a repeat subscribe on the same perspective is skipped.
+pub fn build_mention_sub_id(perspective_id: &str) -> String {
+    format!("mention-{}", perspective_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Clients built against the pre-rename schema still send
+    /// `parent_address`; both spellings must land in `parent`.
+    #[test]
+    fn subscribe_params_accept_legacy_parent_address() {
+        let legacy: SubscribeToModelParams = serde_json::from_str(
+            r#"{"perspective_id":"p","class_name":"Message","parent_address":"chan://1"}"#,
+        )
+        .expect("legacy spelling deserializes");
+        assert_eq!(legacy.parent.as_deref(), Some("chan://1"));
+
+        let current: SubscribeToModelParams = serde_json::from_str(
+            r#"{"perspective_id":"p","class_name":"Message","parent":"chan://2"}"#,
+        )
+        .expect("current spelling deserializes");
+        assert_eq!(current.parent.as_deref(), Some("chan://2"));
+    }
+
+    #[test]
+    fn scoped_query_excludes_ontology_proof_metadata() {
+        let q = build_mention_query(
+            &["alice".to_string()],
+            "did:key:zAgent",
+            Some("ad4m://message_body"),
+        );
+        assert!(
+            q.contains("ad4m://message_body"),
+            "scoped to the body predicate"
+        );
+        assert!(
+            q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
+            "excludes ontology proof metadata"
+        );
+    }
+
+    #[test]
+    fn unscoped_fallback_still_excludes_ontology_proof_metadata() {
+        // Regression: the fallback (no body predicate) used to be fully unscoped,
+        // so the DID term matched the agent's own ad4m://ontology/author links.
+        let q = build_mention_query(&["alice".to_string()], "did:key:zAgent", None);
+        assert!(
+            q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
+            "fallback must still exclude proof metadata"
+        );
+    }
+
+    #[test]
+    fn query_matches_names_and_did_case_insensitively() {
+        let q = build_mention_query(
+            &["Alice".to_string(), "Bob".to_string()],
+            "did:key:zABC",
+            None,
+        );
+        assert!(q.contains("\"alice\""), "name lowercased");
+        assert!(q.contains("\"bob\""), "second name lowercased");
+        assert!(q.contains("\"did:key:zabc\""), "DID lowercased + included");
+        assert!(q.contains("parse_literal"), "decodes literal targets");
+    }
+
+    #[test]
+    fn query_escapes_quotes_and_backslashes_in_terms() {
+        // A term containing a double-quote or backslash must not break out of the
+        // CONTAINS string literal (SPARQL injection guard).
+        let q = build_mention_query(&["a\"b\\c".to_string()], "did:key:zX", None);
+        assert!(q.contains("a\\\"b\\\\c"), "quote + backslash escaped: {q}");
+        assert!(
+            !q.contains("\"a\"b"),
+            "raw unescaped quote must not appear: {q}"
+        );
+    }
+
+    #[test]
+    fn query_escapes_control_characters_in_terms() {
+        // SPARQL STRING_LITERAL2 forbids raw CR/LF/TAB; a term carrying them must
+        // be escaped, not embedded raw, or the query fails to parse.
+        let q = build_mention_query(&["a\nb\tc\rd".to_string()], "did:key:zX", None);
+        assert!(q.contains("a\\nb\\tc\\rd"), "control chars escaped: {q:?}");
+        assert!(!q.contains('\n'), "no raw newline in the query: {q:?}");
+        assert!(!q.contains('\t'), "no raw tab in the query: {q:?}");
+    }
+
+    #[test]
+    fn sub_id_is_perspective_scoped_not_did_scoped() {
+        // Two perspectives, same agent → distinct ids (no cross-neighbourhood
+        // eviction). Uses the full perspective id (no truncation collision) and
+        // matches the plugin's mention-${perspectiveId} dedup guard.
+        let a = build_mention_sub_id("c41dfd35-769e-474f-a2e6-4e5d580615c8");
+        let b = build_mention_sub_id("8432bdcb-410e-48e2-b1e1-2bb3f831d067");
+        assert_ne!(a, b, "distinct perspectives must yield distinct sub ids");
+        assert_eq!(a, "mention-c41dfd35-769e-474f-a2e6-4e5d580615c8");
+        // Repeat subscribe on the same perspective → same id (dedup fires).
+        assert_eq!(
+            a,
+            build_mention_sub_id("c41dfd35-769e-474f-a2e6-4e5d580615c8")
+        );
+    }
+
+    #[test]
+    fn test_escape_sparql_literal_neutralizes_quote_breakout() {
+        // A profile name / name_override containing a `"` must not be able
+        // to close the SPARQL string literal early and inject a second
+        // CONTAINS(...) clause (or worse) into the mention FILTER.
+        let malicious = r#"x") || CONTAINS(STR(?target), "leaked"#;
+        let escaped = escape_sparql_literal(malicious);
+
+        let condition = format!("CONTAINS(LCASE(STR(?target)), \"{}\")", escaped);
+
+        // The whole payload must resolve to a single string literal — i.e.
+        // exactly two unescaped double quotes (the ones we added), none
+        // contributed by the input.
+        let unescaped_quote_count = condition
+            .char_indices()
+            .filter(|&(i, c)| c == '"' && (i == 0 || condition.as_bytes()[i - 1] != b'\\'))
+            .count();
+        assert_eq!(
+            unescaped_quote_count, 2,
+            "escaped payload must not introduce unescaped quotes: {condition}"
+        );
+    }
+
+    #[test]
+    fn test_escape_sparql_literal_handles_backslash_and_control_chars() {
+        assert_eq!(escape_sparql_literal(r"a\b"), r"a\\b");
+        assert_eq!(escape_sparql_literal("a\"b"), "a\\\"b");
+        assert_eq!(escape_sparql_literal("a\nb"), "a\\nb");
+        assert_eq!(escape_sparql_literal("plain"), "plain");
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_accepts_valid_iris() {
+        assert!(validate_sparql_iri("ad4m://has_child").is_ok());
+        assert!(validate_sparql_iri("did:key:z6Mk123").is_ok());
+        assert!(validate_sparql_iri("literal:string:hello").is_ok());
+        assert!(validate_sparql_iri("urn:isbn:0451450523").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_rejects_no_scheme() {
+        assert!(validate_sparql_iri("no-scheme-here").is_err());
+    }
+
+    #[test]
+    fn test_validate_sparql_iri_rejects_injection_chars() {
+        assert!(validate_sparql_iri(r#"ad4m://x" || true || ""#).is_err());
+        assert!(validate_sparql_iri(r"ad4m://x\n").is_err());
+    }
+
+    /// A children-subscription parent in the store's canonical single-colon
+    /// spelling must be watched verbatim. The old `contains("://")` check
+    /// re-wrapped it into `literal:string:literal%3Astring%3A…` — a node no
+    /// link ever points at — so the subscription matched nothing and never
+    /// fired (found live in the 2026-09-15 wake test).
+    #[test]
+    fn test_waker_parent_wrapping_is_idempotent_for_stored_ids() {
+        use crate::mcp::tools::Ad4mMcpHandler;
+        let stored = "literal:string:wake-test-general";
+        let once = Ad4mMcpHandler::wrap_bare_as_literal(stored);
+        assert_eq!(once, stored, "already-wrapped parent must pass through");
+        // And what add_child stores for a bare name is exactly what a later
+        // subscribe call produces for the same bare name — one spelling, both
+        // directions.
+        let wrapped_bare = Ad4mMcpHandler::wrap_bare_as_literal("wake-test-general");
+        assert_eq!(wrapped_bare, stored);
+        assert_eq!(Ad4mMcpHandler::wrap_bare_as_literal(&wrapped_bare), stored);
+        // Other id shapes pass through untouched.
+        assert_eq!(
+            Ad4mMcpHandler::wrap_bare_as_literal("ad4m://obj/abc"),
+            "ad4m://obj/abc"
+        );
+        assert_eq!(
+            Ad4mMcpHandler::wrap_bare_as_literal("did:key:z6Mk123"),
+            "did:key:z6Mk123"
+        );
     }
 }

@@ -26,7 +26,7 @@ pub fn send_signal(signal_data: SignalData) -> SocialContextResult<PerspectiveEx
                 recipient_did: signal_data.remote_agent_did,
                 author: signal_data.payload.author.clone(),
                 data: signal_data.payload.data.clone(),
-                timestamp: signal_data.payload.timestamp,
+                timestamp: signal_data.payload.timestamp.clone(),
                 proof: signal_data.payload.proof.clone(),
             };
 

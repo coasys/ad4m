@@ -2,7 +2,7 @@ import { capitalize } from "./util";
 import type { Where } from "./types";
 import { buildSDNA } from "./sdna";
 import { buildSHACL } from "./shacl-gen";
-import { escapeSurrealString } from "../utils";
+import { escapeQueryString } from "../utils";
 import type { ConformanceCondition } from "../shacl/SHACLShape";
 
 // ============================================================================
@@ -32,10 +32,12 @@ export interface RelationMetadataEntry {
     maxCount?: number;
     local?: boolean;
     /**
-     * Custom SurrealQL getter to resolve the relation values.
+     * Custom getter to resolve the relation values.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      */
     getter?: string;
+    /** No writer for this relation; see `RelationOptions.readOnly`. */
+    readOnly?: boolean;
     /**
      * Whether to auto-generate a conformance filter when `target` is set.
      * Defaults to `true` — set to `false` to opt out of DB-level type filtering
@@ -48,6 +50,30 @@ export interface RelationMetadataEntry {
      * Overrides auto-derived conformance when set.
      */
     where?: Where;
+    /**
+     * SHACL `sh:datatype` for the relation's target values. Set when the
+     * relation holds encoded literal values (e.g. `"xsd:string"` for a
+     * `HasMany<string>` that stores plain strings). Emitted into SHACL
+     * so the executor knows to decode `literal:<type>:<value>` wire form
+     * on hydration. Omit for URI relations that point at other model
+     * instances — those pass through byte-for-byte.
+     */
+    datatype?: string;
+    /** Hydrate targets as the class each one actually is — see `RelationOptions.polymorphic`. */
+    polymorphic?: boolean;
+    /** Model classes this relation's polymorphic results can be constructed as. */
+    instantiateAs?: () => Ad4mModelLike[];
+    /** CRDT ordering config — see `RelationOptions.ordering`. */
+    ordering?: { strategy: 'linkedList' };
+    /**
+     * Natural-language hint describing what this relation MEANS semantically.
+     * Emitted as an `ad4m://interpretation_hint` link on the SHACL property
+     * node; read back by the Rust harness and rendered into the
+     * `_propose_link_child` tool's `predicate` field description. Mirror of
+     * the same field on `RelationOptions` (the decorator arg); this is the
+     * memoized registry copy.
+     */
+    interpretationHint?: string;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -56,12 +82,24 @@ const propertyRegistry = new WeakMap<Function, Record<string, PropertyMetadataEn
 /** Registry of relation metadata keyed by constructor → { propName → metadata } */
 const relationRegistry = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
 
+/** Memoisation cache for getPropertiesMetadata — avoids repeated prototype-chain walks */
+const propertiesMetadataCache = new WeakMap<Function, Record<string, PropertyMetadataEntry>>();
+
+/** Memoisation cache for getRelationsMetadata — avoids repeated prototype-chain walks */
+const relationsMetadataCache = new WeakMap<Function, Record<string, RelationMetadataEntry>>();
+
+/** Memoisation cache for generateSHACL — avoids recomputing SHACL shapes */
+const shaclCache = new WeakMap<Function, any>();
 
 /**
  * Retrieve property metadata for a given class constructor.
  * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * Results are memoised per class constructor.
  */
 export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMetadataEntry> {
+    const cached = propertiesMetadataCache.get(ctor);
+    if (cached) return cached;
+
     const result: Record<string, PropertyMetadataEntry> = {};
     const chain: Function[] = [];
     let current = ctor;
@@ -73,14 +111,19 @@ export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMe
         const meta = propertyRegistry.get(c);
         if (meta) Object.assign(result, meta);
     }
+    propertiesMetadataCache.set(ctor, result);
     return result;
 }
 
 /**
  * Retrieve relation metadata for a given class constructor.
  * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * Results are memoised per class constructor.
  */
 export function getRelationsMetadata(ctor: Function): Record<string, RelationMetadataEntry> {
+    const cached = relationsMetadataCache.get(ctor);
+    if (cached) return cached;
+
     const result: Record<string, RelationMetadataEntry> = {};
     const chain: Function[] = [];
     let current = ctor;
@@ -92,6 +135,51 @@ export function getRelationsMetadata(ctor: Function): Record<string, RelationMet
         const meta = relationRegistry.get(c);
         if (meta) Object.assign(result, meta);
     }
+    relationsMetadataCache.set(ctor, result);
+    return result;
+}
+
+/**
+ * Get or compute memoised SHACL for a class. Used by @Model decorator.
+ *
+ * The `compute` callback receives a `seed(partial)` function: calling
+ * it stores `partial` in the cache *before* `compute` returns, so any
+ * re-entrant `getMemoizedSHACL(target, …)` call from inside `compute`
+ * observes the in-progress shape instead of re-entering `compute`
+ * infinitely.
+ *
+ * This matters for self-referential models — e.g.
+ *
+ *     @Model({ name: "Channel" })
+ *     class Channel extends Ad4mModel {
+ *         @HasMany({ predicate: "…/child", target: () => Channel })
+ *         childChannels!: Channel[];
+ *     }
+ *
+ * Without the seed, building the SHACL shape for `Channel` invokes
+ * `Channel.generateSHACL()` while walking the `childChannels`
+ * relation's target (shacl-gen.ts ~line 327), which re-enters this
+ * function with an empty cache, blowing the stack.
+ */
+export function getMemoizedSHACL(
+    target: Function,
+    compute: (seed: (partial: any) => void) => any,
+): any {
+    const cached = shaclCache.get(target);
+    if (cached) return cached;
+    const seed = (partial: any) => {
+        shaclCache.set(target, partial);
+    };
+    let result: any;
+    try {
+        result = compute(seed);
+    } catch (e) {
+        // If compute throws after seeding, evict the half-built entry
+        // so a later retry can rebuild from scratch.
+        shaclCache.delete(target);
+        throw e;
+    }
+    shaclCache.set(target, result);
     return result;
 }
 
@@ -137,7 +225,7 @@ export interface Ad4mModelLike {
  *
  * Inspects the target class's property metadata to derive:
  * - `conformanceConditions`: Structured, DB-agnostic conditions (flag & required checks)
- * - `getter`: Pre-computed SurrealQL expression that traverses outgoing links and filters
+ * - `getter`: Pre-computed graph traversal expression that traverses outgoing links and filters
  *   target nodes to only those conforming to the target shape.
  *
  * @param relationPredicate - The relation's predicate URI (e.g. "flux://entry_type")
@@ -151,7 +239,8 @@ export function buildConformanceFilter(
     try {
         const targetProps = getPropertiesMetadata(targetClass);
         const conditions: ConformanceCondition[] = [];
-        const surrealConditions: string[] = [];
+        const sparqlConditions: string[] = [];
+        let varIdx = 0;
 
         // 1. Flags — check predicate + value
         for (const [_propName, propMeta] of Object.entries(targetProps)) {
@@ -161,8 +250,8 @@ export function buildConformanceFilter(
                     predicate: propMeta.through,
                     value: propMeta.initial,
                 });
-                surrealConditions.push(
-                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
+                sparqlConditions.push(
+                    `?target <${escapeQueryString(propMeta.through)}> <${escapeQueryString(propMeta.initial)}> .`
                 );
             }
         }
@@ -175,8 +264,8 @@ export function buildConformanceFilter(
                     type: 'required',
                     predicate: propMeta.through,
                 });
-                surrealConditions.push(
-                    `count(->link[WHERE predicate = '${escapeSurrealString(propMeta.through)}']) > 0`
+                sparqlConditions.push(
+                    `?target <${escapeQueryString(propMeta.through)}> ?_v${varIdx++} .`
                 );
             }
         }
@@ -185,8 +274,7 @@ export function buildConformanceFilter(
             return undefined;
         }
 
-        const escapedPredicate = escapeSurrealString(relationPredicate);
-        const getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${surrealConditions.join(' AND ')}].uri)`;
+        const getter = `SELECT ?target WHERE { <Base> <${escapeQueryString(relationPredicate)}> ?target . ${sparqlConditions.join(' ')} }`;
 
         return { getter, conformanceConditions: conditions };
     } catch (e) {
@@ -218,7 +306,16 @@ export interface PropertyOptions {
     readOnly?: boolean;
 
     /**
-     * The language used to store the property. Can be the default `Literal` Language or a custom language address.
+     * The language used to resolve/store the property value — and the sole
+     * selector of storage mode. Not defaulted:
+     *   - unset (the default for a plain `@Property()`) → deterministic
+     *     typed literal storage (`literal:string:` / `:number:` / `:boolean:` /
+     *     `:json:` IRIs stored as XSD-typed RDF literals; POS-index friendly).
+     *   - `"literal"` → the built-in literal language: values go through
+     *     `expression_create`, producing a signed-envelope URI with
+     *     author/timestamp/proof (per-value provenance, e.g. Flux message
+     *     bodies).
+     *   - a custom language address → `expression_create` on that language.
      */
     resolveLanguage?: string;
 
@@ -233,9 +330,9 @@ export interface PropertyOptions {
     prologSetter?: string;
 
     /**
-     * Custom SurrealQL getter to resolve the property value. Use this for custom graph traversals.
+     * Custom getter to resolve the property value. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
-     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)[0]"
+     * Example: "SELECT ?target WHERE { <Base> <flux://has_reply> ?target . } LIMIT 1"
      */
     getter?: string;
 
@@ -245,11 +342,65 @@ export interface PropertyOptions {
     local?: boolean;
 
     /**
-     * Optional transform function to modify the property value after it is retrieved.
-     * This is useful for transforming raw data into a more usable format.
-     * The function takes the raw value as input and returns the transformed value.
+     * Optional transform expression to modify the property value.
+     * This is a SHACL-AF Node Expression that runs in the Rust model query engine.
+     * Examples: `fileToDataUri`, `concat(literal('prefix_'), focus())`, etc.
+     * Builders (`focus`, `literal`, `path`, `exists`, `ifExpr`, `concat`,
+     * `coalesce`, `fn`) and the `fileToDataUri` built-in are exported from
+     * the package root: `import { concat, literal, focus } from '@coasys/ad4m'`.
      */
-    transform?: (value: any) => any;
+    transform?: import('../shacl/NodeExpression').NodeExpression;
+
+    /**
+     * Allowed values for this property (enum constraint).
+     * Maps to SHACL `sh:in`. Each entry has a `value` (the stored RDF term)
+     * and an optional `label` (human-readable display name).
+     *
+     * @example
+     * ```typescript
+     * @Property({
+     *   through: "task://status",
+     *   options: [
+     *     { value: "task://todo", label: "To Do" },
+     *     { value: "task://doing", label: "Doing" },
+     *     { value: "task://done", label: "Done" },
+     *   ]
+     * })
+     * status: string = "task://todo";
+     * ```
+     */
+    options?: Array<{ value: string; label?: string }>;
+
+    /**
+     * Natural-language hint that steers the generic LLM extractor when
+     * turning a transcript into typed subject-class instances.  Emitted as
+     * an `ad4m://interpretation_hint` link on the property shape and surfaced
+     * on `ShapeProperty.interpretation_hint` by the Rust model query so the
+     * extractor prompt can quote it verbatim.
+     */
+    interpretationHint?: string;
+
+    /**
+     * Marks this property as the class's **identity** (dedup key) for the
+     * generic LLM interpreter: on re-runs, two proposed instances of the same
+     * class with an equal (normalized/semantic) value on the identity property
+     * are treated as the same instance rather than duplicated. Emitted as an
+     * `ad4m://identity` link on the property shape and read back by the Rust
+     * model query (`ShapeProperty.identity`). At most one property per class
+     * should set this.
+     */
+    identity?: boolean;
+
+    /**
+     * Explicit SHACL `sh:datatype` for the property value. When set, this
+     * overrides auto-inference and — importantly — lets custom `getter`
+     * properties opt into typed-literal decoding. Auto-inference is disabled
+     * for properties with a `getter` (see `shacl-gen.ts`) because such
+     * getters typically return URIs; setting `datatype` explicitly declares
+     * that this getter returns literal values of the given XSD type
+     * (e.g. `"xsd://string"`) and enables the hydration decode gate.
+     */
+    datatype?: string;
 }
 
 
@@ -268,8 +419,8 @@ function applyPropertyMetadata(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
 
-        if (!opts.through && !opts.prologGetter) {
-            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' option")
+        if (!opts.through && !opts.prologGetter && !opts.getter) {
+            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' or 'getter' option")
         }
 
         // Write to WeakMap registry (keyed by constructor)
@@ -293,7 +444,7 @@ function applyPropertyMetadata(opts: PropertyOptions) {
  *
  * @description
  * Equivalent to `@Property` but defaults `required` to `false` and does not
- * apply `resolveLanguage` or `initial` defaults.  Use this when a property
+ * apply any `initial` defaults.  Use this when a property
  * may or may not have a value, and you want full control over its configuration.
  *
  * @example
@@ -421,6 +572,14 @@ export interface ModelConfig {
      * The name of the entity.
      */
     name: string;
+
+    /**
+     * Natural-language hint that steers the generic LLM extractor when
+     * turning a transcript into instances of this class.  Emitted as an
+     * `ad4m://interpretation_hint` link on the SHACL shape node and surfaced
+     * on `ModelShape.interpretation_hint` by the Rust model query.
+     */
+    interpretationHint?: string;
 }
 
 /**
@@ -438,14 +597,16 @@ export interface ModelConfig {
  * - Generates the necessary SDNA code for the model's properties and relations
  * - Enables the use of other model decorators (@Property, @HasMany, etc.)
  * - Provides static query methods through the Ad4mModel base class
+ *
+ * Schema generation calls the class constructor once, without a perspective, to read
+ * field defaults, so keep constructors free of side effects.
  * 
  * @example
  * ```typescript
  * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
  *   @Property({
- *     through: "recipe://name",
- *     resolveLanguage: "literal"
+ *     through: "recipe://name"
  *   })
  *   name: string = "";
  * 
@@ -492,13 +653,15 @@ export function Model(opts: ModelConfig) {
         }
 
         target.generateSHACL = function() {
-            return buildSHACL(
+            return getMemoizedSHACL(target, (seed) => buildSHACL(
                 opts.name,
                 target,
                 getPropertiesMetadata(target),
                 getRelationsMetadata(target),
                 buildConformanceFilter,
-            );
+                seed,
+                opts.interpretationHint,
+            ));
         }
 
         Object.defineProperty(target, 'type', {configurable: true});
@@ -517,13 +680,15 @@ export function Model(opts: ModelConfig) {
  * Smart defaults (all overridable):
  * - `required` → `false`
  * - `readOnly` → `false`
- * - `resolveLanguage` → `"literal"`
+ * - `resolveLanguage` → unset → deterministic typed literal storage
+ *   (the perf default). Set `resolveLanguage: "literal"` for a signed-envelope
+ *   value, or a custom language address to resolve through that language.
  * - `initial` → `undefined` (no link created until a value is explicitly set)
  * 
  * Properties are optional by default. When a model instance is created without
  * providing a value for an optional property, no link is added to the graph.
  * Set `required: true` explicitly when a property must always be present (this
- * also adds a `"literal://string:uninitialized"` sentinel as the initial value
+ * also adds a `"literal:string:uninitialized"` sentinel as the initial value
  * so that the SDNA constructor creates a placeholder link).
  * 
  * @example
@@ -550,7 +715,8 @@ export function Model(opts: ModelConfig) {
  *   })
  *   role: string = "";
  * 
- *   // Optional property with literal resolution
+ *   // Optional property with signed-envelope literal storage
+ *   // (per-value provenance)
  *   @Property({
  *     through: "user://bio",
  *     resolveLanguage: "literal"
@@ -562,20 +728,24 @@ export function Model(opts: ModelConfig) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
- * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized" when required)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
     const required = opts.required ?? false;
+    // `resolveLanguage` is intentionally NOT defaulted here.
+    // The effective storage mode is derived from what the user explicitly set:
+    //   - unset             → deterministic typed literal (the perf default)
+    //   - "literal"         → signed literal envelope (per-value provenance)
+    //   - <custom address>  → expression on that custom language
     return applyPropertyMetadata({
         ...opts,
         required,
         readOnly: opts.readOnly ?? false,
-        resolveLanguage: opts.resolveLanguage ?? "literal",
-        initial: opts.initial ?? (required ? "literal://string:uninitialized" : undefined),
+        initial: opts.initial ?? (required ? "literal:string:uninitialized" : undefined),
     });
 }
 
@@ -630,7 +800,7 @@ export function Property(opts: PropertyOptions) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
@@ -652,21 +822,50 @@ export interface RelationOptions {
     /**
      * The predicate URI used to link the two models.
      * Defaults to `'ad4m://has_child'` when omitted.
-     * Cannot be combined with `getter`.
+     * Cannot be combined with `getter`, except on a `readOnly` relation.
      */
     through?: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
-     *  Cannot be combined with `getter`. */
+     *  Combines with `getter`, where it names the class the traversal's values hydrate into. */
     target?: () => Ad4mModelLike;
     /**
-     * Custom SurrealQL getter to resolve the relation values. Use this for custom graph traversals.
+     * Custom getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
-     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].out.uri)"
+     * Example: "SELECT ?target WHERE { ?target <flux://has_reply> <Base> . }"
      *
-     * Mutually exclusive with `through` and `target`. When `getter` is provided the
-     * relation is read-only (no adder/remover actions are generated).
+     * Mutually exclusive with `through` — a getter replaces link-based resolution,
+     * so there is no predicate to add to or remove from. When `getter` is provided
+     * the relation is read-only (no adder/remover actions are generated). The
+     * exception is `readOnly: true`, where `through` names the predicate the
+     * getter reads and becomes the shape's path.
+     *
+     * **Combines with `target`**, which names the class the traversal's values
+     * hydrate into — without it `include` has no shape to resolve and the relation
+     * can only return bare URIs. Also combines with `where`, applied as a
+     * post-getter filter against the target class.
+     *
+     * @example Traversing a reified edge — a connection stored as a record rather
+     * than a predicate, so no `through` can express it:
+     * ```typescript
+     * @HasMany({
+     *   getter: `SELECT ?target WHERE {
+     *     ?citation <paper://cites_from> <Base> .
+     *     ?citation <paper://cites_to> ?target .
+     *   }`,
+     *   target: () => Paper,
+     * })
+     * cited: Paper[] = [];
+     * ```
      */
     getter?: string;
+    /**
+     * A relation read through `through` that this model must not write: no
+     * `add*`/`remove*`/`set*` methods and no adder or remover actions. Pair
+     * it with `getter` when the stored links need filtering on the way out
+     * (only those signed by their target, say) but the predicate should
+     * still be the shape's path, so a subscription re-runs when one lands.
+     */
+    readOnly?: boolean;
     /** Whether the link is stored locally (not shared on the network) */
     local?: boolean;
     /**
@@ -685,7 +884,8 @@ export interface RelationOptions {
      * auto-derived from the target shape (flags + required properties).
      * Providing `where` overrides this auto-derivation.
      *
-     * Mutually exclusive with `getter` and `filter: false`.
+     * Mutually exclusive with `filter: false`. Combines with `getter`, where it
+     * is applied as a post-getter filter against the target class.
      *
      * @example
      * ```typescript
@@ -697,6 +897,127 @@ export interface RelationOptions {
      * ```
      */
     where?: Where;
+    /**
+     * SHACL `sh:datatype` for the relation's target values. Set when the
+     * relation holds encoded literal values (e.g. `"xsd:string"` for a
+     * `HasMany<string>` that stores plain strings). The executor uses
+     * this to decode `literal:<type>:<value>` wire form on hydration.
+     * Omit for URI relations that point at other model instances.
+     *
+     * Mutually exclusive with `target`: a relation holds either literals or
+     * model instances. Combines with `through` or `getter`.
+     *
+     * @example
+     * ```typescript
+     * @HasMany({ through: "run://source", datatype: "xsd:string" })
+     * sources: string[] = [];
+     * ```
+     */
+    datatype?: string;
+    /**
+     * Hydrate each target as the class it actually **is**, rather than as the
+     * class this relation declares.
+     *
+     * A heterogeneous relation has no single right target. Declaring the base
+     * class loses every subclass property — the executor hydrates against the
+     * shape it is given, so an `ImagePost` read as a `Post` arrives with its own
+     * fields simply absent, not merely mislabelled. Declaring nothing leaves
+     * `include` with no shape to resolve at all.
+     *
+     * With this set, the targets are classified, grouped by concrete class, and
+     * hydrated against their own shapes — one query per distinct class present,
+     * not per instance.
+     *
+     * Pair with `instantiateAs` so the results become instances of the right
+     * model class rather than plain objects.
+     *
+     * @example
+     * ```typescript
+     * @HasMany({
+     *   through: "we://children",
+     *   polymorphic: true,
+     *   instantiateAs: () => [TextBlock, ImageBlock],
+     * })
+     * children: Post[] = [];
+     * ```
+     */
+    polymorphic?: boolean;
+    /**
+     * The model classes a `polymorphic` result may be constructed as.
+     *
+     * Classification happens in the executor, structurally — there is no
+     * `rdf:type` triple to read, so a target's class is derived from the flags
+     * and required properties it carries. What cannot cross the wire is the
+     * TypeScript constructor, so this names the classes this side can build.
+     * `@Model` already records each class's name on the class itself, so the
+     * name → class mapping is derived from the list rather than restated
+     * alongside it.
+     *
+     * **This is advisory, not a constraint.** It never narrows what the query
+     * returns and never excludes a target: a class missing from the list arrives
+     * as plain JSON carrying its class name, so partial knowledge degrades
+     * instead of failing. Declaring what this call site can *construct* is a
+     * different statement from declaring what the relation may *contain* — a
+     * heterogeneous relation is open by definition, and a list that silently
+     * dropped unrecognised members would defeat the point of reading it
+     * polymorphically at all. Constraining a read to particular classes belongs
+     * in the query, not here.
+     *
+     * A thunk rather than an array, for the same reason `target` is one: it is
+     * evaluated at query time, so a class defined later in a circular import
+     * graph still resolves.
+     */
+    instantiateAs?: () => Ad4mModelLike[];
+    /**
+     * Give this collection a user-controlled order that survives concurrent edits.
+     *
+     * A `@HasMany` is a set of links, and hydration sorts them by link timestamp.
+     * That is right for an append-only collection — a transcript, a message
+     * thread — where timestamp order *is* the order. It cannot express a sequence
+     * somebody chose: a kanban column, a playlist, the blocks of a post.
+     *
+     * **Declaration only, for now.** Setting this emits `ad4m://ordering` on the
+     * property shape, where the executor reads it back — but no read or write
+     * path acts on it yet, so a relation declaring it still hydrates by link
+     * timestamp exactly as one that does not. Wiring save and hydration to the
+     * declaration is the next change; nothing about how you write the relation
+     * will change when it lands — assign the array in the order you want and
+     * save.
+     *
+     * Ordering is declared in the type system, rather than passed per query, so
+     * that *every* writer gets it once it is wired: the ORM, MCP agents, raw
+     * WS-RPC callers, another app sharing the neighbourhood. Implemented
+     * client-side it would order only what this client wrote.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Task, {
+     *   through: "kanban://has_task",
+     *   ordering: { strategy: "linkedList" },
+     * })
+     * tasks: Task[] = [];
+     * ```
+     */
+    ordering?: { strategy: 'linkedList' };
+    /**
+     * Natural-language hint describing what this relation MEANS semantically —
+     * the sentence-level rationale for when to use it, not just its structural
+     * shape. Emitted as an `ad4m://interpretation_hint` link on the SHACL
+     * property node; read back by the Rust harness (`ClassProposeShape.
+     * relations[N].hint`) and rendered into the `_propose_link_child` tool's
+     * `predicate` field description so the LLM knows which relation applies
+     * to which situation instead of guessing from the predicate name alone.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Belief, {
+     *   through: "ns://basedOn",
+     *   interpretationHint: "The prior beliefs this intention derives from.",
+     * })
+     * basedOn: Belief[] = [];
+     * ```
+     */
+    interpretationHint?: string;
 }
 
 /**
@@ -731,44 +1052,82 @@ function resolveRelationArgs(
         ? { ...(second || {}), target: first }
         : first;
 
-    // getter is mutually exclusive with through, target, and where
+    // `where` and `filter: false` contradict each other on every relation,
+    // getter-backed ones included — checked before the getter path returns.
+    if (opts.where && opts.filter === false) {
+        throw new Error(
+            'Relation decorator: `where` and `filter: false` are contradictory. ' +
+            '`where` adds filtering constraints; `filter: false` disables filtering.'
+        );
+    }
+
+    // `datatype` makes the relation's values encoded literals; `target` makes
+    // them model instances. `buildSHACL` would emit `sh:nodeKind sh:Literal`
+    // and `sh:class` on the same property shape, so the executor would decode
+    // the values as literals while `include` tried to hydrate them as
+    // instances. Checked before the getter path returns, so a getter
+    // relation is held to the same rule.
+    if (opts.datatype && opts.target) {
+        throw new Error(
+            'Relation decorator: `datatype` and `target` are mutually exclusive. ' +
+            '`datatype` declares a relation of literal values; `target` declares a ' +
+            'relation to model instances. Drop `datatype` to link instances, or drop ' +
+            '`target` to store literals.'
+        );
+    }
+
+    // getter is mutually exclusive with a WRITABLE through: the relation would
+    // write raw links and read back whatever the getter lets through. With
+    // `readOnly` there is nothing to write, and `through` only names the
+    // predicate the getter reads — the shape's path, which is what makes a
+    // subscription re-run when one of those links lands.
     if (opts.getter) {
-        if (opts.through) {
+        if (opts.through && !opts.readOnly) {
             throw new Error(
                 'Relation decorator: `getter` and `through` are mutually exclusive. ' +
-                'Use `getter` alone for custom read-only relations, or `through` ' +
-                '(with optional `target`) for standard link-based relations.'
+                'Use `getter` alone for custom read-only relations, `through` ' +
+                '(with optional `target`) for standard link-based relations, or ' +
+                'both with `readOnly: true` to read that predicate through the getter.'
             );
         }
-        if (opts.target) {
-            throw new Error(
-                'Relation decorator: `getter` and `target` are mutually exclusive. ' +
-                '`target` auto-generates a conformance getter from the model shape; ' +
-                'providing both is contradictory.'
-            );
-        }
-        if (opts.where) {
-            throw new Error(
-                'Relation decorator: `where` and `getter` are mutually exclusive. ' +
-                'Use `where` for DSL-based filtering, or `getter` for raw SurrealQL.'
-            );
-        }
+        // `target` and `where` are NOT mutually exclusive with `getter`.
+        //
+        // `target` does two separable jobs: it auto-derives a conformance
+        // getter, and it names the class the relation's values hydrate into.
+        // Only the first conflicts with an explicit getter, and `buildSHACL`
+        // already resolves that on its own — an explicit getter wins the getter
+        // slot, while `sh:class` / `ad4m:targetClassName` are emitted from
+        // `target` independently.
+        //
+        // Refusing the pair cost the one thing a custom getter is for. A getter
+        // expresses a traversal the link-shaped DSL cannot — most usefully
+        // through a reified edge, where the connection is a record rather than
+        // a predicate:
+        //
+        //     @HasMany({
+        //       getter: "SELECT ?target WHERE { \
+        //                  ?citation <paper://cites_from> <Base> . \
+        //                  ?citation <paper://cites_to> ?target . }",
+        //       target: () => Paper,
+        //     })
+        //     cited: Paper[] = [];
+        //
+        // Without `target` the relation has no target class, so `include` on it
+        // resolves a shape named "" and fails — leaving a traversal that can
+        // only ever return bare URIs. With it, the values hydrate like any other
+        // relation, because getters are evaluated before include resolution.
+        //
+        // `where` is the same story: the executor applies post-getter where
+        // filters specifically to getter-backed relations
+        // (`apply_where_filter_to_relation`), and emitting `wherePredicates`
+        // needs `target` to resolve the target's metadata — so the runtime is
+        // built for all three together and only this check said otherwise.
         return opts;
     }
 
     // Default predicate when not provided
     if (!opts.through) {
         opts.through = 'ad4m://has_child';
-    }
-
-    // where validation
-    if (opts.where) {
-        if (opts.filter === false) {
-            throw new Error(
-                'Relation decorator: `where` and `filter: false` are contradictory. ' +
-                '`where` adds filtering constraints; `filter: false` disables filtering.'
-            );
-        }
     }
 
     return opts;
@@ -823,12 +1182,18 @@ export function HasMany(
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
         // Only add mutation methods when a predicate is available
-        // (getter-only relations are read-only)
-        if (opts.through) {
+        // (getter-only relations are read-only) and writing is allowed
+        if (opts.through && !opts.readOnly) {
             (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
                 return (this as any).addRelationValue(relKey, arg, batchId);
             };
@@ -874,6 +1239,15 @@ export function HasOne(
     second?: Omit<RelationOptions, 'target'>,
 ): PropertyDecorator {
     const opts = resolveRelationArgs(first, second);
+    // `readOnly` lets `through` and `getter` stand together on `@HasMany`.
+    // `@HasOne` reads through its predicate as a property and carries no
+    // getter, so the pair would read the predicate unfiltered.
+    if (opts.through && opts.getter) {
+        throw new Error(
+            '@HasOne: `through` with `getter` is not supported, even with `readOnly`. ' +
+            'Use `@HasMany` for a read-only relation read through a getter.'
+        );
+    }
     return function <T>(target: T, key: keyof T) {
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
@@ -886,10 +1260,22 @@ export function HasOne(
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
-        if (opts.through) {
+        if (opts.through && opts.readOnly) {
+            applyPropertyMetadata({
+                through: opts.through,
+                readOnly: true,
+                local: opts.local,
+            })(target, key);
+        } else if (opts.through) {
             // Register as a writable property
             applyPropertyMetadata({
                 through: opts.through,
@@ -897,15 +1283,23 @@ export function HasOne(
                 local: opts.local,
             })(target, key);
 
-            // Add prototype methods for add/remove/set (mirroring @HasMany)
-            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).addRelationValue(relKey, arg);
+            // Add prototype methods for add/remove/set (mirroring @HasMany).
+            //
+            // `batchId` is part of that mirroring: without it a to-one link
+            // cannot join a write group, so anything that creates a record and
+            // then points it at something has to commit twice and every
+            // subscriber sees the state in between — a record whose to-one
+            // relation is still empty. Anything rendering from a subscription
+            // therefore has a frame in which the record exists and points at
+            // nothing.
+            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).addRelationValue(relKey, arg, batchId);
             };
-            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).removeRelationValue(relKey, arg);
+            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).removeRelationValue(relKey, arg, batchId);
             };
-            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).setRelationValues(relKey, arg);
+            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).setRelationValues(relKey, arg, batchId);
             };
         } else {
             Object.defineProperty(target, relKey, { configurable: true, writable: true });
@@ -956,6 +1350,11 @@ export function BelongsToOne(
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         if (opts.through) {
@@ -1014,6 +1413,11 @@ export function BelongsToMany(
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*

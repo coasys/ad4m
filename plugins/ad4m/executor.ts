@@ -328,19 +328,19 @@ let executorLogStream: fs.WriteStream | null = null;
 /**
  * Check whether an executor is reachable.
  *
- * Tries the MCP endpoint first, then falls back to a lightweight GraphQL
- * query on the default HTTP port (12000).  This ensures we detect executors
+ * Tries the MCP endpoint first, then falls back to a lightweight HTTP
+ * request on the default HTTP port (12000).  This ensures we detect executors
  * launched via ad4m-launcher where MCP is typically disabled.
  *
- * Returns `"mcp"` or `"graphql"` to indicate which interface responded,
+ * Returns `"mcp"` or `"http"` to indicate which interface responded,
  * or `false` if neither is reachable.
  */
 export async function isExecutorRunning(
   endpoint: string,
   timeoutMs: number = 3000,
-  graphqlHttpUrl: string = "http://localhost:12000/graphql",
-): Promise<"mcp" | "graphql" | false> {
-  const probe = (url: string, body: string, validate?: (json: any) => boolean): Promise<boolean> =>
+  httpUrl: string = "http://localhost:12000",
+): Promise<"mcp" | "http" | false> {
+  const probe = (url: string, init: RequestInit, validate?: (json: any) => boolean): Promise<boolean> =>
     new Promise((resolve) => {
       const controller = new AbortController();
       const timeout = setTimeout(() => {
@@ -349,15 +349,21 @@ export async function isExecutorRunning(
       }, timeoutMs);
 
       fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
+        ...init,
         signal: controller.signal,
       })
         .then(async (res) => {
           clearTimeout(timeout);
-          if (!res.ok) return resolve(false);
-          if (!validate) return resolve(true);
+          if (!res.ok) {
+            try { await res.body?.cancel(); } catch { /* ignore */ }
+            return resolve(false);
+          }
+          if (!validate) {
+            // Release the (possibly event-stream) body so the probe leaks no
+            // open connection.
+            try { await res.body?.cancel(); } catch { /* ignore */ }
+            return resolve(true);
+          }
           try {
             const json = await res.json();
             resolve(validate(json));
@@ -371,24 +377,47 @@ export async function isExecutorRunning(
         });
     });
 
-  // Try MCP and GraphQL in parallel — return the first that succeeds
-  const [mcp, gql] = await Promise.all([
+  // Try MCP and HTTP in parallel — return the first that succeeds
+  const [mcp, rest] = await Promise.all([
     probe(
       endpoint,
-      JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }),
+      {
+        method: "POST",
+        // The rmcp streamable-HTTP server requires this Accept header; without it
+        // the request is Not Acceptable and MCP looks absent. `initialize` also
+        // needs no session (unlike tools/list, which 4xx's without one), so a 200
+        // here reliably means the MCP server is live.
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 0,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "openclaw-ad4m-probe", version: "0.1.0" },
+          },
+        }),
+      },
     ),
     probe(
-      graphqlHttpUrl,
-      JSON.stringify({ query: "{ agentStatus { isInitialized } }" }),
-      // Unauthenticated requests lack AGENT_READ_CAPABILITY so the query
-      // returns errors — but any GraphQL-shaped response (data or errors key)
-      // confirms an AD4M executor is listening.
-      (json) => json != null && ("data" in json || "errors" in json),
+      // Root info endpoint — only HTTP route guaranteed to be reachable.
+      // All AD4M operations now go through the WebSocket at /api/v1/ws;
+      // the HTTP surface is intentionally minimal (`/`, `/health`, WS upgrades,
+      // and the audio transcription feed). See rust-executor/src/api/mod.rs.
+      `${httpUrl.replace(/\/+$/, "")}/`,
+      { method: "GET" },
+      // Positively identify the listener as AD4M Executor rather than
+      // accepting any random HTTP 200 on port 12000.
+      (json) => json != null && json.name === "AD4M Executor",
     ),
   ]);
 
   if (mcp) return "mcp";
-  if (gql) return "graphql";
+  if (rest) return "http";
   return false;
 }
 
@@ -404,10 +433,11 @@ export async function ensureExecutorRunning(
   adminCredential: string,
   logger: any,
   endpoint: string = "http://localhost:3001/mcp",
-  wsEndpoint: string = "ws://localhost:12000/graphql",
+  restEndpoint: string = "http://localhost:12000",
   binaryPath?: string,
   rustLog?: string,
   logTarget: "file" | "openclaw" | "both" = "file",
+  runHolochain: boolean = true,
 ): Promise<ExecutorStartResult> {
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
 
@@ -474,17 +504,24 @@ export async function ensureExecutorRunning(
     }
 
     // Start the executor as a child process
+    const runArgs = [
+      "run",
+      "--enable-mcp",
+      "true",
+      "--admin-credential",
+      adminCredential,
+      "--mcp-port",
+      "3001",
+      "--run-dapp-server",
+      "false",
+    ];
+    if (!runHolochain) {
+      logger.info("[ad4m] Starting executor with Holochain disabled (--run-holochain false)");
+      runArgs.push("--run-holochain", "false");
+    }
     executorProcess = spawn(
       executorPath,
-      [
-        "run",
-        "--enable-mcp",
-        "true",
-        "--admin-credential",
-        adminCredential,
-        "--mcp-port",
-        "3001",
-      ],
+      runArgs,
       {
         stdio: ["ignore", "pipe", "pipe"],
         detached: false,

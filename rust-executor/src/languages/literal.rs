@@ -1,17 +1,28 @@
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::Value as JsonValue;
 
 use super::error::LanguageError;
 
+/// Percent-encoding set matching JS `encodeRFC3986URIComponent`, which the
+/// SDK's `Literal.toUrl()` uses: everything but `A-Z a-z 0-9 - _ . ~` is
+/// escaped. The store renders `literal:string:` / `literal:json:` targets with
+/// the same set.
+pub(crate) const RFC3986_COMPONENT_ENCODE: AsciiSet = NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
 /// Encode a JSON value into a literal URL expression part.
 ///
-/// Mirrors the TypeScript `Literal.from(value).toUrl()` behavior.
+/// Mirrors the TypeScript `Literal.from(value).toUrl()` behavior, including
+/// its percent-encoding set.
 /// For primitive types, uses the corresponding prefix (`string:`, `number:`, `boolean:`).
 /// For objects/arrays, uses `json:` prefix with percent-encoded JSON serialization.
 pub fn literal_encode(value: &JsonValue) -> String {
     match value {
         JsonValue::String(s) => {
-            let encoded = utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+            let encoded = utf8_percent_encode(s, &RFC3986_COMPONENT_ENCODE).to_string();
             format!("string:{}", encoded)
         }
         JsonValue::Number(n) => {
@@ -23,7 +34,7 @@ pub fn literal_encode(value: &JsonValue) -> String {
         _ => {
             // For objects, arrays, null — use json: prefix
             let json_str = serde_json::to_string(value).unwrap_or_default();
-            let encoded = utf8_percent_encode(&json_str, NON_ALPHANUMERIC).to_string();
+            let encoded = utf8_percent_encode(&json_str, &RFC3986_COMPONENT_ENCODE).to_string();
             format!("json:{}", encoded)
         }
     }
@@ -31,9 +42,11 @@ pub fn literal_encode(value: &JsonValue) -> String {
 
 /// Decode a literal URL expression part back into a JSON value.
 ///
-/// Mirrors the TypeScript `Literal.fromUrl("literal://<expression_part>").get()` behavior.
-/// If the decoded value is not an object (i.e., is a primitive), wraps it in a standard
-/// expression envelope with `author`, `timestamp`, `data`, and `proof` fields.
+/// Mirrors the TypeScript `Literal.fromUrl("literal:<expression_part>").get()`.
+/// `string:` / `number:` / `boolean:` decode to their typed primitive. `json:`
+/// payloads are returned as the decoded JSON value verbatim — if the payload
+/// happens to be a signed-expression envelope (`{author, timestamp, data, proof}`),
+/// it is the caller's job to interpret that shape.
 pub fn literal_decode(expression_part: &str) -> Result<JsonValue, LanguageError> {
     let value = if let Some(rest) = expression_part.strip_prefix("string:") {
         let decoded = percent_decode_str(rest).decode_utf8().map_err(|e| {
@@ -86,27 +99,7 @@ pub fn literal_decode(expression_part: &str) -> Result<JsonValue, LanguageError>
         serde_json::from_str(&decoded).unwrap_or(JsonValue::String(decoded.to_string()))
     };
 
-    // If the value is already an object (e.g., a full expression), return it as-is.
-    // Otherwise, wrap it in a standard expression envelope.
-    if value.is_object() {
-        Ok(value)
-    } else {
-        let mut envelope = serde_json::Map::new();
-        envelope.insert(
-            "author".to_string(),
-            JsonValue::String("<unknown>".to_string()),
-        );
-        envelope.insert(
-            "timestamp".to_string(),
-            JsonValue::String("<unknown>".to_string()),
-        );
-        envelope.insert("data".to_string(), value);
-        envelope.insert(
-            "proof".to_string(),
-            JsonValue::Object(serde_json::Map::new()),
-        );
-        Ok(JsonValue::Object(envelope))
-    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -119,8 +112,7 @@ mod tests {
         let encoded = literal_encode(&value);
         assert!(encoded.starts_with("string:"));
         let decoded = literal_decode(&encoded).unwrap();
-        // Primitives get wrapped in an envelope
-        assert_eq!(decoded["data"], value);
+        assert_eq!(decoded, value);
     }
 
     #[test]
@@ -129,7 +121,7 @@ mod tests {
         let encoded = literal_encode(&value);
         assert!(encoded.starts_with("number:"));
         let decoded = literal_decode(&encoded).unwrap();
-        assert_eq!(decoded["data"], value);
+        assert_eq!(decoded, value);
     }
 
     #[test]
@@ -138,7 +130,7 @@ mod tests {
         let encoded = literal_encode(&value);
         assert!(encoded.starts_with("boolean:"));
         let decoded = literal_decode(&encoded).unwrap();
-        assert_eq!(decoded["data"], value);
+        assert_eq!(decoded, value);
     }
 
     #[test]
@@ -149,5 +141,19 @@ mod tests {
         let decoded = literal_decode(&encoded).unwrap();
         // Objects are returned as-is (not wrapped)
         assert_eq!(decoded, value);
+    }
+
+    /// Same bytes as the SDK's `Literal.from(v).toUrl()`
+    /// (`encodeRFC3986URIComponent`): `-_.~` stay bare.
+    #[test]
+    fn test_encode_matches_the_sdk_encoding() {
+        assert_eq!(
+            literal_encode(&JsonValue::String("board://status a-b_c.d~e".into())),
+            "string:board%3A%2F%2Fstatus%20a-b_c.d~e"
+        );
+        assert_eq!(
+            literal_encode(&serde_json::json!({ "a": "x-y" })),
+            "json:%7B%22a%22%3A%22x-y%22%7D"
+        );
     }
 }

@@ -1,75 +1,54 @@
-import { ApolloClient, gql } from "@apollo/client/core";
+import {ApiClient, CallOptions, EventFilter, RpcError } from '../apiClient';
+import type { EventMap, EventName } from '../generated/api/Events';
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
-import { Link, LinkExpressionInput, LinkExpression, LinkInput, LinkMutations, LinkExpressionMutations } from "../links/Links";
+import {
+    Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations,
+    linkExpressionInputToWire, linkExpressionToWire, linkMutationsToWire,
+} from "../links/Links";
 import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
-import unwrapApolloResult from "../unwrapApolloResult";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
-import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
+import { PerspectiveHandle } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
+import type { TranscriptTurn } from "../generated/api";
+import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
+import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
+// FlowInstance.ts owns the flow-proposal result types so they sit next to the
+// `proposeTransition()` API they describe. `import type` keeps this out of the
+// runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
+// would otherwise be a cycle).
+import type {
+    FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
+    FlowReceiptVerdict, FlowValidOutput,
+} from "./FlowInstance";
 
-const LINK_EXPRESSION_FIELDS = `
-author
-timestamp
-status
-data { source, predicate, target }
-proof { valid, invalid, signature, key }
-`
+function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
+    let finalResult: unknown = raw
 
-const PERSPECTIVE_HANDLE_FIELDS = `
-uuid
-name
-sharedUrl
-state
-owners
-neighbourhood {
-    data {
-        linkLanguage
-        meta {
-            links
-                {
-                    author
-                    timestamp
-                    data { source, predicate, target }
-                    proof { valid, invalid, signature, key }
-                }
+    if (typeof finalResult === 'string') {
+        try {
+            finalResult = JSON.parse(finalResult)
+        } catch (e) {
+            console.error(errorContext, e)
         }
     }
-    author
-}
-`
 
-export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
-export type UuidCallback = (uuid: string) => null
-export type LinkCallback = (link: LinkExpression) => null
-export type SyncStateChangeCallback = (state: PerspectiveState) => null
+    return finalResult as AllInstancesResult
+}
 
 export class PerspectiveClient {
-    #apolloClient: ApolloClient<any>
-    #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
-    #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
-    #perspectiveRemovedCallbacks: UuidCallback[]
-    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    #apiClient: ApiClient
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
 
-    constructor(client: ApolloClient<any>, subscribe: boolean = true) {
-        this.#apolloClient = client
-        this.#perspectiveAddedCallbacks = []
-        this.#perspectiveUpdatedCallbacks = []
-        this.#perspectiveRemovedCallbacks = []
-        this.#perspectiveSyncStateChangeCallbacks = []
-
-        if(subscribe) {
-            this.subscribePerspectiveAdded()
-            this.subscribePerspectiveUpdated()
-            this.subscribePerspectiveRemoved()
-        }
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
+        this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
     }
 
     setExpressionClient(client: ExpressionClient) {
@@ -85,580 +64,501 @@ export class PerspectiveClient {
     }
 
     get aiClient(): AIClient {
-        return this.#aiClient
+        return this.#aiClient!
     }
 
     async all(): Promise<PerspectiveProxy[]> {
-        const { perspectives } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query perspectives {
-                perspectives {
-                    ${PERSPECTIVE_HANDLE_FIELDS}
-                }
-            }`
-        }))
-        return perspectives.map(handle => new PerspectiveProxy(handle, this))
+        const perspectives = await this.#apiClient.call('perspective.all', {})
+        return perspectives.map(handle => new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this))
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
-        const { perspective } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query perspective($uuid: String!) {
-                perspective(uuid: $uuid) {
-                    ${PERSPECTIVE_HANDLE_FIELDS}
-                }
-            }`,
-            variables: { uuid }
-        }))
-        if(!perspective) return null
-        return new PerspectiveProxy(perspective, this)
+        try {
+            const perspective = await this.#apiClient.call('perspective.get', { uuid })
+            if(!perspective) return null
+            return new PerspectiveProxy(PerspectiveHandle.fromWire(perspective), this)
+        } catch(e) {
+            if (e instanceof RpcError && e.status === 404) return null
+            throw e
+        }
     }
 
     async snapshotByUUID(uuid: string): Promise<Perspective|null> {
-        const { perspectiveSnapshot } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query perspectiveSnapshot($uuid: String!) {
-                perspectiveSnapshot(uuid: $uuid) {
-                    links { ${LINK_EXPRESSION_FIELDS} }
-                }
-            }`,
-            variables: { uuid }
-        }))
-        return perspectiveSnapshot
+        const snapshot = await this.#apiClient.call('perspective.snapshot', { uuid })
+        return snapshot ? new Perspective(snapshot.links.map(LinkExpression.fromWire)) : null
     }
+
     async publishSnapshotByUUID(uuid: string): Promise<string|null> {
-        const { perspectivePublishSnapshot } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectivePublishSnapshot($uuid: String!) {
-                perspectivePublishSnapshot(uuid: $uuid)
-            }`,
-            variables: { uuid }
-        }))
-        return perspectivePublishSnapshot
+        return this.#apiClient.call('perspective.publishSnapshot', { uuid })
     }
 
-    async queryLinks(uuid: string, query: LinkQuery): Promise<LinkExpression[]> {
-        const { perspectiveQueryLinks } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query perspectiveQueryLinks($uuid: String!, $query: LinkQuery!) {
-                perspectiveQueryLinks(query: $query, uuid: $uuid) {
-                    ${LINK_EXPRESSION_FIELDS}
-                }
-            }`,
-            variables: { uuid, query }
-        }))
-        return perspectiveQueryLinks
+    async queryLinks(uuid: string, query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
+        const params: PerspectiveQueryLinksParams = { uuid }
+        if (query.source) params.source = query.source
+        if (query.predicate) params.predicate = query.predicate
+        if (query.target) params.target = query.target
+        if (query.fromDate) params.fromDate = query.fromDate instanceof Date ? query.fromDate.toISOString() : String(query.fromDate)
+        if (query.untilDate) params.untilDate = query.untilDate instanceof Date ? query.untilDate.toISOString() : String(query.untilDate)
+        if (query.limit !== undefined) params.limit = query.limit
+        const links = await this.#apiClient.call('perspective.queryLinks', params, options)
+        return links.map(LinkExpression.fromWire)
     }
 
-    async queryProlog(uuid: string, query: string): Promise<any> {
-        const { perspectiveQueryProlog } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query perspectiveQueryProlog($uuid: String!, $query: String!) {
-                perspectiveQueryProlog(uuid: $uuid, query: $query)
-            }`,
-            variables: { uuid, query }
-        }))
-
-        return JSON.parse(perspectiveQueryProlog)
+    async queryProlog(uuid: string, query: string, options?: CallOptions): Promise<unknown> {
+        const result = await this.#apiClient.call('perspective.queryProlog', { uuid, query }, options)
+        return JSON.parse(result)
     }
 
-    /**
-     * Executes a read-only SurrealQL query against a perspective's link cache.
-     * 
-     * Security: Only SELECT, RETURN, and other read-only queries are permitted.
-     * Mutating operations (DELETE, UPDATE, INSERT, etc.) are blocked.
-     * 
-     * Note: GraphQL field name is "perspectiveQuerySurrealDb" (lowercase "b" in "Db")
-     * as generated from Rust method "perspective_query_surreal_db"
-     */
-    async querySurrealDB(uuid: string, query: string): Promise<any> {
-        const { perspectiveQuerySurrealDb } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query perspectiveQuerySurrealDb($uuid: String!, $query: String!) {
-                perspectiveQuerySurrealDb(uuid: $uuid, query: $query)
-            }`,
-            variables: { uuid, query }
-        }))
-
-        return JSON.parse(perspectiveQuerySurrealDb)
+    async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
+        const result = await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
+        return JSON.parse(result) as T
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
-        const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {
-                perspectiveSubscribeQuery(uuid: $uuid, query: $query) {
-                    subscriptionId
-                    result
-                }
-            }`,
-            variables: { uuid, query }
-        }))
-        const { subscriptionId, result } = perspectiveSubscribeQuery
-        let finalResult = result;
-        let isInit = false;
-        if(finalResult.startsWith("#init#")) {
-            finalResult = finalResult.substring(6)
-            isInit = true;
-        }
-        try {
-            finalResult = JSON.parse(finalResult)
-        } catch (e) {
-            console.error('Error parsing perspectiveSubscribeQuery result:', e)
-        }
-        return { subscriptionId, result: finalResult, isInit }
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
+        const response = await this.#apiClient.call(
+            'perspective.subscribeQuery', { uuid, query }
+        )
+        const { subscriptionId, result } = response
+        const parsed = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
+        return { subscriptionId, result: parsed }
     }
 
-    async perspectiveSubscribeSurrealQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
-        const { perspectiveSubscribeSurrealQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveSubscribeSurrealQuery($uuid: String!, $query: String!) {
-                perspectiveSubscribeSurrealQuery(uuid: $uuid, query: $query) {
-                    subscriptionId
-                    result
-                }
-            }`,
-            variables: { uuid, query }
-        }))
-        const { subscriptionId, result } = perspectiveSubscribeSurrealQuery
-        let finalResult = result;
-        let isInit = false;
-        if(finalResult.startsWith("#init#")) {
-            finalResult = finalResult.substring(6)
-            isInit = true;
-        }
-        try {
-            finalResult = JSON.parse(finalResult)
-        } catch (e) {
-            console.error('Error parsing perspectiveSubscribeSurrealQuery result:', e)
-        }
-        return { subscriptionId, result: finalResult, isInit }
+    async perspectiveKeepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.keepAliveQuery', { uuid, subscriptionId }
+        )
     }
 
-    async perspectiveKeepAliveSurrealQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        const { perspectiveKeepAliveSurrealQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveKeepAliveSurrealQuery($uuid: String!, $subscriptionId: String!) {
-                perspectiveKeepAliveSurrealQuery(uuid: $uuid, subscriptionId: $subscriptionId)
-            }`,
-            variables: { uuid, subscriptionId }
-        }))
-
-        return perspectiveKeepAliveSurrealQuery
-    }
-
-    async perspectiveDisposeSurrealQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        const { perspectiveDisposeSurrealQuerySubscription } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveDisposeSurrealQuerySubscription($uuid: String!, $subscriptionId: String!) {
-                perspectiveDisposeSurrealQuerySubscription(uuid: $uuid, subscriptionId: $subscriptionId)
-            }`,
-            variables: { uuid, subscriptionId }
-        }))
-
-        return perspectiveDisposeSurrealQuerySubscription
+    async perspectiveDisposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.disposeQuery', { uuid, subscriptionId }
+        )
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        const subscription = this.#apolloClient.subscribe({
-            query: gql`
-                subscription perspectiveQuerySubscription($subscriptionId: String!) {
-                    perspectiveQuerySubscription(subscriptionId: $subscriptionId)
-                }
-            `,
-            variables: {
-                subscriptionId
-            }
-        }).subscribe({
-            next: (result) => {
-                if (result.data && result.data.perspectiveQuerySubscription) {
-                    let finalResult = result.data.perspectiveQuerySubscription;
-                    let isInit = false;
-                    if(finalResult.startsWith("#init#")) {
-                        finalResult = finalResult.substring(6)
-                        isInit = true;
-                    }
-                    try {
-                        finalResult = JSON.parse(finalResult)
-                        if(isInit && typeof finalResult === 'object') {
-                            finalResult.isInit = true;
-                        }
-                    } catch (e) {
-                        console.error('Error parsing perspectiveQuerySubscription:', e)
-                    }
-                    onData(finalResult);
-                }
-            },
-            error: (e) => console.error('Error in query subscription:', e)
-        });
-
-        return () => subscription.unsubscribe();
+        return this.#apiClient.on('query-subscription-update', (event) => {
+            if (event.subscriptionId !== subscriptionId) return
+            onData(normalizeQueryResult(event.result, 'Error parsing query subscription:'))
+        })
     }
 
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        const { perspectiveKeepAliveQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveKeepAliveQuery($uuid: String!, $subscriptionId: String!) {
-                perspectiveKeepAliveQuery(uuid: $uuid, subscriptionId: $subscriptionId)
-            }`,
-            variables: { uuid, subscriptionId }
-        }))
-
-        return perspectiveKeepAliveQuery
+        return this.#apiClient.call(
+            'perspective.keepAliveQuery', { uuid, subscriptionId }
+        )
     }
 
+    /** Ends the subscription on the executor. The caller releases its local listener
+     *  with the function `subscribeToQueryUpdates` returned. */
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        const { perspectiveDisposeQuerySubscription } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveDisposeQuerySubscription($uuid: String!, $subscriptionId: String!) {
-                perspectiveDisposeQuerySubscription(uuid: $uuid, subscriptionId: $subscriptionId)
-            }`,
-            variables: { uuid, subscriptionId }
-        }))
+        return this.#apiClient.call(
+            'perspective.disposeQuery', { uuid, subscriptionId }
+        )
+    }
 
-        return perspectiveDisposeQuerySubscription
+    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
+        const resultJson = await this.#apiClient.call(
+            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
+        )
+        return JSON.parse(resultJson)
+    }
+
+    async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
+        return await this.#apiClient.call(
+            'perspective.subjectClassesOf', { uuid, uris }
+        )
+    }
+
+    async evaluateGetters(
+        uuid: string,
+        className: string,
+        instanceIds: string[],
+        propertyNames?: string[],
+    ): Promise<Record<string, Record<string, any>>> {
+        const resultJson = await this.#apiClient.call(
+            'perspective.evaluateGetters', {
+                uuid,
+                class_name: className,
+                instance_ids: instanceIds,
+                ...(propertyNames && { property_names: propertyNames }),
+            }
+        )
+        return JSON.parse(resultJson)
+    }
+
+    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+        const response = await this.#apiClient.call(
+            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
+        )
+        return {
+            subscriptionId: response.subscription_id,
+            result: JSON.parse(response.result)
+        }
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
-        const { perspectiveAdd } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAdd($name: String!) {
-                perspectiveAdd(name: $name) {
-                    ${PERSPECTIVE_HANDLE_FIELDS}
-                }
-            }`,
-            variables: { name }
-        }))
-        return new PerspectiveProxy(perspectiveAdd, this)
+        const handle = await this.#apiClient.call('perspective.create', { name })
+        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
-        const { perspectiveUpdate } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveUpdate($uuid: String!, $name: String!) {
-                perspectiveUpdate(uuid: $uuid, name: $name) {
-                    ${PERSPECTIVE_HANDLE_FIELDS}
-                }
-            }`,
-            variables: { uuid, name }
-        }))
-        return new PerspectiveProxy(perspectiveUpdate, this)
+        const handle = await this.#apiClient.call('perspective.update', { uuid, name })
+        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
-        return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveRemove($uuid: String!) {
-                perspectiveRemove(uuid: $uuid)
-            }`,
-            variables: { uuid }
-        }))
+        const result = await this.#apiClient.call('perspective.remove', { uuid })
+        return { perspectiveRemove: result }
     }
 
     async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const { perspectiveAddLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLink($uuid: String!, $link: LinkInput!, $status: String!, $batchId: String) {
-                perspectiveAddLink(uuid: $uuid, link: $link, status: $status, batchId: $batchId) {
-                    ${LINK_EXPRESSION_FIELDS}
-                }
-            }`,
-            variables: { uuid, link, status, batchId }
-        }))
-        return perspectiveAddLink
+        const added = await this.#apiClient.call(
+            'perspective.addLink', { uuid, link, status, batchId }
+        )
+        return LinkExpression.fromWire(added)
     }
 
     async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        const { perspectiveAddLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLinks($uuid: String!, $links: [LinkInput!]!, $status: String!, $batchId: String) {
-                perspectiveAddLinks(uuid: $uuid, links: $links, status: $status, batchId: $batchId) {
-                    ${LINK_EXPRESSION_FIELDS}
-                }
-            }`,
-            variables: { uuid, links, status, batchId }
-        }))
-        return perspectiveAddLinks
+        const added = await this.#apiClient.call(
+            'perspective.addLinks', { uuid, links, status, batchId }
+        )
+        return added.map(LinkExpression.fromWire)
     }
 
     async removeLinks(uuid: string, links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        const { perspectiveRemoveLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveRemoveLinks($uuid: String!, $links: [LinkExpressionInput!]!, $batchId: String) {
-                perspectiveRemoveLinks(uuid: $uuid, links: $links, batchId: $batchId) {
-                    ${LINK_EXPRESSION_FIELDS}
-                }
-            }`,
-            variables: { uuid, links, batchId }
-        }))
-        return perspectiveRemoveLinks
+        const removed = await this.#apiClient.call(
+            'perspective.removeLinks', { uuid, links: links.map(linkExpressionInputToWire), batchId }
+        )
+        return removed.map(LinkExpression.fromWire)
     }
 
     async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
-        const { perspectiveLinkMutations } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveLinkMutations($uuid: String!, $mutations: LinkMutations!, $status: String){
-                perspectiveLinkMutations(mutations: $mutations, uuid: $uuid, status: $status) {
-                    additions {
-                        ${LINK_EXPRESSION_FIELDS}
-                    }
-                    removals {
-                        ${LINK_EXPRESSION_FIELDS}
-                    }
-                }
-            }`,
-            variables: { uuid, mutations, status }
-        }))
-        return perspectiveLinkMutations
-    }
-
-    async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const { perspectiveAddLinkExpression } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLinkExpression($uuid: String!, $link: LinkExpressionInput!, $status: String!, $batchId: String) {
-                perspectiveAddLinkExpression(uuid: $uuid, link: $link, status: $status, batchId: $batchId) {
-                    ${LINK_EXPRESSION_FIELDS}
-                }
-            }`,
-            variables: { uuid, link, status, batchId }
-        }))
-        return perspectiveAddLinkExpression
-    }
-
-    async updateLink(uuid: string, oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        const { perspectiveUpdateLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveUpdateLink($uuid: String!, $oldLink: LinkExpressionInput!, $newLink: LinkInput!, $batchId: String) {
-                perspectiveUpdateLink(uuid: $uuid, oldLink: $oldLink, newLink: $newLink, batchId: $batchId) {
-                    ${LINK_EXPRESSION_FIELDS}
-                }
-            }`,
-            variables: { uuid, oldLink, newLink, batchId }
-        }))
-        return perspectiveUpdateLink
-    }
-
-    async removeLink(uuid: string, link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-        delete link.__typename
-        delete link.data.__typename
-        delete link.proof.__typename
-        delete link.status
-        const { perspectiveRemoveLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveRemoveLink($link: LinkExpressionInput!, $uuid: String!, $batchId: String) {
-                perspectiveRemoveLink(link: $link, uuid: $uuid, batchId: $batchId)
-            }`,
-            variables: { uuid, link, batchId }
-        }))
-        return perspectiveRemoveLink
+        const diff = await this.#apiClient.call(
+            'perspective.linkMutations', { uuid, mutations: linkMutationsToWire(mutations), status }
+        )
+        return LinkExpressionMutations.fromWire(diff)
     }
 
     /**
-     * Adds Social DNA code to a perspective.
-     * 
-     * Preferred usage: pass shaclJson (from SHACLShape.toJSON()) as the primary schema definition.
-     * The sdnaCode parameter is kept for backward compatibility but SHACL is the source of truth
-     * for all SDNA operations. Prolog engines remain available for complex queries.
-     * 
-     * @param sdnaCode - Legacy Prolog code (pass empty string when using shaclJson)
-     * @param shaclJson - SHACL JSON string from SHACLShape.toJSON() (recommended)
+     * Run generic LLM interpretation over a transcript into this perspective's own
+     * SHACL subject classes. The target shapes are resolved server-side from the
+     * perspective's registered subject classes, so you pass only the transcript.
+     * Returns the freshly minted instances (their base URIs + the links written).
+     *
+     * The server-side call prompts an LLM (up to `INTERPRETATION_MAX_ATTEMPTS`
+     * retries on parse failure), so it can legitimately take minutes on slower
+     * or CPU-only models, so it defaults to {@link LONG_TIMEOUT_MS}.
+     *
+     * `existingScope` and `mintScope` match the AutoProcessor semantics:
+     * `existingScope` constrains the dedup lookup to instances under a
+     * subtree; `mintScope` links every FRESHLY-created base as a child of
+     * `mintScope.id` via its predicate (upserts of pre-existing instances
+     * are NOT re-parented — same rule as the watcher).
      */
+    async runInterpretation(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        existingScope?: RawScope,
+        mintScope?: RawScope,
+        observe?: RunInterpretationObserveOptions,
+        options?: CallOptions,
+    ): Promise<string[]> {
+        return this.#apiClient.call(
+            'perspective.runInterpretation',
+            {
+                uuid, transcript, basePrefix, classes, existingScope, mintScope,
+                observationId: observe?.observationId,
+                emitDebugEvents: observe?.emitDebugEvents,
+            },
+            options,
+        )
+    }
+
+    /**
+     * Tool-calling counterpart to {@link runInterpretation}. The LLM sees a
+     * live per-class tool surface (`{Class}_query`, `{Class}_propose_create`,
+     * `{Class}_propose_link_child`, …) and drives the extraction via tool
+     * calls; buffered proposals drain through the same overlay gate the
+     * single-shot path uses.
+     *
+     * `maxToolCalls` bounds the loop and MUST be > 0 — zero would collapse
+     * the harness to a no-op final-answer step; use {@link runInterpretation}
+     * for the classic single-shot path.
+     *
+     * Defaults to {@link LONG_TIMEOUT_MS}, like the single-shot path.
+     */
+    async runInterpretationWithHarness(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        existingScope?: RawScope,
+        // Optional live-debug event surface — same shape/semantics as the
+        // single-shot `runInterpretation`. `observationId` names the
+        // `processor_id` + `batch_key` on emitted `ToolCall` / `ToolResult`
+        // events so a subscribed UI can correlate them to this pass.
+        // `emitDebugEvents` is a dead-letter without an observationId
+        // (nothing to key against); the server gates on both.
+        observationId?: string,
+        emitDebugEvents?: boolean,
+        options?: CallOptions,
+    ): Promise<string[]> {
+        return this.#apiClient.call(
+            'perspective.runInterpretationWithHarness',
+            {
+                uuid,
+                transcript,
+                basePrefix,
+                maxToolCalls,
+                classes,
+                modelOverride,
+                existingScope,
+                observationId,
+                emitDebugEvents,
+            },
+            options,
+        )
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor's
+     * watch loop then runs interpretation automatically over new source items
+     * (like Flux per channel), coordinating which peer processes each batch via
+     * the shared-graph ProcessingClaim, and emits step signals on the events
+     * WebSocket (subscribe with `on('auto-processor-event', …, { perspective })`).
+     * Returns the processor id.
+     */
+    async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
+        return this.#apiClient.call(
+            'perspective.addAutoProcessor', { ...config, uuid },
+        )
+    }
+
+    /** Delete an auto-processor's config. `false` when there was none to delete. */
+    async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.removeAutoProcessor', { uuid, processorId },
+        )
+    }
+
+    /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
+    async interpretationOverlays(uuid: string): Promise<InterpretationOverlayInfo[]> {
+        const overlays = await this.#apiClient.call(
+            'perspective.interpretationOverlays', { uuid },
+        )
+        return overlays.map(({ base, kind, run, inferred }) => ({
+            base, run, inferred, kind: kind === 'create' ? 'create' : 'update',
+        }))
+    }
+
+    /** Accept an overlay's suggestion(s): the LLM value becomes the real value and
+     *  the overlay is deleted. Omit `property` to accept the whole base. */
+    async acceptInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.acceptInterpretation', { uuid, base, property },
+        )
+    }
+
+    /** Reject an overlay's suggestion(s). Omit `property` to reject the whole base
+     *  (a rejected `create` deletes the suggested instance). */
+    async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.rejectInterpretation', { uuid, base, property },
+        )
+    }
+
+    async proposeFlowTransition(
+        uuid: string,
+        instanceUri: string,
+        toState: string,
+        rationale?: string,
+        outputs?: FlowOutputRef[],
+    ): Promise<FlowProposeResult> {
+        return this.#apiClient.call(
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
+        )
+    }
+
+    async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
+        return this.#apiClient.call(
+            'perspective.acceptFlowProposal', { uuid, proposalUri },
+        )
+    }
+
+    /**
+     * Withdraw this agent's own links from a proposal. Resolves to how many
+     * were retracted — one for a withdrawn vote, more when retracting a
+     * proposal this agent opened.
+     */
+    async rejectFlowProposal(uuid: string, proposalUri: string): Promise<number> {
+        const result = await this.#apiClient.call(
+            'perspective.rejectFlowProposal', { uuid, proposalUri },
+        )
+        return result.retractedLinks
+    }
+
+    /** Re-decide a flow receipt under this perspective's own flow catalogue. */
+    async verifyFlowReceipt(uuid: string, receipt: JsonValue): Promise<FlowReceiptVerdict> {
+        return this.#apiClient.call(
+            'perspective.verifyFlowReceipt', { uuid, receipt },
+        )
+    }
+
+    /** The instances that are, as they stand, valid outputs of `flow`
+     *  (optionally: of runs settled into terminal state `state`). */
+    async flowValidOutputs(uuid: string, flow: string, state?: string): Promise<FlowValidOutput[]> {
+        return this.#apiClient.call(
+            'perspective.flowValidOutputs', { uuid, flow, state },
+        )
+    }
+
+    /** Mint and store the receipt for a completed flow run. Fails while the
+     *  run has not settled into a terminal state, and when an output's
+     *  content no longer matches what the quorum committed to. */
+    async mintFlowReceipt(uuid: string, instanceUri: string): Promise<FlowMintedReceipt> {
+        return this.#apiClient.call(
+            'perspective.mintFlowReceipt', { uuid, instanceUri },
+        )
+    }
+
+    async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+        const added = await this.#apiClient.call(
+            'perspective.addLinkExpression', { uuid, link: linkExpressionToWire(link), status, batchId }
+        )
+        return LinkExpression.fromWire(added)
+    }
+
+    async updateLink(uuid: string, oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
+        const updated = await this.#apiClient.call(
+            'perspective.updateLink', { uuid, oldLink: linkExpressionInputToWire(oldLink), newLink, batchId }
+        )
+        return LinkExpression.fromWire(updated)
+    }
+
+    async removeLink(uuid: string, link: LinkExpressionInput, batchId?: string): Promise<boolean> {
+        const { status, ...wire } = linkExpressionInputToWire(link)
+        return this.#apiClient.call(
+            'perspective.removeLink', { uuid, link: wire, batchId }
+        )
+    }
+
     async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
-        return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String, $sdnaType: String!, $shaclJson: String) {
-                perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType, shaclJson: $shaclJson)
-            }`,
-            variables: { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
-        })).perspectiveAddSdna
+        const result = await this.#apiClient.call(
+            'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
+        )
+        return typeof result === 'boolean' ? result : result.every(Boolean)
+    }
+
+    async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
+        const result = await this.#apiClient.call(
+            'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
+        )
+        return typeof result === 'boolean' ? [result] : result
     }
 
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
-        return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveExecuteCommands($uuid: String!, $commands: String!, $expression: String!, $parameters: String, $batchId: String) {
-                perspectiveExecuteCommands(uuid: $uuid, commands: $commands, expression: $expression, parameters: $parameters, batchId: $batchId)
-            }`,
-            variables: { uuid, commands, expression, parameters, batchId }
-        })).perspectiveExecuteCommands
+        return this.#apiClient.call(
+            'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
+        )
     }
 
     async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
-        return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!, $initialValues: String, $batchId: String) {
-                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress, initialValues: $initialValues, batchId: $batchId)
-            }`,
-            variables: { uuid, subjectClass, expressionAddress, initialValues, batchId }
-        })).perspectiveCreateSubject
+        return this.#apiClient.call(
+            'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
+        )
     }
 
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
-        return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveGetSubjectData($uuid: String!, $subjectClass: String!, $expressionAddress: String!) {
-                perspectiveGetSubjectData(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress)
-            }`,
-            variables: { uuid, subjectClass, expressionAddress }
-        })).perspectiveGetSubjectData
+        return this.#apiClient.call(
+            'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
+        )
+    }
+
+    // ── SHACL resolution (server-side) ─────────────────────────────────────────
+    // These methods delegate shape resolution to the executor, which reads links
+    // from its local store in-process.  Each call replaces the multi-round-trip
+    // `queryLinks` sequences the old PerspectiveProxy methods performed.
+
+    /** List the names of every SHACL shape stored in a perspective (one RPC call). */
+    async getShaclNames(uuid: string): Promise<string[]> {
+        return this.#apiClient.call('perspective.getShaclNames', { uuid })
+    }
+
+    /**
+     * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     *
+     * Returns `undefined` when the shape (or its `sh://targetClass` edge) is
+     * absent — unified with `PerspectiveProxy.getShaclTargetClass` so callers
+     * see a single "not found" representation across both layers. The
+     * executor wire format is still `null` (see `perspective.getShaclTargetClass`
+     * in `perspectives_ws.rs`); this method maps that at the boundary rather
+     * than pushing the null one layer further up. PR #935 review r3897752023.
+     */
+    async getShaclTargetClass(uuid: string, name: string): Promise<string | undefined> {
+        const result = await this.#apiClient.call(
+            'perspective.getShaclTargetClass',
+            { uuid, name },
+        )
+        return result ?? undefined
+    }
+
+    /**
+     * Retrieve a single SHACL shape's link triples by name (one RPC call).
+     * Returns `{shapeUri, links}` for reconstruction via `SHACLShape.fromLinks()`,
+     * or `null` if no shape with that name exists.
+     */
+    async getShacl(uuid: string, name: string): Promise<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null> {
+        return this.#apiClient.call(
+            'perspective.getShacl', { uuid, name }
+        )
+    }
+
+    /**
+     * Retrieve all SHACL shapes in one call.  Returns an array of
+     * `{name, shapeUri, links}` — one entry per shape (one RPC call).
+     */
+    async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
+        return this.#apiClient.call(
+            'perspective.getAllShacl', { uuid }
+        )
     }
 
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
-        return await this.#expressionClient.get(expressionURI)
+        return await this.#expressionClient!.get(expressionURI)
     }
 
-    async createExpression(content: any, languageAddress: string): Promise<string> {
-        return await this.#expressionClient.create(content, languageAddress)
+    async createExpression(content: unknown, languageAddress: string): Promise<string> {
+        return await this.#expressionClient!.create(content, languageAddress)
     }
 
-    // Subscriptions:
-    addPerspectiveAddedListener(cb: PerspectiveHandleCallback) {
-        this.#perspectiveAddedCallbacks.push(cb)
-    }
-
-    subscribePerspectiveAdded() {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveAdded { ${PERSPECTIVE_HANDLE_FIELDS} }
-            }
-        `}).subscribe({
-            next: result => {
-                this.#perspectiveAddedCallbacks.forEach(cb => {
-                    cb(result.data.perspectiveAdded)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-    }
-
-    addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback) {
-        this.#perspectiveUpdatedCallbacks.push(cb)
-    }
-
-    subscribePerspectiveUpdated() {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveUpdated { ${PERSPECTIVE_HANDLE_FIELDS} }
-            }
-        `}).subscribe({
-            next: result => {
-                this.#perspectiveUpdatedCallbacks.forEach(cb => {
-                    cb(result.data.perspectiveUpdated)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-    }
-
-    addPerspectiveSyncedListener(cb: SyncStateChangeCallback) {
-        this.#perspectiveSyncStateChangeCallbacks.push(cb)
-    }
-
-    async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveSyncStateChange(uuid: "${uuid}")
-            }
-        `}).subscribe({
-            next: result => {
-                cb.forEach(c => {
-                    c(result.data.perspectiveSyncStateChange)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
-    }
-
-    addPerspectiveRemovedListener(cb: UuidCallback) {
-        this.#perspectiveRemovedCallbacks.push(cb)
-    }
-
-    subscribePerspectiveRemoved() {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveRemoved
-            }
-        `}).subscribe({
-            next: result => {
-                this.#perspectiveRemovedCallbacks.forEach(cb => {
-                    cb(result.data.perspectiveRemoved)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-    }
-
-    async addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveLinkAdded(uuid: "${uuid}") { ${LINK_EXPRESSION_FIELDS} }
-            }
-        `}).subscribe({
-            next: result => {
-                cb.forEach(c => {
-                    c(result.data.perspectiveLinkAdded)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
-    }
-
-    async addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveLinkRemoved(uuid: "${uuid}") { ${LINK_EXPRESSION_FIELDS} }
-            }
-        `}).subscribe({
-            next: result => {
-                cb.forEach(c => {
-                    if (!result.data.perspectiveLinkRemoved.status) {
-                        delete result.data.perspectiveLinkRemoved.status
-                    }
-                    c(result.data.perspectiveLinkRemoved)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
-    }
-
-    async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                perspectiveLinkUpdated(uuid: "${uuid}") {
-                    oldLink {
-                        ${LINK_EXPRESSION_FIELDS}
-                    }
-                    newLink {
-                        ${LINK_EXPRESSION_FIELDS}
-                    }
-                }
-            }
-        `}).subscribe({
-            next: result => {
-                cb.forEach(c => {
-                    if (!result.data.perspectiveLinkUpdated.newLink.status) {
-                        delete result.data.perspectiveLinkUpdated.newLink.status
-                    }
-                    if (!result.data.perspectiveLinkUpdated.oldLink.status) {
-                        delete result.data.perspectiveLinkUpdated.oldLink.status
-                    }
-                    c(result.data.perspectiveLinkUpdated)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+    /** The client's event bus; see {@link ApiClient.on}. */
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        return this.#apiClient.on(type, handler, filter)
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
-        return new NeighbourhoodProxy(this.#neighbourhoodClient, uuid)
+        return new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid)
     }
 
     async createBatch(uuid: string): Promise<string> {
-        const { perspectiveCreateBatch } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveCreateBatch($uuid: String!) {
-                perspectiveCreateBatch(uuid: $uuid)
-            }`,
-            variables: { uuid }
-        }))
-        return perspectiveCreateBatch
+        return this.#apiClient.call('perspective.createBatch', { uuid })
     }
 
     async commitBatch(uuid: string, batchId: string): Promise<LinkExpressionMutations> {
-        const { perspectiveCommitBatch } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveCommitBatch($uuid: String!, $batchId: String!) {
-                perspectiveCommitBatch(uuid: $uuid, batchId: $batchId) {
-                    additions {
-                        ${LINK_EXPRESSION_FIELDS}
-                    }
-                    removals {
-                        ${LINK_EXPRESSION_FIELDS}
-                    }
-                }
-            }`,
-            variables: { uuid, batchId }
-        }))
-        return perspectiveCommitBatch
+        const diff = await this.#apiClient.call(
+            'perspective.commitBatch', { uuid, batchId }
+        )
+        return LinkExpressionMutations.fromWire(diff)
+    }
+
+    /** Register a callback that fires after a successful WebSocket reconnect.
+     *  Passes through to ApiClient.onReconnect(). Returns an unsubscribe function. */
+    onReconnect(callback: () => void): () => void {
+        return this.#apiClient.onReconnect(callback)
     }
 }

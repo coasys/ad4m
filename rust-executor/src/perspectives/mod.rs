@@ -1,10 +1,41 @@
+pub mod auto_processor;
+pub(crate) mod content_address;
+pub(crate) mod flow_classes;
+pub(crate) mod flow_context;
+pub(crate) mod flow_evaluator;
+#[cfg(test)]
+mod flow_evaluator_e2e;
+pub(crate) mod flow_instance;
+#[cfg(test)]
+mod flow_instance_e2e;
+pub(crate) mod flow_semantic_check;
+pub(crate) mod flow_spawn;
+pub(crate) mod hardwired_class;
+pub mod interpretation;
+#[cfg(test)]
+mod interpretation_e2e;
+#[cfg(test)]
+mod interpretation_harness_e2e;
+// `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
+// tools, which read flow state through the same loaders) can seed a real
+// `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
+// so it never reaches a release build.
+#[cfg(test)]
+pub(crate) mod interpretation_test_support;
+pub mod memory_diagnostics;
 pub mod migration;
+pub mod model_query;
+pub mod ordering;
 pub mod perspective_instance;
+#[cfg(test)]
+mod read_back_round_trip_tests;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
-pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
-use crate::graphql::graphql_types::{
+pub mod sparql_store;
+pub mod subject_classes_of;
+pub mod utils;
+use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
 };
@@ -30,10 +61,10 @@ lazy_static! {
         RwLock::new(HashMap::new());
 }
 
-/// Set the application data path for file-based SurrealDB storage
+/// Set the application data path for perspective storage
 ///
 /// This must be called before creating perspectives to enable file-based storage.
-/// Each perspective will create its own SurrealDB database in `{app_data_path}/surrealdb_perspectives/{uuid}/`
+/// Each perspective will create its own SPARQL (Oxigraph) store in memory.
 ///
 /// # Arguments
 /// * `path` - The base application data directory path
@@ -47,7 +78,7 @@ pub fn set_app_data_path(path: String) {
 /// # Returns
 /// * `Some(String)` - The configured app data path if set
 /// * `None` - No app data path configured (will use in-memory storage)
-fn get_app_data_path() -> Option<String> {
+pub(crate) fn get_app_data_path() -> Option<String> {
     APP_DATA_PATH.read().unwrap().clone()
 }
 
@@ -82,45 +113,83 @@ pub fn initialize_from_db() {
             }
         }
 
-        // Spawn async task to create service and initialize perspective
+        // Spawn async task to initialize perspective
         tokio::spawn(async move {
-            // Create a per-perspective SurrealDB instance with file-based storage
-            let data_path = get_app_data_path();
-            let surreal_service = match crate::surreal_service::SurrealDBService::new(
-                "ad4m",
-                &handle_clone.uuid,
-                data_path.as_deref(),
-            )
-            .await
-            {
-                Ok(service) => service,
-                Err(e) => {
-                    log::error!(
-                        "Failed to create SurrealDB service for perspective {}: {}, skipping initialization",
-                        handle_clone.uuid,
-                        e
-                    );
-                    return;
-                }
-            };
+            let p = PerspectiveInstance::new(handle_clone.clone(), None);
 
-            // Migrate links from Rusqlite to SurrealDB (one-time migration)
-            // TODO: Remove this migration call after all users have migrated
-            if let Err(e) = migration::migrate_links_from_rusqlite_to_surrealdb(
+            // Run literal:// → literal: URI migration (idempotent)
+            match migration::migrate_links_from_rusqlite_to_sparql(
                 &handle_clone.uuid,
-                &surreal_service,
-            )
-            .await
-            {
-                log::error!(
-                    "Failed to migrate links for perspective {}: {}, skipping initialization",
-                    handle_clone.uuid,
-                    e
-                );
-                return;
+                &p.sparql_store,
+            ) {
+                Ok(result) if result.migrated > 0 => {
+                    log::info!(
+                        "🔄 Migration for {}: {} migrated, {} literal conversions",
+                        handle_clone.uuid,
+                        result.migrated,
+                        result.literal_conversions
+                    );
+                }
+                Ok(_) => {} // Already migrated or nothing to migrate
+                Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
             }
 
-            let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
+            // No named-graph → reifier migration. The named-graph storage model
+            // never shipped: `git tag --contains` on the commit that replaced it
+            // (`7aeeb8982`) is empty, and the last release tag carrying
+            // `perspectives/` has no `sparql_store.rs` at all. Carrying a
+            // migration for a format nobody holds meant carrying a third
+            // `proofValid` read path, and with it the "never evaluated" verdict
+            // it decoded (#1046).
+
+            // No literal-encoding migration on boot. A scalar rides the API as a
+            // `literal:*` wire target and is stored as a native typed RDF literal
+            // by the write path (`target_to_storage_term`, applied uniformly to
+            // every link — model properties, raw `addLink`, and SHACLFlow
+            // bookkeeping alike); reads render it back to the same wire form
+            // (`storage_term_to_target_string`). Fresh writes therefore land in
+            // the indexed shape by construction, so there is nothing to migrate.
+            // A store-sweep migration would sit below this wire-format boundary
+            // and could not tell a model property value from a SHACLFlow
+            // bookkeeping link — see the git history of this file for the removed
+            // v3/v4 sweeps. If real pre-typed-literal stores ever need upgrading,
+            // reintroduce a migration keyed on SHACL property shapes, never a
+            // blanket rewrite.
+
+            // Rebuild SPARQL index from existing links
+            // Skip SPARQL rebuild if persistent store already has data
+            if p.sparql_store.has_data() {
+                log::info!(
+                    "✅ SPARQL store for perspective {} already has data, skipping rebuild",
+                    handle_clone.uuid
+                );
+            } else {
+                match p.get_links(&LinkQuery::default()).await {
+                    Ok(links) => {
+                        if !links.is_empty() {
+                            log::info!(
+                                "🔄 SPARQL REBUILD: Syncing {} links for perspective {}",
+                                links.len(),
+                                handle_clone.uuid
+                            );
+                            if let Err(e) = p.sync_existing_links_to_sparql(&links) {
+                                log::error!(
+                                    "Failed to sync links to SPARQL for perspective {}: {}",
+                                    handle_clone.uuid,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to get links for SPARQL sync in perspective {}: {}",
+                            handle_clone.uuid,
+                            e
+                        );
+                    }
+                }
+            }
 
             // Atomically check-and-insert to prevent race condition
             // (In case multiple initializations were spawned before any completed)
@@ -139,7 +208,7 @@ pub fn initialize_from_db() {
             };
 
             if should_start_tasks {
-                // Start background tasks (no sync needed - SurrealDB is file-based and persistent)
+                // Start background tasks
                 tokio::spawn(p.start_background_tasks());
             }
         });
@@ -165,30 +234,26 @@ pub async fn add_perspective(
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
-    // Create a per-perspective SurrealDB instance with file-based storage
-    let data_path = get_app_data_path();
-    let surreal_service =
-        crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid, data_path.as_deref())
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to create SurrealDB service for perspective {}: {}",
-                    handle.uuid, e
-                )
-            })?;
+    // Sync perspective metadata to shared DB for cross-executor rehydration.
+    // Store the creating executor's DID so other executors can fetch links
+    // from the correct path (links are keyed by DID + perspective UUID).
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        let backend = crate::db_backend::db_backend();
+        let creator_did = crate::agent::did();
+        let meta = serde_json::json!({
+            "uuid": &handle.uuid,
+            "name": &handle.name,
+            "owners": &handle.owners,
+            "state": format!("{:?}", handle.state),
+            "creator_did": &creator_did,
+        });
+        if let Err(e) = backend.upsert("shared:platform", "perspectives", &handle.uuid, meta) {
+            log::warn!("Failed to sync perspective metadata to shared DB: {}", e);
+        }
+    }
 
-    // Migrate links from Rusqlite to SurrealDB (one-time migration)
-    // TODO: Remove this migration call after all users have migrated
-    migration::migrate_links_from_rusqlite_to_surrealdb(&handle.uuid, &surreal_service)
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to migrate links for perspective {}: {}",
-                handle.uuid, e
-            )
-        })?;
-
-    let p = PerspectiveInstance::new(handle.clone(), created_from_join, surreal_service);
+    let p = PerspectiveInstance::new(handle.clone(), created_from_join);
     tokio::spawn(p.clone().start_background_tasks());
 
     {
@@ -203,6 +268,7 @@ pub async fn add_perspective(
     if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle.clone(),
                 owner: owner.clone(),
             };
@@ -217,6 +283,7 @@ pub async fn add_perspective(
         // For perspectives without explicit owners (main agent), publish with main agent DID
         let main_agent_did = crate::agent::did();
         let perspective_with_owner = PerspectiveWithOwner {
+            perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
             owner: main_agent_did,
         };
@@ -241,6 +308,21 @@ pub fn all_perspectives() -> Vec<PerspectiveInstance> {
                 .clone()
         })
         .collect()
+}
+
+/// Register a fully-constructed PerspectiveInstance in the global map.
+/// Used by the rehydration path (shared backend → local) to avoid exposing the PERSPECTIVES static.
+pub(crate) fn register_perspective(uuid: String, instance: PerspectiveInstance) {
+    let mut perspectives = PERSPECTIVES.write().unwrap();
+    perspectives.insert(uuid, RwLock::new(instance));
+}
+
+/// Remove an instance from the global map without touching the persistence
+/// backend. Test-only: lets fixtures that used `register_perspective` leave
+/// global state clean for tests that assert on it.
+#[cfg(test)]
+pub(crate) fn unregister_perspective(uuid: &str) {
+    PERSPECTIVES.write().unwrap().remove(uuid);
 }
 
 pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
@@ -293,6 +375,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
     if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle.clone(),
                 owner: owner.clone(),
             };
@@ -307,6 +390,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         // For perspectives without explicit owners (main agent), publish with main agent DID
         let main_agent_did = crate::agent::did();
         let perspective_with_owner = PerspectiveWithOwner {
+            perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
             owner: main_agent_did,
         };
@@ -341,19 +425,36 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
 
-        // Clean up RocksDB directory for this perspective
+        // Drop any link-language -> perspective cache entries that
+        // pointed at this uuid. Without this, the cache keeps a
+        // stale PerspectiveHandle forever; the slow-path fallback
+        // self-heals for the async lookup but `publish_telepresence_signal_sync`
+        // in handle_telepresence_signal_from_link_language uses the
+        // cached handle DIRECTLY without verifying get_perspective
+        // still returns Some, so signals would keep flowing for a
+        // removed perspective until the cache entry was overwritten.
+        {
+            let handle_snapshot = instance.persisted.lock().await.clone();
+            if let Some(nh) = &handle_snapshot.neighbourhood {
+                let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
+                cache.remove(&nh.data.link_language);
+            }
+        }
+
+        // Clean up the per-perspective SPARQL (Oxigraph/RocksDB) directory
         if let Some(data_path) = get_app_data_path() {
-            let db_path =
-                std::path::Path::new(&data_path).join(format!("surrealdb_perspectives/{}", uuid));
+            let db_path = std::path::Path::new(&data_path)
+                .join("perspectives")
+                .join(uuid);
             if db_path.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&db_path) {
                     log::warn!(
-                        "Failed to remove SurrealDB directory for perspective {}: {}",
+                        "Failed to remove SPARQL store directory for perspective {}: {}",
                         uuid,
                         e
                     );
                 } else {
-                    log::debug!("Cleaned up SurrealDB directory for perspective {}", uuid);
+                    log::debug!("Cleaned up SPARQL store directory for perspective {}", uuid);
                 }
             }
         }
@@ -364,6 +465,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         if let Some(owners) = &handle.owners {
             for owner in owners {
                 let removed_with_owner = PerspectiveRemovedWithOwner {
+                    perspective_uuid: uuid.to_string(),
                     uuid: uuid.to_string(),
                     owner: owner.clone(),
                 };
@@ -445,6 +547,11 @@ pub async fn handle_perspective_diff_from_link_language_impl(
                 e
             );
         }
+    } else {
+        log::warn!(
+            "DIFF-FROM-LINK-LANG [{}]: No perspective found for this link language!",
+            language_address
+        );
     }
 }
 
@@ -492,7 +599,7 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// Publish a telepresence signal to PubSub for delivery to GraphQL subscribers
+/// Publish a telepresence signal to PubSub for delivery to REST subscribers
 pub(crate) async fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
@@ -504,6 +611,7 @@ pub(crate) async fn publish_telepresence_signal(
             .publish(
                 &NEIGHBOURHOOD_SIGNAL_TOPIC,
                 &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective_uuid: handle.uuid.clone(),
                     perspective: handle,
                     signal,
                     recipient: Some(recipient),
@@ -518,6 +626,7 @@ pub(crate) async fn publish_telepresence_signal(
                 .publish(
                     &NEIGHBOURHOOD_SIGNAL_TOPIC,
                     &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective_uuid: handle.uuid.clone(),
                         perspective: handle.clone(),
                         signal: signal.clone(),
                         recipient: Some(owner_did.clone()),
@@ -532,6 +641,7 @@ pub(crate) async fn publish_telepresence_signal(
             .publish(
                 &NEIGHBOURHOOD_SIGNAL_TOPIC,
                 &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective_uuid: handle.uuid.clone(),
                     perspective: handle,
                     signal,
                     recipient: None,
@@ -554,6 +664,7 @@ fn publish_telepresence_signal_sync(
         pubsub.publish_sync(
             &NEIGHBOURHOOD_SIGNAL_TOPIC,
             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle,
                 signal,
                 recipient: Some(recipient),
@@ -565,6 +676,7 @@ fn publish_telepresence_signal_sync(
             pubsub.publish_sync(
                 &NEIGHBOURHOOD_SIGNAL_TOPIC,
                 &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective_uuid: handle.uuid.clone(),
                     perspective: handle.clone(),
                     signal: signal.clone(),
                     recipient: Some(owner_did.clone()),
@@ -576,6 +688,7 @@ fn publish_telepresence_signal_sync(
         pubsub.publish_sync(
             &NEIGHBOURHOOD_SIGNAL_TOPIC,
             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle,
                 signal,
                 recipient: None,
@@ -627,29 +740,31 @@ pub async fn import_perspective(
             .map_err(|e| format!("Failed to create perspective: {}", e))?;
     }
 
-    // Add all links directly to SurrealDB to preserve original authorship
+    // Add all links directly to SPARQL store to preserve original authorship
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
-    let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance
+    // `instance.links` is already `LinkExpression`. Decorating just to persist
+    // would convert back at the store boundary. Missing status defaults to
+    // Local, matching the previous decorate path (not Shared).
+    let additions: Vec<crate::types::LinkExpression> = instance
         .links
         .into_iter()
-        .map(|link| {
-            let status = link.status.clone().unwrap_or(LinkStatus::Local);
-            crate::types::DecoratedLinkExpression::from((link, status))
+        .map(|mut link| {
+            if link.status.is_none() {
+                link.status = Some(LinkStatus::Local);
+            }
+            link
         })
         .collect();
 
-    let diff = crate::graphql::graphql_types::DecoratedPerspectiveDiff {
-        additions: decorated_links,
-        removals: vec![],
-    };
-
-    // Write to SurrealDB
     perspective
-        .persist_link_diff(&diff)
+        .persist_link_diff(&crate::types::PerspectiveDiff {
+            additions,
+            removals: vec![],
+        })
         .await
-        .map_err(|e| format!("Failed to persist link diff to SurrealDB: {}", e))?;
+        .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
 
     Ok(instance.handle)
 }
@@ -661,8 +776,9 @@ mod tests {
     use chrono::Utc;
 
     fn setup() {
-        //setup_wallet();
+        crate::test_utils::setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::agent::AgentService::init_global_test_instance();
     }
 
     async fn find_perspective_by_uuid(
@@ -670,7 +786,7 @@ mod tests {
         uuid: &String,
     ) -> Option<PerspectiveInstance> {
         for p in all_perspectives {
-            if p.persisted.lock().await.uuid == *uuid {
+            if p.uuid == *uuid {
                 return Some(p.clone());
             }
         }

@@ -126,7 +126,7 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
                 .target
                 .into_entry_hash()
                 .expect("Could not get entry_hash"),
-            GetOptions::network(),
+            GetOptions::local(),
         )?
         .ok_or(SocialContextError::InternalError(
             "Could not find did entry for given did entry reference",
@@ -169,7 +169,7 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
                 .target
                 .into_entry_hash()
                 .expect("Could not get entry_hash"),
-            GetOptions::network(),
+            GetOptions::local(),
         )?
         .ok_or(SocialContextError::InternalError(
             "Could not find did entry for given did entry reference",
@@ -200,7 +200,7 @@ pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String
             continue;
         }
 
-        let did_result = get(entry_hash.unwrap(), GetOptions::network())?;
+        let did_result = get(entry_hash.unwrap(), GetOptions::local())?;
 
         if let Some(record) = did_result {
             if let Some(anchor) = record.entry().to_app_option::<Anchor>()? {

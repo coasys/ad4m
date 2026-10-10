@@ -1,6 +1,7 @@
 import {
     perspective_diff_received, sync_state_changed, telepresence_signal_received,
-    register_holochain_signal_handler, ad4m_signal_emitted
+    register_holochain_signal_handler, ad4m_signal_emitted,
+    language_storage_directory, language_address, language_settings
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -19,6 +20,16 @@ import {
         },
         registerHolochainSignalHandler: (cellIdKey, language_address) => {
             return register_holochain_signal_handler(cellIdKey, language_address);
+        },
+        // Language context ops - used by ad4m:host via LANGUAGE_CONTROLLER
+        languageStorageDirectory: () => {
+            return language_storage_directory();
+        },
+        languageAddress: () => {
+            return language_address();
+        },
+        languageSettings: () => {
+            return language_settings();
         },
     };
   })(globalThis);

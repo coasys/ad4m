@@ -1,0 +1,157 @@
+# GitLab CI/CD pipeline for AD4M.
+#
+# Runs on the self-hosted `marvin-host-shell` runner (shell executor,
+# concurrent=4).  Mirrors the CircleCI workflow shape from `.circleci/config.yml`
+# but stripped down for a first-pass proof-of-life — see notes in README below.
+#
+# Design notes:
+#   * Executor: shell (no Docker).  Same host as CircleCI runners, so all system
+#     toolchains (nvm/Node 24, cargo, deno, go, pnpm, wasm-bindgen-cli) are
+#     already installed and cached in /home/marvin.
+#   * Stages: build → test → integration.  Integration jobs depend on the
+#     `build-and-test` artifact stash (mirrors CircleCI's requires: build-and-test).
+#   * Artifacts: release binaries are stashed to /tmp/ci-artifacts/$CI_COMMIT_SHA/
+#     between jobs (loopback, no CI network storage).  Mirrors CircleCI local stash.
+#   * No cache: for now we rely on cargo/pnpm's incremental build.  Adding
+#     proper cache: keys is next-iteration work.
+#   * No CUDA/Docker/publish jobs yet: those need separate porting.
+
+variables:
+  # Shared toolchain PATH — matches what setup_env in CircleCI expects.
+  # nvm-managed Node 24, system cargo/deno/go, marvin's local npm-global.
+  NODE_VERSION: "24"
+  GIT_DEPTH: "0"                    # full history (some tests inspect merge base)
+  GIT_STRATEGY: fetch               # incremental fetch, not clone-every-time
+  GIT_SUBMODULE_STRATEGY: recursive
+  FF_USE_FASTZIP: "true"            # faster artifact tarballs
+  ARTIFACT_STASH: /tmp/ci-artifacts/$CI_COMMIT_SHA
+
+stages:
+  - build
+  - test
+  - integration
+
+# ---------------------------------------------------------------------------
+# Reusable snippet: set up the shell environment (Node via nvm + Rust + Deno +
+# Go + pnpm) exactly as CircleCI's setup_env command does.  Referenced by
+# every job via `!reference` or included as before_script.
+# ---------------------------------------------------------------------------
+.setup_env: &setup_env
+  - export NVM_DIR="$HOME/.nvm"
+  - '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" --no-use'
+  - |
+    NODE_PATH=$(nvm which "$NODE_VERSION" 2>/dev/null || true)
+    if [ -z "$NODE_PATH" ] || [ ! -x "$NODE_PATH" ]; then
+      echo "Node $NODE_VERSION not found, installing via nvm..."
+      nvm install "$NODE_VERSION"
+      NODE_PATH=$(nvm which "$NODE_VERSION")
+    fi
+    NODE_BIN_DIR=$(dirname "$NODE_PATH")
+    export PATH="$NODE_BIN_DIR:$HOME/.cargo/bin:$HOME/.deno/bin:$HOME/.local/go/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/go/bin:$PATH"
+  - echo "Node    $(node --version)"
+  - echo "npm     $(npm --version)"
+  - echo "pnpm    $(pnpm --version 2>/dev/null || echo 'not installed')"
+  - echo "Rust    $(rustc --version)"
+  - echo "Deno    $(deno --version | head -1 || echo 'not installed')"
+  - echo "Go      $(go version 2>/dev/null || echo 'not installed')"
+  # wasm-bindgen-cli is needed for Rust WASM builds; install if missing.
+  - |
+    if ! command -v wasm-bindgen >/dev/null 2>&1; then
+      cargo install wasm-bindgen-cli --version 0.2.118
+    fi
+
+# ---------------------------------------------------------------------------
+# Stage 1 — build + unit tests
+# ---------------------------------------------------------------------------
+build-and-test:
+  stage: build
+  tags: [marvin, shell]
+  timeout: 3h                        # cargo builds are long on cold cache
+  before_script: *setup_env
+  script:
+    - cargo fmt --check
+    - pnpm install --no-frozen-lockfile
+    - pnpm build-dapp
+    - cd ./core && pnpm install --no-frozen-lockfile && cd ..
+    - pnpm run build-deno-snapshot   # long: up to 30m cold
+    - rm -f target/release/ad4m target/release/ad4m-executor
+    - pnpm run build-libs            # long: up to 30m cold
+    - cargo clippy --all --exclude ad4m-launcher
+    # Stash release binaries between jobs (loopback, no CI network round-trip).
+    - mkdir -p "$ARTIFACT_STASH"
+    - cp target/release/ad4m target/release/ad4m-executor "$ARTIFACT_STASH/"
+    # Re-install pnpm without patches (CircleCI does this before root tests).
+    - node removePnpm.js
+    - pnpm install --no-frozen-lockfile
+    - cd ./core && pnpm install --no-frozen-lockfile && cd ..
+    - pnpm test
+  artifacts:
+    when: always
+    paths:
+      - target/release/ad4m
+      - target/release/ad4m-executor
+    expire_in: 3 days
+
+# ---------------------------------------------------------------------------
+# Stage 2 — plugin-ad4m tests (parallel with build, no shared build deps).
+# ---------------------------------------------------------------------------
+plugin-ad4m-tests:
+  stage: build
+  tags: [marvin, shell]
+  timeout: 45m
+  before_script: *setup_env
+  script:
+    - pnpm install --no-frozen-lockfile
+    - cd ./core && pnpm install --no-frozen-lockfile && cd ..
+    - pnpm run test-plugin-ad4m
+
+# ---------------------------------------------------------------------------
+# Stage 3 — integration tests (all depend on build-and-test binaries)
+# ---------------------------------------------------------------------------
+.integration_base: &integration_base
+  stage: integration
+  tags: [marvin, shell]
+  timeout: 45m
+  needs: [build-and-test]
+  before_script: *setup_env
+  after_script:
+    - |
+      mkdir -p /tmp/gl-test-artifacts/$CI_JOB_ID
+      shopt -s nullglob
+      for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+        agent_id="$(basename "$(dirname "$ad4m_dir")")"
+        mkdir -p "/tmp/gl-test-artifacts/$CI_JOB_ID/$agent_id"
+        cp -r "$ad4m_dir/logs" "/tmp/gl-test-artifacts/$CI_JOB_ID/$agent_id/" 2>/dev/null || true
+        cp -r "$ad4m_dir/holochain" "/tmp/gl-test-artifacts/$CI_JOB_ID/$agent_id/" 2>/dev/null || true
+      done
+      lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/gl-test-artifacts/$CI_JOB_ID/listening-ports.txt || true
+  artifacts:
+    when: always
+    paths:
+      - tests/js/tst-tmp/agents/*/ad4m/logs
+    expire_in: 3 days
+
+integration-tests-js:
+  <<: *integration_base
+  script:
+    - cd ./tests/js && pnpm run test-main
+
+integration-tests-multi-user-simple:
+  <<: *integration_base
+  script:
+    - cd ./tests/js && pnpm run test-multi-user-simple
+
+integration-tests-email-verification:
+  <<: *integration_base
+  script:
+    - cd ./tests/js && pnpm run test-email-verification
+
+integration-tests-mcp:
+  <<: *integration_base
+  script:
+    - cd ./tests/js && pnpm run test-mcp
+
+integration-tests-model:
+  <<: *integration_base
+  script:
+    - cd ./tests/js && pnpm run test-model

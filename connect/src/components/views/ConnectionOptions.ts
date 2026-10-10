@@ -3,7 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { DownloadIcon, LocalIcon, RefreshIcon, CheckIcon, GlobeIcon } from "../icons";
 import CrossIcon from "../icons/CrossIcon";
-import { connectWebSocket } from "../../utils";
+import { checkConnection } from "../../utils";
 
 @customElement("connection-options")
 export class ConnectionOptions extends LitElement {
@@ -63,7 +63,13 @@ export class ConnectionOptions extends LitElement {
 
   private async detectLocalNode() {
     try {
-      await connectWebSocket(`ws://localhost:${this.newPort}/graphql`, 3000);
+      // Try 127.0.0.1 first (more reliable in sandboxed/headless environments),
+      // fall back to localhost
+      try {
+        await checkConnection(`http://127.0.0.1:${this.newPort}`, 3000);
+      } catch {
+        await checkConnection(`http://localhost:${this.newPort}`, 3000);
+      }
       this.localNodeDetected = true;
     } catch (error) {
       console.log("[Ad4m Connect] Local detection failed:", error);

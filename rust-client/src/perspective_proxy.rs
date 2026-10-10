@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::{
     literal::{Literal, LiteralValue},
-    perspectives::{
-        AddLinkPerspectiveAddLink, PerspectivesClient, QueryLinksPerspectiveQueryLinks,
-    },
     subject_proxy::SubjectProxy,
-    types::LinkExpression,
+    types::{LinkExpression, LinkExpressionInput, LinkInput},
+    ws_rpc::WsRpcClient,
 };
 use anyhow::{anyhow, Result};
 use chrono::naive::NaiveDateTime;
@@ -15,14 +14,14 @@ use serde_json::Value;
 type DateTime = NaiveDateTime;
 
 pub struct PerspectiveProxy {
-    client: PerspectivesClient,
+    ws: Arc<WsRpcClient>,
     perspective_uuid: String,
 }
 
 impl PerspectiveProxy {
-    pub fn new(client: PerspectivesClient, perspective_uuid: String) -> Self {
+    pub fn new(ws: Arc<WsRpcClient>, perspective_uuid: String) -> Self {
         Self {
-            client,
+            ws,
             perspective_uuid,
         }
     }
@@ -32,15 +31,20 @@ impl PerspectiveProxy {
         source: String,
         target: String,
         predicate: Option<String>,
-        status: Option<String>,
-    ) -> Result<AddLinkPerspectiveAddLink> {
-        self.client
-            .add_link(
-                self.perspective_uuid.clone(),
-                source,
-                target,
-                predicate,
-                status,
+        _status: Option<String>,
+    ) -> Result<LinkExpression> {
+        let link = LinkInput {
+            source,
+            target,
+            predicate,
+        };
+        self.ws
+            .call(
+                "perspective.addLink",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "link": link,
+                }),
             )
             .await
     }
@@ -53,23 +57,51 @@ impl PerspectiveProxy {
         from_date: Option<DateTime>,
         until_date: Option<DateTime>,
         limit: Option<f64>,
-    ) -> Result<Vec<QueryLinksPerspectiveQueryLinks>> {
-        self.client
-            .query_links(
-                self.perspective_uuid.clone(),
-                source,
-                target,
-                predicate,
-                from_date,
-                until_date,
-                limit,
+    ) -> Result<Vec<LinkExpression>> {
+        let mut params = serde_json::json!({ "uuid": self.perspective_uuid });
+        if let Some(v) = source {
+            params["source"] = Value::String(v);
+        }
+        if let Some(v) = target {
+            params["target"] = Value::String(v);
+        }
+        if let Some(v) = predicate {
+            params["predicate"] = Value::String(v);
+        }
+        if let Some(v) = from_date {
+            params["fromDate"] = Value::String(v.and_utc().to_rfc3339());
+        }
+        if let Some(v) = until_date {
+            params["untilDate"] = Value::String(v.and_utc().to_rfc3339());
+        }
+        if let Some(v) = limit {
+            params["limit"] = serde_json::json!(v as i64);
+        }
+        self.ws.call("perspective.queryLinks", params).await
+    }
+
+    pub async fn infer(&self, prolog_query: String) -> Result<Value> {
+        self.ws
+            .call(
+                "perspective.queryProlog",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "query": prolog_query,
+                }),
             )
             .await
     }
 
-    pub async fn infer(&self, prolog_query: String) -> Result<Value> {
-        self.client
-            .infer(self.perspective_uuid.clone(), prolog_query)
+    pub async fn remove_link(&self, link: LinkExpression) -> Result<bool> {
+        let link_input: LinkExpressionInput = link.into();
+        self.ws
+            .call(
+                "perspective.removeLink",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "link": link_input,
+                }),
+            )
             .await
     }
 
@@ -117,9 +149,6 @@ impl PerspectiveProxy {
     }
 
     pub async fn is_sdna_loaded(&self, sdna_code: &str) -> Result<bool> {
-        // Extract subject_class facts from the SDNA code using regex
-        use regex::Regex;
-        // Handle both quoted and unquoted ref values, and require it to be the only content on the line
         let subject_class_regex =
             Regex::new(r#"^\s*subject_class\("([^"]+)",\s*("([^"]+)"|([^,\s)]+))\)\s*\.\s*$"#)
                 .unwrap();
@@ -130,7 +159,6 @@ impl PerspectiveProxy {
             let line = line.trim();
             if let Some(captures) = subject_class_regex.captures(line) {
                 if let Some(class_name) = captures.get(1) {
-                    // Check if ref is quoted (capture group 3) or unquoted (capture group 4)
                     let ref_value = if let Some(quoted_ref) = captures.get(3) {
                         quoted_ref.as_str()
                     } else if let Some(unquoted_ref) = captures.get(4) {
@@ -145,28 +173,22 @@ impl PerspectiveProxy {
             }
         }
 
-        // If no subject_class facts found, consider it not loaded
         if subject_class_facts.is_empty() {
             return Ok(false);
         }
 
-        // Test if we can infer the specific facts from this SDNA
         for (class_name, ref_value) in subject_class_facts {
-            // Use a general query with both variables to check if the fact exists
             let query = "subject_class(Name, Ref).".to_string();
 
             match self.infer(query).await {
                 Ok(results) => {
-                    // Check if any of the results have both Name and Ref matching our expected values
                     if let Some(array) = results.as_array() {
                         let mut found_match = false;
                         for result in array {
-                            // Look for both Name and Ref bindings in this result
                             if let Some(result_obj) = result.as_object() {
                                 let name_binding = result_obj.get("Name");
                                 let ref_binding = result_obj.get("Ref");
 
-                                // Check if both bindings exist and match our expected values
                                 if let (Some(name), Some(ref_val)) = (name_binding, ref_binding) {
                                     if let (Some(bound_name), Some(bound_ref)) =
                                         (name.as_str(), ref_val.as_str())
@@ -195,21 +217,18 @@ impl PerspectiveProxy {
             }
         }
 
-        // All subject_class facts from this SDNA are loaded
         Ok(true)
     }
 
     pub async fn get_dna(
         &self,
     ) -> Result<Vec<(String, Vec<(String, String)>, Vec<String>, Vec<String>)>> {
-        // First, find all the name literals that are linked from ad4m://self with SDNA predicates
         let sdna_predicates = vec![
             "ad4m://has_subject_class",
             "ad4m://has_flow",
             "ad4m://has_custom_sdna",
         ];
 
-        // Use a HashMap to group by class name and avoid duplicates
         use std::collections::HashMap;
         let mut class_groups: HashMap<String, (Vec<String>, Vec<String>, Vec<(String, String)>)> =
             HashMap::new();
@@ -226,12 +245,10 @@ impl PerspectiveProxy {
                 )
                 .await?;
 
-            // For each name literal found, get the actual SDNA code
             for link in links {
                 let name_literal = link.data.target.clone();
                 let name_author = link.author.clone();
 
-                // Extract the class name from the literal
                 let class_name = match Literal::from_url(name_literal.clone()) {
                     Ok(literal) => match literal.get() {
                         Ok(LiteralValue::String(name)) => name,
@@ -240,7 +257,6 @@ impl PerspectiveProxy {
                     Err(_) => continue,
                 };
 
-                // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
                 let sdna_links = self
                     .get(
                         Some(name_literal.clone()),
@@ -252,26 +268,21 @@ impl PerspectiveProxy {
                     )
                     .await?;
 
-                // Get or create the entry for this class
                 let (name_authors, code_authors, sdna_codes_with_authors) = class_groups
                     .entry(class_name.clone())
                     .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
 
-                // Add this name author if not already present
                 if !name_authors.contains(&name_author) {
                     name_authors.push(name_author);
                 }
 
-                // Add all unique code authors and SDNA codes from this name link
                 for sdna_link in sdna_links {
                     if !code_authors.contains(&sdna_link.author) {
                         code_authors.push(sdna_link.author.clone());
                     }
 
-                    // Extract the SDNA code and track its author
                     if let Ok(literal) = Literal::from_url(sdna_link.data.target.clone()) {
                         if let Ok(LiteralValue::String(sdna_code)) = literal.get() {
-                            // Check if this exact code already exists (to avoid duplicates)
                             let code_exists = sdna_codes_with_authors
                                 .iter()
                                 .any(|(existing_code, _)| existing_code == &sdna_code);
@@ -285,8 +296,6 @@ impl PerspectiveProxy {
             }
         }
 
-        // Convert to the expected return format
-        // For each class, we'll return one entry with all collected information
         let mut result = Vec::new();
         for (class_name, (name_authors, code_authors, sdna_codes_with_authors)) in class_groups {
             result.push((
@@ -304,7 +313,6 @@ impl PerspectiveProxy {
         &self,
         class_name: &str,
     ) -> Result<Option<(String, Vec<String>, Vec<String>)>> {
-        // First, find the name literal for this class that is linked from ad4m://self
         let name_literal = Literal::from_string(class_name.to_string());
 
         let links = self
@@ -322,7 +330,6 @@ impl PerspectiveProxy {
             return Ok(None);
         }
 
-        // Collect all unique name authors
         let mut name_authors = Vec::new();
         for link in &links {
             if !name_authors.contains(&link.author) {
@@ -330,7 +337,6 @@ impl PerspectiveProxy {
             }
         }
 
-        // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
         let sdna_links = self
             .get(
                 Some(name_literal.to_url().unwrap()),
@@ -346,7 +352,6 @@ impl PerspectiveProxy {
             return Ok(None);
         }
 
-        // Collect all unique code authors and find the first SDNA code
         let mut code_authors = Vec::new();
         let mut first_sdna_code = None;
 
@@ -355,7 +360,6 @@ impl PerspectiveProxy {
                 code_authors.push(sdna_link.author.clone());
             }
 
-            // Get the first SDNA code we find
             if first_sdna_code.is_none() {
                 let literal = Literal::from_url(sdna_link.data.target.clone())?;
                 match literal.get() {
@@ -376,16 +380,7 @@ impl PerspectiveProxy {
 
     pub async fn get_single_target(&self, source: String, predicate: String) -> Result<String> {
         let links = self
-            .client
-            .query_links(
-                self.perspective_uuid.clone(),
-                Some(source),
-                None,
-                Some(predicate),
-                None,
-                None,
-                None,
-            )
+            .get(Some(source), None, Some(predicate), None, None, None)
             .await?;
         if links.is_empty() {
             return Err(anyhow::anyhow!("No links found"));
@@ -402,10 +397,8 @@ impl PerspectiveProxy {
         predicate: String,
         target: String,
     ) -> Result<()> {
-        let links: Vec<LinkExpression> = self
-            .client
-            .query_links(
-                self.perspective_uuid.clone(),
+        let links = self
+            .get(
                 Some(source.clone()),
                 None,
                 Some(predicate.clone()),
@@ -413,24 +406,24 @@ impl PerspectiveProxy {
                 None,
                 None,
             )
-            .await?
-            .into_iter()
-            .map(LinkExpression::from)
-            .collect();
+            .await?;
 
         for link in links {
-            self.client
-                .remove_link(self.perspective_uuid.clone(), link)
-                .await?;
+            self.remove_link(link).await?;
         }
 
-        self.client
-            .add_link(
-                self.perspective_uuid.clone(),
-                source,
-                target,
-                Some(predicate),
-                Some("shared".to_string()),
+        let link_input = LinkInput {
+            source,
+            target,
+            predicate: Some(predicate),
+        };
+        self.ws
+            .call::<LinkExpression>(
+                "perspective.addLink",
+                serde_json::json!({
+                    "uuid": self.perspective_uuid,
+                    "link": link_input,
+                }),
             )
             .await?;
         Ok(())
@@ -486,14 +479,11 @@ impl PerspectiveProxy {
             ))
             .await
         {
-            //println!("{:?}", results);
             if let Some(Value::Object(action)) = results.first() {
-                //println!("{:?}", action);
                 if let Value::String(action_string) = action
                     .get("Action")
                     .ok_or(anyhow::anyhow!("Unbound variable Action is not set"))?
                 {
-                    //println!("{}", action_string);
                     self.execute_action(action_string, base, None).await?;
                     return Ok(());
                 }
@@ -568,7 +558,6 @@ impl PerspectiveProxy {
             }
             match command.action.as_str() {
                 "addLink" => {
-                    //println!("addLink: {:?}", command);
                     self.add_link(
                         command.source,
                         command.target,
@@ -579,8 +568,6 @@ impl PerspectiveProxy {
                 }
                 "removeLink" => {
                     unimplemented!();
-                    //let links = self.get(Some(source), Some(target), predicate, None, None, None).await?;
-                    //elf.remove_link(source, target.into(), predicate.into()).await?;
                 }
                 "setSingleTarget" => {
                     self.set_single_target(
@@ -601,14 +588,10 @@ impl PerspectiveProxy {
     }
 
     pub async fn get_neighbourhood_author(&self) -> Result<Option<String>> {
-        // This would need to be implemented in the client to get the neighborhood author
-        // For now, we'll return None and implement this later
         Ok(None)
     }
 
     pub async fn get_local_agent_did(&self) -> Result<String> {
-        // This would need to be implemented in the client to get the local agent's DID
-        // For now, we'll return a placeholder
         Ok("local_agent".to_string())
     }
 }
@@ -643,8 +626,6 @@ impl Command {
 fn parse_action(action: &str) -> Result<Vec<Command>> {
     let action_regex = Regex::new(r"\[(?P<command>\{.*})*\]")?;
 
-    // This parses strings like:
-    // {action: "<action>", source: "<source>", predicate: "<predicate>", target: "<target>", status: "<status>"}
     let command_regex = Regex::new(
         r#"\{(action:\s*"(?P<action>[\S--,]+)",?\s*)|(source:\s*"(?P<source>[\S--,]+)",?\s*)|(predicate:\s*"(?P<predicate>[\S--,]+)",?\s*)|(target:\s*"(?P<target>[\S--,]+)",?\s*)|(status:\s*"(?P<status>[\S--,]+)",?\s*)\}"#,
     )?;
@@ -673,7 +654,6 @@ fn parse_action(action: &str) -> Result<Vec<Command>> {
             target: target.ok_or(anyhow!("Comman without target"))?.into(),
             status: status.map(|e| e.into()),
         });
-        //println!("{:?}", commands);
     }
 
     Ok(commands)

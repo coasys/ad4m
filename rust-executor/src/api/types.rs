@@ -1,0 +1,869 @@
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use crate::types::{
+    AuthInfoInput, InteractionCall, LanguageMetaInput, LinkExpression, LinkExpressionInput,
+    LinkInput, LinkMutations, ModelType,
+};
+
+// Re-export for use in handler files
+pub use crate::agent::capabilities::user_email_from_token;
+
+// ── Agent ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GenerateAgentRequest {
+    pub passphrase: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LockAgentRequest {
+    pub passphrase: String,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UnlockAgentRequest {
+    pub passphrase: String,
+    pub holochain: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SignMessageRequest {
+    pub message: String,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateProfileRequest {
+    pub dm_language: Option<String>,
+    pub public_perspective: Option<PublicPerspectiveInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PublicPerspectiveInput {
+    pub links: Vec<LinkExpressionInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RequestCapabilityRequest {
+    pub auth_info: AuthInfoInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PermitCapabilityRequest {
+    pub auth: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GenerateJwtRequest {
+    pub rand: String,
+    pub request_id: String,
+}
+
+// ── Entanglement ──
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct EntanglementProofInput {
+    pub device_key: String,
+    pub device_key_type: String,
+    pub device_key_signed_by_did: String,
+    pub did_signed_by_device_key: Option<String>,
+}
+
+/// Wrapper: SDK sends `{ proofs: [...] }` for entanglement endpoints
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct EntanglementProofsWrapper {
+    pub proofs: Vec<EntanglementProofInput>,
+}
+
+/// Wrapper: SDK sends `{ agents: [...] }` for trusted agent endpoints
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TrustedAgentsWrapper {
+    pub agents: Vec<String>,
+}
+
+/// Wrapper: SDK sends `{ interactionCall: {...} }` for expression interact
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct InteractionCallWrapper {
+    #[ts(type = "any")]
+    pub interaction_call: InteractionCall,
+}
+
+/// Wrapper: SDK sends `{ settings: ... }` for language settings
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageSettingsWrapper {
+    #[ts(type = "any")]
+    pub settings: serde_json::Value,
+}
+
+// ── Perspectives & Links ──
+
+#[derive(Deserialize, Clone, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveInput {
+    pub links: Vec<LinkInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CreatePerspectiveRequest {
+    pub name: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdatePerspectiveRequest {
+    pub name: String,
+}
+
+/// Unified link mutation request (harmonised endpoint).
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LinkMutationRequest {
+    pub additions: Option<Vec<LinkInput>>,
+    pub removals: Option<Vec<LinkInput>>,
+    pub updates: Option<Vec<LinkUpdateInput>>,
+    pub status: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LinkUpdateInput {
+    pub old_link: LinkInput,
+    pub new_link: LinkInput,
+}
+
+/// Unified query request (harmonised: engine + query in one).
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct QueryRequest {
+    pub engine: String, // "prolog" | "sparql"
+    pub query: String,
+}
+
+// ── Neighbourhoods ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct JoinNeighbourhoodRequest {
+    pub url: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PublishNeighbourhoodRequest {
+    #[serde(alias = "perspectiveUUID")]
+    pub perspective_uuid: String,
+    #[serde(alias = "linkLanguage")]
+    pub link_language: String,
+    pub meta: crate::types::Perspective,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct BroadcastRequest {
+    #[ts(type = "any")]
+    pub payload: serde_json::Value,
+    pub signed: Option<bool>,
+    pub loopback: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SignalRequest {
+    pub remote_agent_did: String,
+    #[ts(type = "any")]
+    pub payload: serde_json::Value,
+    pub signed: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetOnlineStatusRequest {
+    #[ts(type = "any")]
+    pub status: serde_json::Value,
+    pub signed: Option<bool>,
+}
+
+// ── Expressions ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CreateExpressionRequest {
+    pub content: String,
+    pub language_address: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionManyRequest {
+    pub urls: Vec<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionUrlRequest {
+    pub url: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionInteractRequest {
+    pub url: String,
+    pub interaction_call: InteractionCall,
+}
+
+// ── Languages ──
+
+// ── Languages ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PublishLanguageRequest {
+    pub language_path: String,
+    pub language_meta: LanguageMetaInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ApplyTemplateRequest {
+    pub source_language_hash: String,
+    pub template_data: String,
+}
+
+// ── Runtime ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LinkLanguageTemplatesRequest {
+    pub addresses: Vec<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetStatusRequest {
+    #[ts(type = "any")]
+    pub status: serde_json::Value,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OpenLinkRequest {
+    pub url: String,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExportRequest {
+    #[serde(rename = "type")]
+    pub export_type: String, // "db" | "perspective"
+    pub file_path: String,
+    pub perspective_uuid: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ImportRequest {
+    #[serde(rename = "type")]
+    pub import_type: String,
+    pub file_path: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AddAgentInfosRequest {
+    pub agent_infos: Vec<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FriendSendMessageRequest {
+    #[ts(type = "any")]
+    pub message: serde_json::Value,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FriendsListRequest {
+    pub dids: Vec<String>,
+}
+
+// ── Users ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CreateUserRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetMultiUserRequest {
+    pub enabled: bool,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetUserFreeAccessRequest {
+    pub email: String,
+    pub enabled: bool,
+}
+
+// ── AI ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PromptRequest {
+    pub task_id: String,
+    pub prompt: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct EmbedRequest {
+    pub model_id: String,
+    pub text: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetDefaultModelRequest {
+    pub model_type: ModelType,
+}
+
+// ── Notifications ──
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NotificationInput {
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: Option<String>,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    pub webhook_auth: String,
+    pub granted: Option<bool>,
+}
+
+/// Grant/revoke a notification (partial update for grant status only)
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NotificationGrantRequest {
+    pub granted: bool,
+}
+
+// ── SDNA / Commands / Subjects ──
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AddSdnaRequest {
+    pub name: String,
+    pub sdna_code: Option<String>,
+    pub sdna_type: String,
+    pub shacl_json: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExecuteCommandsRequest {
+    pub commands: String,
+    pub expression: String,
+    pub parameters: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+// ── Hosting ──
+
+// ── Verify Signature ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct VerifySignatureRequest {
+    pub did: String,
+    pub data: String,
+    pub signed_data: String,
+}
+
+// ── Dev ──
+
+// ── Additional Perspective Types ──
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AddLinkRequest {
+    pub link: LinkInput,
+    pub status: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AddLinksBulkRequest {
+    pub links: Vec<LinkInput>,
+    pub status: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemoveLinksBulkRequest {
+    pub links: Vec<LinkExpressionInput>,
+    pub batch_id: Option<String>,
+}
+
+// ── Generic LLM interpretation (perspective.runInterpretation) ──
+
+/// One conversation turn fed to the extractor.
+#[derive(Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TranscriptTurn {
+    pub speaker: String,
+    pub text: String,
+}
+
+/// Run generic LLM interpretation over a transcript into the perspective's own
+/// SHACL subject classes. Shapes are resolved server-side from the
+/// perspective's registered classes, so callers pass only the transcript.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunInterpretationRequest {
+    pub uuid: String,
+    pub transcript: Vec<TranscriptTurn>,
+    /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
+    pub base_prefix: String,
+    /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
+    /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
+    pub classes: Option<Vec<String>>,
+    /// Optional parent-scope filter for the dedup lookup: when set, only
+    /// existing instances of the target classes that live under this scope
+    /// are candidates for upsert. `None` = whole-perspective dedup set (the
+    /// pre-scope default). Same semantics as `AutoProcessorConfig.existingScope`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Optional parent-scope target for newly minted instances: when set,
+    /// every base URI the pass CREATES is additionally linked as a child of
+    /// `mintScope.id` via the scope's predicate. Upserts of pre-existing
+    /// instances are NOT linked (would multi-parent unrelated graph state).
+    /// Must be the `Raw` variant of `Scope` (id + predicate). Same semantics
+    /// as `AutoProcessorConfig.mintScope`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Opt into live observability for this one-shot pass, under an id the
+    /// **caller** chooses.
+    ///
+    /// A watch pass is identified by its `batch_key` — a hash of the source
+    /// items the watcher gathered. A one-shot pass has neither: the caller
+    /// supplies the transcript directly, so there are no source item ids to
+    /// hash and no claim to key off. Rather than invent a server-side id the
+    /// caller would then have to correlate by guesswork (the pass is one
+    /// blocking RPC, so there is no earlier response to carry it), the caller
+    /// names the pass and gets its own id back on every event.
+    ///
+    /// Present: the pass emits `RunningInterpretation` → `Processed` on the
+    /// `auto-processor-event` topic, plus `Claimed` → `Finished`/`Abandoned`
+    /// on the neighbourhood topic, all carrying this value as both
+    /// `processor_id` and `batch_key`. Absent: the pass is silent, exactly as
+    /// before — no existing caller changes behaviour.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Emit `LlmRequestSent` / `LlmResponseReceived` (carrying the raw prompt
+    /// and response) for this pass. Ignored without `observation_id` — there
+    /// would be nothing to correlate the payloads to. Same switch, same
+    /// reasons, as `AutoProcessorConfig.emit_debug_events`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
+}
+
+/// Run harness-dispatched LLM interpretation over a transcript. Mirrors
+/// [`RunInterpretationRequest`] but takes the tool-calling path — the LLM
+/// sees a live `{Class}_query` / `{Class}_propose_create` /
+/// `{Class}_propose_link_child` tool surface (design v3 §6) and drives the
+/// extraction by tool calls rather than by emitting one big JSON blob.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunInterpretationWithHarnessRequest {
+    pub uuid: String,
+    pub transcript: Vec<TranscriptTurn>,
+    /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
+    pub base_prefix: String,
+    /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
+    /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
+    pub classes: Option<Vec<String>>,
+    /// Upper bound on tool calls the harness will make in one pass. Reaching
+    /// the bound forces a final-answer step (no more tools). Must be > 0 —
+    /// zero would collapse the loop to the classic single-shot path and
+    /// should be routed there instead.
+    pub max_tool_calls: u32,
+    /// Optional model override — same semantics as the auto-processor's
+    /// `modelOverride`. `None` uses the default LLM.
+    #[serde(default)]
+    #[ts(optional)]
+    pub model_override: Option<String>,
+    /// Optional parent-scope filter for existing-instance context (fed into
+    /// the pre-loop prompt). Same semantics as `RunInterpretationRequest`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Present: the pass emits `ToolCall` / `ToolResult` events on the
+    /// `auto-processor-event` topic carrying this value as both
+    /// `processor_id` and `batch_key`, so a subscribed UI can render the
+    /// harness loop live. Absent: the pass is silent (fast headless path).
+    /// Same wire-shape as `RunInterpretationRequest.observation_id`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Enable per-tool-call `ToolCall` + `ToolResult` events on the
+    /// auto-processor topic. Dead-letter without `observation_id` (nothing
+    /// to key against); the server gates on both.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LinkMutationsRequest {
+    pub mutations: LinkMutations,
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AddLinkExpressionRequest {
+    pub link: LinkExpression,
+    pub status: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateLinkRequest {
+    pub old_link: LinkExpressionInput,
+    pub new_link: LinkInput,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemoveLinkRequest {
+    pub link: LinkExpressionInput,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CommitBatchRequest {
+    pub batch_id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SubscribeQueryRequest {
+    pub query: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct KeepAliveQueryRequest {
+    pub subscription_id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DisposeQueryRequest {
+    pub subscription_id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CreateSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+    pub initial_values: Option<String>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GetSubjectDataRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+}
+
+// ── Agent Import ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ImportAgentRequest {
+    pub did: String,
+    pub did_document: String,
+    pub keystore: String,
+    pub passphrase: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct EntanglementProofPreflightRequest {
+    pub device_key: String,
+    pub device_key_type: String,
+}
+
+// ── Trusted Agents ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TrustedAgentsRequest {
+    pub agents: Vec<String>,
+}
+
+// ── Language Settings ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct WriteSettingsRequest {
+    pub settings: String,
+}
+
+// ── Free Hosting ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetFreeHostingEnabledRequest {
+    pub enabled: bool,
+}
+
+// ── Host rates ──
+
+/// Price in HOT the host charges for one metered operation.
+#[derive(Serialize, Deserialize, TS, Debug, Clone, PartialEq)]
+#[ts(export)]
+pub struct HostRate {
+    pub description: String,
+    #[serde(rename = "priceInHOT")]
+    pub price_in_hot: f64,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetHostRatesRequest {
+    pub rates: Vec<HostRate>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetUnytMembraneProofRequest {
+    /// Base64-encoded membrane proof from the hosting joining service.
+    pub proof: String,
+}
+
+/// The Unyt alliance DNA: installed and bundled versions, and why the last
+/// install failed. `setUnytMembraneProof` installs in the background, so this
+/// is where its outcome shows.
+#[derive(Serialize, Deserialize, TS, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UnytVersionInfo {
+    /// Version of the installed DNA; `null` until an install succeeds.
+    pub installed: Option<String>,
+    /// Version of the DNA bundled with this executor.
+    pub bundled: String,
+    /// Error of the last install that failed; `null` after a success or a new proof.
+    pub install_error: Option<String>,
+}
+
+// ── Hosting wallet ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetHotWalletAddressRequest {
+    pub address: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RequestPaymentRequest {
+    #[serde(rename = "amountHOT")]
+    pub amount_hot: String,
+}
+
+// ── Users: request verification ──
+
+// ── AI Transcription ──
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedTranscriptionRequest {
+    pub stream_ids: Vec<String>,
+    pub audio: Vec<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ts_rs::TS;
+
+    #[test]
+    fn export_ts_bindings() {
+        // ts-rs auto-exports when #[ts(export)] is used and tests run.
+        // Verify key types produce valid TypeScript declarations.
+        let cfg = ts_rs::Config::default();
+
+        let decl = GenerateAgentRequest::decl(&cfg);
+        assert!(
+            decl.contains("passphrase"),
+            "GenerateAgentRequest: {}",
+            decl
+        );
+
+        let decl = UpdateProfileRequest::decl(&cfg);
+        assert!(
+            decl.contains("publicPerspective") || decl.contains("dmLanguage"),
+            "UpdateProfileRequest: {}",
+            decl
+        );
+
+        let decl = AddLinkRequest::decl(&cfg);
+        assert!(decl.contains("link"), "AddLinkRequest: {}", decl);
+
+        let decl = LinkMutationRequest::decl(&cfg);
+        assert!(decl.contains("additions"), "LinkMutationRequest: {}", decl);
+
+        let decl = CreateExpressionRequest::decl(&cfg);
+        assert!(
+            decl.contains("content"),
+            "CreateExpressionRequest: {}",
+            decl
+        );
+
+        // Print sample declarations for verification
+        println!("\n=== Generated TypeScript Types ===");
+        println!("{}", GenerateAgentRequest::decl(&cfg));
+        println!("{}", UpdateProfileRequest::decl(&cfg));
+        println!("{}", PublicPerspectiveInput::decl(&cfg));
+        println!("{}", AddLinkRequest::decl(&cfg));
+        println!("{}", LinkMutationRequest::decl(&cfg));
+        println!("{}", CreateExpressionRequest::decl(&cfg));
+        println!("=================================\n");
+    }
+}

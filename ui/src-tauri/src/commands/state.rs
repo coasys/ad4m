@@ -17,8 +17,7 @@ pub fn request_credential(state: State<'_, AppState>) -> String {
 #[tauri::command]
 pub fn get_port(state: State<'_, AppState>) -> PortInfo {
     PortInfo {
-        // Return graphql_port which is always the local HTTP port
-        port: state.graphql_port,
+        port: state.port,
         tls_enabled: state.tls_enabled,
     }
 }

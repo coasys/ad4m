@@ -18,6 +18,18 @@ export let resolveUrl = ({path, importer}) => {
   }
 }
 
+// Rewrite deno.land/std URLs to the equivalent path on raw.githubusercontent.com.
+// deno.land's CDN has been intermittently returning `Content-Encoding: br`
+// headers with uncompressed bodies for at least std@0.177.0/node/internal/*,
+// which makes deno's fetch (and curl --compressed) fail with "brotli error"
+// on ~20% of CI runs. GitHub raw serves the same files without the broken
+// content-encoding pathway, so we just source them from there.
+function rewriteDenoStdToGithub(url) {
+  const m = url.match(/^https:\/\/deno\.land\/std@([^/]+)\/(.+)$/)
+  if (!m) return url
+  return `https://raw.githubusercontent.com/denoland/deno_std/${m[1]}/${m[2]}`
+}
+
 export let loadSource = async ({path}) => {
   let source;
   if (path.includes('perspect3vism')) {
@@ -27,6 +39,8 @@ export let loadSource = async ({path}) => {
 
       path = url;
   }
+
+  path = rewriteDenoStdToGithub(path)
 
   source = await fetch(path)
 
