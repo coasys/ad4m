@@ -1,7 +1,8 @@
 // The operator admission page, served by operator.ts. Kept as strings so
-// `tsc` ships it in dist/ with no copy step. The script builds every node
-// with textContent: room ids and DIDs are chosen by clients and must never
-// be parsed as HTML.
+// `tsc` ships it in dist/ with no copy step. The styles are a file of their
+// own (admin.css), because the page's CSP (default-src 'self') blocks inline
+// styles. The script builds every node with textContent: room ids and DIDs
+// are chosen by clients and must never be parsed as HTML.
 
 export const OPERATOR_PAGE_HTML = `<!doctype html>
 <html lang="en">
@@ -10,27 +11,7 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Link server admission</title>
-<style>
-  body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 1100px; padding: 1rem 1.5rem; color: #1d1d1f; }
-  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
-  .muted { color: #6e6e73; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #e5e5ea; vertical-align: top; }
-  th { font-weight: 600; font-size: .85rem; color: #6e6e73; }
-  td.mono, span.mono { font-family: ui-monospace, monospace; font-size: .82rem; word-break: break-all; }
-  tr.room { cursor: pointer; }
-  tr.room:hover, tr.room.selected { background: #f2f2f7; }
-  .tag { display: inline-block; font-size: .75rem; padding: 0 .4rem; border-radius: .6rem; background: #e5e5ea; margin-right: .25rem; }
-  .tag.admin { background: #ffe8a3; }
-  .tag.online { background: #c9f0d1; }
-  .tag.instance { font-size: .9rem; background: #d6e4ff; vertical-align: middle; }
-  form { display: flex; gap: .5rem; margin: .75rem 0; }
-  input[type=text] { flex: 1; font: inherit; font-family: ui-monospace, monospace; font-size: .85rem; padding: .35rem .5rem; }
-  button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
-  #error { color: #b00020; min-height: 1.2rem; }
-  .note { background: #f2f2f7; padding: .5rem .75rem; border-radius: .4rem; font-size: .9rem; }
-</style>
+<link rel="stylesheet" href="admin.css">
 </head>
 <body>
 <h1>Link server admission <span id="instance" class="tag instance"></span></h1>
@@ -54,6 +35,27 @@ room admin's executor has been online and granted it the room keys.</p>
 <script src="admin.js"></script>
 </body>
 </html>
+`;
+
+export const OPERATOR_PAGE_CSS = `body { font: 15px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 1100px; padding: 1rem 1.5rem; color: #1d1d1f; }
+h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+.muted { color: #6e6e73; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #e5e5ea; vertical-align: top; }
+th { font-weight: 600; font-size: .85rem; color: #6e6e73; }
+td.mono, span.mono { font-family: ui-monospace, monospace; font-size: .82rem; word-break: break-all; }
+tr.room { cursor: pointer; }
+tr.room:hover, tr.room.selected { background: #f2f2f7; }
+.tag { display: inline-block; font-size: .75rem; padding: 0 .4rem; border-radius: .6rem; background: #e5e5ea; margin-right: .25rem; }
+.tag.admin { background: #ffe8a3; }
+.tag.online { background: #c9f0d1; }
+.tag.instance { font-size: .9rem; background: #d6e4ff; vertical-align: middle; }
+form { display: flex; gap: .5rem; margin: .75rem 0; }
+input[type=text] { flex: 1; font: inherit; font-family: ui-monospace, monospace; font-size: .85rem; padding: .35rem .5rem; }
+button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
+#error { color: #b00020; min-height: 1.2rem; }
+.note { background: #f2f2f7; padding: .5rem .75rem; border-radius: .4rem; font-size: .9rem; }
 `;
 
 export const OPERATOR_PAGE_JS = `"use strict";

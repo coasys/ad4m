@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import { didToPublicKey, type AuthManager } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
-import { OPERATOR_PAGE_HTML, OPERATOR_PAGE_JS } from "./operator-page.js";
+import { OPERATOR_PAGE_CSS, OPERATOR_PAGE_HTML, OPERATOR_PAGE_JS } from "./operator-page.js";
 import { removeMember } from "./routes.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import type { WsManager } from "./ws.js";
@@ -166,7 +166,7 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
     reply.header("Cache-Control", "no-store");
   });
 
-  // The page and its script carry no data; everything else needs the token.
+  // The page, its script and its styles carry no data; everything else needs the token.
   app.get("/", async (_request, reply) => {
     return reply
       .type("text/html; charset=utf-8")
@@ -175,6 +175,9 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
   });
   app.get("/admin.js", async (_request, reply) => {
     return reply.type("text/javascript; charset=utf-8").send(OPERATOR_PAGE_JS);
+  });
+  app.get("/admin.css", async (_request, reply) => {
+    return reply.type("text/css; charset=utf-8").send(OPERATOR_PAGE_CSS);
   });
 
   app.register(async (api) => {

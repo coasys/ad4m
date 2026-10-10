@@ -9,7 +9,7 @@ import { Writable } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { isLoopbackHost, readOperatorToken } from "../src/operator.js";
-import { OPERATOR_PAGE_JS } from "../src/operator-page.js";
+import { OPERATOR_PAGE_HTML, OPERATOR_PAGE_JS } from "../src/operator-page.js";
 import {
   authenticateAgent,
   createTestAgent,
@@ -318,6 +318,27 @@ test("the admission page is served with a strict CSP and builds no HTML from dat
     assert.equal(js.status, 200);
     assert.match(js.headers.get("content-type") ?? "", /javascript/);
   });
+});
+
+test("the page's styles come from admin.css on the same origin, so the strict CSP does not block them", async () => {
+  await withOperator(async ({ opUrl }) => {
+    const page = await fetch(`${opUrl}/`);
+    const csp = page.headers.get("content-security-policy") ?? "";
+    assert.doesNotMatch(csp, /unsafe-inline/);
+    const html = await page.text();
+    // Relative href: works under /link-admin/<instance>/.
+    assert.match(html, /<link rel="stylesheet" href="admin.css">/);
+    const css = await fetch(`${opUrl}/admin.css`);
+    assert.equal(css.status, 200);
+    assert.match(css.headers.get("content-type") ?? "", /^text\/css/);
+    assert.match(await css.text(), /font: 15px/);
+  });
+  // CSP default-src 'self' blocks inline styles; keep them out of the page and the script.
+  assert.doesNotMatch(OPERATOR_PAGE_HTML, /<style|style=/);
+  assert.doesNotMatch(OPERATOR_PAGE_JS, /\.style\b|setAttribute\("style"/);
+});
+
+test("the admission page builds no HTML from data and uses relative URLs", () => {
   assert.doesNotMatch(OPERATOR_PAGE_JS, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   // Relative paths, so the page also works mounted under a path prefix.
   assert.doesNotMatch(OPERATOR_PAGE_JS, /fetch\("\//);
