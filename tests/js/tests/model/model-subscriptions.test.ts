@@ -13,11 +13,11 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
+import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
-import { TestComment, TestPost, TestTag, TestChannel } from "./models.js";
+import { TestComment, TestPost, TestReaction, TestTag, TestChannel } from "./models.js";
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -305,5 +305,69 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     builder.dispose();
 
     expect(all.length).to.equal(countAfterInitial);
+  });
+
+  // ── 8. writes on related records (#1237) ──────────────────────────────────
+  //
+  // A subscription re-runs on writes to the records its query reads beyond
+  // its own class: included records, and the targets a typed relation lists.
+
+  it("subscribe() with include re-fires when an included record is edited", async () => {
+    // `test://emoji` is TestReaction's alone. (`test://body` would not do:
+    // TestPost declares it too, so any body edit re-ran TestPost queries.)
+    await TestReaction.register(perspective);
+    const comment = await TestComment.create(perspective, { body: "c" });
+    const reaction = await TestReaction.create(perspective, { emoji: "👍" });
+    await comment.addReactions(reaction.id);
+    // Settle, so the edit is checked in a batch of its own (see the next test).
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const all: TestComment[][] = [];
+    const builder = TestComment.query(perspective).include({ reactions: true });
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial[0].reactions.map((r) => r.emoji)).to.deep.equal(["👍"]);
+    await new Promise((r) => setTimeout(r, 1000));
+
+    await TestReaction.update(perspective, reaction.id, { emoji: "🎉" });
+
+    await waitUntil(
+      () => all.at(-1)?.[0]?.reactions?.[0]?.emoji === "🎉",
+      8000,
+      "subscription re-fires with the included reaction's new emoji",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() without include re-fires when a related record starts to conform", async () => {
+    const post = await TestPost.create(perspective, { title: "Late comment", body: "" });
+    // Flagged as a TestComment, but without the `body` TestComment requires,
+    // so `post.comments` leaves it out.
+    const late = "test://late-comment";
+    await perspective.add(
+      new Link({ source: late, predicate: "test://comment_type", target: "test://comment" }),
+    );
+    await post.addComments(late);
+    // Let the relation link's subscription check pass before subscribing, and
+    // the subscription settle before the write under test. Batched with the
+    // `body` write, the relation link (on the post, which is in the result)
+    // would re-run the query on its own.
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective);
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial.find((p) => p.id === post.id)!.comments).to.deep.equal([]);
+    await new Promise((r) => setTimeout(r, 1000));
+
+    await perspective.add(
+      new Link({ source: late, predicate: "test://body", target: "literal:string:now" }),
+    );
+
+    await waitUntil(
+      () => ((all.at(-1)?.find((p) => p.id === post.id)?.comments ?? []) as unknown[]).includes(late),
+      8000,
+      "subscription re-fires once the comment conforms",
+    );
+    builder.dispose();
   });
 });

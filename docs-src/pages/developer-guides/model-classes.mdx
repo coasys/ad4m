@@ -1120,6 +1120,18 @@ builder.dispose();
 
 Always call `dispose()` when you're done with a subscription to prevent memory leaks.
 
+#### What re-runs a subscription
+
+The executor re-runs a subscribed query when a write can change its result.
+That covers the records the query reads beyond its own class: an edit to an
+`include`d record (a comment's text under `include: { comments: true }`), and a
+linked record that starts or stops matching a typed relation (`@HasMany(() =>
+Comment)` lists only targets that carry `Comment`'s flag and required
+properties, so `post.comments` updates when one does, with or without
+`include`). It does not cover a record of another class: creating a `Note` does
+not re-run a `Post` subscription, even when both classes use the same flag
+predicate.
+
 #### Subscription sharing and `dispose()`
 
 The executor keeps one live subscription per distinct query and agent. Two
