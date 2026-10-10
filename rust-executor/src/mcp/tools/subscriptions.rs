@@ -194,9 +194,11 @@ impl Ad4mMcpHandler {
         let token = self.get_auth_token().await.unwrap_or_default();
 
         // Resolve agent
-        let agent = match AgentService::get_agent_for_context(
-            &crate::agent::AgentContext::from_auth_token(token.clone()),
-        ) {
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
+        let agent = match AgentService::get_agent_for_context(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };

@@ -645,8 +645,13 @@ async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
+    // The SDK sends the app's request id here; the field name promises the JWT. Both work,
+    // and a value that names no app answers 404 instead of a silent success (#1060).
     let token = params.require_str("token")?;
-    apps_map::revoke_app(&token).map_err(|e| WsRpcError::internal(e))?;
+    apps_map::revoke_app(&token).map_err(|e| match e {
+        apps_map::RevokeError::NotFound => WsRpcError::not_found(e.to_string()),
+        apps_map::RevokeError::Store(_) => WsRpcError::internal(e.to_string()),
+    })?;
     Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
@@ -1081,5 +1086,90 @@ mod tests {
             link_expression_input_to_decorated(&input).status,
             Some(LinkStatus::Shared)
         );
+    }
+}
+
+#[cfg(test)]
+mod revoke_token_tests {
+    use crate::agent::capabilities::*;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn operator() -> Arc<RequestContext> {
+        Arc::new(RequestContext {
+            capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: true,
+            user_email: None,
+            user_did: None,
+            cancel_token: None,
+        })
+    }
+
+    /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.
+    fn approved_app() -> (String, String) {
+        crate::test_utils::use_test_apps_file();
+        let request_id = format!("revoke-test-{}", uuid::Uuid::new_v4());
+        let token = format!("app-token-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        (request_id, token)
+    }
+
+    async fn revoke(value: &str) -> Result<serde_json::Value, (u16, String)> {
+        build_handler_map()
+            .dispatch("agent.revokeToken", json!({ "token": value }), operator())
+            .await
+            .map_err(|e| (e.code, e.message))
+    }
+
+    // #1060: revoking by the JWT, as the field name says, reported success and revoked
+    // nothing.
+    #[tokio::test]
+    async fn revoking_by_the_jwt_revokes_the_app() {
+        let (request_id, token) = approved_app();
+        revoke(&token).await.expect("the JWT names the app");
+        assert!(check_token_revoked(&token).is_err());
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoking_by_the_request_id_still_works() {
+        let (request_id, token) = approved_app();
+        revoke(&request_id)
+            .await
+            .expect("the SDK sends the request id");
+        assert!(check_token_revoked(&token).is_err());
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_value_that_names_no_app_is_an_error() {
+        let err = revoke("names-no-app").await.unwrap_err();
+        assert_eq!(err.0, 404, "{}", err.1);
+    }
+
+    // A failed write must not read as "no such app": the operator would stop looking, and a
+    // restart would bring the app back.
+    #[tokio::test]
+    async fn a_revoke_that_cannot_be_saved_is_a_server_error() {
+        let (request_id, token) = approved_app();
+        apps_map::set_data_file_path("/nonexistent-dir-for-revoke-test/apps.json".to_string());
+        let result = revoke(&request_id).await;
+        crate::test_utils::use_test_apps_file();
+
+        let err = result.unwrap_err();
+        assert_eq!(err.0, 500, "{}", err.1);
+        assert!(
+            check_token_revoked(&token).is_err(),
+            "the app stays revoked in memory"
+        );
+        apps_map::remove_app(&request_id).unwrap();
     }
 }
