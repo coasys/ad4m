@@ -684,19 +684,21 @@ async fn only_the_admin_credential_imports_data() {
     .unwrap();
     let params = json!({ "type": "db", "filePath": file.to_str().unwrap() });
 
-    for (who, ctx) in [
-        ("a managed user", user_ctx(ALICE)),
+    // Both callers hold AGENT_UPDATE, so neither is refused by the capability check: a managed
+    // user by the user-session guard (#1167), an app token by the admin-credential check.
+    for (who, ctx, refusal) in [
+        ("a managed user", user_ctx(ALICE), "user session"),
         (
             "an app token with AGENT_UPDATE",
             app_ctx(vec![AGENT_UPDATE_CAPABILITY.clone()]),
+            "admin credential",
         ),
     ] {
         let err = call("runtime.importData", params.clone(), ctx)
             .await
             .expect_err(who);
         assert_eq!(err.code, 403, "{who}");
-        // Both callers hold AGENT_UPDATE: the admin check refuses them, not the capability check.
-        assert!(err.message.contains("admin credential"), "{who}: {err:?}");
+        assert!(err.message.contains(refusal), "{who}: {err:?}");
         assert_eq!(stored(&id), None, "{who} imported a notification");
     }
 
