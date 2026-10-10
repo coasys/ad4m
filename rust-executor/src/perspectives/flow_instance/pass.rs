@@ -361,7 +361,18 @@ pub(crate) async fn catch_up_before_acting(
         Ok(true) => {}
         Ok(false) => {
             let only = [instance_uri.to_string()];
-            run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+            // Empty on a first pass, which is silent. Not empty only when the
+            // cache is unreadable while marks exist (two Local `currentState`
+            // links, a non-literal target; see #1387): then these edges
+            // settled before the action and are not the call's to report.
+            let dropped =
+                run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+            if !dropped.is_empty() {
+                log::debug!(
+                    "catch_up_before_acting: {instance_uri} had an unreadable cache; {} earlier edge(s) recorded, not reported: {dropped:?}",
+                    dropped.len()
+                );
+            }
         }
         Err(e) => {
             log::warn!("catch_up_before_acting: reading the cache of {instance_uri} failed: {e:#}")
