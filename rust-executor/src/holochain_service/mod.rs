@@ -1096,14 +1096,7 @@ mod tests {
         use super::*;
 
         // Init V8 / Deno platform (once) — required by Holochain
-        {
-            use std::sync::Once;
-            static V8_INIT: Once = Once::new();
-            V8_INIT.call_once(|| {
-                deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-                deno_core::JsRuntime::init_platform(None);
-            });
-        }
+        crate::test_utils::init_v8_platform();
 
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

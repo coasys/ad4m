@@ -16,6 +16,7 @@ use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
+use super::guards::refuse_user_session;
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
     LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
@@ -118,6 +119,8 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.exportData")?;
 
     let body: ExportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -168,6 +171,8 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.importData")?;
 
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -231,10 +236,13 @@ async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 // ── Friends & Messages ──
+// The friend list and the outbox belong to the node's main agent; a user session has
+// neither of its own here, so it may not read or change them.
 
 async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.friends")?;
 
     let friends = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
@@ -253,6 +261,7 @@ async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.addFriends")?;
 
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -267,6 +276,7 @@ async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.removeFriends")?;
 
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -284,6 +294,8 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The main agent's friends and outbox: a user session has neither of its own here.
+    refuse_user_session(&ctx, "runtime.sendFriendMessage")?;
     let _: RuntimeSendFriendMessageParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     Err(WsRpcError::not_implemented(
@@ -300,6 +312,7 @@ async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.outbox")?;
 
     let outbox = RuntimeService::with_global_instance(|runtime| runtime.get_outbox());
     Ok(serde_json::to_value(outbox).unwrap_or_default())
@@ -442,6 +455,8 @@ async fn add_link_language_templates(
         &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node's list of link-language templates, offered to every user.
+    refuse_user_session(&ctx, "runtime.addLinkLanguageTemplates")?;
 
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -462,6 +477,7 @@ async fn remove_link_language_templates(
         &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.removeLinkLanguageTemplates")?;
 
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -497,6 +513,8 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
 async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Injects peer records into the node's Holochain conductor.
+    refuse_user_session(&ctx, "runtime.addHcAgentInfos")?;
 
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
@@ -573,11 +591,7 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let user_email = params
-        .opt_str("userEmail")
-        .or_else(|| ctx.user_email.clone());
-
-    let email = user_email.unwrap_or_default();
+    let email = compute_log_email(params.opt_str("userEmail"), &ctx)?;
     let since = params.opt_str("since");
     let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
 
@@ -586,6 +600,21 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(logs).unwrap_or_default())
+}
+
+/// Whose compute log a `runtime.computeLog` call reads. A user session reads only its own
+/// log, and an omitted `userEmail` means its own. The operator may read any user's log.
+fn compute_log_email(
+    requested: Option<String>,
+    ctx: &RequestContext,
+) -> Result<String, WsRpcError> {
+    match (ctx.user_email.clone(), requested) {
+        (Some(own), Some(requested)) if requested != own => Err(WsRpcError::forbidden(
+            "A user session may read only its own compute log",
+        )),
+        (Some(own), _) => Ok(own),
+        (None, requested) => Ok(requested.unwrap_or_default()),
+    }
 }
 
 async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

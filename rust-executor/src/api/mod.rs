@@ -7,6 +7,7 @@ pub mod auth;
 pub mod errors;
 pub mod event_interest;
 pub mod events_ws;
+pub mod guards;
 pub mod internal;
 pub mod openai_compat;
 pub mod types;
