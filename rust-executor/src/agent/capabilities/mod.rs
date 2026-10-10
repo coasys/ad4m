@@ -793,6 +793,23 @@ mod app_token_tests {
             .contains_key(&request_id));
     }
 
+    // Request ids are UUIDs, which contain dashes, and the stored keys are `{id}-{code}`.
+    // Wrong codes sent for only the start of someone else's id must not lock that request out.
+    #[tokio::test]
+    async fn wrong_codes_for_a_prefix_of_an_id_leave_that_request_alone() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let dir = tempfile::tempdir().unwrap();
+        apps_map::set_data_file_path(dir.path().join("apps.json").to_str().unwrap().to_string());
+        let (request_id, code) = permitted_request().await;
+        let prefix = request_id.split('-').next().unwrap().to_string();
+        assert_ne!(prefix, request_id);
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            let _ = generate_capability_token(prefix.clone(), "100000".to_string()).await;
+        }
+        assert!(generate_capability_token(request_id, code).await.is_ok());
+    }
+
     #[tokio::test]
     async fn a_correct_code_after_a_few_wrong_ones_still_works() {
         crate::test_utils::setup_wallet();
