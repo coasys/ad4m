@@ -11,7 +11,8 @@
 //!   shared flag predicate re-ran on every create, whatever class was created.
 //!
 //! [`TriggerRules`] widens what is watched (the classes reached through
-//! `include`, projections, `where` quantifiers and the parent scope) and
+//! `include`, projections, dotted `order` keys, `where` quantifiers and the
+//! parent scope) and
 //! matches each written link on more than its predicate. A write re-runs the
 //! subscription when one of these holds, checked in this order:
 //!
@@ -31,7 +32,8 @@
 //!    instance of that class: it has one of the class's flag links. This is
 //!    how a record that is not in the result yet moves into a filter or a page.
 //! 5. **`via`**: a `near` predicate written on a node linked, through a
-//!    relation the query includes or projects, to a node in the last result.
+//!    relation the query includes, projects or orders by (`comments.text`),
+//!    to a node in the last result.
 //!    This is how an included record that was filtered out, or did not conform
 //!    yet, enters the include. It is also what lets a polymorphic include be
 //!    watched without knowing its members' classes. A typed relation counts
@@ -483,9 +485,33 @@ impl Walk<'_> {
         }
     }
 
-    /// Walk `query`'s includes and projections, which read from `shape`.
-    /// Recurses over the query, never over the shapes, so it ends.
+    /// Walk `query`'s includes, projections and order keys, which read from
+    /// `shape`. Recurses over the query, never over the shapes, so it ends.
     fn query(&mut self, shape: &ModelShape, query: &ModelQueryInput) {
+        // A dotted order key (`comments.text`) sorts by a property of the
+        // relation's targets, `include` or not: the page query joins them
+        // through the class's declared relation (`SortKey::RelationProperty`).
+        // Watch the target as an include one level down, without recursing:
+        // only its own properties are read. A key naming no declared relation
+        // sorts by nothing (the query falls back to the timestamp).
+        for key in query.order.iter().flatten().map(|(key, _)| key.as_str()) {
+            let Some((rel_name, _)) = key.split_once('.') else {
+                continue;
+            };
+            let Some(rel) = shape.include_relations.iter().find(|r| r.name == rel_name) else {
+                continue;
+            };
+            self.rules.via.add(&rel.predicate);
+            let target = (!rel.target_class_name.is_empty())
+                .then(|| self.resolver.get_shape(&rel.target_class_name).ok())
+                .flatten();
+            match target {
+                Some(target) => self.watch_class(&target),
+                // The targets' class is not known, so neither is the sorted
+                // property's predicate: any write on a target may move it.
+                None => self.rules.near = Predicates::All,
+            }
+        }
         for (name, value) in query.include.iter().flatten() {
             let sub = match value {
                 IncludeValue::Bool(false) => continue,
