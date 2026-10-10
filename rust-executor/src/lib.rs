@@ -651,6 +651,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         );
     }
 
+    // Retry publishing expressions created while their language was unreachable.
+    crate::languages::LanguageController::start_publish_worker();
+
     // Spawn credit change flush loop (every 2 seconds)
     // When any credit mutation marks a user dirty, this drains the set
     // and publishes updated HostingUserInfo only for affected users.

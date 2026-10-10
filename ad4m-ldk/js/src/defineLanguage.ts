@@ -19,11 +19,22 @@ import type {
 
 // ----- Capability sub-objects -----
 
+/** A minted but unpublished Expression: what `prepare` returns. */
+export interface PreparedExpression {
+    address: Address;
+    expression: Expression;
+}
+
 export interface ExpressionCapability {
     get?(address: Address): Promise<Expression | null>;
     create?(content: object): Promise<Address>;
     addressOf?(content: object): Promise<Address>;
     isImmutable?(address: Address): boolean;
+    /** Sign `content` and compute its address without touching the network.
+     *  Implement together with `publish` (spec §5.1). */
+    prepare?(content: object): Promise<PreparedExpression>;
+    /** Store an Expression `prepare` returned. Must be idempotent. */
+    publish?(address: Address, expression: Expression): Promise<void>;
     icon?(): string;
     constructorIcon?(): string;
 }
@@ -105,6 +116,8 @@ export interface FlatLanguageExports {
     expressionCreate?(content: object): Promise<Address>;
     expressionAddressOf?(content: object): Promise<Address>;
     isImmutableExpression?(address: Address): boolean;
+    expressionPrepare?(content: object): Promise<PreparedExpression>;
+    expressionPublish?(address: Address, expression: Expression): Promise<void>;
     expressionIcon?(): string;
     expressionConstructorIcon?(): string;
 
@@ -182,6 +195,8 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
         if (e.create) out.expressionCreate = e.create.bind(e);
         if (e.addressOf) out.expressionAddressOf = e.addressOf.bind(e);
         if (e.isImmutable) out.isImmutableExpression = e.isImmutable.bind(e);
+        if (e.prepare) out.expressionPrepare = e.prepare.bind(e);
+        if (e.publish) out.expressionPublish = e.publish.bind(e);
         if (e.icon) out.expressionIcon = e.icon.bind(e);
         if (e.constructorIcon) out.expressionConstructorIcon = e.constructorIcon.bind(e);
     }

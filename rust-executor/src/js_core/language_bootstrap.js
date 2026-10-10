@@ -354,7 +354,8 @@ async function initLanguage(contextJson) {
         "init", "teardown", "interactions", "isPublic",
         // Expression capability
         "expressionGet", "expressionCreate", "expressionAddressOf",
-        "isImmutableExpression", "expressionIcon", "expressionConstructorIcon",
+        "isImmutableExpression", "expressionPrepare", "expressionPublish",
+        "expressionIcon", "expressionConstructorIcon",
         "expressionInteract",
         // Perspective-commit
         "perspectiveCommit",
