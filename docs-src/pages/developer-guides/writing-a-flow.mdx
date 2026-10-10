@@ -385,11 +385,11 @@ expect(
 Bob does not count. The run completed is not evidence. A receipt is. The gate reads receipts from the granting flow's index and verifies each one; with no receipt there is nothing to verify, and an unverified grant is not a grant. `flowValidOutputs` asks the same question from the outside and gives the same empty answer.
 
 <Callout type="warning" emoji="⚠️">
-  Spell `producedByFlow` exactly. The role query drops keys it does not know,
-  so a misspelt key, or the pre-rename `grantedByFlow`, silently degrades to
-  plain `fromRole` and the edge fires the way the hole did. The assertion
-  above is the test that catches it. Tracked in
-  [#1144](https://github.com/coasys/ad4m/issues/1144).
+  Spell `producedByFlow` exactly. A misspelt key, or the pre-rename
+  `grantedByFlow`, makes the whole rule unreadable: the edge is refused for
+  everyone, Bob included, and the executor log names the key
+  ([#1144](https://github.com/coasys/ad4m/issues/1144)). It does not fall
+  back to plain `fromRole`.
 </Callout>
 
 ## Step 7: mint the receipt
@@ -537,7 +537,7 @@ Each of these maps to a row in [Errors and limits](/flows#errors-and-limits) on 
 - **Bob's press named different outputs than Alice's.** Refused, neither joined nor twinned. Agree on the outputs, or reject the open proposal.
 - **You forgot to mint.** Nothing fires. A settled grant without a receipt does not grant. Call `mintFlowReceipt` after the grant settles.
 - **You minted a run in `Proposed`.** Error: `no settled edge`. Reach quorum on Grant first.
-- **You wrote `grantedByFlow`, or misspelt the key.** Silently plain `fromRole`, and the hole is back. See [#1144](https://github.com/coasys/ad4m/issues/1144).
+- **You wrote `grantedByFlow`, or misspelt the key.** The rule is refused and the edge fires for nobody. The executor log names the key, e.g. `` unknown key `fromRole.grantedByFlow` (renamed to `producedByFlow` in #1076) ``.
 - **You omitted `state` from `producedByFlow`.** The rule does not decode and the edge is refused for everyone.
 - **The replica does not hold `ReviewerRoleGrant`.** Error, never an empty result. Sync the Social DNA first.
 - **Someone flooded the grant flow's receipt index past 256 entries.** Error: `ReceiptBudgetExceeded`. The gate refuses rather than truncates. Remove the junk links.
