@@ -18,6 +18,9 @@ import type { PerspectiveQuerySubscriptionFilter } from "./PerspectiveQuerySubsc
 import type { PerspectiveRemovedWithOwner } from "./PerspectiveRemovedWithOwner";
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
 import type { PerspectiveWithOwner } from "./PerspectiveWithOwner";
+import type { SfuCallRenegotiationOffer } from "./SfuCallRenegotiationOffer";
+import type { SfuDataMessage } from "./SfuDataMessage";
+import type { SfuMigrateEvent } from "./SfuMigrateEvent";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -42,6 +45,9 @@ export interface EventMap {
   "query-subscription-update": PerspectiveQuerySubscriptionFilter;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;
+  "sfu-call-renegotiation-offer": SfuCallRenegotiationOffer;
+  "sfu-migrate": SfuMigrateEvent;
+  "sfu-data": SfuDataMessage;
 }
 
 export type EventName = keyof EventMap;

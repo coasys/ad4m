@@ -55,6 +55,12 @@ it in older docs.
   `core/src/generated/api/RpcMethods.ts`. After changing a method or a type it
   reaches, regenerate: `cd core && pnpm run generate:api-types`. A unit test fails
   when the committed files are stale.
+- **Events are typed and opt-in.** Every pushed event has a name in
+  `events_ws::events` and a payload type in `event_specs()` (generates
+  `Events.ts`); SDK code listens with `ApiClient.on(name, handler)`. A socket
+  gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
+  client must send the watch and wait for its reply before it triggers the
+  event (see `tests/js/helpers/sfu/events.ts`).
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 

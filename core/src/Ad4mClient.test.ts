@@ -146,6 +146,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.otherAgents': ['did:other:1', 'did:other:2'],
     'neighbourhood.hasTelepresence': true,
     'neighbourhood.onlineAgents': [{ did: 'did:test:1', status: new Perspective() }],
+    'sfu.status': { reachability: 'nat', isPublic: false, bindAddress: '127.0.0.1:9000', detail: 'nat' },
     'neighbourhood.setOnlineStatus': true,
     'neighbourhood.sendSignal': true,
     'neighbourhood.sendBroadcast': true,
@@ -975,6 +976,55 @@ describe('NeighbourhoodClient', () => {
         const result = await ad4m.neighbourhood.sendBroadcast('uuid-1', new Perspective(), true);
         expect(result).toBe(true);
         expect(lastRpcCall!.params.loopback).toBe(true);
+    });
+
+    test('availableSfuNodes() reads the SFU link from the signed status perspective', async () => {
+        const onlineAgents = MOCK_RESPONSES['neighbourhood.onlineAgents'];
+        const status = (target: string, predicate = 'ad4m://sfu/available') => ({
+            author: 'did:other:1', timestamp: '2024-01-01T00:00:00.000Z',
+            data: { links: [{ ...wireLink('did:other:1', target), data: { source: 'did:other:1', predicate, target } }] },
+            proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+        });
+        MOCK_RESPONSES['neighbourhood.onlineAgents'] = [
+            { did: 'did:sfu:1', status: status('1.2.3.4:9000') },
+            { did: 'did:other:2', status: status('x', 'ad4m://session/in-call') },
+        ];
+        try {
+            expect(await ad4m.neighbourhood.availableSfuNodes('uuid-1'))
+                .toEqual([{ did: 'did:sfu:1', bindAddress: '1.2.3.4:9000' }]);
+        } finally {
+            MOCK_RESPONSES['neighbourhood.onlineAgents'] = onlineAgents;
+        }
+    });
+
+    test('SFU event subscriptions get only their events and are watched before the next call', async () => {
+        const freshClient = newClient();
+        const offers = jest.fn();
+        const migrations = jest.fn();
+        const data = jest.fn();
+        const releaseOffers = freshClient.neighbourhood.subscribeSfuCallRenegotiationOffer('did:me', offers);
+        freshClient.neighbourhood.subscribeSfuMigrateEvent('did:me', migrations);
+        freshClient.neighbourhood.subscribeSfuDataChannel(data);
+        await freshClient.neighbourhood.sfuStatus();
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'sfu.status']);
+        expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
+
+        const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
+        const message = { senderDid: 'did:other', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
+        ws.emit(event('sfu-data', message));
+
+        expect(offers).toHaveBeenCalledTimes(1);
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
+        expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
+
+        releaseOffers();
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{}' }));
+        expect(offers).toHaveBeenCalledTimes(1);
     });
 });
 

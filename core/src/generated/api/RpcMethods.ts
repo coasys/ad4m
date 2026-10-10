@@ -24,6 +24,7 @@ import type { AiUpdateModelParams } from "./AiUpdateModelParams";
 import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
+import type { CallSessionInfo } from "./CallSessionInfo";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
@@ -139,6 +140,20 @@ import type { SetMultiUserRequest } from "./SetMultiUserRequest";
 import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
+import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
+import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
+import type { SfuCallJoinParams } from "./SfuCallJoinParams";
+import type { SfuCascadeStatus } from "./SfuCascadeStatus";
+import type { SfuConfig } from "./SfuConfig";
+import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
+import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
+import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
+import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
+import type { SfuRoomInfo } from "./SfuRoomInfo";
+import type { SfuRoomParams } from "./SfuRoomParams";
+import type { SfuSendDataParams } from "./SfuSendDataParams";
+import type { SfuSetConfigParams } from "./SfuSetConfigParams";
+import type { SfuStatus } from "./SfuStatus";
 import type { SignMessageRequest } from "./SignMessageRequest";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
@@ -317,6 +332,23 @@ export interface RpcMethods {
   "runtime.unytWalletHistory": { params: RuntimeUnytWalletHistoryParams; result: null };
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
   "runtime.verifySignature": { params: VerifySignatureRequest; result: boolean };
+  "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
+  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
+  "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
+  "sfu.callLeave": { params: SfuRoomParams; result: boolean };
+  "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
+  "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
+  "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
+  "sfu.getConfig": { params: SfuNeighbourhoodParams; result: SfuConfig };
+  "sfu.listRooms": { params: Record<string, never>; result: Array<SfuRoomInfo> };
+  "sfu.qualityPreferences": { params: Record<string, never>; result: Array<SfuParticipantQualityPreference> };
+  "sfu.sendData": { params: SfuSendDataParams; result: boolean };
+  "sfu.setConfig": { params: SfuSetConfigParams; result: boolean };
+  "sfu.sfuPeerForNeighbourhood": { params: SfuNeighbourhoodParams; result: string | null };
+  "sfu.sfuPeersForNeighbourhood": { params: SfuNeighbourhoodParams; result: Array<string> };
+  "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
+  "sfu.status": { params: Record<string, never>; result: SfuStatus };
+  "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
   "user.create": { params: CreateUserRequest; result: UserCreationResult };
   "user.credits": { params: UsersSetCreditsParams; result: boolean };
   "user.emailTest": { params: UsersEmailTestParams; result: UsersEmailTestResult };
@@ -397,6 +429,13 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.unytWalletBalance",
   "runtime.unytWalletHistory",
   "runtime.verifySignature",
+  "sfu.cascadeStatus",
+  "sfu.getConfig",
+  "sfu.listRooms",
+  "sfu.qualityPreferences",
+  "sfu.sfuPeerForNeighbourhood",
+  "sfu.sfuPeersForNeighbourhood",
+  "sfu.status",
   "user.list",
   "user.multiUserEnabled",
   "user.wallet",

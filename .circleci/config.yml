@@ -33,6 +33,22 @@ commands:
               echo "Corrupted .git directory detected, removing for fresh clone..."
               rm -rf .git
             fi
+            # A .git that opens but lacks objects passes the check above, then fails checkout with
+            # "pack has N unresolved deltas": checkout offers its local refs as haves, GitHub sends a
+            # thin pack against them, and the bases are not there. A connectivity check walks the same
+            # refs and finds the gap in under a second.
+            if [ -d .git ] && ! git fsck --connectivity-only --no-progress >/dev/null 2>&1; then
+              echo "Cached .git is missing objects its refs reach, removing for fresh clone..."
+              rm -rf .git
+            fi
+            # Checkout refuses a non-empty directory that is not a repository, and these runners keep
+            # untracked caches (target/) beside the checkout. An empty repository with origin set lets
+            # checkout fetch everything and check out over the old files, keeping the caches.
+            if [ ! -d .git ] && [ -n "$(ls -A)" ]; then
+              echo "Working directory has files but no .git, initialising an empty repository..."
+              git init -q
+              git remote add origin "$CIRCLE_REPOSITORY_URL"
+            fi
       - run:
           # tests/js/utils/utils.ts starts each executor in /tmp/ad4m-<hash>
           # and never deletes it. On marvin /tmp is a 30GB tmpfs shared by
@@ -652,6 +668,26 @@ jobs:
             cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain
           no_output_timeout: 60m
 
+  integration-tests-sfu:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run SFU wind tunnel tests
+          command: cd ./tests/js && pnpm run test-sfu
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: on_fail
+          command: |
+            mkdir -p /tmp/test-artifacts
+            cp -r /tmp/ad4m-sfu-test-* /tmp/test-artifacts/ 2>/dev/null || true
+      - store_artifacts:
+          when: on_fail
+          path: /tmp/test-artifacts
+          destination: sfu-test-logs
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -774,6 +810,9 @@ workflows:
           requires:
             - build
       - integration-tests-model:
+          requires:
+            - build
+      - integration-tests-sfu:
           requires:
             - build
 

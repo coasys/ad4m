@@ -246,6 +246,49 @@ pub struct RunArgs {
     /// Useful for test harnesses that need targeted process cleanup.
     #[arg(long, env = "AD4M_PID_FILE", value_parser = non_empty(StringValueParser::new()))]
     pub pid_file: Option<String>,
+    /// Local DID for this SFU node in a cascade cluster. Required alongside
+    /// --sfu-cascade-listen to enable cascade gossip.
+    #[arg(long, env = "AD4M_SFU_LOCAL_DID", value_parser = non_empty(StringValueParser::new()))]
+    pub sfu_local_did: Option<String>,
+    /// Capacity hint published by this SFU node in every announce.
+    #[arg(
+        long,
+        env = "AD4M_SFU_MAX_PARTICIPANTS_PER_NODE",
+        value_parser = non_empty(value_parser!(u32))
+    )]
+    pub sfu_max_participants_per_node: Option<u32>,
+    /// Local `host:port` the cascade gossip listener binds.
+    #[arg(
+        long,
+        env = "AD4M_SFU_CASCADE_LISTEN",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_cascade_listen: Option<String>,
+    /// Peer SFU nodes as `did=host:port`, comma separated. The gossip listener
+    /// accepts connections only from these hosts, so each peer must connect
+    /// from the address it is listed under (not through NAT).
+    #[arg(
+        long,
+        env = "AD4M_SFU_CASCADE_PEERS",
+        value_delimiter = ',',
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_cascade_peers: Option<Vec<String>>,
+    /// IP address the SFU media server binds its UDP socket to. Default:
+    /// 127.0.0.1, so calls reach only this machine; with `--localhost false`,
+    /// the machine's outbound interface. Set it (e.g. a LAN address) to choose
+    /// which interface accepts media from other machines.
+    #[arg(long, env = "AD4M_SFU_BIND_ADDR", value_parser = non_empty(StringValueParser::new()))]
+    pub sfu_bind_addr: Option<String>,
+    /// STUN server (`host:port`) the SFU asks once at startup whether a
+    /// public bind address is reachable. Unset: no probe, and a public
+    /// address reports reachability "unknown".
+    #[arg(
+        long,
+        env = "AD4M_SFU_STUN_SERVER",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_stun_server: Option<String>,
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -359,6 +402,12 @@ impl RunArgs {
         config.dynamic_class_tools = self.dynamic_class_tools;
         config.pid_file = self.pid_file;
         config.insecure_no_admin_credential = Some(self.insecure_no_admin_credential);
+        config.sfu_local_did = self.sfu_local_did;
+        config.sfu_max_participants_per_node = self.sfu_max_participants_per_node;
+        config.sfu_cascade_listen = self.sfu_cascade_listen;
+        config.sfu_cascade_peers = self.sfu_cascade_peers;
+        config.sfu_bind_addr = self.sfu_bind_addr;
+        config.sfu_stun_server = self.sfu_stun_server;
         Ok(ResolvedRun {
             config,
             unlock_passphrase: secrets.unlock_passphrase,
@@ -908,7 +957,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 30, "every flag of run has a variable");
+        assert_eq!(checked, 36, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
