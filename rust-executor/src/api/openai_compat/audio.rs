@@ -106,7 +106,12 @@ pub async fn transcriptions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let text = service
-        .transcribe_buffer(model_id, samples, auth.auth_token.clone())
+        .transcribe_buffer(
+            model_id,
+            samples,
+            auth.auth_token.clone(),
+            auth.is_admin_credential,
+        )
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
