@@ -368,8 +368,11 @@ pub(super) fn evaluate_getters(
                     // graphs returns one row per graph that holds a matching
                     // triple: since #1357 the same flag written Shared and
                     // Local sits in two graphs. So a relation keeps each
-                    // target once, in first-seen order.
+                    // target once, in first-seen order: a set beside the Vec,
+                    // as `hydration.rs` does, so it stays linear.
                     let relation = prop.is_collection || prop.is_scalar_relation;
+                    let mut seen: std::collections::HashSet<(&str, &str)> =
+                        std::collections::HashSet::new();
                     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
                     for row in &rows {
                         let source = match row.get("source").and_then(|v| v.as_str()) {
@@ -381,9 +384,11 @@ pub(super) fn evaluate_getters(
                             {
                                 if let Some(s) = val.as_str() {
                                     if !s.is_empty() && s != "None" {
-                                        let values = grouped.entry(source.to_string()).or_default();
-                                        if !relation || !values.iter().any(|v| v == s) {
-                                            values.push(s.to_string());
+                                        if !relation || seen.insert((source, s)) {
+                                            grouped
+                                                .entry(source.to_string())
+                                                .or_default()
+                                                .push(s.to_string());
                                         }
                                     }
                                 }
