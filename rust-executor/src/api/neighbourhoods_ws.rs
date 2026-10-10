@@ -22,7 +22,7 @@ async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let handle = install_neighbourhood_with_context(body.url, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -40,7 +40,7 @@ async fn publish_neighbourhood(
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
         &body.perspective_uuid,
         body.link_language,
@@ -96,7 +96,7 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: BroadcastRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -119,7 +119,7 @@ async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let body: SignalRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -142,7 +142,7 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let body: SetOnlineStatusRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -189,7 +189,7 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let current_user_did = crate::agent::did_for_context(&agent_context)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
