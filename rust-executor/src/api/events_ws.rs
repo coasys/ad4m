@@ -741,7 +741,13 @@ pub(crate) fn handle_broadcast_result(
 ) -> Option<Result<String, u64>> {
     match r {
         Ok(msg) => Some(Ok(msg)),
-        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(n)),
+        Err(BroadcastStreamRecvError::Lagged(n)) => {
+            // The socket's receiver fell more than the channel's capacity behind (a slow
+            // client, or an ownership filter waiting on a perspective lock), so these events
+            // are gone for this socket. Say so: the client cannot know it missed them.
+            log::warn!("events_ws: a socket's event stream lagged and dropped {n} event(s)");
+            Some(Err(n))
+        }
     }
 }
 
