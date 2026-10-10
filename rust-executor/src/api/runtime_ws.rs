@@ -11,11 +11,15 @@ use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
 use crate::holochain_service::get_holochain_service;
+use crate::runtime_service::notification_access::{
+    caller_may_manage, granted_after_update, owner_may_read,
+};
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
+use super::perspectives_ws::get_perspective_or_404;
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
     LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
@@ -169,6 +173,16 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
+    // An import writes rows as they are in the file: notifications with their `granted` flag
+    // and `owner_did`, and users with their password hashes. With AGENT_UPDATE alone, an app
+    // token or a managed user could import a granted notification on someone else's
+    // perspectives. Only the operator imports, as only the operator grants notifications.
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden(
+            "Permission denied: only the node operator (admin credential) can import data",
+        ));
+    }
+
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -178,8 +192,11 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             let json_data: serde_json::Value =
                 serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-            let result = Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let main_agent_did = AgentService::with_global_instance(|a| a.did.clone());
+            let result = Ad4mDb::with_global_instance(|db| {
+                db.import_from_json(json_data, main_agent_did.as_deref())
+            })
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
             Ok(serde_json::to_value(result).map_err(|e| WsRpcError::internal(e.to_string()))?)
         }
         "perspective" => {
@@ -306,14 +323,79 @@ async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 // ── Notifications ──
+//
+// Grant, update and delivery rules: `runtime_service::notification_access`.
+
+/// The caller's DID and the main agent's. A managed user's session acts as
+/// the user; every other session acts as the main agent (the operator).
+struct Dids {
+    caller: String,
+    main_agent: String,
+}
+
+fn notification_dids(ctx: &RequestContext) -> Result<Dids, WsRpcError> {
+    let main_agent = AgentService::with_global_instance(|a| a.did.clone())
+        .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
+    let caller = match &ctx.user_email {
+        Some(_) => ctx
+            .user_did
+            .clone()
+            .ok_or_else(|| WsRpcError::forbidden("Managed user has no DID"))?,
+        None => main_agent.clone(),
+    };
+    Ok(Dids { caller, main_agent })
+}
+
+/// Refuses a perspective the caller may not query, or `owner_did` may not
+/// read.
+async fn check_notification_perspectives(
+    perspective_ids: &[String],
+    owner_did: &str,
+    dids: &Dids,
+    ctx: &RequestContext,
+) -> Result<(), WsRpcError> {
+    for uuid in perspective_ids {
+        check_capability(
+            &ctx.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+        let perspective = match get_perspective_or_404(uuid).await {
+            Ok(perspective) => perspective,
+            // A missing perspective holds no data, and delivery checks access
+            // again when it fires. The operator still sees every id before
+            // approving a main-agent notification.
+            Err(e) if e.code == 404 && owner_did == dids.main_agent => continue,
+            Err(e) => return Err(e),
+        };
+        let handle = perspective.persisted.lock().await.clone();
+        if !owner_may_read(owner_did, &dids.main_agent, &handle) {
+            return Err(WsRpcError::forbidden(format!(
+                "Access denied: the notification owner cannot read perspective {}",
+                uuid
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The stored notification `id`, if the caller may update or delete it.
+/// Another user's notification reads as not found.
+fn notification_for_caller(id: &str, dids: &Dids) -> Result<Notification, WsRpcError> {
+    Ad4mDb::with_global_instance(|db| db.get_notification(id.to_string()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .filter(|notification| caller_may_manage(notification, &dids.caller, &dids.main_agent))
+        .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))
+}
 
 async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let user_email = ctx.user_email.clone();
+    let dids = notification_dids(&ctx)?;
     let notifications =
-        Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email))
+        Ad4mDb::with_global_instance(|db| db.get_notifications_for_owner(&dids.caller))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(notifications)?)
@@ -325,6 +407,8 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let body: NotificationInput = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let dids = notification_dids(&ctx)?;
+    check_notification_perspectives(&body.perspective_ids, &dids.caller, &dids, &ctx).await?;
 
     let domain_input = crate::types::domain::NotificationInput {
         description: body.description,
@@ -337,8 +421,8 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         webhook_auth: body.webhook_auth,
     };
 
-    let user_email = ctx.user_email.clone();
-    let id = RuntimeService::request_install_notification(domain_input, user_email)
+    let managed_user = dids.caller != dids.main_agent;
+    let id = RuntimeService::request_install_notification(domain_input, dids.caller, managed_user)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -352,6 +436,9 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
     let id = params.require_str("id")?;
     let body: NotificationInput = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let dids = notification_dids(&ctx)?;
+    let stored = notification_for_caller(&id, &dids)?;
+    check_notification_perspectives(&body.perspective_ids, &stored.owner_did, &dids, &ctx).await?;
 
     let notification = Notification {
         id: id.clone(),
@@ -363,8 +450,8 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         perspective_ids: body.perspective_ids,
         webhook_url: body.webhook_url,
         webhook_auth: body.webhook_auth,
-        granted: body.granted.unwrap_or(false),
-        user_email: None,
+        granted: granted_after_update(&stored, &dids.caller, &dids.main_agent),
+        owner_did: stored.owner_did,
     };
 
     Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
@@ -377,9 +464,12 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    if ctx.user_email.is_some() {
+    // Only the operator approves notifications: the launcher holds the admin credential. An
+    // app token with AGENT_UPDATE must not approve the notification it created, and managed
+    // users hold no admin credential either.
+    if !ctx.is_admin_credential {
         return Err(WsRpcError::forbidden(
-            "Permission denied: managed users cannot call grantNotification",
+            "Permission denied: only the node operator (admin credential) can grant notifications",
         ));
     }
 
@@ -387,15 +477,9 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let body: NotificationGrantRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let existing = notifications
-        .iter()
-        .find(|n| n.id == id)
+    let mut updated = Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))?;
-
-    let mut updated = existing.clone();
     updated.granted = body.granted;
 
     Ad4mDb::with_global_instance(|db| db.update_notification(id, &updated))
@@ -409,6 +493,7 @@ async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
+    notification_for_caller(&id, &notification_dids(&ctx)?)?;
     Ad4mDb::with_global_instance(|db| db.remove_notification(id))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 

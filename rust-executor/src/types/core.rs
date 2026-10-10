@@ -5,9 +5,7 @@ use std::str::FromStr;
 use ts_rs::TS;
 use url::Url;
 
-use super::domain::{
-    LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
-};
+use super::domain::{LinkExpressionInput, LinkInput, LinkStatus, PerspectiveInput};
 use crate::agent::signatures::verify_or_false;
 use regex::Regex;
 
@@ -475,7 +473,8 @@ pub struct Notification {
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
     pub webhook_auth: String,
-    pub user_email: Option<String>, // NULL for main agent, Some(email) for managed users
+    /// The owner's DID: a managed user's, or the main agent's.
+    pub owner_did: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
@@ -496,28 +495,6 @@ pub struct AITask {
     pub meta_data: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-}
-
-impl Notification {
-    pub fn from_input_and_id(
-        id: String,
-        input: NotificationInput,
-        user_email: Option<String>,
-    ) -> Self {
-        Notification {
-            id,
-            granted: false,
-            description: input.description,
-            app_name: input.app_name,
-            app_url: input.app_url,
-            app_icon_path: input.app_icon_path,
-            trigger: input.trigger,
-            perspective_ids: input.perspective_ids,
-            webhook_url: input.webhook_url,
-            webhook_auth: input.webhook_auth,
-            user_email,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]

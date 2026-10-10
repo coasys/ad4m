@@ -24,7 +24,7 @@
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification` + `perspectiveUuid` | perspective owner | Notification triggered   |
+//! | `notification-triggered`      | `notification` + `perspectiveUuid` | notification owner DID | Notification triggered |
 //! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
@@ -43,7 +43,7 @@
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
     response::IntoResponse,
@@ -72,14 +72,14 @@ use crate::agent::{did_for_context, AgentContext};
 /// don't know who this is" and filters must drop the event, not accept it.
 pub(crate) struct LazyDid {
     cached: Mutex<Option<String>>,
-    auth_token: String,
+    context: AgentContext,
 }
 
 impl LazyDid {
-    pub(crate) fn new(auth_token: String, initial: Option<String>) -> Self {
+    pub(crate) fn new(context: AgentContext, initial: Option<String>) -> Self {
         Self {
             cached: Mutex::new(initial),
-            auth_token,
+            context,
         }
     }
 
@@ -88,8 +88,7 @@ impl LazyDid {
     pub(crate) fn get(&self) -> Option<String> {
         let mut guard = self.cached.lock().unwrap();
         if guard.is_none() {
-            let ctx = AgentContext::from_auth_token(self.auth_token.clone());
-            *guard = did_for_context(&ctx).ok();
+            *guard = did_for_context(&self.context).ok();
         }
         guard.clone()
     }
@@ -252,48 +251,48 @@ pub async fn events_ws(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let auth_token = context.auth_token.clone();
-    let user_email = user_email_from_token(auth_token.clone());
+    let user_email = context.user_email.clone();
     // Captured before the upgrade so the stream builder knows whether the
     // caller is an admin credential. Admin is the ONLY escape hatch for
     // per-DID filters — an ordinary session whose DID hasn't resolved yet
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
     let is_admin = context.is_admin_credential;
+    let token_check = TokenCheck::new(&context.auth_token, is_admin);
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email, is_admin)))
+    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, token_check, user_email, is_admin)))
 }
 
 /// Build the merged event stream for a given user.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user.
+/// per-user. The stream ends at the first event after `token_check` fails.
 pub(crate) async fn build_event_stream(
-    auth_token: String,
+    token_check: TokenCheck,
     user_email: Option<String>,
     is_admin: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
-    // Resolve the DID once at subscription time — avoids repeated JWT decode +
-    // DB / AgentService lookups on every single event. If the client connected
-    // before `agent.generate()` completed this returns `None`; the per-DID
-    // filters below fail closed on `None` until re-resolution succeeds.
-    let resolved_did: Option<String> = {
-        let ctx = AgentContext::from_auth_token(auth_token.clone());
-        did_for_context(&ctx).ok()
-    };
-    build_event_stream_for(auth_token, resolved_did, user_email, is_admin).await
+    // The session's own agent, taken from the session: a token that stops decoding cannot
+    // turn it into the main agent. Resolve the DID once at subscription time — avoids
+    // repeated DB / AgentService lookups on every single event. If the client connected
+    // before `agent.generate()` completed this returns `None`; the per-DID filters below
+    // fail closed on `None` until re-resolution succeeds.
+    let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
+    build_event_stream_for(token_check, resolved_did, user_email, is_admin).await
 }
 
 /// [`build_event_stream`] with the session DID already resolved (tests
 /// inject one directly).
 pub(crate) async fn build_event_stream_for(
-    auth_token: String,
+    token_check: TokenCheck,
     resolved_did: Option<String>,
     user_email: Option<String>,
     is_admin: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
+
+    let session_context = AgentContext::for_session(user_email.clone());
 
     // Clone the pre-resolved DID for each filter closure
     let d_persp_added = resolved_did.clone();
@@ -306,17 +305,17 @@ pub(crate) async fn build_event_stream_for(
     let d_agent_updated = resolved_did.clone();
     let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
-    let d_notif = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
-    // #881: "Resolve the DID after it becomes available"). Both auto-processor
-    // streams share the same lazy cell — one resolution serves both.
-    let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
+    // #881: "Resolve the DID after it becomes available"). The auto-processor
+    // and notification streams share one lazy cell.
+    let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
+    let d_notif = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -481,22 +480,19 @@ pub(crate) async fn build_event_stream_for(
 
     // ── Neighbourhood signals ──
     // Lazy DID resolution: the WebSocket may connect before agent.generate()
-    // completes, leaving resolved_did as None. Resolve on each signal event
-    // so that by the time signals actually flow, the DID is available.
+    // completes, leaving resolved_did as None. The shared lazy cell resolves
+    // again until a DID exists, so by the time signals flow, it is available.
     let s_signal = {
         let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
-        let token = auth_token.clone();
+        let d_signal = d_auto_processor.clone();
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let token = token.clone();
+                let d_signal = d_signal.clone();
                 async move {
                     match result {
                         Ok(ref msg) => {
-                            let did = {
-                                let ctx = AgentContext::from_auth_token(token.clone());
-                                did_for_context(&ctx).ok()
-                            };
+                            let did = d_signal.get();
                             if matches_signal_recipient(msg, did.as_deref()) {
                                 Some(wrap_event(events::SIGNAL, msg))
                             } else {
@@ -515,14 +511,25 @@ pub(crate) async fn build_event_stream_for(
         events::MESSAGE_RECEIVED,
         "message"
     );
-    let s_notif = did_stream!(
-        pubsub
+    // Inlined (not `did_stream!`) so the filter reads the shared `LazyDid`.
+    let s_notif = {
+        let rx = pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-            .await,
-        events::NOTIFICATION_TRIGGERED,
-        d_notif,
-        matches_perspective_owner
-    );
+            .await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did = d_notif.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) if matches_notification_owner(msg, did.get().as_deref()) => {
+                            Some(wrap_event(events::NOTIFICATION_TRIGGERED, msg))
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
     let s_exc = broadcast_stream_nested!(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
         events::EXCEPTION_OCCURRED,
@@ -654,19 +661,20 @@ pub(crate) async fn build_event_stream_for(
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
-    Box::pin(top)
+    // Events end with the token: expiry and revokeToken() stop them as they stop requests.
+    Box::pin(top.take_while(move |_| futures::future::ready(token_check.check().is_ok())))
 }
 
 async fn handle_events_ws(
     mut socket: WebSocket,
-    auth_token: String,
+    token_check: TokenCheck,
     user_email: Option<String>,
     is_admin: bool,
 ) {
     log::info!("Events WebSocket connected");
 
     let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let event_stream = build_event_stream(token_check, user_email, is_admin).await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
         event_stream,
         interest.clone(),
@@ -682,7 +690,15 @@ async fn handle_events_ws(
                             break;
                         }
                     }
-                    None => break, // All streams ended (shouldn't happen with broadcast)
+                    // The stream ends when the token stops working.
+                    None => {
+                        let close = CloseFrame {
+                            code: 1008,
+                            reason: "token expired or revoked".into(),
+                        };
+                        let _ = socket.send(Message::Close(Some(close))).await;
+                        break;
+                    }
                 }
             }
             // Handle incoming WebSocket messages
@@ -843,6 +859,17 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
             true
         }
     }
+}
+
+/// A triggered notification carries its owner's trigger matches and webhook
+/// secret, so only sessions whose DID equals `notification.notification.ownerDid`
+/// receive it. The perspective's other owners do not. A session without a DID,
+/// or a malformed event, matches nothing.
+pub(crate) fn matches_notification_owner(msg: &str, session_did: Option<&str>) -> bool {
+    session_did.is_some_and(|did| {
+        serde_json::from_str::<NotificationTriggeredEvent>(msg)
+            .is_ok_and(|event| event.notification.notification.owner_did == did)
+    })
 }
 
 /// Multi-user: only events about a perspective the session owns. An event
@@ -1259,7 +1286,10 @@ mod lazy_did_tests {
     fn resolved_at_construction_stays_resolved() {
         // Happy path: the caller already had a DID at socket-open time.
         // `get()` returns it verbatim, no re-resolution attempt needed.
-        let lazy = LazyDid::new("token".into(), Some("did:key:alice".into()));
+        let lazy = LazyDid::new(
+            crate::agent::AgentContext::main_agent(),
+            Some("did:key:alice".into()),
+        );
         assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
         // Idempotent — repeated calls keep returning the same DID.
         assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
@@ -1279,6 +1309,69 @@ mod lazy_did_tests {
     // agent — reproducing it as a pure Rust unit test would require standing
     // up an in-process `AgentContext` + `agent::generate()` + DB, which is
     // what the integration suite already does.
+}
+
+#[cfg(test)]
+mod notification_owner_filter_tests {
+    //! A triggered notification carries the owner's trigger matches and
+    //! webhook secret, so only the owner's sessions may receive it.
+    use super::matches_notification_owner;
+    use crate::types::{Notification, NotificationTriggeredEvent, TriggeredNotification};
+
+    fn event(owner: &str) -> String {
+        serde_json::to_string(&NotificationTriggeredEvent {
+            perspective_uuid: "perspective".to_string(),
+            notification: TriggeredNotification {
+                notification: Notification {
+                    id: "notification".to_string(),
+                    granted: true,
+                    description: String::new(),
+                    app_name: String::new(),
+                    app_url: String::new(),
+                    app_icon_path: String::new(),
+                    trigger: String::new(),
+                    perspective_ids: vec!["perspective".to_string()],
+                    webhook_url: String::new(),
+                    webhook_auth: "secret".to_string(),
+                    owner_did: owner.to_string(),
+                },
+                perspective_id: "perspective".to_string(),
+                trigger_match: "[]".to_string(),
+            },
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn triggered_notification_reaches_only_its_owners_sessions() {
+        let main_agents = event("did:key:main");
+        assert!(matches_notification_owner(
+            &main_agents,
+            Some("did:key:main")
+        ));
+        assert!(!matches_notification_owner(
+            &main_agents,
+            Some("did:key:alice")
+        ));
+
+        let alices = event("did:key:alice");
+        assert!(matches_notification_owner(&alices, Some("did:key:alice")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:bob")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:main")));
+        assert!(!matches_notification_owner(&alices, None));
+    }
+
+    #[test]
+    fn malformed_event_reaches_nobody() {
+        assert!(!matches_notification_owner(
+            "not json",
+            Some("did:key:main")
+        ));
+        assert!(!matches_notification_owner(
+            r#"{"perspectiveUuid":"p","notification":{}}"#,
+            Some("did:key:main")
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1303,6 +1396,55 @@ mod events_socket_message_tests {
         assert_eq!(reply(r#"{"type":"ping"}"#), json!({ "type": "pong" }));
         assert!(super::client_message_reply(r#"{"type":"other"}"#, &interest).is_none());
         assert!(super::client_message_reply("not json", &interest).is_none());
+    }
+}
+
+#[cfg(test)]
+mod token_expiry_tests {
+    use super::*;
+    use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
+    use std::time::Duration;
+
+    /// Builds a user's event stream, publishes one event and returns what the stream yields.
+    async fn next_event(token_check: TokenCheck) -> Option<String> {
+        let mut stream = build_event_stream(
+            token_check,
+            Some("events.user@example.org".to_string()),
+            false,
+        )
+        .await;
+        get_global_pubsub()
+            .await
+            .publish(
+                &AI_MODEL_LOADING_STATUS,
+                &r#"{"model":"m","status":"loading"}"#.to_string(),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream must answer, not hang")
+    }
+
+    // A connection kept its event stream after its token expired.
+    #[tokio::test]
+    async fn a_token_that_expired_after_connect_ends_the_event_stream() {
+        let an_hour_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        let expired = TokenCheck::with_expiry("user-jwt", an_hour_ago);
+        assert!(next_event(expired).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_valid_token_keeps_its_event_stream() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token =
+            crate::user_management::generate_user_jwt("events.user@example.org", "test").unwrap();
+        assert!(next_event(TokenCheck::new(&token, false)).await.is_some());
     }
 }
 
@@ -1382,7 +1524,7 @@ mod event_spec_tests {
                     notification: serde_json::from_value(serde_json::json!({
                         "id": "n", "granted": true, "description": "", "appName": "",
                         "appUrl": "", "appIconPath": "", "trigger": "", "perspectiveIds": [],
-                        "webhookUrl": "", "webhookAuth": "", "userEmail": null,
+                        "webhookUrl": "", "webhookAuth": "", "ownerDid": "did:x",
                     }))
                     .unwrap(),
                     perspective_id: p(),

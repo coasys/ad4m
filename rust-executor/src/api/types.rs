@@ -414,7 +414,6 @@ pub struct NotificationInput {
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
     pub webhook_auth: String,
-    pub granted: Option<bool>,
 }
 
 /// Grant/revoke a notification (partial update for grant status only)

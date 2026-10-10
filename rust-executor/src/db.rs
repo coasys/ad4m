@@ -230,7 +230,7 @@ impl Ad4mDb {
                 perspective_ids TEXT NOT NULL,
                 webhookUrl TEXT NOT NULL,
                 webhookAuth TEXT NOT NULL,
-                user_email TEXT
+                owner_did TEXT NOT NULL
              )",
             [],
         )?;
@@ -373,9 +373,9 @@ impl Ad4mDb {
             }
         };
 
-        // Add user_email column to notifications table for multi-user support
-        // This column tracks which user created the notification (NULL for main agent)
-        alter_add_column("ALTER TABLE notifications ADD COLUMN user_email TEXT")?;
+        // Notifications used to name their owner by `user_email` (NULL for the main agent).
+        // `migrate_notification_owners` moves them to `owner_did` once the agent's DID is known.
+        alter_add_column("ALTER TABLE notifications ADD COLUMN owner_did TEXT")?;
 
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
@@ -763,7 +763,8 @@ impl Ad4mDb {
     pub fn add_notification(
         &self,
         notification: NotificationInput,
-        user_email: Option<String>,
+        owner_did: &str,
+        granted: bool,
     ) -> Result<String, rusqlite::Error> {
         // Validate the trigger query before storing
         if let Err(e) = Self::validate_notification_query(&notification.trigger) {
@@ -775,10 +776,10 @@ impl Ad4mDb {
 
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, user_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, owner_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
-                false,
+                granted,
                 notification.description,
                 notification.app_name,
                 notification.app_url,
@@ -787,121 +788,109 @@ impl Ad4mDb {
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
                 notification.webhook_auth,
-                user_email,
+                owner_did,
             ],
         )?;
         Ok(id)
     }
 
-    pub fn get_notifications(&self) -> Result<Vec<Notification>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT * FROM notifications")?;
-        let notification_iter = stmt.query_map([], |row| {
-            Ok(Notification {
-                id: row.get(0)?,
-                granted: row.get(1)?,
-                description: row.get(2)?,
-                app_name: row.get(3)?,
-                app_url: row.get(4)?,
-                app_icon_path: row.get(5)?,
-                trigger: row.get(6)?,
-                perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                webhook_url: row.get(8)?,
-                webhook_auth: row.get(9)?,
-                user_email: row.get(10)?,
-            })
-        })?;
-
-        let mut notifications = Vec::new();
-        for notification in notification_iter {
-            notifications.push(notification?);
-        }
-        Ok(notifications)
+    /// Reads a row of `NOTIFICATION_COLUMNS`, in that order.
+    fn notification_from_row(row: &rusqlite::Row) -> Result<Notification, rusqlite::Error> {
+        Ok(Notification {
+            id: row.get(0)?,
+            granted: row.get(1)?,
+            description: row.get(2)?,
+            app_name: row.get(3)?,
+            app_url: row.get(4)?,
+            app_icon_path: row.get(5)?,
+            trigger: row.get(6)?,
+            perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+            webhook_url: row.get(8)?,
+            webhook_auth: row.get(9)?,
+            owner_did: row.get(10)?,
+        })
     }
 
-    pub fn get_notifications_for_user(
+    const NOTIFICATION_COLUMNS: &str = "id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, owner_did";
+
+    fn query_notifications(
         &self,
-        user_email: Option<String>,
+        filter: &str,
+        params: impl rusqlite::Params,
     ) -> Result<Vec<Notification>, rusqlite::Error> {
-        let notifications = if let Some(email) = user_email {
-            // Query for specific user's notifications
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM notifications WHERE user_email = ?1")?;
-            let notification_iter = stmt.query_map(params![email], |row| {
-                Ok(Notification {
-                    id: row.get(0)?,
-                    granted: row.get(1)?,
-                    description: row.get(2)?,
-                    app_name: row.get(3)?,
-                    app_url: row.get(4)?,
-                    app_icon_path: row.get(5)?,
-                    trigger: row.get(6)?,
-                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                    webhook_url: row.get(8)?,
-                    webhook_auth: row.get(9)?,
-                    user_email: row.get(10)?,
-                })
-            })?;
+        self.conn
+            .prepare(&format!(
+                "SELECT {} FROM notifications WHERE owner_did IS NOT NULL {filter}",
+                Self::NOTIFICATION_COLUMNS
+            ))?
+            .query_map(params, Self::notification_from_row)?
+            .collect()
+    }
 
-            let mut result = Vec::new();
-            for notification in notification_iter {
-                result.push(notification?);
-            }
-            result
-        } else {
-            // Query for main agent's notifications (user_email IS NULL)
-            let mut stmt = self
-                .conn
-                .prepare("SELECT * FROM notifications WHERE user_email IS NULL")?;
-            let notification_iter = stmt.query_map([], |row| {
-                Ok(Notification {
-                    id: row.get(0)?,
-                    granted: row.get(1)?,
-                    description: row.get(2)?,
-                    app_name: row.get(3)?,
-                    app_url: row.get(4)?,
-                    app_icon_path: row.get(5)?,
-                    trigger: row.get(6)?,
-                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                    webhook_url: row.get(8)?,
-                    webhook_auth: row.get(9)?,
-                    user_email: row.get(10)?,
-                })
-            })?;
+    pub fn get_notifications(&self) -> Result<Vec<Notification>, rusqlite::Error> {
+        self.query_notifications("", [])
+    }
 
-            let mut result = Vec::new();
-            for notification in notification_iter {
-                result.push(notification?);
-            }
-            result
-        };
-
-        Ok(notifications)
+    pub fn get_notifications_for_owner(
+        &self,
+        owner_did: &str,
+    ) -> Result<Vec<Notification>, rusqlite::Error> {
+        self.query_notifications("AND owner_did = ?1", params![owner_did])
     }
 
     pub fn get_notification(&self, id: String) -> Result<Option<Notification>, rusqlite::Error> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM notifications WHERE id = ?")?;
-        let mut rows = stmt.query(params![id])?;
+        Ok(self
+            .query_notifications("AND id = ?1", params![id])?
+            .into_iter()
+            .next())
+    }
 
-        if let Some(row) = rows.next()? {
-            Ok(Some(Notification {
-                id: row.get(0)?,
-                granted: row.get(1)?,
-                description: row.get(2)?,
-                app_name: row.get(3)?,
-                app_url: row.get(4)?,
-                app_icon_path: row.get(5)?,
-                trigger: row.get(6)?,
-                perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
-                webhook_url: row.get(8)?,
-                webhook_auth: row.get(9)?,
-                user_email: row.get(10)?,
-            }))
-        } else {
-            Ok(None)
+    /// Gives every notification of an older executor an `owner_did`: a managed
+    /// user's DID from `users` for a `user_email`, else `main_agent_did`. Rows
+    /// of a user who no longer exists go: nobody owns them. Needs the main
+    /// agent's DID, so it runs once the agent has loaded. Until then
+    /// `query_notifications` skips rows without an owner.
+    pub fn migrate_notification_owners(&self, main_agent_did: &str) -> Result<(), AnyError> {
+        let has_user_email: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('notifications') WHERE name = 'user_email'",
+            [],
+            |row| row.get(0),
+        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        if has_user_email {
+            tx.execute(
+                "UPDATE notifications SET owner_did = (SELECT NULLIF(did, '') FROM users WHERE username = user_email)
+                 WHERE owner_did IS NULL AND user_email IS NOT NULL",
+                [],
+            )?;
+            let ownerless: Vec<String> = tx
+                .prepare(
+                    "SELECT id FROM notifications WHERE owner_did IS NULL AND user_email IS NOT NULL",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            if !ownerless.is_empty() {
+                log::warn!(
+                    "Deleting {} notification(s) whose user no longer exists or has no DID: {:?}",
+                    ownerless.len(),
+                    ownerless
+                );
+            }
+            tx.execute(
+                "DELETE FROM notifications WHERE owner_did IS NULL AND user_email IS NOT NULL",
+                [],
+            )?;
         }
+        // Rows of executors from before `user_email` belong to the main agent.
+        tx.execute(
+            "UPDATE notifications SET owner_did = ?1 WHERE owner_did IS NULL",
+            params![main_agent_did],
+        )?;
+        if has_user_email {
+            tx.execute("ALTER TABLE notifications DROP COLUMN user_email", [])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn remove_notification(&self, id: String) -> Result<(), rusqlite::Error> {
@@ -924,7 +913,7 @@ impl Ad4mDb {
         }
 
         let result = self.conn.execute(
-            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, user_email = ?11 WHERE id = ?1",
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, owner_did = ?11 WHERE id = ?1",
             params![
                 id,
                 updated_notification.description,
@@ -936,7 +925,7 @@ impl Ad4mDb {
                 updated_notification.webhook_url,
                 updated_notification.webhook_auth,
                 updated_notification.granted,
-                updated_notification.user_email,
+                updated_notification.owner_did,
             ],
         )?;
         Ok(result > 0)
@@ -2137,7 +2126,7 @@ impl Ad4mDb {
 
         // Export notifications
         let notifications: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email FROM notifications"
+            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, owner_did FROM notifications"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2150,7 +2139,7 @@ impl Ad4mDb {
                 "webhook_url": row.get::<_, String>(7)?,
                 "webhook_auth": row.get::<_, String>(8)?,
                 "granted": row.get::<_, bool>(9)?,
-                "user_email": row.get::<_, Option<String>>(10)?
+                "owner_did": row.get::<_, String>(10)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert(
@@ -2337,7 +2326,11 @@ impl Ad4mDb {
         Ok(serde_json::Value::Object(export_data))
     }
 
-    pub fn import_from_json(&self, data: serde_json::Value) -> Ad4mDbResult<ImportResult> {
+    pub fn import_from_json(
+        &self,
+        data: serde_json::Value,
+        main_agent_did: Option<&str>,
+    ) -> Ad4mDbResult<ImportResult> {
         log::info!("Importing DB data from JSON");
         let data = data
             .as_object()
@@ -2555,54 +2548,6 @@ impl Ad4mDb {
                         .errors
                         .push(format!("Failed to parse perspective diffs: {}", e));
                     log::warn!("Failed to parse perspective diffs: {}", e)
-                }
-            }
-        }
-
-        // Import notifications
-        if let Some(notifications) = data.get("notifications") {
-            match serde_json::from_value::<Vec<serde_json::Value>>(notifications.clone()) {
-                Ok(notifications) => {
-                    result.notifications.total = notifications.len() as i32;
-                    log::debug!("Importing {} notifications", notifications.len());
-                    for notification in notifications {
-                        let id = notification
-                            .get("id")
-                            .and_then(|id| id.as_str())
-                            .unwrap_or("<unknown>");
-                        match self.conn.execute(
-                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                            params![
-                                notification["id"].as_str().unwrap_or(""),
-                                notification["description"].as_str().unwrap_or(""),
-                                notification["app_name"].as_str().unwrap_or(""),
-                                notification["app_url"].as_str().unwrap_or(""),
-                                notification["app_icon_path"].as_str().unwrap_or(""),
-                                notification["trigger"].as_str().unwrap_or(""),
-                                notification["perspective_ids"].as_str().unwrap_or(""),
-                                notification["webhook_url"].as_str().unwrap_or(""),
-                                notification["webhook_auth"].as_str().unwrap_or(""),
-                                notification["granted"].as_bool().unwrap_or(false),
-                                notification["user_email"].as_str()
-                            ],
-                        ) {
-                            Ok(_) => result.notifications.imported += 1,
-                            Err(e) => {
-                                result.notifications.failed += 1;
-                                result.notifications.errors.push(format!("Failed to import notification {}: {}", id, e));
-                                log::warn!("Failed to import notification {}: {}", id, e)
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    result.notifications.failed = 1;
-                    result
-                        .notifications
-                        .errors
-                        .push(format!("Failed to parse notifications: {}", e));
-                    log::warn!("Failed to parse notifications: {}", e)
                 }
             }
         }
@@ -2826,6 +2771,74 @@ impl Ad4mDb {
                         .errors
                         .push(format!("Failed to parse users: {}", e));
                     log::warn!("Failed to parse users: {}", e)
+                }
+            }
+        }
+
+        // Import notifications (after users: older exports name their owner by email)
+        if let Some(notifications) = data.get("notifications") {
+            match serde_json::from_value::<Vec<serde_json::Value>>(notifications.clone()) {
+                Ok(notifications) => {
+                    result.notifications.total = notifications.len() as i32;
+                    log::debug!("Importing {} notifications", notifications.len());
+                    for notification in notifications {
+                        let id = notification
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .unwrap_or("<unknown>");
+                        // Exports of older executors name the owner by email (null: the main agent).
+                        let owner = match (
+                            notification["owner_did"].as_str(),
+                            notification["user_email"].as_str(),
+                        ) {
+                            (Some(did), _) => Some(did.to_string()),
+                            (None, Some(email)) => self
+                                .get_user(email)
+                                .ok()
+                                .map(|u| u.did)
+                                .filter(|d| !d.is_empty()),
+                            (None, None) => main_agent_did.map(str::to_string),
+                        };
+                        let Some(owner) = owner else {
+                            result.notifications.failed += 1;
+                            let error = format!("Failed to import notification {}: no owner", id);
+                            log::warn!("{}", error);
+                            result.notifications.errors.push(error);
+                            continue;
+                        };
+                        match self.conn.execute(
+                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, owner_did)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                            params![
+                                notification["id"].as_str().unwrap_or(""),
+                                notification["description"].as_str().unwrap_or(""),
+                                notification["app_name"].as_str().unwrap_or(""),
+                                notification["app_url"].as_str().unwrap_or(""),
+                                notification["app_icon_path"].as_str().unwrap_or(""),
+                                notification["trigger"].as_str().unwrap_or(""),
+                                notification["perspective_ids"].as_str().unwrap_or(""),
+                                notification["webhook_url"].as_str().unwrap_or(""),
+                                notification["webhook_auth"].as_str().unwrap_or(""),
+                                notification["granted"].as_bool().unwrap_or(false),
+                                owner,
+                            ],
+                        ) {
+                            Ok(_) => result.notifications.imported += 1,
+                            Err(e) => {
+                                result.notifications.failed += 1;
+                                result.notifications.errors.push(format!("Failed to import notification {}: {}", id, e));
+                                log::warn!("Failed to import notification {}: {}", id, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    result.notifications.failed = 1;
+                    result
+                        .notifications
+                        .errors
+                        .push(format!("Failed to parse notifications: {}", e));
+                    log::warn!("Failed to parse notifications: {}", e)
                 }
             }
         }
@@ -4124,7 +4137,9 @@ mod tests {
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
         };
-        let notification_id = db.add_notification(notification, None).unwrap();
+        let notification_id = db
+            .add_notification(notification, "did:key:main", false)
+            .unwrap();
 
         // Add tasks
         let task = AIPromptExamples {
@@ -4169,7 +4184,7 @@ mod tests {
         let import_db = Ad4mDb::new(":memory:").unwrap();
 
         // 4. Import the data
-        import_db.import_from_json(exported_data).unwrap();
+        import_db.import_from_json(exported_data, None).unwrap();
 
         // 5. Verify imported data
         // Verify trusted agents
@@ -4284,7 +4299,7 @@ mod tests {
                 None => model.remove("api_max_num_ctx"),
             };
             let import_db = Ad4mDb::new(":memory:").unwrap();
-            let result = import_db.import_from_json(data).unwrap();
+            let result = import_db.import_from_json(data, None).unwrap();
             let models = import_db.get_models().unwrap();
             (result.models, models)
         };
@@ -4516,6 +4531,127 @@ mod tests {
         assert_eq!(diff.removals.len(), 0);
     }
 
+    /// The notifications table of executors that named the owner by email.
+    fn legacy_notifications_db() -> Ad4mDb {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.conn
+            .execute_batch(
+                "DROP TABLE notifications;
+                 CREATE TABLE notifications (
+                    id TEXT PRIMARY KEY, granted BOOLEAN NOT NULL, description TEXT NOT NULL,
+                    appName TEXT NOT NULL, appUrl TEXT NOT NULL, appIconPath TEXT,
+                    trigger TEXT NOT NULL, perspective_ids TEXT NOT NULL,
+                    webhookUrl TEXT NOT NULL, webhookAuth TEXT NOT NULL, user_email TEXT,
+                    owner_did TEXT);
+                 INSERT INTO users (username, did, password_hash) VALUES ('alice@test', 'did:key:alice', 'x');
+                 INSERT INTO users (username, did, password_hash) VALUES ('nodid@test', '', 'x');
+                 INSERT INTO notifications VALUES ('main', 1, '', '', '', '', '', '[]', '', '', NULL, NULL);
+                 INSERT INTO notifications VALUES ('alice', 1, '', '', '', '', '', '[]', '', '', 'alice@test', NULL);
+                 INSERT INTO notifications VALUES ('gone', 1, '', '', '', '', '', '[]', '', '', 'gone@test', NULL);
+                 INSERT INTO notifications VALUES ('nodid', 1, '', '', '', '', '', '[]', '', '', 'nodid@test', NULL);",
+            )
+            .unwrap();
+        db
+    }
+
+    fn owners(db: &Ad4mDb) -> Vec<(String, String)> {
+        let mut owners: Vec<_> = db
+            .get_notifications()
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.id, n.owner_did))
+            .collect();
+        owners.sort();
+        owners
+    }
+
+    #[test]
+    fn migration_moves_notification_owners_from_email_to_did() {
+        let db = legacy_notifications_db();
+        db.migrate_notification_owners("did:key:main").unwrap();
+        assert_eq!(
+            owners(&db),
+            vec![
+                ("alice".to_string(), "did:key:alice".to_string()),
+                ("main".to_string(), "did:key:main".to_string()),
+            ],
+            "a user's row takes the user's DID, a NULL email the main agent's; rows of a deleted user or one without a DID go"
+        );
+
+        // The email column is gone, so a second run changes nothing.
+        db.migrate_notification_owners("did:key:other").unwrap();
+        assert_eq!(owners(&db).len(), 2);
+        assert_eq!(owners(&db)[1].1, "did:key:main");
+    }
+
+    #[test]
+    fn migration_gives_rows_from_before_user_email_to_the_main_agent() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.conn
+            .execute_batch(
+                "DROP TABLE notifications;
+                 CREATE TABLE notifications (
+                    id TEXT PRIMARY KEY, granted BOOLEAN NOT NULL, description TEXT NOT NULL,
+                    appName TEXT NOT NULL, appUrl TEXT NOT NULL, appIconPath TEXT,
+                    trigger TEXT NOT NULL, perspective_ids TEXT NOT NULL,
+                    webhookUrl TEXT NOT NULL, webhookAuth TEXT NOT NULL, owner_did TEXT);
+                 INSERT INTO notifications VALUES ('old', 1, '', '', '', '', '', '[]', '', '', NULL);",
+            )
+            .unwrap();
+        assert_eq!(owners(&db), vec![], "a row without an owner is never read");
+        db.migrate_notification_owners("did:key:main").unwrap();
+        assert_eq!(
+            owners(&db),
+            vec![("old".to_string(), "did:key:main".to_string())]
+        );
+    }
+
+    #[test]
+    fn import_names_legacy_notification_owners_by_did() {
+        // A migrated table, whose `owner_did` column accepts NULL.
+        let db = legacy_notifications_db();
+        db.conn.execute("DELETE FROM notifications", []).unwrap();
+        db.migrate_notification_owners("did:key:main").unwrap();
+        let notification = |id: &str, owner: serde_json::Value| {
+            let mut n = serde_json::json!({
+                "id": id, "description": "", "app_name": "", "app_url": "", "app_icon_path": "",
+                "trigger": "", "perspective_ids": "[]", "webhook_url": "", "webhook_auth": "",
+                "granted": true,
+            });
+            n.as_object_mut()
+                .unwrap()
+                .extend(owner.as_object().unwrap().clone());
+            n
+        };
+        let data = serde_json::json!({
+            "users": [{ "username": "alice@test", "did": "did:key:alice", "password_hash": "x" }],
+            "notifications": [
+                notification("current", serde_json::json!({ "owner_did": "did:key:bob" })),
+                notification("alice", serde_json::json!({ "user_email": "alice@test" })),
+                notification("main", serde_json::json!({ "user_email": null })),
+                notification("gone", serde_json::json!({ "user_email": "gone@test" })),
+            ],
+        });
+        let result = db.import_from_json(data, Some("did:key:main")).unwrap();
+        assert_eq!(
+            result.notifications.failed, 1,
+            "nobody owns the deleted user's row"
+        );
+        let stored: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM notifications", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, 3, "the ownerless row is not stored");
+        assert_eq!(
+            owners(&db),
+            vec![
+                ("alice".to_string(), "did:key:alice".to_string()),
+                ("current".to_string(), "did:key:bob".to_string()),
+                ("main".to_string(), "did:key:main".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn can_handle_notifications() {
         let db = Ad4mDb::new(":memory:").unwrap();
@@ -4533,7 +4669,9 @@ mod tests {
         };
 
         // Add the test notification
-        let notification_id = db.add_notification(notification, None).unwrap();
+        let notification_id = db
+            .add_notification(notification, "did:key:main", false)
+            .unwrap();
         // Get all notifications
         let notifications = db.get_notifications().unwrap();
 
@@ -4572,7 +4710,7 @@ mod tests {
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
-            user_email: None,
+            owner_did: "did:key:main".to_string(),
         };
 
         // Update the test notification
@@ -4617,7 +4755,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result1 = db.add_notification(notification1, None);
+        let result1 = db.add_notification(notification1, "did:key:main", false);
         assert!(result1.is_ok(), "Should allow DELETE inside string literal");
 
         // Should reject: actual DELETE operation
@@ -4632,7 +4770,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result2 = db.add_notification(notification2, None);
+        let result2 = db.add_notification(notification2, "did:key:main", false);
         assert!(result2.is_err(), "Should reject actual DELETE operation");
         assert!(result2.unwrap_err().to_string().contains("DELETE"));
 
@@ -4648,7 +4786,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result3 = db.add_notification(notification3, None);
+        let result3 = db.add_notification(notification3, "did:key:main", false);
         assert!(result3.is_ok(), "Should allow DELETE inside escaped string");
     }
 

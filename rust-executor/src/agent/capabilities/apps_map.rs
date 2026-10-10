@@ -77,13 +77,43 @@ pub fn insert_app(
     Ok(())
 }
 
-pub fn revoke_app(request_key: &str) -> Result<(), String> {
-    let mut apps = APPS.lock().map_err(|e| e.to_string())?;
-    if let Some(app) = apps.get_mut(request_key) {
-        app.revoked = true;
-        persist_apps_to_file(&apps).map_err(|e| e.to_string())?;
+/// Why `revoke_app` failed.
+#[derive(Debug)]
+pub enum RevokeError {
+    /// No app has this request id or token.
+    NotFound,
+    /// The app stays revoked in memory, but the registry file did not take the change, so a
+    /// restart would bring the app back.
+    Store(String),
+}
+
+impl std::fmt::Display for RevokeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RevokeError::NotFound => write!(f, "No app matches this token or request id"),
+            RevokeError::Store(e) => write!(f, "Revoked until restart, but not saved: {e}"),
+        }
     }
-    Ok(())
+}
+
+/// Revokes the app that `token_or_request_id` names: its request id, which the SDK sends, or
+/// its JWT, which the RPC's field name (`token`) promises. A value that names no app is an
+/// error: a revoke that reports success and revokes nothing ends the search for a leak
+/// (#1060).
+pub fn revoke_app(token_or_request_id: &str) -> Result<(), RevokeError> {
+    let mut apps = APPS.lock().map_err(|e| RevokeError::Store(e.to_string()))?;
+    let key = if apps.contains_key(token_or_request_id) {
+        Some(token_or_request_id.to_string())
+    } else {
+        apps.iter()
+            .find(|(_, app)| crate::utils::constant_time_eq(&app.token, token_or_request_id))
+            .map(|(key, _)| key.clone())
+    };
+    let Some(app) = key.and_then(|key| apps.get_mut(&key)) else {
+        return Err(RevokeError::NotFound);
+    };
+    app.revoked = true;
+    persist_apps_to_file(&apps).map_err(|e| RevokeError::Store(e.to_string()))
 }
 
 pub fn remove_app(request_key: &str) -> Result<(), String> {
@@ -99,6 +129,17 @@ pub fn remove_app(request_key: &str) -> Result<(), String> {
 pub fn get_app(request_key: &str) -> Result<Option<App>, String> {
     let apps = APPS.lock().map_err(|e| e.to_string())?;
     Ok(apps.get(request_key).cloned())
+}
+
+/// Whether the operator revoked the app that holds this token. Scans in place, without
+/// copying the app list, because connections call it on every request and event.
+pub fn is_revoked(token: &str) -> bool {
+    APPS.lock()
+        .map(|apps| {
+            apps.values()
+                .any(|app| crate::utils::constant_time_eq(&app.token, token) && app.revoked)
+        })
+        .unwrap_or(true)
 }
 
 pub fn get_apps() -> Vec<crate::types::Apps> {
