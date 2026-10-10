@@ -284,10 +284,12 @@ export class FlowInstance {
     // synthetic hydration field and would be silently shadowed on read).
     // No explicit start-time field: Ad4mModel synthesises `createdAt` on
     // hydration from the earliest link timestamp on the instance's URI.
-    // Convention: `SHACLFlow.states` is stored sorted ascending by `value`
-    // (enforced by `fromLinks`), so `states[0]` is the initial state. A
-    // flow author who wants a specific state as the entry point must give
-    // it the lowest `value` in the set.
+    // Convention: `SHACLFlow.states` is stored sorted ascending by `value`,
+    // ties broken by state name (enforced by `fromLinks`, same key as
+    // rust-executor — #1202), so `states[0]` is the initial state. A flow
+    // author who wants a specific state as the entry point must give it
+    // the lowest `value` in the set, and not share that value with another
+    // state unless the name order is the intended one.
     //
     // A run already on this subject for this flow is the one to return:
     // minting another would leave two runs, each with its own state, and
