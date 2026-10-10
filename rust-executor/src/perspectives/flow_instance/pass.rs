@@ -363,9 +363,9 @@ pub(crate) async fn catch_up_before_acting(
             let only = [instance_uri.to_string()];
             run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
         }
-        Err(e) => log::warn!(
-            "catch_up_before_acting: reading the cache of {instance_uri} failed: {e:#}"
-        ),
+        Err(e) => {
+            log::warn!("catch_up_before_acting: reading the cache of {instance_uri} failed: {e:#}")
+        }
     }
 }
 
@@ -392,7 +392,8 @@ pub(crate) async fn record_for_other_agents(
         if crate::agent::did_for_context(&context).ok() == actor_did {
             continue;
         }
-        let outcomes = run_flow_consensus_pass(perspective, None, &context, None, Some(&only)).await;
+        let outcomes =
+            run_flow_consensus_pass(perspective, None, &context, None, Some(&only)).await;
         if !outcomes.is_empty() {
             log::debug!(
                 "record_for_other_agents: {} edge(s) of {instance_uri} recorded for {:?}",

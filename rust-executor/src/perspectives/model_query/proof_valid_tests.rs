@@ -944,7 +944,13 @@ async fn a_typed_relation_lists_a_target_once_when_its_flag_is_in_two_graphs() {
         .add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
         .unwrap();
     store
-        .add_link(&pv_signed(&signer, "pv://c/1", "ad4m://type", "pv://Comment", 1))
+        .add_link(&pv_signed(
+            &signer,
+            "pv://c/1",
+            "ad4m://type",
+            "pv://Comment",
+            1,
+        ))
         .unwrap();
     let mut local_flag = pv_signed(&signer, "pv://c/1", "ad4m://type", "pv://Comment", 2);
     local_flag.graph = Some(local_graph_iri("did:key:alice"));
@@ -999,7 +1005,11 @@ async fn a_typed_relation_lists_a_target_once_when_its_flag_is_in_two_graphs() {
         store.visible_scope(Some("did:key:alice"), None).unwrap(),
         None
     );
-    assert_eq!(comments(None).await, vec![json!(["pv://c/1"]); 2], "union read");
+    assert_eq!(
+        comments(None).await,
+        vec![json!(["pv://c/1"]); 2],
+        "union read"
+    );
 
     // Once another agent has a Local graph, Alice's read lists its graphs.
     let mut bobs = pv_signed(&signer, "pv://other", "pv://p", "pv://o", 4);
@@ -1009,5 +1019,9 @@ async fn a_typed_relation_lists_a_target_once_when_its_flag_is_in_two_graphs() {
         .visible_scope(Some("did:key:alice"), None)
         .unwrap()
         .expect("Bob's Local graph is hidden, so the read is scoped");
-    assert_eq!(comments(Some(scope)).await, vec![json!(["pv://c/1"]); 2], "scoped read");
+    assert_eq!(
+        comments(Some(scope)).await,
+        vec![json!(["pv://c/1"]); 2],
+        "scoped read"
+    );
 }

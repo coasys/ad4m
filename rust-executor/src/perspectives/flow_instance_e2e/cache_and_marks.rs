@@ -659,7 +659,10 @@ async fn a_co_owners_first_accept_reports_the_edge_it_settles() {
     )
     .await
     .expect("the proposer");
-    assert!(proposed.outcomes.is_empty(), "one vote is short of {{n: 2}}");
+    assert!(
+        proposed.outcomes.is_empty(),
+        "one vote is short of {{n: 2}}"
+    );
 
     let bob = second_agent("bob-first-accept@e2e.test");
     let fired = accept_flow_proposal(&mut f.perspective, &proposed.proposal_uri, &bob)
@@ -725,7 +728,11 @@ async fn an_acting_call_records_the_new_state_for_the_perspectives_owner() {
     let alices = local_cached_state(&f.perspective.clone().for_viewer(alice_did), &instance)
         .await
         .unwrap();
-    assert_eq!(alices.as_deref(), Some("scoped"), "Alice reads the new state");
+    assert_eq!(
+        alices.as_deref(),
+        Some("scoped"),
+        "Alice reads the new state"
+    );
 }
 
 /// The same for an accept: the `{n: 2}` edge another agent's co-signature
@@ -759,11 +766,19 @@ async fn an_accept_records_the_new_state_for_the_perspectives_owner() {
     )
     .await
     .expect("the proposer");
-    assert_eq!(alices(&f).await.as_deref(), Some("identified"), "one vote short");
+    assert_eq!(
+        alices(&f).await.as_deref(),
+        Some("identified"),
+        "one vote short"
+    );
 
     let bob = second_agent("bob-cosigner@e2e.test");
     accept_flow_proposal(&mut f.perspective, &proposed.proposal_uri, &bob)
         .await
         .expect("Bob co-signs");
-    assert_eq!(alices(&f).await.as_deref(), Some("scoped"), "Alice reads the new state");
+    assert_eq!(
+        alices(&f).await.as_deref(),
+        Some("scoped"),
+        "Alice reads the new state"
+    );
 }
