@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::events_ws::build_event_stream_for;
-use crate::api::tests::support::{admin_conn_ctx, registered_perspective};
+use crate::api::tests::support::{admin_conn_ctx, admin_ctx, registered_perspective};
 use crate::api::ws_handler::{build_handler_map, HandlerMap};
 use crate::api::ws_rpc::{serve, Connection};
 use crate::pubsub::{
@@ -45,7 +45,7 @@ impl Socket {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
         let events = build_event_stream_for(
-            String::new(),
+            crate::agent::capabilities::TokenCheck::new("", false),
             Some(did.into()),
             None,
             false,
@@ -389,4 +389,29 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
         .await;
         assert!(leaked.is_err(), "{who} got a live-query update: {leaked:?}");
     }
+}
+
+#[tokio::test]
+async fn an_event_stream_that_ends_ends_the_session() {
+    // `build_event_stream` ends its stream when the token expires or gets
+    // revoked. `serve` must then stop reading, so the socket closes instead
+    // of staying open without events while the client keeps it.
+    let (tx, _out) = mpsc::unbounded_channel();
+    let (_input, incoming) = mpsc::unbounded_channel::<String>();
+    let conn = Connection::new(
+        Arc::new(build_handler_map()),
+        admin_ctx(),
+        String::new(),
+        tx,
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        serve(
+            conn,
+            UnboundedReceiverStream::new(incoming),
+            Box::pin(futures::stream::empty()),
+        ),
+    )
+    .await
+    .expect("serve returns once the event stream ends");
 }
