@@ -15,6 +15,7 @@ use crate::types::{
 };
 use base64::Engine;
 
+use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -48,9 +49,23 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let models: Vec<Model> = Ad4mDb::with_global_instance(|db| db.get_models())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .into_iter()
+        .map(|model| model_for_session(model, &ctx))
+        .collect();
     Ok(serde_json::to_value(models)?)
+}
+
+/// A model as a session may see it. A user session sees the model but not its provider
+/// key: the key belongs to the node's operator, and anyone holding it can spend on it.
+fn model_for_session(mut model: Model, ctx: &RequestContext) -> Model {
+    if ctx.user_email.is_some() {
+        if let Some(api) = model.api.as_mut() {
+            api.api_key = String::new();
+        }
+    }
+    model
 }
 
 /// `ai.discoverModels` — what does this endpoint serve, and does this key work?
@@ -71,12 +86,14 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// credentials, so this widens reach and not authority; and the body is the
 /// reason the endpoint is worth having, because a status alone does not
 /// separate a bad key from a bad model name from a host that is not an LLM.
-/// Revisit it if AI_CREATE is ever granted more widely than to the operator of
-/// the node — the reach is a cleaner read primitive than `addModel` plus a
+/// The default user capabilities include AI_CREATE, so the call also refuses
+/// user sessions: the reach is a cleaner read primitive than `addModel` plus a
 /// prompt, needing no model and no completion.
 async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node sends a request to a URL the caller chooses.
+    refuse_user_session(&ctx, "ai.discoverModels")?;
 
     let base_url = params.require_str("baseUrl")?;
     let base_url = url::Url::parse(&base_url)
@@ -140,6 +157,8 @@ pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRp
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Node-wide settings: every user's prompts go to the models and keys set here.
+    refuse_user_session(&ctx, "ai.addModel")?;
 
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
@@ -161,6 +180,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.updateModel")?;
 
     let id = params.require_str("id")?;
     let model: ModelInput =
@@ -183,6 +203,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.removeModel")?;
 
     let id = params.require_str("id")?;
 
@@ -201,6 +222,7 @@ async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.setDefaultModel")?;
 
     let id = params.require_str("id")?;
     let body: SetDefaultModelRequest = serde_json::from_value(params.clone())
@@ -243,7 +265,9 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         None
     };
 
-    Ok(serde_json::to_value(model)?)
+    Ok(serde_json::to_value(
+        model.map(|model| model_for_session(model, &ctx)),
+    )?)
 }
 
 async fn get_model_loading_status(
@@ -669,4 +693,91 @@ pub struct AiTranscriptionOpenParams {
 #[ts(export)]
 pub struct AiTranscriptionCloseParams {
     pub stream_id: String,
+}
+
+#[cfg(test)]
+mod model_key_tests {
+    use super::*;
+    use crate::types::{ModelApi, ModelApiType};
+
+    fn remote_model() -> Model {
+        Model {
+            id: "m1".to_string(),
+            name: "Remote".to_string(),
+            api: Some(ModelApi {
+                base_url: url::Url::parse("https://api.example.org/v1").unwrap(),
+                api_key: "sk-provider-secret".to_string(),
+                model: "gpt".to_string(),
+                api_type: ModelApiType::OpenAi,
+                max_num_ctx: None,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        }
+    }
+
+    fn ctx(user_email: Option<&str>) -> RequestContext {
+        RequestContext {
+            capabilities: Ok(vec![]),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: false,
+            user_email: user_email.map(String::from),
+            user_did: None,
+            cancel_token: None,
+        }
+    }
+
+    #[test]
+    fn user_sessions_see_models_without_provider_keys() {
+        let model = model_for_session(remote_model(), &ctx(Some("a@example.org")));
+        assert_eq!(model.api.as_ref().unwrap().api_key, "");
+        assert_eq!(model.api.as_ref().unwrap().model, "gpt");
+    }
+
+    // Goes through the `ai.getDefaultModel` handler, which returned the stored model
+    // unfiltered.
+    #[tokio::test]
+    async fn user_sessions_get_the_default_model_without_its_provider_key() {
+        use crate::types::ModelApiInput;
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: "Remote".to_string(),
+                api: Some(ModelApiInput {
+                    base_url: "https://api.example.org/v1".to_string(),
+                    api_key: "sk-provider-secret".to_string(),
+                    model: "gpt".to_string(),
+                    api_type: "OPEN_AI".to_string(),
+                    max_num_ctx: None,
+                }),
+                local: None,
+                model_type: ModelType::Llm,
+            })
+        })
+        .unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
+        let session = |user_email: Option<&str>| {
+            Arc::new(RequestContext {
+                capabilities: Ok(vec![AI_READ_CAPABILITY.clone()]),
+                ..ctx(user_email)
+            })
+        };
+        let params = serde_json::json!({ "modelType": "LLM" });
+
+        let user = get_default_model(params.clone(), session(Some("a@example.org")))
+            .await
+            .unwrap();
+        assert_eq!(user["id"], id.as_str());
+        assert_eq!(user["api"]["apiKey"], "");
+
+        let operator = get_default_model(params, session(None)).await.unwrap();
+        assert_eq!(operator["api"]["apiKey"], "sk-provider-secret");
+    }
+
+    #[test]
+    fn operator_sessions_see_the_keys() {
+        let model = model_for_session(remote_model(), &ctx(None));
+        assert_eq!(model.api.as_ref().unwrap().api_key, "sk-provider-secret");
+    }
 }

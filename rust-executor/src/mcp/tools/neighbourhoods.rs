@@ -11,6 +11,7 @@ use crate::agent::capabilities::{
         RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
     },
 };
+use crate::agent::AgentContext;
 use crate::languages::LanguageController;
 use crate::neighbourhoods;
 use crate::runtime_service::RuntimeService;
@@ -115,128 +116,6 @@ impl Ad4mMcpHandler {
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
     }
 
-    /// Clone a link language template and publish the cloned instance.
-    /// Returns the new language address.
-    async fn clone_link_language(
-        &self,
-        template_address: &str,
-        name: &str,
-    ) -> Result<String, String> {
-        let controller = LanguageController::global_instance();
-
-        // Check if language language is available
-        let language_language_address = {
-            let sys = controller.system_addresses.lock().await;
-            sys.language_language
-                .clone()
-                .ok_or("Language language not loaded — cannot clone link language template")?
-        };
-
-        let meta = controller
-            .get_language_expression(template_address)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to get template meta for '{}': {}. Use `list_link_language_templates` to see available templates.",
-                    template_address, e
-                )
-            })?;
-        let declared_params: Vec<String> = meta.possible_template_params.unwrap_or_default();
-
-        let template_map = build_clone_template_map(&declared_params, name);
-
-        // Apply template to generate unique language source
-        let input = controller
-            .language_apply_template_on_source(template_address, template_map)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to clone template '{}': {}. Use `list_link_language_templates` to see available templates.",
-                    template_address, e
-                )
-            })?;
-
-        let input_name = input.meta.name.clone();
-
-        // Save locally and get the path
-        let (saved_hash, bundle_path) = controller
-            .save_language_bundle(&input.bundle, None)
-            .map_err(|e| format!("Failed to save cloned language bundle locally: {}", e))?;
-
-        // Publish via the language language
-        let input_json = serde_json::to_string(&input)
-            .map_err(|e| format!("Failed to serialize cloned language: {}", e))?;
-
-        // See the matching comment in mutation_resolvers.rs publish path:
-        // wrap in JSON.stringify and parse as JSON so addresses containing
-        // quotes / backslashes / whitespace don't get silently corrupted.
-        // Coerce undefined/null to JSON null before stringifying for the
-        // same reason as the expressionGet sweep — a bare
-        // JSON.stringify(undefined) yields the JS value undefined, which
-        // to_rust_string_lossy then captures as the raw string
-        // "undefined" and from_str::<String> fails with a confusing
-        // type-mismatch instead of a clear "no address" error.
-        let publish_script = format!(
-            r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
-            input_json
-        );
-
-        let address_raw = controller
-            .execute_on_language(&language_language_address, &publish_script)
-            .await
-            .map_err(|e| format!("Failed to publish cloned language: {}", e))?;
-
-        let trimmed_addr_raw = address_raw.trim();
-        if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
-            return Err(format!(
-                "Language language returned no address from expressionCreate when cloning template {} (got {:?})",
-                template_address, trimmed_addr_raw
-            ));
-        }
-
-        let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
-            format!(
-                "Failed to parse published cloned language address: {} ({:?})",
-                e, address_raw
-            )
-        })?;
-
-        // Load into runtime - use the saved bundle path
-        // Verify the saved hash matches the published address
-        if saved_hash != address {
-            log::warn!(
-                "Saved language hash ({}) doesn't match published address ({}). Using published address.",
-                saved_hash, address
-            );
-        }
-
-        if bundle_path.exists() {
-            controller
-                .load_language(bundle_path, false)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to load cloned language into runtime: {}. The language was published but cannot be used locally.",
-                        e
-                    )
-                })?;
-        } else {
-            return Err(format!(
-                "Language bundle not found at expected path: {:?}",
-                bundle_path
-            ));
-        }
-
-        log::info!(
-            "Cloned link language template '{}' → '{}' (name: {})",
-            template_address,
-            address,
-            input_name
-        );
-
-        Ok(address)
-    }
-
     /// Publish a local perspective as a shared neighbourhood for P2P collaboration
     #[tool(
         description = "Publish a local perspective as a shared neighbourhood. Automatically clones the given link language template to create a unique sync instance. Returns the neighbourhood URL that others can use to join via `neighbourhood_join_from_url`. Use `list_link_language_templates` first to find available templates."
@@ -272,10 +151,11 @@ impl Ad4mMcpHandler {
         }
 
         // Clone the link language template
-        let cloned_address = match self.clone_link_language(&p.link_language, &p.name).await {
-            Ok(addr) => addr,
-            Err(e) => return json!({"error": e}).to_string(),
-        };
+        let cloned_address =
+            match clone_link_language(&p.link_language, &p.name, &agent_context).await {
+                Ok(addr) => addr,
+                Err(e) => return json!({"error": e}).to_string(),
+            };
 
         let meta = Perspective::default();
 
@@ -338,6 +218,133 @@ impl Ad4mMcpHandler {
             }
         }
     }
+}
+
+/// Clone a link language template and publish the cloned instance as `agent_context`: a
+/// user's neighbourhood publishes its link language as the user, never as the node.
+/// Returns the new language address.
+pub(crate) async fn clone_link_language(
+    template_address: &str,
+    name: &str,
+    agent_context: &AgentContext,
+) -> Result<String, String> {
+    let controller = LanguageController::global_instance();
+
+    // Check if language language is available
+    let language_language_address = {
+        let sys = controller.system_addresses.lock().await;
+        sys.language_language
+            .clone()
+            .ok_or("Language language not loaded — cannot clone link language template")?
+    };
+
+    let meta = controller
+        .get_language_expression(template_address)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to get template meta for '{}': {}. Use `list_link_language_templates` to see available templates.",
+                template_address, e
+            )
+        })?;
+    let declared_params: Vec<String> = meta.possible_template_params.unwrap_or_default();
+
+    let template_map = build_clone_template_map(&declared_params, name);
+
+    // Apply template to generate unique language source
+    let input = controller
+        .language_apply_template_on_source(template_address, template_map)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to clone template '{}': {}. Use `list_link_language_templates` to see available templates.",
+                template_address, e
+            )
+        })?;
+
+    let input_name = input.meta.name.clone();
+
+    // Save locally and get the path
+    let (saved_hash, bundle_path) = controller
+        .save_language_bundle(&input.bundle, None)
+        .map_err(|e| format!("Failed to save cloned language bundle locally: {}", e))?;
+
+    // Publish via the language language
+    let input_json = serde_json::to_string(&input)
+        .map_err(|e| format!("Failed to serialize cloned language: {}", e))?;
+
+    // See the matching comment in mutation_resolvers.rs publish path:
+    // wrap in JSON.stringify and parse as JSON so addresses containing
+    // quotes / backslashes / whitespace don't get silently corrupted.
+    // Coerce undefined/null to JSON null before stringifying for the
+    // same reason as the expressionGet sweep — a bare
+    // JSON.stringify(undefined) yields the JS value undefined, which
+    // to_rust_string_lossy then captures as the raw string
+    // "undefined" and from_str::<String> fails with a confusing
+    // type-mismatch instead of a clear "no address" error.
+    let publish_script = format!(
+        r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionCreate({})) ?? null)"#,
+        input_json
+    );
+
+    let address_raw = controller
+        .execute_on_language_with_context(
+            &language_language_address,
+            &publish_script,
+            agent_context,
+        )
+        .await
+        .map_err(|e| format!("Failed to publish cloned language: {}", e))?;
+
+    let trimmed_addr_raw = address_raw.trim();
+    if trimmed_addr_raw == "null" || trimmed_addr_raw.is_empty() {
+        return Err(format!(
+            "Language language returned no address from expressionCreate when cloning template {} (got {:?})",
+            template_address, trimmed_addr_raw
+        ));
+    }
+
+    let address: String = serde_json::from_str(trimmed_addr_raw).map_err(|e| {
+        format!(
+            "Failed to parse published cloned language address: {} ({:?})",
+            e, address_raw
+        )
+    })?;
+
+    // Load into runtime - use the saved bundle path
+    // Verify the saved hash matches the published address
+    if saved_hash != address {
+        log::warn!(
+            "Saved language hash ({}) doesn't match published address ({}). Using published address.",
+            saved_hash, address
+        );
+    }
+
+    if bundle_path.exists() {
+        controller
+            .load_language(bundle_path, false)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to load cloned language into runtime: {}. The language was published but cannot be used locally.",
+                    e
+                )
+            })?;
+    } else {
+        return Err(format!(
+            "Language bundle not found at expected path: {:?}",
+            bundle_path
+        ));
+    }
+
+    log::info!(
+        "Cloned link language template '{}' → '{}' (name: {})",
+        template_address,
+        address,
+        input_name
+    );
+
+    Ok(address)
 }
 
 fn build_clone_template_map(
