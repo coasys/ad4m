@@ -1,0 +1,124 @@
+name: Publish dev packages
+
+# Publishes the npm packages on every merge to `dev`, under the npm tag `dev`, so an app can build
+# against what `dev` contains without anyone publishing a test version by hand.
+#
+# The version is `<next release>-dev.<commit time, UTC>.g<short sha>`, for example
+# `0.13.0-dev.202609301712.gee117eaf8`. It sorts by commit time, it names the commit it was built
+# from (as does `gitHead` in the published manifest), and as a prerelease of the next release it
+# never becomes `latest`: `npm install @coasys/ad4m` is unaffected. All five packages get the same
+# version, so a consumer can pin every one of them to a single commit.
+#
+# It publishes on merges that change only Rust too. A version names a commit of the whole
+# repository, and a consumer that pairs the packages with an executor finds that executor through
+# the version's commit.
+on:
+  push:
+    branches:
+      - dev
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'docs-src/**'
+      - 'planning/**'
+  workflow_dispatch:
+
+# One at a time and in order, so the `dev` tag always ends on the latest merge. GitHub keeps one
+# pending run per group, so when merges arrive faster than a publish, a newer pending run replaces
+# the older one: that commit gets no version of its own, and the next one covers it. Running them in
+# parallel instead would let an older run finish last and move `dev` backwards.
+concurrency:
+  group: publish-dev
+  cancel-in-progress: false
+
+jobs:
+  npm-publish-dev:
+    # A manual run can start from any ref; only `dev` may move the `dev` tag.
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
+    steps:
+      # The job holds the npm token, so the checkout leaves no git credentials behind.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install deps
+        run: pnpm install
+
+      - name: Install core dependencies
+        run: cd ./core && pnpm install
+
+      # After the install, which the version change would otherwise take out of step with the
+      # lockfile, and before the build, which reads the root version into connect.
+      #
+      # Internal dependencies become `workspace:*`, which `pnpm publish` replaces with the exact
+      # version being published. `npm publish` would copy the `workspace:` protocol into the
+      # manifest, and npm cannot install a package that depends on one.
+      #
+      # `gitHead` is written too: `npm publish` records the commit a version was built from, and
+      # `pnpm publish` does not. It is how a consumer gets from a version back to its commit.
+      - name: Set dev version
+        id: version
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          VERSION="$(node -e "
+            const { execSync } = require('child_process');
+            const base = require('./core/package.json').version.split('-')[0];
+            const time = execSync('git log -1 --format=%cd --date=format-local:%Y%m%d%H%M', { env: { ...process.env, TZ: 'UTC' } }).toString().trim();
+            const sha = execSync('git rev-parse --short=9 HEAD').toString().trim();
+            console.log(base + '-dev.' + time + '.g' + sha);
+          ")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing $VERSION"
+          VERSION="$VERSION" GIT_HEAD="$(git rev-parse HEAD)" node -e "
+            const fs = require('fs');
+            const version = process.env.VERSION;
+            for (const dir of ['.', 'core', 'connect', 'ad4m-hooks/helpers', 'ad4m-hooks/react', 'ad4m-hooks/vue']) {
+              const file = dir + '/package.json';
+              const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+              pkg.version = version;
+              if (dir !== '.') pkg.gitHead = process.env.GIT_HEAD;
+              for (const field of ['dependencies', 'devDependencies', 'peerDependencies']) {
+                for (const name of Object.keys(pkg[field] ?? {})) {
+                  if (String(pkg[field][name]).startsWith('workspace:')) pkg[field][name] = 'workspace:*';
+                }
+              }
+              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
+            }
+          "
+
+      - name: Build modules
+        run: pnpm run build-npm-packages
+
+      # Dependencies before dependents. A version that already exists is skipped, so a re-run of
+      # the same commit completes instead of failing.
+      - name: Publish
+        env:
+          NPM_TOKEN: ${{ secrets.COASYS_NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
+            NAME="$(node -p "require('./$dir/package.json').name")"
+            if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+              echo "$NAME@$VERSION is already published"
+              continue
+            fi
+            (cd "$dir" && pnpm publish --tag dev --access public --no-git-checks)
+          done
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "Published \`$VERSION\` under the npm tag \`dev\`:"
+            echo
+            for name in @coasys/ad4m @coasys/ad4m-connect @coasys/hooks-helpers @coasys/ad4m-react-hooks @coasys/ad4m-vue-hooks; do
+              echo "- \`$name@$VERSION\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
