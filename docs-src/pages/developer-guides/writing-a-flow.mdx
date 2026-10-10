@@ -522,7 +522,7 @@ This is the part that decides what a receipt of the *gated* task flow means to s
 - **Only the date travels.** The read-set carries `produced_at` for each role instance, next to the grant and revocation links. The granting receipt itself is not carried, and verifying a receipt of the gated flow never recurses into the granting flow's receipts.
 - **There is no fallback.** With `producedByFlow` on the role, an instance with no `produced_at` contributes no membership window at all. The assignment link's timestamp and the instance's own timestamp are never consulted. If they were, writing one link would grant the role and the gate would be decorative.
 - **The rule comes from the reader's flow definition, never from the evidence.** Which flow grants, and which class name binds, are read from the definition the verifying replica holds. A minter cannot name the rule its own receipt is judged by.
-- **Cannot decide is an error, not "no".** A granting flow this replica does not hold, or a receipt index over its budget, aborts the derivation of every flow gated on it. "I could not check" is neither "granted" nor "not granted".
+- **Cannot decide is an error, not "no".** A granting flow this replica does not hold aborts the derivation of every flow gated on it. "I could not check" is neither "granted" nor "not granted".
 
 So a receipt minted for a *gated* flow proves that n people signed and when. It does not, on its own, prove to a reader outside the neighbourhood that those people were eligible. The reader takes the carried `produced_at` on the same footing as the carried grant links. Referencing the granting receipt by hash, carrying it, and transitive verification are follow-up work in [#1140](https://github.com/coasys/ad4m/issues/1140).
 
@@ -540,7 +540,7 @@ Each of these maps to a row in [Errors and limits](/flows#errors-and-limits) on 
 - **You wrote `grantedByFlow`, or misspelt the key.** Silently plain `fromRole`, and the hole is back. See [#1144](https://github.com/coasys/ad4m/issues/1144).
 - **You omitted `state` from `producedByFlow`.** The rule does not decode and the edge is refused for everyone.
 - **The replica does not hold `ReviewerRoleGrant`.** Error, never an empty result. Sync the Social DNA first.
-- **Someone flooded the grant flow's receipt index past 256 entries.** Error: `ReceiptBudgetExceeded`. The gate refuses rather than truncates. Remove the junk links.
+- **Someone flooded the grant flow's receipt index with junk.** No error. Entries with a URI that is not a receipt URI, with no body, or with a body that is over the 256 KiB receipt cap, does not hash to the URI or names another flow are skipped with a warning, and the honest receipt keeps granting. The reader pays a parse per junk body; there is no cap that honest runs could hit ([#1177](https://github.com/coasys/ad4m/issues/1177)).
 - **You gated with `count: { max: 0 }`.** Refused outright. That would make every failed verification a reason to grant.
 
 <Callout type="info" emoji="📄">

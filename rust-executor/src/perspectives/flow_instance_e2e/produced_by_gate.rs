@@ -18,18 +18,17 @@ use super::*;
 ///    answer, and the assertion can tell them apart.
 /// 2. A gate naming a state the run did not settle into grants nothing.
 /// 3. A DID that owns no task is not a member.
-/// 4. A flood of the flow's index is the typed budget error out of
-///    `resolve_role_grants`, not "not a member".
+/// 4. A flood of junk under the flow's index is skipped by the loader:
+///    `resolve_role_grants` still answers, and the holder is still granted
+///    (#1177 — neither an error nor "not a member").
 ///
 /// Red if the gate reads anything but F's index (no receipt is found and
 /// the holder is not granted), if it dates from the assignment link, or if
-/// the loader's budget error is swallowed.
+/// junk index entries can refuse or hide the honest receipt.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_produced_by_flow_gate_grants_the_holder_through_the_real_store() {
     use crate::perspectives::flow_evaluator::requires_query_input;
-    use crate::perspectives::flow_instance::produced::{
-        ReceiptBudgetExceeded, FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
-    };
+    use crate::perspectives::flow_instance::produced::FLOW_RECEIPT_INDEX_PREDICATE;
     use crate::perspectives::flow_instance::receipt::{
         FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX,
     };
@@ -134,23 +133,26 @@ async fn a_produced_by_flow_gate_grants_the_holder_through_the_real_store() {
         "no role instance, so nothing for any receipt to grant"
     );
 
-    // 4. The flood: the honest receipt plus MAX junk entries is one over.
+    // 4. The flood: 300 junk entries under the flow's index, every second
+    //    one with a non-receipt body, beside the honest receipt. The loader
+    //    skips them; the holder stays granted, dated from the same quorum.
     let flow = f.flow_uri.clone();
-    let junk: Vec<Link> = (0..MAX_FLOW_RECEIPTS)
+    let junk: Vec<Link> = (0..300)
         .flat_map(|i| {
             let uri = format!("{RECEIPT_URI_PREFIX}-junk-{i:04}");
-            vec![
-                Link {
-                    source: flow.clone(),
-                    predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
-                    target: uri.clone(),
-                },
-                Link {
+            let mut links = vec![Link {
+                source: flow.clone(),
+                predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+                target: uri.clone(),
+            }];
+            if i % 2 == 0 {
+                links.push(Link {
                     source: uri,
                     predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
                     target: literal(&format!("not a receipt {i}")),
-                },
-            ]
+                });
+            }
+            links
         })
         .collect();
     let ctx = f.ctx.clone();
@@ -158,7 +160,7 @@ async fn a_produced_by_flow_gate_grants_the_holder_through_the_real_store() {
         .add_links(junk, LinkStatus::Shared, None, &ctx)
         .await
         .expect("plant the flood");
-    let err = resolve_role_grants(
+    let evidence = resolve_role_grants(
         &f.perspective,
         "delivery://Delivery.scoped",
         &scoped,
@@ -166,14 +168,12 @@ async fn a_produced_by_flow_gate_grants_the_holder_through_the_real_store() {
         std::slice::from_ref(&me),
     )
     .await
-    .expect_err("an over-budget index must be an error, not a denial");
-    assert_eq!(
-        err.downcast_ref::<ReceiptBudgetExceeded>(),
-        Some(&ReceiptBudgetExceeded {
-            flow,
-            found: MAX_FLOW_RECEIPTS + 1,
-            cap: MAX_FLOW_RECEIPTS,
-        }),
-        "the typed budget error: {err:#}"
-    );
+    .expect("a junk flood is skipped: neither an error nor a denial");
+    let grant = grant_for(&scoped, &me, &evidence);
+    let window = grant
+        .windows
+        .iter()
+        .find(|w| w.instance_id == TASK)
+        .expect("the holder is still granted under the flood");
+    assert_eq!(window.granted_at, settled_at, "still dated from the quorum");
 }

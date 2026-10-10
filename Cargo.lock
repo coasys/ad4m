@@ -109,6 +109,7 @@ dependencies = [
  "lettre",
  "libc",
  "log",
+ "lru 0.12.5",
  "maplit",
  "mockito",
  "multibase",

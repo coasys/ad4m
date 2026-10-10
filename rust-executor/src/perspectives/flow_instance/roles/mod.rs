@@ -226,9 +226,8 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
 
     // A `producedByFlow` gate is decided here, against this replica's own
     // graph, once for the whole role: every receipt fully verified, bound to
-    // `(role.class_name, id)`. Over budget, or a flow this replica does not
-    // hold, is an ERROR that propagates — see `grant`. Every other role pays
-    // nothing.
+    // `(role.class_name, id)`. A flow this replica does not hold is an ERROR
+    // that propagates — see `grant`. Every other role pays nothing.
     let produced = match &role.produced_by_flow {
         Some(spec) => {
             Some(super::grant::produced_at_by_instance(perspective, &role.class_name, spec).await?)
