@@ -443,6 +443,45 @@ async fn a_related_record_that_starts_to_conform_enters_a_typed_relation() {
     assert_eq!(now["instances"][0]["comments"], json!(["ns://c2"]), "{now}");
 }
 
+/// A dotted `order` key reads the relation's targets without `include`:
+/// `comments.text` is pushed into the page query through the class's declared
+/// relation (`SortKey::RelationProperty`), so a comment's text decides its
+/// post's place. Red at 0befb3b8b (#1386 review): the walker never read
+/// `order`, so the edit matched no rule and the page kept its stale order.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_moving_a_record_in_a_relation_property_order_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    let old_text = add(&mut p, "ns://c1", "ns://text", "literal:string:m").await;
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    record(&mut p, "ns://p2", "Post", &[]).await;
+    record(&mut p, "ns://c2", "Comment", &[("ns://text", "k")]).await;
+    add(&mut p, "ns://p2", "ns://comment", "ns://c2").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "order": [["comments.text", "ASC"]], "limit": 10 }),
+    )
+    .await;
+    assert_eq!(ids(&first), vec!["ns://p2", "ns://p1"], "k < m: {first}");
+
+    p.remove_link(old_text.into(), None)
+        .await
+        .expect("remove_link");
+    add(&mut p, "ns://c1", "ns://text", "literal:string:a").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "c1's text decides p1's place");
+    assert_eq!(
+        ids(&last_result(&p, &id).await),
+        vec!["ns://p1", "ns://p2"],
+        "a < k"
+    );
+}
+
 /// Task (steps → Step, conformance requires Step's `label`; `open` → Step
 /// filtered on `state = "done"`), Step (label, state).
 async fn tasks() -> PerspectiveInstance {
