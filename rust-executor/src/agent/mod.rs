@@ -821,8 +821,7 @@ impl AgentService {
             if self.legacy_keystore {
                 // Synced before the rewrite: after a power loss the backup must hold the
                 // legacy file whenever the agent file holds the new one.
-                match std::fs::copy(&self.file, self.legacy_backup_file())
-                    .and_then(|_| std::fs::File::open(self.legacy_backup_file())?.sync_all())
+                match copy_synced(&self.file, &self.legacy_backup_file())
                     .map_err(AnyError::from)
                     .and_then(|_| self.try_save(&password))
                 {
@@ -981,6 +980,25 @@ impl AgentService {
             error: None,
         }
     }
+}
+
+/// Copies `from` to `to` and flushes the copy to disk. The sync goes through
+/// `open_for_sync`, so a regression there fails on Windows inside the function the
+/// tests cover.
+fn copy_synced(from: &str, to: &str) -> std::io::Result<()> {
+    std::fs::copy(from, to)?;
+    open_for_sync(to)?.sync_all()
+}
+
+/// Opens an existing file for `sync_all`: writable, and neither created nor truncated.
+///
+/// The handle must be writable: on Windows `sync_all` is `FlushFileBuffers`, which
+/// needs write access and fails with "access denied" on the read-only handle that
+/// `File::open` gives. Linux and macOS `fsync` either kind. No `create`: a backup
+/// that vanished between copy and sync must fail the rewrite, not be replaced by an
+/// empty file that is then synced as the "backup".
+fn open_for_sync(path: &str) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).open(path)
 }
 
 #[cfg(test)]
@@ -1791,6 +1809,65 @@ mod tests {
     const OWNER: &str = "owner passphrase";
     /// Opens a legacy file written under `OWNER`: the legacy key ignored a trailing space.
     const VARIANT: &str = "owner passphrase ";
+
+    /// The backup is synced through a writable handle, because Windows refuses to flush a
+    /// read-only one, and the open must not truncate the backup it is about to sync. A
+    /// Windows failure cannot be reproduced here, so the test checks the handle's access
+    /// mode directly: a write through it succeeds, which a read-only handle rejects.
+    #[test]
+    fn the_legacy_backup_is_synced_through_a_writable_untruncated_handle() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let backup = tmp.path().join("agent.json.legacy");
+        let backup = backup.to_str().unwrap();
+        std::fs::write(backup, "legacy keystore").unwrap();
+
+        let mut file = open_for_sync(backup).expect("open the backup for sync");
+        file.sync_all().expect("sync the backup");
+        assert_eq!(
+            std::fs::read_to_string(backup).unwrap(),
+            "legacy keystore",
+            "opening for sync must not truncate the backup"
+        );
+
+        std::io::Write::write_all(&mut file, b"writable")
+            .expect("the sync handle must have write access");
+        drop(file);
+        assert!(std::fs::read_to_string(backup)
+            .unwrap()
+            .starts_with("writable"));
+    }
+
+    /// A backup that is gone when the sync opens it must fail the rewrite. An open that
+    /// created it would sync an empty file and let the rewrite go ahead without a backup.
+    #[test]
+    fn opening_a_missing_backup_for_sync_fails_without_creating_it() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let missing = tmp.path().join("agent.json.legacy");
+
+        let err =
+            open_for_sync(missing.to_str().unwrap()).expect_err("a missing backup must not open");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err:?}");
+        assert!(!missing.exists(), "the open must not create the backup");
+    }
+
+    /// The copy the rewrite relies on is byte-identical and synced through `open_for_sync`.
+    #[test]
+    fn copy_synced_writes_an_identical_backup() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let agent_file = tmp.path().join("agent.json");
+        let backup = tmp.path().join("agent.json.legacy");
+        std::fs::write(&agent_file, "legacy keystore").unwrap();
+
+        copy_synced(agent_file.to_str().unwrap(), backup.to_str().unwrap())
+            .expect("copy and sync the backup");
+
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "legacy keystore");
+        assert_eq!(
+            std::fs::read_to_string(&agent_file).unwrap(),
+            "legacy keystore"
+        );
+    }
 
     /// Keys added after a migration under a variant passphrase exist only in the rewritten
     /// file. The real passphrase opens the legacy backup, which lacks them, so the fallback
