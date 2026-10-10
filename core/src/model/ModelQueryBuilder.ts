@@ -7,6 +7,7 @@
 
 import type { Ad4mModel } from "./Ad4mModel";
 import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { LiveQuery } from "../perspectives/LiveQuery";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
@@ -38,9 +39,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private queryParams: Query = {};
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
-  private currentSubscription?: { dispose: () => Promise<void> };
-  /** Tail of the subscribe/dispose chain; see `serialize()`. */
-  private subscriptionChain: Promise<void> = Promise.resolve();
+  private currentSubscription?: { dispose(): void };
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
@@ -48,43 +47,30 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     if (query) this.queryParams = query;
   }
 
-  /**
-   * Disposes of the current subscription if one exists.
-   * 
-   * This method:
-   * 1. Stops the keepalive signals to the subscription
-   * 2. Unsubscribes from subscription updates
-   * 3. Notifies the backend to clean up subscription resources
-   * 4. Clears the subscription reference
-   * 
-   * Steps 1, 2 and 4 happen synchronously, so `builder.dispose()` without
-   * `await` is still a complete local cleanup. The returned promise resolves
-   * once the executor has released this subscriber's hold on the subscription
-   * (it never rejects). The executor shares one subscription between all
-   * subscribers of the same query and only drops it when the last one
-   * disposes, so disposing here does not interrupt another builder's updates.
-   *
-   * You should call this method when you're done with a subscription
-   * to prevent memory leaks and ensure proper cleanup.
-   */
-  dispose(): Promise<void> {
-    const current = this.currentSubscription;
-    this.currentSubscription = undefined;
-    return current ? current.dispose() : Promise.resolve();
+  /** Ends the current subscription, if any, on the client and the executor. */
+  dispose() {
+    if (this.currentSubscription) {
+      this.currentSubscription.dispose();
+      this.currentSubscription = undefined;
+    }
   }
 
-  /**
-   * Runs one subscribe variant after every earlier one on this builder has
-   * finished. Each variant disposes the previous subscription (awaiting the
-   * executor) and then registers its own; two overlapping calls would both
-   * find no current subscription, both register, and the builder could only
-   * ever dispose the last one. Serializing keeps exactly one subscription
-   * per builder.
-   */
-  private serialize<R>(run: () => Promise<R>): Promise<R> {
-    const result = this.subscriptionChain.then(run, run);
-    this.subscriptionChain = result.then(() => {}, () => {});
-    return result;
+  /** Open a live model query for `params` as the current subscription.
+   *  Resolves with the raw initial result; `onResult` gets every later one. */
+  private async live(params: Query, onResult: (raw: any) => void): Promise<any> {
+    const { className, queryJson } = (this.ctor as any).prepareModelQueryParams(params, this.modelClassName);
+    const live = new LiveQuery(
+      this.perspective.client, this.perspective.uuid,
+      () => this.perspective.modelSubscribe(className, queryJson),
+      onResult,
+    );
+    this.currentSubscription = live;
+    try {
+      return await live.start();
+    } catch (e) {
+      this.dispose();
+      throw e;
+    }
   }
 
   /**
@@ -442,112 +428,29 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  subscribe(callback: (results: T[]) => void): Promise<T[]> {
-    return this.serialize(() => this.subscribeNow(callback));
-  }
+  async subscribe(callback: (results: T[]) => void): Promise<T[]> {
+    this.dispose();
 
-  private async subscribeNow(callback: (results: T[]) => void): Promise<T[]> {
-    // Clean up any existing subscription. Awaited so the executor has
-    // released the previous hold before the new registration arrives: the
-    // executor hands out one shared id per query, and a dispose landing after
-    // the re-subscribe would otherwise release the id just handed back.
-    await this.dispose();
+    const parseResults = (raw: any): T[] =>
+      (this.ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
 
-    const ctor = this.ctor;
+    // Suppress callbacks whose parsed results equal the last ones emitted.
+    const fingerprint = (results: any[]) =>
+      JSON.stringify(results, (_, v) => (typeof v === 'function' ? undefined : v));
+    let lastFingerprint: string | null = null;
 
-    // Build the model query params (className, queryJson).  The executor
-    // resolves the shape from the perspective's SHACL triples.
-    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
-      this.queryParams, this.modelClassName
-    );
-
-    // Register model subscription via Rust — this builds trigger SPARQL internally,
-    // registers the subscription, and runs the initial query in one call.
-    const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
-      className, queryJson
-    );
-
-    // Convert JSON instances to model class instances
-    const parseResults = (raw: any): T[] => {
-      return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
-    };
-
-    // Transforms are now applied by the Rust executor during hydration
-    const initialResults = parseResults(initialModelResult);
-
-    // Track last emitted result fingerprint to suppress duplicate callbacks
-    let lastResultFingerprint: string | null = null;
-    const buildFingerprint = (results: any[]) => {
-      if (results.length === 0) return '0:';
-      return JSON.stringify(results, (_, v) =>
-        typeof v === 'function' ? undefined : v
-      );
-    };
-    lastResultFingerprint = buildFingerprint(initialResults);
-
-    // Listen for subscription updates via the same WS-RPC subscription channel.
-    // When Rust re-runs the model query and finds changed results, it pushes them.
-    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
-      subscriptionId,
-      (rawResult: any) => {
-        try {
-          const results = parseResults(rawResult);
-          const fp = buildFingerprint(results);
-          if (fp === lastResultFingerprint) {
-            return;
-          }
-          lastResultFingerprint = fp;
-          callback(results);
-        } catch (e) {
-          console.error('Model subscription update parse error:', e);
-        }
-      },
-    );
-
-    // Set up keepalive with recovery — uses setTimeout loop so we can
-    // break out and resubscribe when the server evicts the subscription.
-    let disposed = false;
-    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
-    let resubscribeAttempts = 0;
-    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
-    const keepaliveLoop = async () => {
-      if (disposed) return;
+    const initialResults = parseResults(await this.live(this.queryParams, (raw) => {
       try {
-        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
-        resubscribeAttempts = 0; // Reset on success
-      } catch (e: any) {
-        console.warn(`Model subscription keepalive failed for ${subscriptionId}:`, e);
-        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
-          resubscribeAttempts++;
-          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
-          console.warn(`Resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
-          await new Promise(r => setTimeout(r, backoffMs));
-          try {
-            unsubscribe();
-            await this.subscribe(callback);
-          } catch (resubErr) {
-            console.error('Model subscription resubscribe failed:', resubErr);
-          }
-        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
-          console.error(`Model subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
-        }
-        return; // new subscription owns its own keepalive loop
+        const results = parseResults(raw);
+        const fp = fingerprint(results);
+        if (fp === lastFingerprint) return;
+        lastFingerprint = fp;
+        callback(results);
+      } catch (e) {
+        console.error('Model subscription update parse error:', e);
       }
-      if (!disposed) {
-        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
-      }
-    };
-    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
-
-    // Store dispose function
-    this.currentSubscription = {
-      dispose: () => {
-        disposed = true;
-        if (keepaliveTimer) clearTimeout(keepaliveTimer);
-        unsubscribe();
-        return this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).then(() => {}, () => {});
-      },
-    };
+    }));
+    lastFingerprint = fingerprint(initialResults);
 
     // Take snapshots for dirty tracking
     for (const inst of initialResults) {
@@ -618,87 +521,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  countSubscribe(callback: (count: number) => void): Promise<number> {
-    return this.serialize(() => this.countSubscribeNow(callback));
-  }
-
-  private async countSubscribeNow(callback: (count: number) => void): Promise<number> {
-    // Clean up any existing subscription. Awaited so the executor has
-    // released the previous hold before the new registration arrives: the
-    // executor hands out one shared id per query, and a dispose landing after
-    // the re-subscribe would otherwise release the id just handed back.
-    await this.dispose();
-
-    const countParams = { ...this.queryParams, limit: 0 };
-    const { className, queryJson } = (this.ctor as any).prepareModelQueryParams(
-      countParams, this.modelClassName
-    );
-
-    const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
-      className, queryJson
-    );
-
-    const parseCount = (raw: any): number => {
-      const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      return data.totalCount ?? 0;
-    };
-
-    const initialCount = parseCount(initialModelResult);
-
-    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
-      subscriptionId,
-      (rawResult: any) => {
-        try {
-          callback(parseCount(rawResult));
-        } catch (e) {
-          console.error('Count subscription update parse error:', e);
-        }
-      },
-    );
-
-    let disposed = false;
-    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
-    let resubscribeAttempts = 0;
-    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
-    const keepaliveLoop = async () => {
-      if (disposed) return;
-      try {
-        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
-        resubscribeAttempts = 0;
-      } catch (e: any) {
-        console.warn(`Count subscription keepalive failed for ${subscriptionId}:`, e);
-        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
-          resubscribeAttempts++;
-          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
-          console.warn(`Count resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
-          await new Promise(r => setTimeout(r, backoffMs));
-          try {
-            unsubscribe();
-            await this.countSubscribe(callback);
-          } catch (resubErr) {
-            console.error('Count subscription resubscribe failed:', resubErr);
-          }
-        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
-          console.error(`Count subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
-        }
-        return;
-      }
-      if (!disposed) {
-        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
-      }
-    };
-    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
-
-    this.currentSubscription = {
-      dispose: () => {
-        disposed = true;
-        if (keepaliveTimer) clearTimeout(keepaliveTimer);
-        unsubscribe();
-        return this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).then(() => {}, () => {});
-      },
-    };
-
-    return initialCount;
+  async countSubscribe(callback: (count: number) => void): Promise<number> {
+    this.dispose();
+    const initial = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
+    return initial.totalCount ?? 0;
   }
 
   /**
@@ -768,40 +594,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  paginateSubscribe(
-    pageSize: number, 
-    pageNumber: number, 
-    callback: (results: PaginationResult<T>) => void
-  ): Promise<PaginationResult<T>> {
-    return this.serialize(() => this.paginateSubscribeNow(pageSize, pageNumber, callback));
-  }
-
-  private async paginateSubscribeNow(
+  async paginateSubscribe(
     pageSize: number,
     pageNumber: number,
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
-    // Clean up any existing subscription. Awaited so the executor has
-    // released the previous hold before the new registration arrives: the
-    // executor hands out one shared id per query, and a dispose landing after
-    // the re-subscribe would otherwise release the id just handed back.
-    await this.dispose();
+    // Clean up any existing subscription
+    this.dispose();
 
     const ctor = this.ctor;
 
     // Subscribe to the full result set (no limit/offset) so the subscription
-    // detects changes anywhere in the dataset. Rust builds trigger SPARQL
-    // from the shape predicates.
+    // detects changes anywhere in the dataset; each change re-reads the page.
     const subscriptionParams = { ...(this.queryParams || {}) };
     delete subscriptionParams.limit;
     delete subscriptionParams.offset;
-    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
-      subscriptionParams, this.modelClassName
-    );
-
-    const { subscriptionId } = await this.perspective.modelSubscribe(
-      className, queryJson
-    );
 
     // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
     const paginatedQuery = {
@@ -823,12 +630,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     let disposed = false;
     let fetching = false;
     let pending = false;
-    let coalesced = 0;
     const processResults = async (): Promise<void> => {
       if (disposed) return;
       if (fetching) {
         pending = true;
-        coalesced++;
         return;
       }
       fetching = true;
@@ -838,16 +643,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       } finally {
         fetching = false;
         if (pending) {
-          const dispatches = coalesced;
           pending = false;
-          coalesced = 0;
-          // Whether a trailing fetch actually starts is decided by the entry
-          // guard at the top of processResults, which returns when disposed.
-          // Log only what that guard will let through, or the dispose path
-          // announces a fetch it then drops.
-          if (!disposed) {
-            console.debug(`[ModelQueryBuilder.paginateSubscribe] ${dispatches} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
-          }
           // Detached from the caller's promise: needs its own handler, or a
           // rejection here is unhandled.
           processResults().catch(e => console.error('Paginate subscription error:', e));
@@ -855,52 +651,14 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       }
     };
 
-    const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
-      subscriptionId,
-      (rawResult: any) => {
-        console.debug(`[ModelQueryBuilder.paginateSubscribe] Update received for ${subscriptionId}, re-fetching paginated data...`);
-        processResults().catch(e => console.error('Paginate subscription error:', e));
-      },
-    );
-
-    let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
-    let resubscribeAttempts = 0;
-    const MAX_RESUBSCRIBE_ATTEMPTS = 5;
-    const keepaliveLoop = async () => {
-      if (disposed) return;
-      try {
-        await this.perspective.client.keepAliveQuery(this.perspective.uuid, subscriptionId);
-        resubscribeAttempts = 0;
-      } catch (e: any) {
-        console.warn(`Paginate subscription keepalive failed for ${subscriptionId}:`, e);
-        if (!disposed && resubscribeAttempts < MAX_RESUBSCRIBE_ATTEMPTS) {
-          resubscribeAttempts++;
-          const backoffMs = Math.min(1000 * Math.pow(2, resubscribeAttempts), 60000);
-          console.warn(`Paginate resubscribing (attempt ${resubscribeAttempts}/${MAX_RESUBSCRIBE_ATTEMPTS}, backoff ${backoffMs}ms)...`);
-          await new Promise(r => setTimeout(r, backoffMs));
-          try {
-            unsubscribe();
-            await this.paginateSubscribe(pageSize, pageNumber, callback);
-          } catch (resubErr) {
-            console.error('Paginate subscription resubscribe failed:', resubErr);
-          }
-        } else if (resubscribeAttempts >= MAX_RESUBSCRIBE_ATTEMPTS) {
-          console.error(`Paginate subscription ${subscriptionId}: max resubscribe attempts reached, giving up.`);
-        }
-        return;
-      }
-      if (!disposed) {
-        keepaliveTimer = setTimeout(keepaliveLoop, 30000);
-      }
-    };
-    keepaliveTimer = setTimeout(keepaliveLoop, 30000);
-
+    await this.live(subscriptionParams, () => {
+      processResults().catch(e => console.error('Paginate subscription error:', e));
+    });
+    const live = this.currentSubscription!;
     this.currentSubscription = {
       dispose: () => {
         disposed = true;
-        if (keepaliveTimer) clearTimeout(keepaliveTimer);
-        unsubscribe();
-        return this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).then(() => {}, () => {});
+        live.dispose();
       },
     };
 

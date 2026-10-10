@@ -297,6 +297,15 @@ pub async fn add_perspective(
     Ok(())
 }
 
+/// End every live query the RPC connection `connection_id` opened.
+pub async fn dispose_connection_subscriptions(connection_id: &str) {
+    for perspective in all_perspectives() {
+        perspective
+            .dispose_connection_subscriptions(connection_id)
+            .await;
+    }
+}
+
 pub fn all_perspectives() -> Vec<PerspectiveInstance> {
     PERSPECTIVES
         .read()
