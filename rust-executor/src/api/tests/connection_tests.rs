@@ -33,7 +33,13 @@ impl Socket {
     async fn open_as(did: &str) -> Self {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        let events = build_event_stream_for(String::new(), Some(did.into()), None, false).await;
+        let events = build_event_stream_for(
+            crate::agent::capabilities::TokenCheck::new("", false),
+            Some(did.into()),
+            None,
+            false,
+        )
+        .await;
         let conn = Connection::new(
             Arc::new(build_handler_map()),
             admin_ctx(),
@@ -254,4 +260,29 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
         leaked.is_err(),
         "Bob got Alice's live-query update: {leaked:?}"
     );
+}
+
+#[tokio::test]
+async fn an_event_stream_that_ends_ends_the_session() {
+    // `build_event_stream` ends its stream when the token expires or gets
+    // revoked. `serve` must then stop reading, so the socket closes instead
+    // of staying open without events while the client keeps it.
+    let (tx, _out) = mpsc::unbounded_channel();
+    let (_input, incoming) = mpsc::unbounded_channel::<String>();
+    let conn = Connection::new(
+        Arc::new(build_handler_map()),
+        admin_ctx(),
+        String::new(),
+        tx,
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        serve(
+            conn,
+            UnboundedReceiverStream::new(incoming),
+            Box::pin(futures::stream::empty()),
+        ),
+    )
+    .await
+    .expect("serve returns once the event stream ends");
 }
