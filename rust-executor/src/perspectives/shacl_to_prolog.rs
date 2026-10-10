@@ -278,6 +278,7 @@ mod tests {
                 invalid: None,
             },
             status: None,
+            graph: None,
         }
     }
 

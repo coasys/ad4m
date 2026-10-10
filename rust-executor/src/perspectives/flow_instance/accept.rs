@@ -152,6 +152,9 @@ pub async fn accept_flow_proposal(
     if already {
         log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");
     } else {
+        // Before the vote: this agent's first pass on the instance is a silent
+        // catch-up, and the pass after the vote must report what the vote settles.
+        super::pass::catch_up_before_acting(perspective, &instance_uri, context).await;
         perspective
             .add_link(
                 Link {
@@ -162,18 +165,22 @@ pub async fn accept_flow_proposal(
                 LinkStatus::Shared,
                 None,
                 context,
+                None,
             )
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
-    Ok(run_flow_consensus_pass(
+    let outcomes = run_flow_consensus_pass(
         perspective,
         None,
         context,
         None,
         Some(std::slice::from_ref(&instance_uri)),
     )
-    .await)
+    .await;
+    // Every other agent with bookkeeping here reads the step once this returns.
+    super::pass::record_for_other_agents(perspective, &instance_uri, context).await;
+    Ok(outcomes)
 }
 
 /// Reject a proposal: retract the links on it that this replica signed.

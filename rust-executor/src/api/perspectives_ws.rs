@@ -10,6 +10,7 @@ use crate::agent::capabilities::*;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
+use crate::perspectives::sparql_store::resolve_graph_for;
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
@@ -121,7 +122,8 @@ async fn get_perspective_with_access(
         }
     }
 
-    Ok(perspective)
+    // The request reads as its caller: other agents' Local graphs stay out.
+    Ok(perspective.for_viewer(viewer_did(ctx)?))
 }
 
 fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
@@ -287,6 +289,13 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
+/// The agent whose view of a perspective a request reads: other agents' Local
+/// graphs stay out of it.
+pub(crate) fn viewer_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    crate::agent::did_for_context(&AgentContext::from_auth_token(ctx.auth_token.clone()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
 async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -441,7 +450,13 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let status = parse_link_status(body.status.as_deref());
 
     let result = perspective
-        .add_link(Link::from(body.link), status, body.batch_id, &agent_context)
+        .add_link(
+            Link::from(body.link),
+            status,
+            body.batch_id,
+            &agent_context,
+            body.graph,
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -476,18 +491,14 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let status = parse_link_status(body.status.as_deref());
+    let links: Vec<Link> = body.links.into_iter().map(Link::from).collect();
 
-    let mutations = LinkMutations {
-        additions: body.links,
-        removals: vec![],
-    };
-
-    let diff = perspective
-        .link_mutations(mutations, status, &agent_context)
+    let results = perspective
+        .add_links(links, status, body.batch_id, &agent_context, body.graph)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let count = diff.additions.len();
+    let count = results.len();
     if count > 0 {
         if let Err(e) = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
@@ -497,7 +508,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         }
     }
 
-    Ok(serde_json::to_value(diff.additions)?)
+    Ok(serde_json::to_value(results)?)
 }
 
 async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -535,7 +546,7 @@ async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     };
 
     let diff = perspective
-        .link_mutations(mutations, LinkStatus::Shared, &agent_context)
+        .link_mutations(mutations, LinkStatus::Shared, &agent_context, None)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -560,7 +571,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let status = parse_link_status(body.status.as_deref());
 
     let diff = perspective
-        .link_mutations(body.mutations, status, &agent_context)
+        .link_mutations(body.mutations, status, &agent_context, body.graph)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -710,6 +721,10 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let engine = params
         .opt_str("engine")
         .unwrap_or_else(|| "sparql".to_string());
+    let graphs: Option<Vec<String>> = params
+        .as_object()
+        .and_then(|o| o.get("graphs"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     match engine.as_str() {
@@ -726,10 +741,15 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             // historical timeout + spawn_blocking shape.
             let timeout = Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS);
             let result = if let Some(cancel) = ctx.cancel_token.clone() {
-                tokio::time::timeout(timeout, perspective.sparql_query_cancellable(query, cancel))
-                    .await
+                tokio::time::timeout(
+                    timeout,
+                    perspective.sparql_query_cancellable_with_graphs(query, graphs, cancel),
+                )
+                .await
             } else {
-                let join = tokio::task::spawn_blocking(move || perspective.sparql_query(query));
+                let join = tokio::task::spawn_blocking(move || {
+                    perspective.sparql_query_with_graphs(query, graphs.as_deref())
+                });
                 tokio::time::timeout(timeout, async move {
                     join.await
                         .map_err(|e| deno_core::anyhow::anyhow!("Task join error: {}", e))?
@@ -775,6 +795,50 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             other
         ))),
     }
+}
+
+async fn named_graphs(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    // Run the synchronous store lookup on a blocking thread — matches the
+    // sparql_query_with_graphs pattern below so this handler doesn't hold up
+    // the async runtime on the (unbounded, store-size-proportional) scan.
+    let graphs = tokio::task::spawn_blocking(move || perspective.named_graphs())
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Task join error: {}", e)))?
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(graphs)?)
+}
+
+async fn remove_named_graph(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let graph_iri = params.require_str("graphIri")?;
+    // The Local alias names the caller's own Local graph; another agent's is refused.
+    let graph_iri = resolve_graph_for(&graph_iri, Some(&viewer_did(&ctx)?))
+        .map_err(|e| WsRpcError::forbidden(e.to_string()))?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    // remove_graph does a subject-enumeration query, a graph delete, and a
+    // batched cross-graph link cleanup query — run it on a blocking thread
+    // so it can't stall the Tokio runtime, matching the pattern above.
+    tokio::task::spawn_blocking(move || perspective.remove_graph(&graph_iri))
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Task join error: {}", e)))?
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
 }
 
 async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -870,6 +934,7 @@ async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Val
             parameters,
             body.batch_id.clone(),
             &agent_context,
+            body.graph,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -1041,6 +1106,7 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
             initial_values,
             body.batch_id.clone(),
             &agent_context,
+            body.graph,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -1148,13 +1214,17 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
+    let graph_iris: Option<Vec<String>> = params
+        .as_object()
+        .and_then(|o| o.get("graph_iris"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query(&class_name, &query_json),
+        perspective.model_query(&class_name, &query_json, graph_iris.as_deref()),
     )
     .await;
 
@@ -1212,7 +1282,12 @@ async fn evaluate_getters_handler(
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            perspective.evaluate_getters(&class_name, &instance_ids, property_names.as_deref())
+            perspective.evaluate_getters(
+                &class_name,
+                &instance_ids,
+                property_names.as_deref(),
+                None,
+            )
         }),
     )
     .await;
@@ -1250,12 +1325,16 @@ async fn model_subscribe_handler(
 
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
+    let graph_iris: Option<Vec<String>> = params
+        .as_object()
+        .and_then(|o| o.get("graph_iris"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let user_email = ctx.user_email.clone();
     let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query(class_name, query_json, user_email)
+        .model_subscribe_and_query(class_name, query_json, user_email, graph_iris)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -2693,6 +2772,12 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         evaluate_getters_handler,
     )
     .read();
+    map.method::<PerspectiveUuidParams, Vec<String>>("perspective.namedGraphs", named_graphs)
+        .read();
+    map.method::<PerspectiveRemoveNamedGraphParams, bool>(
+        "perspective.removeNamedGraph",
+        remove_named_graph,
+    );
     map.method::<RunInterpretationRequest, Vec<String>>(
         "perspective.runInterpretation",
         run_interpretation_handler,
@@ -2886,6 +2971,10 @@ pub struct PerspectiveSparqlParams {
     /// Only `"sparql"` (the default) is accepted.
     #[ts(optional)]
     pub engine: Option<String>,
+    /// Named graphs to read; the Local alias names the caller's own Local
+    /// graph. Absent: every graph the caller may read.
+    #[ts(optional)]
+    pub graphs: Option<Vec<String>>,
 }
 
 /// One SDNA entry (`entries` absent) or a batch of them.
@@ -2968,6 +3057,10 @@ pub struct PerspectiveModelQueryParams {
     pub uuid: String,
     pub class_name: String,
     pub query_json: String,
+    /// Named graphs to read; the Local alias names the caller's own Local
+    /// graph. Absent: every graph the caller may read.
+    #[ts(optional)]
+    pub graph_iris: Option<Vec<String>>,
 }
 
 /// Wire names stay snake_case, as the SDK reads them.
@@ -3155,6 +3248,16 @@ pub struct PerspectiveMintFlowReceiptResult {
 }
 
 #[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveRemoveNamedGraphParams {
+    pub uuid: String,
+    /// The Local alias names the caller's own Local graph; another agent's
+    /// Local graph is refused.
+    pub graph_iri: String,
+}
+
+#[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveShaclNameParams {
     pub uuid: String,
@@ -3176,4 +3279,40 @@ pub struct PerspectiveNamedShacl {
     pub name: String,
     pub shape_uri: String,
     pub links: Vec<ShaclLinkTriple>,
+}
+
+#[cfg(test)]
+mod local_graph_tests {
+    use super::*;
+    use crate::perspectives::local_graph_tests::two_users_and_shared_links;
+
+    /// Every handler in this file reads through `get_perspective_with_access`,
+    /// so its stamp is what keeps other agents' Local graphs out of WS reads.
+    #[tokio::test]
+    async fn a_request_reads_as_its_caller() {
+        let (p, _, _) = two_users_and_shared_links().await;
+        crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+        let ctx = RequestContext {
+            capabilities: Ok(vec![]),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: true,
+            user_email: None,
+            user_did: None,
+            cancel_token: None,
+        };
+        let view = get_perspective_with_access(&p.uuid, &ctx).await.unwrap();
+        crate::perspectives::unregister_perspective(&p.uuid);
+
+        let mut seen: Vec<String> = view
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.source)
+            .collect();
+        seen.sort();
+        // The admin's request sees the shared links, not Alice's or Bob's Local ones.
+        assert_eq!(seen, vec!["ad4m://s/default", "ad4m://s/shared"]);
+    }
 }

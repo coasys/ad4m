@@ -57,6 +57,7 @@ impl Ad4mMcpHandler {
                         parameters,
                         None,
                         &agent_context,
+                        None,
                     )
                     .await
                 {

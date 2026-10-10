@@ -55,16 +55,21 @@ export class LinkExpression extends ExpressionGeneric(Link) {
     }
     status?: WireLinkStatus;
 
+    graph?: string;
+
     /** Build a LinkExpression (with `hash()`) from the executor's wire shape. */
     static fromWire(wire: WireLinkExpression | DecoratedLinkExpression): LinkExpression {
         const link = new LinkExpression(wire.author, wire.timestamp, wire.data, wire.proof)
         if (wire.status) link.status = wire.status
+        if (wire.graph) link.graph = wire.graph
         return link
     }
 };
 export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {
     hash: () => number;
     status?: WireLinkStatus;
+
+    graph?: string;
 };
 
 export function linkExpressionToWire(link: LinkExpression): WireLinkExpression {
@@ -74,6 +79,7 @@ export function linkExpressionToWire(link: LinkExpression): WireLinkExpression {
         data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate ?? null },
         proof: { key: link.proof.key, signature: link.proof.signature },
         status: link.status ?? null,
+        ...(link.graph ? { graph: link.graph } : {}),
     }
 }
 
@@ -84,6 +90,7 @@ export function linkExpressionInputToWire(link: LinkExpressionInput): WireLinkEx
         data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate },
         proof: { key: link.proof.key, signature: link.proof.signature, valid: link.proof.valid, invalid: link.proof.invalid },
         status: link.status,
+        ...(link.graph ? { graph: link.graph } : {}),
     }
 }
 
@@ -99,7 +106,8 @@ export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
         l1.timestamp == l2.timestamp &&
         l1.data.source == l2.data.source &&
         l1.data.predicate == l2.data.predicate &&
-        l1.data.target == l2.data.target
+        l1.data.target == l2.data.target &&
+        (l1.graph ?? '') == (l2.graph ?? '')
 }
 
 export function isLink(l: any): boolean {

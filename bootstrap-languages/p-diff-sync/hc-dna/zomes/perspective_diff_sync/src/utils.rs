@@ -42,5 +42,6 @@ pub fn create_link_expression(source: &str, target: &str) -> LinkExpression {
             signature: String::from("sig"),
             key: String::from("key"),
         },
+        graph: None,
     }
 }

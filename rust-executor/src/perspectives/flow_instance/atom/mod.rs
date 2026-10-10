@@ -521,7 +521,7 @@ pub async fn load_proposal_links(
     // Half 1: discovery through the class query.
     let query_json = serde_json::json!({ "where": { "flowInstance": instance_uri } }).to_string();
     let raw = perspective
-        .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json)
+        .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json, None)
         .await
         .map_err(|e| anyhow::anyhow!("load_proposal_links: model_query failed: {e:#}"))?;
     let result: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {

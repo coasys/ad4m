@@ -163,6 +163,9 @@ pub async fn propose_flow_transition(
         ));
     }
     let acting_did = crate::agent::did_for_context(context)?;
+    // Before any vote: this agent's first pass on the instance is a silent
+    // catch-up, and the pass after the vote must report what the vote settles.
+    super::pass::catch_up_before_acting(perspective, instance_uri, context).await;
 
     let reachable = reachable_next_states(flow, &derived.state);
     let target_state = reachable
@@ -348,6 +351,9 @@ pub async fn propose_flow_transition(
             mint(perspective, &transition, &acting_did, rationale, context).await?
         }
     };
+
+    // Every other agent with bookkeeping here reads the step once this returns.
+    super::pass::record_for_other_agents(perspective, instance_uri, context).await;
 
     // Re-derive rather than report the pre-call fold: `derived_state` is the
     // answer to "did my click move it?". An error here does NOT unwind the

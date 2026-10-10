@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
-import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { PerspectiveProxy, LOCAL_GRAPH, isLocalGraph } from "../perspectives/PerspectiveProxy";
 import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
@@ -245,6 +245,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
   json: any,
   include?: IncludeMap,
   properties?: string[],
+  graphIris?: string[],
 ): T {
   const instance = new ModelClass(perspective, json.id || json.baseExpression) as any;
 
@@ -368,6 +369,17 @@ function jsonToModelInstance<T extends Ad4mModel>(
         }
       }
     }
+  }
+
+  // Recover the named graph this instance's own properties were queried
+  // from. Graph-rooted models don't need this — the `graphIri` getter
+  // already derives it from the instance's own base expression. Non-graph-
+  // rooted models only get a graph back here when the query was
+  // unambiguously scoped to a single graph: SPARQL result rows aren't
+  // graph-tagged, so a union (multi-graph) or unscoped query can't attribute
+  // a graph to any individual instance after the fact.
+  if (!(ModelClass as any)._graphRooted && graphIris && graphIris.length === 1) {
+    instance._resolvedGraphIri = graphIris[0];
   }
 
   return instance;
@@ -696,6 +708,7 @@ export class Ad4mModel {
       className,
       properties: propertiesMetadata,
       relations: relationsMetadata,
+      graph: !!(this as any)._graphRooted,
     };
   }
 
@@ -718,6 +731,13 @@ export class Ad4mModel {
    * const recipe = new Recipe(perspective, "ad4m://obj/existing-id");
    * ```
    */
+  /**
+   * The resolved named graph IRI for this instance.
+   * Set during `create()` to propagate parent graph context to child entities.
+   * @private
+   */
+  private _resolvedGraphIri?: string;
+
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
     // Use a dedicated `ad4m://obj/<id>` scheme for auto-generated
     // baseExpressions instead of `Literal.from(...).toUrl()`'s
@@ -745,6 +765,28 @@ export class Ad4mModel {
    */
   protected get perspective(): PerspectiveProxy {
     return this._perspective;
+  }
+
+  /**
+   * Returns the named graph IRI for this instance.
+   * Priority: explicit _resolvedGraphIri (set during create with parent context) >
+   * model-level graph: true > undefined (default graph).
+   */
+  get graphIri(): string | undefined {
+    if (this._resolvedGraphIri) return this._resolvedGraphIri;
+    const ctor = this.constructor as typeof Ad4mModel;
+    if ((ctor as any)._graphRooted) {
+      return `ad4m://graph/${this._baseExpression}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Compute the named graph IRI for a given base expression.
+   * Only meaningful for graph-rooted models.
+   */
+  static graphIriFor(baseExpression: string): string {
+    return `ad4m://graph/${baseExpression}`;
   }
 
   /**
@@ -1174,11 +1216,12 @@ export class Ad4mModel {
     raw: any,
     include?: IncludeMap,
     properties?: string[],
+    graphIris?: string[],
   ): T[] {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties, graphIris));
   }
 
 
@@ -1205,12 +1248,28 @@ export class Ad4mModel {
       query, classNameOverride,
     );
 
-    const result = await perspective.modelQuery(className, queryJson, options);
+    // Resolve graph scoping from the parent's model metadata.
+    // If the parent model is graph-rooted, scope queries to the parent's graph.
+    // Graph-rooted children store their own data in their OWN graph
+    // (`ad4m://graph/${child.id}`), never the parent's — so only scope to the
+    // parent's graph when the queried model itself is NOT graph-rooted.
+    // Without a parent (or when the queried model is graph-rooted), queries
+    // stay unscoped (union across all graphs). A traversal scope names
+    // several anchors and walks below them, so it stays unscoped too.
+    const metadata = this.getModelMetadata();
+    let graphIris: string[] | undefined;
+    const parent = query.parent;
+    if (parent && 'id' in parent && 'model' in parent && parent.model && !metadata.graph) {
+      const parentGraph = resolveParentGraph(parent);
+      if (parentGraph) graphIris = [parentGraph];
+    }
+
+    const result = await perspective.modelQuery(className, queryJson, graphIris, options);
 
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.
     const instances: T[] = result.instances.map((json: any) => {
-      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
+      return jsonToModelInstance(this, perspective, json, query.include, query.properties, graphIris);
     });
 
     // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
@@ -1418,7 +1477,7 @@ export class Ad4mModel {
       value = valueToLiteralIri(value);
     }
 
-    await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
+    await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId, this.graphIri);
   }
 
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
@@ -1445,10 +1504,11 @@ export class Ad4mModel {
           actions,
           this._baseExpression,
           value.map((v) => ({ name: "value", value: this.resolveRelationId(v) })),
-          batchId
+          batchId,
+          this.graphIri
         );
       } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId, this.graphIri);
       }
     }
   }
@@ -1467,11 +1527,11 @@ export class Ad4mModel {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
+            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId, this.graphIri)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId, this.graphIri);
       }
     }
   }
@@ -1490,11 +1550,11 @@ export class Ad4mModel {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
+            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId, this.graphIri)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId, this.graphIri);
       }
     }
   }
@@ -1511,6 +1571,10 @@ export class Ad4mModel {
    * refreshes from the perspective.
    * 
    * @param batchId - Optional batch ID for batch operations
+   * @param graph - Named graph for a new instance's links. Overrides
+   *   `@Model({ graph: true })`. `LOCAL_GRAPH` keeps the instance in the
+   *   caller's Local graph, which never syncs. An existing instance keeps its
+   *   graph, so passing one for it throws.
    * @throws Will throw if instance creation, linking, or updating fails
    * 
    * @example
@@ -1525,9 +1589,14 @@ export class Ad4mModel {
    * await recipe.save();
    * ```
    */
-  async save(batchId?: string) {
+  async save(batchId?: string, graph?: string) {
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
+      if (graph !== undefined) {
+        throw new Error(
+          'save(): the graph argument places a new instance. An existing instance keeps its graph.',
+        );
+      }
       await this.innerUpdate(true, batchId);
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
@@ -1541,6 +1610,7 @@ export class Ad4mModel {
     }
 
     // New instance → create path
+    if (graph !== undefined) this._resolvedGraphIri = graph;
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
@@ -1582,7 +1652,8 @@ export class Ad4mModel {
       className,
       this._baseExpression,
       initialValues,
-      batchId
+      batchId,
+      this.graphIri
     );
 
     // Relations via innerUpdate; createSubject wrote the scalar properties.
@@ -1869,6 +1940,19 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+
+    // Fast path: graph-rooted models can drop the entire named graph.
+    // The executor's removeGraph handles cross-graph reference cleanup atomically
+    // (removes incoming links from other graphs that target subjects in this graph).
+    // Only when that graph exists: an instance created with an explicit `graph`
+    // (e.g. the Local graph) shares it with others, and the destructor below
+    // removes just its links.
+    const ownGraph = Ad4mModel.graphIriFor(this._baseExpression);
+    if (metadata.graph && (await this._perspective.graphs()).includes(ownGraph)) {
+      await this._perspective.removeGraph(ownGraph);
+      return;
+    }
+
     const hasDestructor = Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
@@ -1936,6 +2020,14 @@ export class Ad4mModel {
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
+   *   - `graph` — the named graph for the instance's links, and for the
+   *     parent→child link. Overrides `@Model({ graph: true })` and the parent's
+   *     graph. `LOCAL_GRAPH` keeps the instance in the caller's Local graph:
+   *     it never syncs, and only the caller reads it.
+   *
+   * Graph precedence: `options.graph`, then a Local parent graph, then this
+   * model's own graph (`@Model({ graph: true })`), then the parent's graph
+   * (`parent.graph`, or a graph-rooted parent model), then the default graph.
    * @returns The saved model instance
    *
    * @example
@@ -1961,10 +2053,39 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    options?: { parent?: Scope; batchId?: string },
+    options?: { parent?: Scope; batchId?: string; graph?: string },
   ): Promise<T> {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
+    const metadata = (this as typeof Ad4mModel).getModelMetadata();
+    // A graph-rooted child would otherwise land in its own, shared graph, which
+    // the executor never redirects. So when the scope doesn't name the
+    // parent's graph, read where the parent lives.
+    const parentGraphIri =
+      metadata.graph && !options?.graph && !hasExplicitGraph(options?.parent)
+        ? (await localGraphOfParent(perspective, options?.parent)) ??
+          resolveParentGraph(options?.parent)
+        : resolveParentGraph(options?.parent);
+    // A Local parent keeps its children Local, even a graph-rooted child: there
+    // the graph is a privacy rule, not a placement preference.
+    instance._resolvedGraphIri =
+      options?.graph ??
+      (isLocalGraph(parentGraphIri) || !metadata.graph
+        ? parentGraphIri
+        : Ad4mModel.graphIriFor(instance._baseExpression));
+    // The parent→child link follows an explicit graph, so a private child under
+    // a shared parent leaves no shared trace; otherwise it sits in the parent's graph.
+    const parentLinkGraph = options?.graph ?? parentGraphIri;
+    if (options?.parent && !('model' in options.parent) && 'id' in options.parent && !options.graph) {
+      // A raw `{ id }` parent names no model, so its graph stays unknown and
+      // the parent→child link falls back to the default graph.
+      console.warn(
+        `${this.name}.create(): 'options.parent' was provided without 'model' — graph ` +
+        `scoping can't be resolved from a raw id. If the parent model is graph-rooted, ` +
+        `pass { model, id } instead of { id } so the parent→child link resolves into ` +
+        `the parent's graph.`
+      );
+    }
 
     // When a parent scope is provided without a caller-supplied batch, open a
     // new batch ourselves so that the instance creation and the parent→child
@@ -1980,7 +2101,7 @@ export class Ad4mModel {
         predicate,
         target: instance.id,
       });
-      await perspective.add(link, 'shared', batchId);
+      await perspective.add(link, 'shared', batchId, parentLinkGraph);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -1999,7 +2120,7 @@ export class Ad4mModel {
         predicate,
         target: instance.id,
       });
-      await perspective.add(link, 'shared', options?.batchId);
+      await perspective.add(link, 'shared', options?.batchId, parentLinkGraph);
     }
 
     return instance;
@@ -2368,3 +2489,47 @@ export class Ad4mModel {
   }
 }
 
+/**
+ * The named graph a parent scope passes to records created under it: the
+ * scope's explicit `graph`, else the parent's own graph when its model is
+ * graph-rooted. Raw `{ id, predicate }` scopes name no graph.
+ */
+function resolveParentGraph(parent?: Scope): string | undefined {
+  if (!parent || !('model' in parent) || !('id' in parent)) return undefined;
+  if (parent.graph) return parent.graph;
+  const parentMeta = (parent.model as typeof Ad4mModel).getModelMetadata?.();
+  return parentMeta?.graph ? Ad4mModel.graphIriFor(parent.id) : undefined;
+}
+
+function hasExplicitGraph(parent?: Scope): boolean {
+  return !!parent && 'graph' in parent && !!parent.graph;
+}
+
+/**
+ * The Local graph a parent lives in, read from the store by the executor's
+ * rule for a Local subject (`follow_local_subject`): every link on the parent
+ * that the caller reads sits in the caller's Local graph, or, while the
+ * parent's own graph `ad4m://graph/<parent>` does not exist, every link the
+ * caller wrote on it does, so a link someone else put elsewhere cannot flip it.
+ * `undefined` for a shared or unknown parent, and for a scope without a single
+ * parent id.
+ *
+ * It errs toward Local: when a shared parent's own links have not reached the
+ * caller yet and the caller has a Local link on it, the child stays Local. A
+ * lost share is better than a leak.
+ */
+async function localGraphOfParent(
+  perspective: PerspectiveProxy,
+  parent?: Scope,
+): Promise<string | undefined> {
+  if (!parent || !('id' in parent) || typeof parent.id !== 'string') return undefined;
+  const links = await perspective.get(new LinkQuery({ source: parent.id }));
+  // The caller reads no other agent's Local graph, so one here is the caller's.
+  const local = links.find((l) => isLocalGraph(l.graph))?.graph;
+  if (!local) return undefined;
+  if (links.every((l) => l.graph === local)) return local;
+  if ((await perspective.graphs()).includes(Ad4mModel.graphIriFor(parent.id))) return undefined;
+  const caller = local.slice(`${LOCAL_GRAPH}/`.length);
+  const own = links.filter((l) => l.author === caller);
+  return own.length > 0 && own.every((l) => l.graph === local) ? local : undefined;
+}

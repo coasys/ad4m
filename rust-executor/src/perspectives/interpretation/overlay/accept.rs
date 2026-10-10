@@ -22,7 +22,6 @@ use crate::agent::AgentContext;
 use crate::perspectives::interpretation::replace_link;
 use crate::perspectives::model_query::utils::{emittable_iri, parse_literal_value};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::perspectives::sparql_store::decorated_links_query;
 use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use std::collections::BTreeMap;
 
@@ -140,10 +139,11 @@ pub(crate) async fn list_overlays(
         bases.into_iter().partition(|b| emittable_iri(b));
     let mut by_base: BTreeMap<String, Vec<DecoratedLinkExpression>> = BTreeMap::new();
     if !iri_bases.is_empty() {
+        let (source_constraint, filter) = overlay_links_query(&iri_bases);
         let rows = perspective
             .sparql_store
-            .query_decorated_links(&overlay_links_query(&iri_bases))?;
-        for l in rows {
+            .query_decorated_links(&source_constraint, &filter)?;
+        for l in rows.into_iter().filter(|l| perspective.sees(l)) {
             by_base.entry(l.data.source.clone()).or_default().push(l);
         }
     }
@@ -165,17 +165,18 @@ pub(crate) async fn list_overlays(
 }
 
 /// The batched read behind [`list_overlays`]: every overlay link whose
-/// source is one of `bases`, in the row shape `get_links` decodes. Every base
-/// must pass [`emittable_iri`].
-fn overlay_links_query(bases: &[String]) -> String {
+/// source is one of `bases`, in the row shape `get_links` decodes, as the
+/// `(source_constraint, filter)` pair `query_decorated_links` takes. Every
+/// base must pass [`emittable_iri`].
+fn overlay_links_query(bases: &[String]) -> (String, String) {
     let values = bases
         .iter()
         .map(|b| format!("<{b}>"))
         .collect::<Vec<_>>()
         .join(" ");
-    decorated_links_query(
-        &format!("VALUES ?source {{ {values} }}"),
-        &format!(
+    (
+        format!("VALUES ?source {{ {values} }}"),
+        format!(
             r#"?predicate = <{OVERLAY_KIND_PRED}> || ?predicate = <{OVERLAY_RUN_PRED}> || STRSTARTS(STR(?predicate), "{INFERRED_PREFIX}")"#
         ),
     )
@@ -390,9 +391,10 @@ mod tests {
                 predicate: Some(pred.into()),
                 target: target.into(),
             }],
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
+            None,
         )
         .await
         .expect("add_links");
@@ -519,6 +521,7 @@ mod tests {
             crate::types::LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .unwrap();
@@ -612,6 +615,60 @@ mod tests {
         assert_eq!(kind_of(plain), "update");
     }
 
+    /// The listing reads raw store rows, so it drops the rows its reader may
+    /// not see: Bob's Local `inferred/<p>` on a shared overlay never reaches
+    /// Alice's list, and Bob's own list keeps it.
+    #[tokio::test]
+    async fn list_overlays_leaves_out_another_agents_local_rows() {
+        use crate::perspectives::local_graph_tests::user;
+        use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let (_, alice_did) = user("alice");
+        let (bob, bob_did) = user("bob");
+        let base = "soa://ext/Task/shared";
+        add(&mut p, base, OVERLAY_KIND_PRED, "update", &ctx).await;
+        add(
+            &mut p,
+            base,
+            &format!("{INFERRED_PREFIX}soa://title"),
+            "literal:string:public",
+            &ctx,
+        )
+        .await;
+        p.add_link(
+            Link {
+                source: base.into(),
+                predicate: Some(format!("{INFERRED_PREFIX}soa://secret")),
+                target: "literal:string:private".into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &bob,
+            Some(LOCAL_GRAPH_ALIAS.to_string()),
+        )
+        .await
+        .unwrap();
+
+        let inferred = |views: Vec<OverlayView>| {
+            let mut preds: Vec<String> = views
+                .into_iter()
+                .find(|v| v.base == base)
+                .expect("the shared overlay is listed")
+                .inferred
+                .into_iter()
+                .map(|(pred, _)| pred)
+                .collect();
+            preds.sort();
+            preds
+        };
+        let alices = list_overlays(&p.clone().for_viewer(alice_did))
+            .await
+            .unwrap();
+        assert_eq!(inferred(alices), vec!["soa://title"]);
+        let bobs = list_overlays(&p.clone().for_viewer(bob_did)).await.unwrap();
+        assert_eq!(inferred(bobs), vec!["soa://secret", "soa://title"]);
+    }
+
     /// The previous `list_overlays`, kept as the parity and timing reference:
     /// one `get_links` for the `kind` links, then `overlay_of` (a `get_links`
     /// of every link of the base) once per base.
@@ -652,6 +709,7 @@ mod tests {
                     signature: "s".into(),
                 },
                 status: Some(LinkStatus::Shared),
+                graph: None,
             })
             .unwrap();
     }
@@ -933,7 +991,7 @@ mod tests {
                 );
             }
         }
-        p.add_links(links, LinkStatus::Local, None, ctx)
+        p.add_links(links, LinkStatus::Shared, None, ctx, None)
             .await
             .unwrap();
     }
@@ -1029,7 +1087,7 @@ mod tests {
                 target: target.into(),
             });
         }
-        p.add_links(links, LinkStatus::Local, None, &ctx)
+        p.add_links(links, LinkStatus::Shared, None, &ctx, None)
             .await
             .unwrap();
 
@@ -1039,21 +1097,26 @@ mod tests {
         assert_eq!(inferred_of(&new, flux), vec!["soa://title"]);
 
         // The scan the non-IRI group used to run.
-        let scan = decorated_links_query(
+        let scan = (
             "",
-            &format!(
+            format!(
                 r#"STR(?source) IN ("{flux}") && (?predicate = <{OVERLAY_KIND_PRED}> || ?predicate = <{OVERLAY_RUN_PRED}> || STRSTARTS(STR(?predicate), "{INFERRED_PREFIX}"))"#
             ),
         );
         assert_eq!(
-            p.sparql_store.query_decorated_links(&scan).unwrap().len(),
+            p.sparql_store
+                .query_decorated_links(scan.0, &scan.1)
+                .unwrap()
+                .len(),
             3
         );
 
         let reps = 5;
         let t = std::time::Instant::now();
         for _ in 0..reps {
-            p.sparql_store.query_decorated_links(&scan).unwrap();
+            p.sparql_store
+                .query_decorated_links(scan.0, &scan.1)
+                .unwrap();
         }
         let scan_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
         let t = std::time::Instant::now();

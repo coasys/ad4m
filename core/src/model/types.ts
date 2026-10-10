@@ -105,7 +105,18 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  * scopes reject it, because it names no single parent to write under.
  */
 export type Scope =
-  | { model: typeof Ad4mModel; id: string; field?: string }
+  /**
+   * `graph` names the parent's named graph when it was created with an
+   * explicit one (`create(..., { graph })`). A child created under it then
+   * lands there too; without it, only a graph-rooted parent model passes its
+   * graph down. A Local parent keeps its children Local without `graph` in
+   * two cases: a graph-rooted child (`create` reads where the parent lives),
+   * and a graph-rooted parent (the executor redirects writes into its own
+   * graph). Under a parent created with `LOCAL_GRAPH` whose model is not
+   * graph-rooted, leave `graph` out and a child that isn't graph-rooted, with
+   * its parent→child link, lands in a shared graph.
+   */
+  | { model: typeof Ad4mModel; id: string; field?: string; graph?: string }
   | { id: string; predicate: string }
   | TraverseScope;
 
@@ -797,4 +808,6 @@ export interface ModelMetadata {
   properties: Record<string, PropertyMetadata>;
   /** Map of relation name to metadata */
   relations: Record<string, RelationMetadata>;
+  /** Whether instances are stored in named graphs */
+  graph: boolean;
 }

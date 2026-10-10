@@ -117,9 +117,12 @@ pub async fn strip_noop_updates(
         // row for this base.
         let props: Vec<&str> = values.keys().map(String::as_str).collect();
         let query = serde_json::json!({ "properties": props }).to_string();
-        let result_json = perspective.model_query(class, &query).await.map_err(|e| {
-            anyhow::anyhow!("strip_noop_updates: model_query({class}) failed: {e:#}")
-        })?;
+        let result_json = perspective
+            .model_query(class, &query, None)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("strip_noop_updates: model_query({class}) failed: {e:#}")
+            })?;
         let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
             anyhow::anyhow!("strip_noop_updates: bad model_query result for {class}: {e:#}")
         })?;
@@ -343,6 +346,7 @@ pub async fn apply_interpretation_ops(
                     Some(serde_json::Value::Object(values.clone())),
                     Some(batch_id.clone()),
                     context,
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -386,6 +390,7 @@ pub async fn apply_interpretation_ops(
                         LinkStatus::Shared,
                         Some(batch_id.clone()),
                         context,
+                        None,
                     )
                     .await
                     .map(|_| ())
@@ -1108,7 +1113,11 @@ pub async fn run_interpretation_with_harness_and_model(
         // Set explicitly so the intent is visible at the construction site.
         dynamic_class_tools: true,
     };
-    let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
+    // The tools read what this pass reads (see `Ad4mMcpHandler::for_pass`).
+    let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::for_pass(
+        perspective,
+        mcp_context,
+    ));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
         mcp_handler,
     ));
@@ -1910,10 +1919,16 @@ mod tests {
         .expect("apply_ops_and_run_flow_passes failed")
     }
 
+    /// The instances on `base` as the main agent (every caller here acts as
+    /// it) reads them: the `currentState` cache is its Local link (#1357).
     async fn live_on(p: &PerspectiveInstance, base: &str) -> Vec<FlowInstanceRecord> {
-        load_flow_instances(p, std::slice::from_ref(&base.to_string()))
-            .await
-            .expect("load_flow_instances failed")
+        let main = crate::agent::did_for_context(&AgentContext::main_agent()).unwrap();
+        load_flow_instances(
+            &p.clone().for_viewer(main),
+            std::slice::from_ref(&base.to_string()),
+        )
+        .await
+        .expect("load_flow_instances failed")
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -447,6 +447,7 @@ pub struct ExecuteCommandsRequest {
     pub expression: String,
     pub parameters: Option<String>,
     pub batch_id: Option<String>,
+    pub graph: Option<String>,
 }
 
 // ── Hosting ──
@@ -474,6 +475,7 @@ pub struct AddLinkRequest {
     pub link: LinkInput,
     pub status: Option<String>,
     pub batch_id: Option<String>,
+    pub graph: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -484,6 +486,7 @@ pub struct AddLinksBulkRequest {
     pub links: Vec<LinkInput>,
     pub status: Option<String>,
     pub batch_id: Option<String>,
+    pub graph: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -624,6 +627,8 @@ pub struct RunInterpretationWithHarnessRequest {
 pub struct LinkMutationsRequest {
     pub mutations: LinkMutations,
     pub status: Option<String>,
+    /// Named graph for the additions; `ad4m://local` is the caller's Local graph.
+    pub graph: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -692,6 +697,7 @@ pub struct CreateSubjectRequest {
     pub expression_address: String,
     pub initial_values: Option<String>,
     pub batch_id: Option<String>,
+    pub graph: Option<String>,
 }
 
 #[derive(Deserialize, TS)]

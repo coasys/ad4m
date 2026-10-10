@@ -1453,6 +1453,7 @@ impl Ad4mDb {
                         author: row.get(4)?,
                         timestamp: row.get(5)?,
                         status: Some(status.clone()),
+                        graph: None,
                     };
 
                     Ok((link, status))
@@ -1491,6 +1492,7 @@ impl Ad4mDb {
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
                 status: Some(status.clone()),
+                graph: None,
             };
             Ok((link_expression, status))
         })?;
@@ -1528,6 +1530,7 @@ impl Ad4mDb {
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
                 status: Some(status.clone()),
+                graph: None,
             };
             Ok((link_expression, status))
         })?;
@@ -1565,6 +1568,7 @@ impl Ad4mDb {
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
                 status: Some(status.clone()),
+                graph: None,
             };
             Ok((link_expression, status))
         })?;
@@ -1603,6 +1607,7 @@ impl Ad4mDb {
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
                 status: Some(status.clone()),
+                graph: None,
             };
             Ok((link_expression, status))
         })?;
@@ -4039,6 +4044,7 @@ mod tests {
             author: "did:test:key".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             status: Some(status),
+            graph: None,
         }
     }
 

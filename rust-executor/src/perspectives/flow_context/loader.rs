@@ -122,7 +122,7 @@ async fn query_flow_instances(
     query: &serde_json::Value,
 ) -> anyhow::Result<Vec<FlowInstanceRecord>> {
     let json = match perspective
-        .model_query(FLOW_INSTANCE_CLASS, &query.to_string())
+        .model_query(FLOW_INSTANCE_CLASS, &query.to_string(), None)
         .await
     {
         Ok(j) => j,

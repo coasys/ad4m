@@ -24,11 +24,11 @@
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification` + `perspectiveUuid` | perspective owner | Notification triggered   |
+//! | `notification-triggered`      | (inline)      | owner DID (lazy)       | Notification triggered               |
 //! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
-//! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
+//! | `query-subscription-update`   | (inline)      | subscriber DID (lazy)  | Live query subscription update       |
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
@@ -306,17 +306,18 @@ pub(crate) async fn build_event_stream_for(
     let d_agent_updated = resolved_did.clone();
     let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
-    let d_notif = resolved_did.clone();
-    let d_query_sub = resolved_did.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
     // #881: "Resolve the DID after it becomes available"). Both auto-processor
-    // streams share the same lazy cell — one resolution serves both.
+    // streams, the query-subscription stream and the notification stream share
+    // the same lazy cell — one resolution serves all four.
     let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
+    let d_query_sub = d_auto_processor.clone();
+    let d_notif = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -515,14 +516,31 @@ pub(crate) async fn build_event_stream_for(
         events::MESSAGE_RECEIVED,
         "message"
     );
-    let s_notif = did_stream!(
-        pubsub
+    // Owner-scoped like query subscriptions: the match was read as the
+    // notification's agent, so only their sessions get it. See
+    // [`matches_notification_owner`].
+    let s_notif = {
+        let rx = pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-            .await,
-        events::NOTIFICATION_TRIGGERED,
-        d_notif,
-        matches_perspective_owner
-    );
+            .await;
+        let admin = is_admin;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = d_notif.clone();
+                async move {
+                    let current_did = did_cell.get();
+                    match result {
+                        Ok(ref msg)
+                            if matches_notification_owner(msg, current_did.as_deref(), admin) =>
+                        {
+                            Some(wrap_event(events::NOTIFICATION_TRIGGERED, msg))
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
     let s_exc = broadcast_stream_nested!(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
         events::EXCEPTION_OCCURRED,
@@ -542,14 +560,37 @@ pub(crate) async fn build_event_stream_for(
     );
 
     // ── Query subscriptions ──
-    let s_query_sub = did_stream!(
-        pubsub
+    // Subscriber-scoped: an update is delivered ONLY to the session of the
+    // agent that created the subscription, never to a co-owner of the
+    // perspective (#812 review). Inlined like the auto-processor streams
+    // so the filter can capture `is_admin` and re-resolve the DID lazily;
+    // see [`matches_query_subscription_owner`] for the rule.
+    let s_query_sub = {
+        let rx = pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await,
-        events::QUERY_SUBSCRIPTION_UPDATE,
-        d_query_sub,
-        matches_perspective_owner
-    );
+            .await;
+        let admin = is_admin;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = d_query_sub.clone();
+                async move {
+                    let current_did = did_cell.get();
+                    match result {
+                        Ok(ref msg)
+                            if matches_query_subscription_owner(
+                                msg,
+                                current_did.as_deref(),
+                                admin,
+                            ) =>
+                        {
+                            Some(wrap_event(events::QUERY_SUBSCRIPTION_UPDATE, msg))
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
 
     // ── Auto-processor step signals ──
     // DID-scoped: an event is delivered ONLY to the DID whose pass produced
@@ -759,17 +800,23 @@ pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &
     )
 }
 
+/// Whether a per-owner event reaches the session of `current_did`. A session
+/// whose DID did not resolve still gets shared events, but never a link in a
+/// Local graph: `link` for an added or removed link, `oldLink` and `newLink`
+/// for an update.
 pub(crate) fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(owner)) = map.get("owner") {
-                    return owner == did;
-                }
-            }
-            true
-        }
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) else {
+        return true;
+    };
+    match (map.get("owner"), current_did) {
+        (Some(serde_json::Value::String(owner)), Some(did)) => owner == did,
+        (_, None) => !["link", "oldLink", "newLink"].iter().any(|key| {
+            map.get(*key)
+                .and_then(|link| link.get("graph"))
+                .and_then(|graph| graph.as_str())
+                .is_some_and(crate::perspectives::sparql_store::is_local_graph)
+        }),
+        _ => true,
     }
 }
 
@@ -856,6 +903,84 @@ pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) ->
         .ok()
         .and_then(|v| v.get("perspectiveUuid")?.as_str().map(str::to_string))
         .is_some_and(|uuid| perspective_is_owned_by(&uuid, did))
+}
+
+/// A `notification-triggered` event reaches the sessions of the agent the
+/// notification belongs to (`ownerDid`), and no other. Its trigger ran as
+/// that agent reads, so `triggerMatch` may hold rows from their Local graph;
+/// a co-owner of the perspective must not see it (#812 review). Same rule,
+/// and the same admin escape hatch, as [`matches_query_subscription_owner`].
+pub(crate) fn matches_notification_owner(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+) -> bool {
+    matches_event_agent_with(
+        msg,
+        current_did,
+        is_admin,
+        "ownerDid",
+        perspective_is_owned_by,
+    )
+}
+
+/// A `query-subscription-update` reaches the session of the agent that
+/// created the subscription (`subscriberDid`), and no other. The result was
+/// computed as that agent reads (`read_scope`), so it may hold rows from
+/// their Local graph; a co-owner of the perspective must not see it (#812
+/// review). Owning the perspective stays the outer gate, so a subscriber
+/// whose access was revoked gets nothing either.
+///
+/// `is_admin` is the ONLY escape hatch, as for the auto-processor filters.
+/// An unresolved DID, a malformed payload, or one without `subscriberDid`
+/// fails closed.
+pub(crate) fn matches_query_subscription_owner(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+) -> bool {
+    matches_query_subscription_owner_with(msg, current_did, is_admin, perspective_is_owned_by)
+}
+
+fn matches_query_subscription_owner_with(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+    owned_check: impl Fn(&str, &str) -> bool,
+) -> bool {
+    matches_event_agent_with(msg, current_did, is_admin, "subscriberDid", owned_check)
+}
+
+/// An event that names the one agent it is for under `agent_key` reaches
+/// that agent's sessions, if they still own the perspective. Admin
+/// credentials see everything; anything else fails closed.
+fn matches_event_agent_with(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+    agent_key: &str,
+    owned_check: impl Fn(&str, &str) -> bool,
+) -> bool {
+    if is_admin {
+        return true;
+    }
+    let Some(did) = current_did else {
+        return false;
+    };
+    let map = match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return false,
+    };
+    // The agent first: a string compare, so only that agent's own session
+    // reaches the ownership check and its perspective lock.
+    match map.get(agent_key) {
+        Some(serde_json::Value::String(subscriber)) if subscriber == did => {}
+        _ => return false,
+    }
+    match map.get("perspectiveUuid") {
+        Some(serde_json::Value::String(uuid)) => owned_check(uuid, did),
+        _ => false,
+    }
 }
 
 /// Auto-processor events are delivered ONLY to the DID whose pass produced
@@ -1249,6 +1374,134 @@ mod perspective_is_owned_by_tests {
 }
 
 #[cfg(test)]
+mod query_subscription_filter_tests {
+    //! `matches_query_subscription_owner` — #812 review: a subscription's
+    //! result is computed as its subscriber reads, so it may hold rows from
+    //! that agent's Local graph. The update therefore reaches the
+    //! subscriber's session only. A co-owner of the perspective who did not
+    //! create the subscription gets nothing. `is_admin` is the only escape
+    //! hatch; an unresolved DID, a payload without `subscriberDid`, or a
+    //! perspective the session does not own fails closed.
+    //!
+    //! The end-to-end case (two co-owners, a real Local-graph link, the real
+    //! publish payload) is `a_subscription_update_reaches_only_its_subscriber`
+    //! in `perspectives::local_graph_tests`.
+    use super::matches_query_subscription_owner_with;
+
+    const UPDATE: &str = r#"{"perspectiveUuid":"p","subscriptionId":"s1","subscriberDid":"did:key:alice","result":"[]"}"#;
+
+    /// Stub owner-check: both Alice and Bob own the perspective.
+    fn owns(_uuid: &str, _did: &str) -> bool {
+        true
+    }
+
+    /// Stub owner-check: the perspective is missing or the lock is contended.
+    fn owns_nothing(_uuid: &str, _did: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn the_subscriber_gets_their_update() {
+        assert!(matches_query_subscription_owner_with(
+            UPDATE,
+            Some("did:key:alice"),
+            false,
+            owns,
+        ));
+    }
+
+    #[test]
+    fn a_co_owner_who_did_not_subscribe_gets_nothing() {
+        // The leak: Bob owns the perspective, so the ownership gate passes,
+        // but the subscription is Alice's.
+        assert!(!matches_query_subscription_owner_with(
+            UPDATE,
+            Some("did:key:bob"),
+            false,
+            owns,
+        ));
+    }
+
+    #[test]
+    fn a_co_owners_session_never_reaches_the_ownership_check() {
+        // The check takes the perspective lock; only the subscriber's session
+        // may wait on it for an update that is theirs.
+        let reached = std::cell::Cell::new(false);
+        assert!(!matches_query_subscription_owner_with(
+            UPDATE,
+            Some("did:key:bob"),
+            false,
+            |_: &str, _: &str| {
+                reached.set(true);
+                true
+            },
+        ));
+        assert!(!reached.get());
+    }
+
+    #[test]
+    fn admin_sees_every_update_regardless_of_did() {
+        assert!(matches_query_subscription_owner_with(
+            UPDATE,
+            Some("did:key:bob"),
+            true,
+            owns
+        ));
+        assert!(matches_query_subscription_owner_with(
+            UPDATE, None, true, owns
+        ));
+    }
+
+    #[test]
+    fn unresolved_did_non_admin_fails_closed() {
+        assert!(!matches_query_subscription_owner_with(
+            UPDATE, None, false, owns
+        ));
+    }
+
+    #[test]
+    fn missing_subscriber_did_fails_closed() {
+        // A payload with no attribution must not reach every owner.
+        let msg = r#"{"perspectiveUuid":"p","subscriptionId":"s1","result":"[]"}"#;
+        assert!(!matches_query_subscription_owner_with(
+            msg,
+            Some("did:key:alice"),
+            false,
+            owns,
+        ));
+    }
+
+    #[test]
+    fn the_subscriber_must_still_own_the_perspective() {
+        // Ownership stays the outer gate: a subscriber whose access was
+        // revoked, or a perspective the registry can't verify, gets nothing.
+        assert!(!matches_query_subscription_owner_with(
+            UPDATE,
+            Some("did:key:alice"),
+            false,
+            owns_nothing,
+        ));
+    }
+
+    #[test]
+    fn missing_uuid_or_malformed_payload_fails_closed() {
+        let no_uuid = r#"{"subscriptionId":"s1","subscriberDid":"did:key:alice","result":"[]"}"#;
+        assert!(!matches_query_subscription_owner_with(
+            no_uuid,
+            Some("did:key:alice"),
+            false,
+            owns,
+        ));
+        assert!(!matches_query_subscription_owner_with(
+            "not json",
+            Some("did:key:alice"),
+            false,
+            owns,
+        ));
+    }
+}
+
+#[cfg(test)]
 mod lazy_did_tests {
     //! `LazyDid` — CodeRabbit #881 follow-up: once the DID resolves on a
     //! session that connected DID-less, subsequent events must be delivered
@@ -1388,12 +1641,14 @@ mod event_spec_tests {
                     perspective_id: p(),
                     trigger_match: "[]".into(),
                 },
+                owner_did: "did:x".into(),
             }),
             uuid_of(PerspectiveQuerySubscriptionFilter {
                 perspective_uuid: p(),
                 uuid: p(),
                 subscription_id: "s".into(),
                 result: "[]".into(),
+                subscriber_did: "did:x".into(),
             }),
             uuid_of(AutoProcessorNeighbourhoodState::new(
                 "p",

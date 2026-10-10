@@ -350,6 +350,7 @@ pub async fn write_processor(
                 Some(values),
                 Some(batch_id.clone()),
                 context,
+                None,
             )
             .await
             .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
@@ -384,6 +385,7 @@ pub async fn write_processor(
                     LinkStatus::Shared,
                     Some(batch_id.clone()),
                     context,
+                    None,
                 )
                 .await
                 .map_err(|e| {
@@ -404,6 +406,7 @@ pub async fn write_processor(
                     LinkStatus::Shared,
                     Some(batch_id.clone()),
                     context,
+                    None,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("write_processor: add_link(flow) failed: {e:#}"))?;
@@ -535,7 +538,7 @@ pub async fn load_processors(
     })
     .to_string();
     let result_json = perspective
-        .model_query(AUTO_PROCESSOR_CLASS, &query)
+        .model_query(AUTO_PROCESSOR_CLASS, &query, None)
         .await
         .map_err(|e| anyhow::anyhow!("load_processors: model_query failed: {e:#}"))?;
     let result: serde_json::Value = serde_json::from_str(&result_json)
@@ -962,6 +965,7 @@ mod tests {
             LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("seed partial");

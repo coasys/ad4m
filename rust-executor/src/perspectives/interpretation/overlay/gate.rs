@@ -119,7 +119,7 @@ async fn read_real_values(
     let props: Vec<&str> = values.keys().map(String::as_str).collect();
     let query = serde_json::json!({ "properties": props }).to_string();
     let result_json = perspective
-        .model_query(class, &query)
+        .model_query(class, &query, None)
         .await
         .map_err(|e| anyhow::anyhow!("gate_update: model_query({class}) failed: {e:#}"))?;
     let result: serde_json::Value = serde_json::from_str(&result_json)

@@ -155,7 +155,7 @@ async fn a_produced_by_flow_gate_grants_the_holder_through_the_real_store() {
         .collect();
     let ctx = f.ctx.clone();
     f.perspective
-        .add_links(junk, LinkStatus::Shared, None, &ctx)
+        .add_links(junk, LinkStatus::Shared, None, &ctx, None)
         .await
         .expect("plant the flood");
     let err = resolve_role_grants(

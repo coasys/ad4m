@@ -9,6 +9,10 @@ use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
+use crate::perspectives::sparql_store::{
+    graph_visible_to, is_local_graph, link_visible_to, local_graph_iri, local_graph_owner,
+    resolve_graph_for,
+};
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::QueryResolution;
@@ -35,6 +39,7 @@ use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::future;
+use oxigraph::model::GraphName;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -57,6 +62,17 @@ enum ChangedPredicates {
     /// A predicate-less diff was seen — must check ALL subscriptions
     CheckAll,
     /// Only specific predicates changed
+    Specific(HashSet<String>),
+}
+
+/// Tracks which named graphs have changed since the last subscription check.
+#[derive(Debug, Clone)]
+enum ChangedGraphs {
+    /// No graph changes recorded
+    NoneRecorded,
+    /// A link with no graph was seen — must check all graph-scoped subs
+    DefaultGraphChanged,
+    /// Only specific named graphs changed
     Specific(HashSet<String>),
 }
 use uuid;
@@ -164,6 +180,7 @@ mod inbound_touches_shacl_tests {
                 invalid: Some(false),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         }
     }
 
@@ -391,12 +408,20 @@ struct SubscribedQuery {
     last_result: String,
     last_keepalive: Instant,
     user_email: Option<String>,
+    /// The agent the subscription reads for. Every result is computed in
+    /// this agent's scope, and the published update names it so the events
+    /// socket delivers to this agent's session only.
+    subscriber_did: String,
     /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
     /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
     predicates: HashSet<String>,
     /// When set, this subscription was registered via `model_subscribe_and_query`.
     /// On trigger, `execute_model_query` is called instead of re-running raw SPARQL.
     model_query_params: Option<ModelSubscriptionParams>,
+    /// Named graph IRIs this subscription watches. Derived from the model query's
+    /// graph_iris (which generates FROM clauses in the query). When set, only changes
+    /// in these graphs trigger re-evaluation. For raw SPARQL subscriptions, this is None.
+    graph_scope: Option<Vec<String>>,
     /// Number of subscribers currently holding this entry. `subscribe_and_query`
     /// and `model_subscribe_and_query` hand the same id to every caller that
     /// registers the same (query, user) pair, so one re-evaluation and one push
@@ -434,6 +459,7 @@ pub struct PerspectiveMemoryStats {
 struct ModelSubscriptionParams {
     class_name: String,
     query_json: String,
+    graph_iris: Option<Vec<String>>,
 }
 
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
@@ -482,6 +508,53 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     predicates
 }
 
+/// Extract FROM graph IRIs from a SPARQL query's dataset declaration.
+/// Returns Some(vec) if the query declares specific default graphs, None otherwise.
+fn extract_from_graph_iris(query: &str) -> Option<Vec<String>> {
+    let parsed = oxigraph::sparql::Query::parse(query, None).ok()?;
+    let dataset = parsed.dataset();
+    if dataset.is_default_dataset() {
+        return None;
+    }
+    let graphs: Vec<String> = dataset
+        .default_graph_graphs()?
+        .iter()
+        .filter_map(|g| match g {
+            GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+            _ => None,
+        })
+        .collect();
+    if graphs.is_empty() {
+        None
+    } else {
+        Some(graphs)
+    }
+}
+
+/// The part of `diff` that may reach the link language: links in a Local graph
+/// never sync, whatever status a write path gave them, and neither does a link
+/// whose status is Local, wherever it sits (one written before #1357 is still
+/// in the default graph until #1359 moves it).
+pub(crate) fn shareable(diff: &PerspectiveDiff) -> PerspectiveDiff {
+    let shared = |l: &&LinkExpression| {
+        !l.graph.as_deref().is_some_and(is_local_graph) && l.status != Some(LinkStatus::Local)
+    };
+    PerspectiveDiff {
+        additions: diff.additions.iter().filter(shared).cloned().collect(),
+        removals: diff.removals.iter().filter(shared).cloned().collect(),
+    }
+}
+
+/// What [`PerspectiveInstance::stored_copy`] found for a requested link.
+enum StoredCopy {
+    /// No copy is stored.
+    Missing,
+    /// Copies are stored, but none the caller reads.
+    Hidden,
+    /// The copy the request acts on.
+    Found(DecoratedLinkExpression),
+}
+
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
@@ -498,8 +571,13 @@ pub struct PerspectiveInstance {
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<AtomicBool>,
     trigger_prolog_subscription_check: Arc<AtomicBool>,
-    /// Predicates of links changed since last subscription check.
-    changed_predicates: Arc<Mutex<ChangedPredicates>>,
+    /// Predicates and named graphs changed since last subscription check.
+    /// Combined under one mutex: recording and draining both fields as a
+    /// single atomic snapshot prevents one diff's predicate and graph state
+    /// from being observed torn across two subscription-check cycles (a
+    /// diff whose predicate lands in one drain and whose graph lands in the
+    /// next would let a subscription requiring both silently miss a check).
+    changed_predicates_and_graphs: Arc<Mutex<(ChangedPredicates, ChangedGraphs)>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
@@ -512,6 +590,15 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The agent a request-scoped clone reads for (see [`Self::for_viewer`]).
+    /// Its reads leave out other agents' Local graphs. `None` — the shared
+    /// instance the executor itself uses — reads the shared graphs only, as
+    /// after [`Self::for_shared_reads`] (#1358): a path that forgets to scope
+    /// itself must not read every user's Local graph.
+    viewer: Option<String>,
+    /// Set by [`Self::for_shared_reads`]: every read leaves out every Local
+    /// graph, the viewer's own included.
+    shared_reads: bool,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -570,6 +657,8 @@ impl PerspectiveInstance {
         });
 
         PerspectiveInstance {
+            viewer: None,
+            shared_reads: false,
             persisted: Arc::new(Mutex::new(handle.clone())),
             uuid: handle.uuid.clone(),
 
@@ -582,7 +671,10 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
-            changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
+            changed_predicates_and_graphs: Arc::new(Mutex::new((
+                ChangedPredicates::NoneRecorded,
+                ChangedGraphs::NoneRecorded,
+            ))),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
@@ -1205,7 +1297,7 @@ impl PerspectiveInstance {
         link_language_guard.is_some()
     }
 
-    async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
+    pub(crate) async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.uuid.clone();
 
         let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
@@ -1220,7 +1312,7 @@ impl PerspectiveInstance {
 
             if let Some(mut link_language) = link_language_clone {
                 log::debug!("💾 committing {} pending diffs...", pending_ids.len());
-                let commit_result = link_language.commit(pending_diffs).await;
+                let commit_result = link_language.commit(shareable(&pending_diffs)).await;
                 match commit_result {
                     // Spec §5.2 splits perspective-commit (write) from
                     // perspective-sync (revision read), so a spec-compliant
@@ -1316,7 +1408,9 @@ impl PerspectiveInstance {
                 })
                 .collect();
 
-            local_links.retain(|(_, status)| status == &LinkStatus::Shared);
+            local_links.retain(|(link, status)| {
+                status == &LinkStatus::Shared && !link.graph.as_deref().is_some_and(is_local_graph)
+            });
 
             // `current_revision()` returns `Ok(None)` both when the link language
             // genuinely has no committed revision yet AND when it lacks the
@@ -1464,6 +1558,12 @@ impl PerspectiveInstance {
     }
 
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+        let filtered = shareable(diff);
+        let had_links = !diff.additions.is_empty() || !diff.removals.is_empty();
+        if had_links && filtered.additions.is_empty() && filtered.removals.is_empty() {
+            return Ok(());
+        }
+        let diff = &filtered;
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
             log::debug!("commit({}): skipping — no neighbourhood", handle.uuid);
@@ -1568,14 +1668,22 @@ impl PerspectiveInstance {
                 log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
                 Ad4mDb::with_global_instance(|db|
-                    db.add_pending_diff(&handle_clone.uuid, &diff_clone)
+                    db.add_pending_diff(&handle_clone.uuid, &shareable(&diff_clone))
                 ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
         });
     }
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
-        // Deduplicate by (author, timestamp, source, predicate, target)
+        // Local graphs never sync, so a peer's link that names one is forged or
+        // misrouted. Drop it: it would land in an agent's private view.
+        let received = diff.additions.len() + diff.removals.len();
+        let diff = shareable(&diff);
+        let dropped = received - diff.additions.len() - diff.removals.len();
+        if dropped > 0 {
+            log::warn!("Dropped {} synced link(s) that name a Local graph", dropped);
+        }
+        // Deduplicate by (author, timestamp, source, predicate, target, graph)
         // Use structured keys to avoid delimiter collision issues
         let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut unique_additions: Vec<LinkExpression> = Vec::new();
@@ -1586,6 +1694,7 @@ impl PerspectiveInstance {
                 &link.data.source,
                 link.data.predicate.as_deref().unwrap_or(""),
                 &link.data.target,
+                link.graph.as_deref().unwrap_or(""),
             );
             let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
                 // Fallback to a simple hash if serialization fails
@@ -1605,6 +1714,7 @@ impl PerspectiveInstance {
                 &link.data.source,
                 link.data.predicate.as_deref().unwrap_or(""),
                 &link.data.target,
+                link.graph.as_deref().unwrap_or(""),
             );
             let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
                 // Fallback to a simple hash if serialization fails
@@ -1682,20 +1792,136 @@ impl PerspectiveInstance {
         super::publish_telepresence_signal(handle, signal, recipient_did).await;
     }
 
+    /// Test seam: plug in a link language, such as `languages::language::recording`.
+    #[cfg(test)]
+    pub(crate) async fn set_link_language_for_test(&self, language: Language) {
+        *self.link_language.write().await = Some(language);
+    }
+
+    /// Whether this instance's viewer reads the stored `link`. The executor's
+    /// own view (no viewer) reads no Local graph.
+    pub(crate) fn sees(&self, link: &DecoratedLinkExpression) -> bool {
+        link.graph.as_deref().is_none_or(|g| self.reads_graph(g))
+    }
+
+    /// Whether this instance reads named graph `iri`: not another agent's
+    /// Local graph, and no Local graph at all without a viewer or after
+    /// [`Self::for_shared_reads`].
+    fn reads_graph(&self, iri: &str) -> bool {
+        match self.viewer.as_deref() {
+            Some(viewer) if !self.shared_reads => graph_visible_to(iri, viewer),
+            _ => !is_local_graph(iri),
+        }
+    }
+
+    /// The stored copy of `requested` that a removal or an update acts on.
+    ///
+    /// One signed expression can sit in more than one graph: the reifier IRI
+    /// leaves the graph out, so an author who re-adds their own link with the
+    /// other status stores a second copy. Only the copies `visible` accepts
+    /// count. With one, that copy. With several, the one in the graph the
+    /// request names (the alias resolved for `viewer`; none = the default
+    /// graph), else an error: acting on whichever copy the store returns
+    /// first could remove a shared link when the Local one was meant.
+    fn stored_copy(
+        &self,
+        requested: &LinkExpression,
+        viewer: Option<&str>,
+        visible: impl Fn(&DecoratedLinkExpression) -> bool,
+    ) -> Result<StoredCopy, AnyError> {
+        let copies = self.sparql_store.get_link_copies(
+            &requested.data.source,
+            requested.data.predicate.as_deref(),
+            &requested.data.target,
+            &requested.author,
+            &requested.timestamp,
+        )?;
+        if copies.is_empty() {
+            return Ok(StoredCopy::Missing);
+        }
+        let mut seen: Vec<DecoratedLinkExpression> =
+            copies.into_iter().filter(|c| visible(c)).collect();
+        if seen.len() <= 1 {
+            return Ok(seen.pop().map_or(StoredCopy::Hidden, StoredCopy::Found));
+        }
+        let named = requested
+            .graph
+            .as_deref()
+            .map(|g| resolve_graph_for(g, viewer))
+            .transpose()?;
+        seen.into_iter()
+            .find(|c| c.graph == named)
+            .map(StoredCopy::Found)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Link is stored in more than one graph, none of them {}",
+                    named.as_deref().unwrap_or("the default graph")
+                )
+            })
+    }
+
+    /// Resolve the graph a write by `context` names, and the status its links
+    /// get. The Local alias becomes the writer's own Local graph, another
+    /// agent's Local graph is refused, the own graph of a Local subject becomes
+    /// that Local graph ([`Self::follow_local_subject`]), and links in a Local
+    /// graph are always `Local`, so they never reach the link language.
+    ///
+    /// A `Local` link always lives in its writer's Local graph, whatever graph
+    /// the write names, or none (#1357). Anywhere else every co-owner of the
+    /// perspective on this executor would read it.
+    fn resolve_write_graph(
+        &self,
+        graph: Option<String>,
+        status: LinkStatus,
+        context: &AgentContext,
+    ) -> Result<(Option<String>, LinkStatus), AnyError> {
+        if graph.is_none() && status == LinkStatus::Shared {
+            return Ok((None, status));
+        }
+        self.resolve_write_graph_for(graph, status, &did_for_context(context)?)
+    }
+
+    /// [`Self::resolve_write_graph`] for the writer DID `viewer`.
+    fn resolve_write_graph_for(
+        &self,
+        graph: Option<String>,
+        status: LinkStatus,
+        viewer: &str,
+    ) -> Result<(Option<String>, LinkStatus), AnyError> {
+        let Some(graph) = graph else {
+            return Ok(match status {
+                LinkStatus::Local => (Some(local_graph_iri(viewer)), status),
+                LinkStatus::Shared => (None, status),
+            });
+        };
+        let graph = self.follow_local_subject(resolve_graph_for(&graph, Some(viewer))?, viewer)?;
+        Ok(if local_graph_owner(&graph).is_some() {
+            (Some(graph), LinkStatus::Local)
+        } else if status == LinkStatus::Local {
+            (Some(local_graph_iri(viewer)), status)
+        } else {
+            (Some(graph), status)
+        })
+    }
+
     pub async fn add_link(
         &mut self,
         link: Link,
         status: LinkStatus,
         batch_id: Option<String>,
         context: &AgentContext,
+        graph: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         if let Some(ref email) = context.user_email {
             crate::billing::check_compute_credits(email)?;
         }
         link.validate()?;
-        let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
+        let (graph, status) = self.resolve_write_graph(graph, status, context)?;
+        let mut link_expr: LinkExpression =
+            create_signed_expression(link.normalize(), context)?.into();
+        link_expr.graph = graph;
         let result = self
-            .add_link_expression(link_expr, status, batch_id)
+            .add_resolved_link_expression(link_expr, status, batch_id)
             .await?;
 
         if let Some(ref email) = context.user_email {
@@ -1727,17 +1953,11 @@ impl PerspectiveInstance {
 
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
-            let decorated_link = self
-                .sparql_store
-                .get_link(
-                    &link_expression.data.source,
-                    link_expression.data.predicate.as_deref(),
-                    &link_expression.data.target,
-                    &link_expression.author,
-                    &link_expression.timestamp,
-                )?
-                .ok_or(anyhow!("Link not found"))?;
+            let StoredCopy::Found(decorated_link) =
+                self.stored_copy(&link_expression, self.viewer.as_deref(), |l| self.sees(l))?
+            else {
+                return Err(anyhow!("Link not found"));
+            };
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
             let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
@@ -1747,14 +1967,9 @@ impl PerspectiveInstance {
         } else {
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
-                &link_expression.data.source,
-                link_expression.data.predicate.as_deref(),
-                &link_expression.data.target,
-                &link_expression.author,
-                &link_expression.timestamp,
-            )? {
+            if let StoredCopy::Found(decorated_link) =
+                self.stored_copy(&link_expression, self.viewer.as_deref(), |l| self.sees(l))?
+            {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
@@ -1785,9 +2000,11 @@ impl PerspectiveInstance {
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
         // Every write reaches here, local or synced, so this is where a local
-        // change to a flow definition queues the re-derivation that a synced
-        // one gets from `diff_from_link_language`. A no-op for anything else.
-        self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        // change to a flow definition (or, on a co-owned perspective, any flow
+        // write) queues the re-derivation that a synced one gets from
+        // `diff_from_link_language`. A no-op for anything else.
+        self.schedule_flow_pass_on_local_write(&decorated_diff)
+            .await;
 
         // Get handle without holding lock during pubsub operations
         let handle = {
@@ -1801,7 +2018,8 @@ impl PerspectiveInstance {
 
         if let Some(owners) = owners_list {
             for link in &decorated_diff.additions {
-                for owner in owners {
+                // A link in an agent's Local graph reaches only that agent.
+                for owner in owners.iter().filter(|o| link_visible_to(link, o.as_str())) {
                     pubsub
                         .publish(
                             &PERSPECTIVE_LINK_ADDED_TOPIC,
@@ -1818,7 +2036,7 @@ impl PerspectiveInstance {
 
             // Publish link removed events - one per owner for proper multi-user isolation
             for link in &decorated_diff.removals {
-                for owner in owners {
+                for owner in owners.iter().filter(|o| link_visible_to(link, o.as_str())) {
                     pubsub
                         .publish(
                             &PERSPECTIVE_LINK_REMOVED_TOPIC,
@@ -1836,7 +2054,11 @@ impl PerspectiveInstance {
             // For perspectives without explicit owners (main agent), publish with main agent DID
             let main_agent_did = crate::agent::did();
 
-            for link in &decorated_diff.additions {
+            for link in decorated_diff
+                .additions
+                .iter()
+                .filter(|l| link_visible_to(l, &main_agent_did))
+            {
                 pubsub
                     .publish(
                         &PERSPECTIVE_LINK_ADDED_TOPIC,
@@ -1850,7 +2072,11 @@ impl PerspectiveInstance {
                     .await;
             }
 
-            for link in &decorated_diff.removals {
+            for link in decorated_diff
+                .removals
+                .iter()
+                .filter(|l| link_visible_to(l, &main_agent_did))
+            {
                 pubsub
                     .publish(
                         &PERSPECTIVE_LINK_REMOVED_TOPIC,
@@ -1866,7 +2092,34 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Add a link a client signed itself. Its graph gets the rules of
+    /// [`Self::add_link`] ([`Self::resolve_write_graph`]), written for this
+    /// instance's viewer, or for the main agent on the executor's own instance:
+    /// a Local link always lives in a Local graph, and the own graph of a
+    /// Local subject is that Local graph.
     pub async fn add_link_expression(
+        &mut self,
+        link_expression: LinkExpression,
+        status: LinkStatus,
+        batch_id: Option<String>,
+    ) -> Result<DecoratedLinkExpression, AnyError> {
+        let mut link_expression = link_expression;
+        let mut status = status;
+        if link_expression.graph.is_some() || status == LinkStatus::Local {
+            let writer = match self.viewer.clone() {
+                Some(viewer) => viewer,
+                None => did_for_context(&AgentContext::main_agent())?,
+            };
+            (link_expression.graph, status) =
+                self.resolve_write_graph_for(link_expression.graph.take(), status, &writer)?;
+        }
+        self.add_resolved_link_expression(link_expression, status, batch_id)
+            .await
+    }
+
+    /// Store `link_expression` in the graph it names, which the caller has
+    /// already resolved ([`Self::resolve_write_graph`]).
+    async fn add_resolved_link_expression(
         &mut self,
         link_expression: LinkExpression,
         status: LinkStatus,
@@ -1937,6 +2190,7 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
         context: &AgentContext,
+        graph: Option<String>,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         if let Some(ref email) = context.user_email {
             crate::billing::check_compute_credits(email)?;
@@ -1944,9 +2198,16 @@ impl PerspectiveInstance {
         for link in &links {
             link.validate()?;
         }
+        let (graph, status) = self.resolve_write_graph(graph, status, context)?;
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
-            .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
+            .map(|l| {
+                create_signed_expression(l.normalize(), context).map(|e| {
+                    let mut le = LinkExpression::from(e);
+                    le.graph = graph.clone();
+                    le
+                })
+            })
             .collect();
         let link_expressions = link_expressions?;
 
@@ -2022,7 +2283,9 @@ impl PerspectiveInstance {
         mutations: LinkMutations,
         status: LinkStatus,
         context: &AgentContext,
+        graph: Option<String>,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
+        let (graph, status) = self.resolve_write_graph(graph, status, context)?;
         if !mutations.additions.is_empty() {
             if let Some(ref email) = context.user_email {
                 crate::billing::check_compute_credits(email)?;
@@ -2035,13 +2298,32 @@ impl PerspectiveInstance {
         let additions = addition_links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context))
-            .map(|r| r.map(LinkExpression::from))
+            .map(|r| {
+                r.map(|e| {
+                    let mut link = LinkExpression::from(e);
+                    link.graph = graph.clone();
+                    link
+                })
+            })
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
-        let removals = mutations
-            .removals
-            .into_iter()
-            .map(LinkExpression::try_from)
-            .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+        // A removal acts on the stored link: its graph and status come from the
+        // store, not from the caller's copy, which may name the alias or no
+        // graph at all.
+        let viewer = did_for_context(context)?;
+        let mut removals = Vec::new();
+        for requested in mutations.removals {
+            let requested = LinkExpression::try_from(requested)?;
+            match self.stored_copy(&requested, Some(&viewer), |l| link_visible_to(l, &viewer))? {
+                StoredCopy::Hidden => return Err(anyhow!("Link not found")),
+                StoredCopy::Found(stored) => removals.push(LinkExpression::from(stored)),
+                // Not stored here: nothing to remove from a Local graph.
+                StoredCopy::Missing if requested.graph.as_deref().is_some_and(is_local_graph) => {}
+                StoredCopy::Missing => removals.push(LinkExpression {
+                    status: Some(status.clone()),
+                    ..requested
+                }),
+            }
+        }
 
         let store_diff = PerspectiveDiff::from(
             additions
@@ -2052,14 +2334,7 @@ impl PerspectiveInstance {
                     l
                 })
                 .collect(),
-            removals
-                .iter()
-                .cloned()
-                .map(|mut l| {
-                    l.status = Some(status.clone());
-                    l
-                })
-                .collect(),
+            removals.clone(),
         );
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: additions
@@ -2067,9 +2342,11 @@ impl PerspectiveInstance {
                 .map(|l| DecoratedLinkExpression::from((l, status.clone())))
                 .collect::<Vec<DecoratedLinkExpression>>(),
             removals: removals
-                .clone()
                 .into_iter()
-                .map(|l| DecoratedLinkExpression::from((l, status.clone())))
+                .map(|l| {
+                    let status = l.status.clone().unwrap_or(LinkStatus::Local);
+                    DecoratedLinkExpression::from((l, status))
+                })
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
 
@@ -2123,36 +2400,43 @@ impl PerspectiveInstance {
         }
         let handle = self.persisted.lock().await.clone();
 
-        // Query SPARQL store
-        let decorated_link_option = self.sparql_store.get_link(
-            &old_link.data.source,
-            old_link.data.predicate.as_deref(),
-            &old_link.data.target,
-            &old_link.author,
-            &old_link.timestamp,
-        )?;
+        // `stored` carries the graph the old link lives in; the caller's copy may
+        // not. A link in another agent's Local graph does not exist for the caller.
+        let viewer = did_for_context(context)?;
+        let (stored, link_status) =
+            match self.stored_copy(&old_link, Some(&viewer), |l| link_visible_to(l, &viewer))? {
+                StoredCopy::Found(decorated) => {
+                    let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
+                    (LinkExpression::from(decorated), status)
+                }
+                StoredCopy::Missing | StoredCopy::Hidden => {
+                    return Err(AnyError::msg(format!(
+                        "NH [{}] ({}) Link not found in perspective \"{}\": {:?}",
+                        handle
+                            .shared_url
+                            .clone()
+                            .unwrap_or("not-shared".to_string()),
+                        handle.name.clone().unwrap_or("<no name>".to_string()),
+                        handle.uuid,
+                        old_link
+                    )))
+                }
+            };
 
-        let (_link, link_status) = match decorated_link_option {
-            Some(decorated) => {
-                let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
-                (LinkExpression::from(decorated), status)
-            }
-            None => {
-                return Err(AnyError::msg(format!(
-                    "NH [{}] ({}) Link not found in perspective \"{}\": {:?}",
-                    handle
-                        .shared_url
-                        .clone()
-                        .unwrap_or("not-shared".to_string()),
-                    handle.name.clone().unwrap_or("<no name>".to_string()),
-                    handle.uuid,
-                    old_link
-                )))
-            }
-        };
-
-        let new_link_expression =
+        let old_link = stored;
+        // The replacement stays in the old link's graph. A Local link stored
+        // outside a Local graph (written before #1357) moves into the writer's.
+        let mut new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
+        new_link_expression.graph = match old_link.graph.clone() {
+            graph
+                if link_status == LinkStatus::Local
+                    && !graph.as_deref().is_some_and(is_local_graph) =>
+            {
+                Some(local_graph_iri(&viewer))
+            }
+            graph => graph,
+        };
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -2189,15 +2473,19 @@ impl PerspectiveInstance {
             self.update_prolog_engines(decorated_diff.clone()).await;
 
             // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep here.
-            self.schedule_flow_pass_on_definition_change(&decorated_diff);
+            // `pubsub_publish_diff`, so it queues the sweep here.
+            self.schedule_flow_pass_on_local_write(&decorated_diff)
+                .await;
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
             let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
 
             if let Some(owners) = owners_list {
-                for owner in owners {
+                for owner in owners
+                    .iter()
+                    .filter(|o| link_visible_to(&decorated_new_link_expression, o.as_str()))
+                {
                     pubsub
                         .publish(
                             &PERSPECTIVE_LINK_UPDATED_TOPIC,
@@ -2211,7 +2499,7 @@ impl PerspectiveInstance {
                         )
                         .await;
                 }
-            } else {
+            } else if link_visible_to(&decorated_new_link_expression, &crate::agent::did()) {
                 // For perspectives without explicit owners (main agent), publish with main agent DID
                 let main_agent_did = crate::agent::did();
                 pubsub
@@ -2258,14 +2546,9 @@ impl PerspectiveInstance {
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
-                &link.data.source,
-                link.data.predicate.as_deref(),
-                &link.data.target,
-                &link.author,
-                &link.timestamp,
-            )? {
+            if let StoredCopy::Found(decorated_link) =
+                self.stored_copy(&link, self.viewer.as_deref(), |l| self.sees(l))?
+            {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));
@@ -2386,11 +2669,16 @@ impl PerspectiveInstance {
             uuid
         );
         // Query for SHACL class definition links
-        let shacl_class_links = self.get_links_local(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })?;
+        // Classes act for every agent: a Local graph never declares one.
+        let shacl_class_links: Vec<_> = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })?
+            .into_iter()
+            .filter(|(link, _)| !link.graph.as_deref().is_some_and(is_local_graph))
+            .collect();
         log::debug!(
             "🔶 get_subject_classes_from_shacl: Found {} links",
             shacl_class_links.len()
@@ -2483,13 +2771,23 @@ impl PerspectiveInstance {
                         signature: decorated.proof.signature,
                     },
                     status: Some(status.clone()),
+                    graph: decorated.graph,
                 };
                 (link_expr, status)
             })
             .collect())
     }
 
+    /// The links matching `q`, as this instance's viewer sees them (see
+    /// [`Self::for_viewer`]). The shared instance reads no Local graph.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.get_links_for(q).await
+    }
+
+    async fn get_links_unscoped(
+        &self,
+        q: &LinkQuery,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let mut reverse = false;
         let mut query = q.clone();
 
@@ -2558,6 +2856,103 @@ impl PerspectiveInstance {
         });
 
         Ok(links)
+    }
+
+    /// [`Self::get_links`] as this instance reads it ([`Self::sees`]): the
+    /// graphs it doesn't read left out. When the store holds such graphs, a
+    /// `limit` applies after the filter, so a page never comes back short.
+    async fn get_links_for(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        if self
+            .sparql_store
+            .named_graphs()?
+            .iter()
+            .all(|g| self.reads_graph(g))
+        {
+            return self.get_links_unscoped(q).await;
+        }
+        let mut unlimited = q.clone();
+        unlimited.limit = None;
+        let mut links = self.get_links_unscoped(&unlimited).await?;
+        links.retain(|l| self.sees(l));
+        if let Some(limit) = q.limit {
+            links.truncate(limit as usize);
+        }
+        Ok(links)
+    }
+
+    /// The graph scope a read by `context` runs in: the graphs it asked for,
+    /// checked against its view, or everything but other agents' Local graphs.
+    /// See [`SparqlStore::visible_scope`].
+    pub fn read_scope(
+        &self,
+        context: &AgentContext,
+        requested: Option<&[String]>,
+    ) -> Result<Option<Vec<String>>, AnyError> {
+        self.sparql_store
+            .visible_scope(Some(&did_for_context(context)?), requested)
+    }
+
+    /// This instance, reading as `viewer`: other agents' Local graphs leave
+    /// every read, and the viewer's own joins them. Request handlers call it on
+    /// the clone they serve a request with; the shared instance reads the
+    /// shared graphs only.
+    pub fn for_viewer(mut self, viewer: String) -> Self {
+        self.viewer = Some(viewer);
+        self
+    }
+
+    /// This instance, reading shared graphs only: every Local graph leaves
+    /// every read, the viewer's own included. For background work that writes
+    /// what it reads into shared graphs, such as an auto-processor pass. It
+    /// doesn't depend on what an unscoped read covers.
+    pub fn for_shared_reads(mut self) -> Self {
+        self.shared_reads = true;
+        self
+    }
+
+    /// This instance, reading as `viewer` with their own Local graph, even if
+    /// it came from [`Self::for_shared_reads`]. For work that keeps its
+    /// agent's own bookkeeping in their Local graph and writes nothing it
+    /// reads into a shared graph: a flow pass, whose cache and fired marks
+    /// are Local (#1360).
+    pub(crate) fn for_own_bookkeeping(mut self, viewer: String) -> Self {
+        self.viewer = Some(viewer);
+        self.shared_reads = false;
+        self
+    }
+
+    /// Whether this instance came from [`Self::for_shared_reads`].
+    pub(crate) fn reads_shared_graphs_only(&self) -> bool {
+        self.shared_reads
+    }
+
+    /// The graph scope a read on this instance runs in: [`Self::read_scope`]
+    /// for the instance's viewer. Without a viewer, or after
+    /// [`Self::for_shared_reads`], no Local graph: a requested one is refused.
+    pub(crate) fn scope_for(
+        &self,
+        requested: Option<&[String]>,
+    ) -> Result<Option<Vec<String>>, AnyError> {
+        let scope = match &self.viewer {
+            Some(viewer) => self.sparql_store.visible_scope(Some(viewer), requested)?,
+            None => requested.filter(|r| !r.is_empty()).map(<[String]>::to_vec),
+        };
+        if self.viewer.is_some() && !self.shared_reads {
+            return Ok(scope);
+        }
+        let requested = requested.is_some_and(|r| !r.is_empty());
+        match scope {
+            Some(graphs) if requested => {
+                if let Some(local) = graphs.iter().find(|g| is_local_graph(g)) {
+                    return Err(anyhow!("A shared read cannot read Local graph {}", local));
+                }
+                Ok(Some(graphs))
+            }
+            Some(graphs) => Ok(Some(
+                graphs.into_iter().filter(|g| !is_local_graph(g)).collect(),
+            )),
+            None => Ok(self.sparql_store.shared_scope()?),
+        }
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
@@ -2839,12 +3234,12 @@ impl PerspectiveInstance {
             target: sdna_code.clone(),
         });
 
-        self.add_links(sdna_links, LinkStatus::Shared, None, context)
+        self.add_links(sdna_links, LinkStatus::Shared, None, context, None)
             .await?;
 
         // Handle SHACL links if SHACL JSON provided explicitly
         if let Some(shacl_links) = shacl_links {
-            self.add_links(shacl_links, LinkStatus::Shared, None, context)
+            self.add_links(shacl_links, LinkStatus::Shared, None, context, None)
                 .await?;
             // SHACL just changed for this class — drop any cached shape so the
             // next query re-parses against the fresh store state.
@@ -3585,7 +3980,66 @@ impl PerspectiveInstance {
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_arbitrary(&query)
+        self.sparql_query_with_graphs(query, None)
+    }
+
+    /// [`Self::sparql_query`] with optional graph scoping. Like it, this is the
+    /// entry point for caller-supplied SPARQL, so `?target` bindings come back
+    /// as stored, not re-encoded into the wire form. A viewer's query never
+    /// reaches another agent's Local graph.
+    pub fn sparql_query_with_graphs(
+        &self,
+        query: String,
+        graphs: Option<&[String]>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let scope = self.scope_for(graphs)?;
+        self.sparql_store
+            .query_arbitrary_with_graphs(&query, scope.as_deref())
+    }
+
+    /// List the named graph IRIs in this perspective the viewer reads: other
+    /// agents' Local graphs stay out.
+    pub fn named_graphs(&self) -> Result<Vec<String>, deno_core::anyhow::Error> {
+        let mut graphs = self.sparql_store.named_graphs()?;
+        graphs.retain(|g| self.reads_graph(g));
+        Ok(graphs)
+    }
+
+    /// Remove a named graph and all its quads
+    pub fn remove_graph(&self, graph_iri: &str) -> Result<(), deno_core::anyhow::Error> {
+        // 1. Find all subject IRIs within this graph (batch — single query)
+        let subjects_in_graph = self
+            .sparql_store
+            .query_with_graphs(
+                "SELECT DISTINCT ?s WHERE { ?s ?p ?o . FILTER(isIRI(?s)) }",
+                Some(&[graph_iri.to_string()]),
+            )
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "remove_graph: failed to enumerate subjects in graph {}: {}",
+                    graph_iri,
+                    e
+                );
+                "[]".to_string()
+            });
+
+        // Collect subject IRIs
+        let subject_iris: Vec<String> =
+            serde_json::from_str::<Vec<serde_json::Value>>(&subjects_in_graph)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v["s"].as_str().map(|s| s.to_string()))
+                .collect();
+
+        // 2. Remove the named graph and all its quads (fast — single oxigraph op)
+        self.sparql_store.remove_named_graph_and_quads(graph_iri)?;
+
+        // 3. Batch-remove incoming links from other graphs targeting deleted subjects
+        //    (single SPARQL query with VALUES clause, not N individual queries)
+        self.sparql_store
+            .remove_links_targeting_subjects(&subject_iris, self.viewer.as_deref())?;
+
+        Ok(())
     }
 
     /// Resolve each URI to every subject class it is an instance of, most
@@ -3607,7 +4061,13 @@ impl PerspectiveInstance {
         uris: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+        let scope = self.scope_for(None)?;
+        super::subject_classes_of::subject_classes_of(
+            &self.sparql_store,
+            &resolver,
+            uris,
+            scope.as_deref(),
+        )
     }
 
     /// Cancellation-aware async variant of [`Self::sparql_query`].
@@ -3621,7 +4081,21 @@ impl PerspectiveInstance {
         query: String,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_cancellable(&query, cancel).await
+        self.sparql_query_cancellable_with_graphs(query, None, cancel)
+            .await
+    }
+
+    /// [`Self::sparql_query_cancellable`] with optional graph scoping.
+    pub async fn sparql_query_cancellable_with_graphs(
+        &self,
+        query: String,
+        graphs: Option<Vec<String>>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let scope = self.scope_for(graphs.as_deref())?;
+        self.sparql_store
+            .query_cancellable_with_graphs(&query, scope, cancel)
+            .await
     }
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
@@ -3661,11 +4135,13 @@ impl PerspectiveInstance {
     ) -> Option<String> {
         let pending = self.staged_triples_for(source, batch_id).await;
         let resolver = self.shape_resolver();
+        let scope = self.scope_for(None).ok()?;
         let classes = super::subject_classes_of::subject_classes_of_with_pending(
             &self.sparql_store,
             &resolver,
             &[source.to_string()],
             &pending,
+            scope.as_deref(),
         )
         .ok()?;
         for class_name in classes.get(source)? {
@@ -3794,6 +4270,7 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
         context: &AgentContext,
+        graph: Option<String>,
     ) -> Result<(), AnyError> {
         let strategy_name = match self
             .ordering_strategy_for(source, predicate, batch_id.as_deref())
@@ -3884,7 +4361,8 @@ impl PerspectiveInstance {
             .collect();
 
         if !links.is_empty() {
-            self.add_links(links, status, batch_id, context).await?;
+            self.add_links(links, status, batch_id, context, graph)
+                .await?;
         }
         Ok(())
     }
@@ -3902,8 +4380,9 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         query_json: &str,
+        graph_iris: Option<&[String]>,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.model_query_within(class_name, query_json, graph_iris, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
@@ -3913,8 +4392,11 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         query_json: &str,
+        graph_iris: Option<&[String]>,
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
+        let graph_iris = self.scope_for(graph_iris)?;
+        let graph_iris = graph_iris.as_deref();
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
@@ -3994,6 +4476,7 @@ impl PerspectiveInstance {
                 shape.as_ref(),
                 &query_input,
                 &resolver,
+                graph_iris,
             )
             .await
             {
@@ -4024,13 +4507,16 @@ impl PerspectiveInstance {
         class_name: &str,
         instance_ids: &[String],
         property_names: Option<&[String]>,
+        graph_iris: Option<&[String]>,
     ) -> Result<String, deno_core::anyhow::Error> {
         let shape = self.get_shape(class_name)?;
+        let graph_iris = self.scope_for(graph_iris)?;
         let result = super::model_query::evaluate_getters_batch(
             &self.sparql_store,
             shape.as_ref(),
             instance_ids,
             property_names,
+            graph_iris.as_deref(),
         )?;
 
         serde_json::to_string(&result).map_err(|e| {
@@ -4080,39 +4566,64 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Record the predicates from a diff into `changed_predicates`.
-    /// `None` means "all predicates changed" (check everything).
+    /// Record the predicates and graphs from a diff into tracking state.
+    ///
+    /// Both fields are recorded under a single lock acquisition (see
+    /// `changed_predicates_and_graphs`) so a concurrent subscription-check
+    /// drain can never observe this diff's predicate update without its
+    /// graph update, or vice versa.
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
-        let mut changed = self.changed_predicates.lock().await;
+        let mut state = self.changed_predicates_and_graphs.lock().await;
+        let (changed, changed_graphs) = &mut *state;
 
         // If already CheckAll, it's sticky — nothing to do
-        if matches!(*changed, ChangedPredicates::CheckAll) {
-            return;
-        }
+        if !matches!(changed, ChangedPredicates::CheckAll) {
+            // Collect predicates from the diff
+            let mut new_preds = HashSet::new();
+            let mut has_predicate_less = false;
+            for link in diff.additions.iter().chain(diff.removals.iter()) {
+                if let Some(ref pred) = link.data.predicate {
+                    new_preds.insert(pred.clone());
+                } else {
+                    has_predicate_less = true;
+                    break;
+                }
+            }
 
-        // Collect predicates from the diff
-        let mut new_preds = HashSet::new();
-        let mut has_predicate_less = false;
-        for link in diff.additions.iter().chain(diff.removals.iter()) {
-            if let Some(ref pred) = link.data.predicate {
-                new_preds.insert(pred.clone());
+            if has_predicate_less {
+                *changed = ChangedPredicates::CheckAll;
             } else {
-                has_predicate_less = true;
-                break;
+                match changed {
+                    ChangedPredicates::NoneRecorded => {
+                        *changed = ChangedPredicates::Specific(new_preds);
+                    }
+                    ChangedPredicates::Specific(existing) => {
+                        existing.extend(new_preds);
+                    }
+                    ChangedPredicates::CheckAll => unreachable!(),
+                }
             }
         }
 
-        if has_predicate_less {
-            *changed = ChangedPredicates::CheckAll;
-        } else {
-            match &mut *changed {
-                ChangedPredicates::NoneRecorded => {
-                    *changed = ChangedPredicates::Specific(new_preds);
+        // Record changed graphs
+        for link in diff.additions.iter().chain(diff.removals.iter()) {
+            match &link.graph {
+                Some(g) => match changed_graphs {
+                    ChangedGraphs::NoneRecorded => {
+                        let mut set = HashSet::new();
+                        set.insert(g.clone());
+                        *changed_graphs = ChangedGraphs::Specific(set);
+                    }
+                    ChangedGraphs::Specific(existing) => {
+                        existing.insert(g.clone());
+                    }
+                    ChangedGraphs::DefaultGraphChanged => {
+                        // Already watching everything
+                    }
+                },
+                None => {
+                    *changed_graphs = ChangedGraphs::DefaultGraphChanged;
                 }
-                ChangedPredicates::Specific(existing) => {
-                    existing.extend(new_preds);
-                }
-                ChangedPredicates::CheckAll => unreachable!(),
             }
         }
     }
@@ -4293,7 +4804,7 @@ impl PerspectiveInstance {
             .collect())
     }
 
-    async fn calc_notification_trigger_matches(
+    pub(crate) async fn calc_notification_trigger_matches(
         &self,
     ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
         let uuid = self.uuid.clone();
@@ -4323,8 +4834,17 @@ impl PerspectiveInstance {
                 // silencing all notifications. This can happen with orphaned notifications
                 // from deleted users or corrupted data.
                 match {
-                    let query = n.trigger.clone();
-                    let result_json = self.sparql_store.query(&query);
+                    // A trigger reads as the agent the notification belongs to.
+                    let context = match &n.user_email {
+                        Some(email) => AgentContext::for_user_email(email.clone()),
+                        None => AgentContext::main_agent(),
+                    };
+                    let result_json = did_for_context(&context)
+                        .and_then(|did| self.sparql_store.visible_scope(Some(&did), None))
+                        .and_then(|scope| {
+                            self.sparql_store
+                                .query_with_graphs(&n.trigger, scope.as_deref())
+                        });
                     match result_json {
                         Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
                             .map_err(|e| anyhow::anyhow!(e)),
@@ -4397,7 +4917,7 @@ impl PerspectiveInstance {
             .collect()
     }
 
-    async fn publish_notification_matches(
+    pub(crate) async fn publish_notification_matches(
         uuid: String,
         match_map: BTreeMap<Notification, Vec<serde_json::Value>>,
     ) {
@@ -4406,6 +4926,24 @@ impl PerspectiveInstance {
                 // Convert matches to JSON string
                 let trigger_match =
                     serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
+                // The trigger ran as the notification's agent, so only that
+                // agent may receive the match (see `matches_notification_owner`).
+                let owner = match &notification.user_email {
+                    Some(email) => AgentContext::for_user_email(email.clone()),
+                    None => AgentContext::main_agent(),
+                };
+                let owner_did = match did_for_context(&owner) {
+                    Ok(did) => did,
+                    Err(e) => {
+                        log::error!(
+                            "Notification {} in perspective {}: no DID for its owner {:?}: {e:#}",
+                            notification.id,
+                            uuid,
+                            notification.user_email
+                        );
+                        continue;
+                    }
+                };
 
                 let payload = NotificationTriggeredEvent {
                     perspective_uuid: uuid.clone(),
@@ -4414,6 +4952,7 @@ impl PerspectiveInstance {
                         perspective_id: uuid.clone(),
                         trigger_match,
                     },
+                    owner_did,
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();
@@ -4824,6 +5363,62 @@ impl PerspectiveInstance {
         }
     }
 
+    /// The named graph `subject` lives in: the graph of its stored links, when
+    /// they all share one. `None` for a new subject, a default-graph one, or one
+    /// whose links span graphs (a shared subject with a private annotation stays
+    /// shared).
+    /// Only links that `keep` accepts count.
+    fn graph_of_subject(
+        &self,
+        subject: &str,
+        keep: impl Fn(&DecoratedLinkExpression) -> bool,
+    ) -> Result<Option<String>, AnyError> {
+        let links = self
+            .sparql_store
+            .query_links(Some(subject), None, None, None, None, None)?;
+        let mut graphs = links.iter().filter(|l| keep(l)).map(|l| l.graph.as_deref());
+        let first = graphs.next().flatten();
+        Ok(match first {
+            Some(graph) if graphs.all(|g| g == Some(graph)) => Some(graph.to_string()),
+            _ => None,
+        })
+    }
+
+    /// The graph a write that names `graph` lands in. A write into the own
+    /// graph `ad4m://graph/<S>` of a subject S that lives in the writer's Local
+    /// graph goes to that Local graph: children of a Local instance stay Local.
+    ///
+    /// - S lives in the writer's Local graph when all its links the writer
+    ///   reads sit there. While `ad4m://graph/<S>` does not exist, the writer's
+    ///   own links decide, so a link someone else put elsewhere cannot flip it.
+    /// - Nobody may create the own graph of another agent's Local subject: that
+    ///   graph would pull the owner's later children into a shared graph.
+    fn follow_local_subject(&self, graph: String, viewer: &str) -> Result<String, AnyError> {
+        let Some(subject) = graph.strip_prefix("ad4m://graph/") else {
+            return Ok(graph);
+        };
+        let local = local_graph_iri(viewer);
+        let exists = self.sparql_store.contains_named_graph(&graph);
+        // Cheap index probe first: most writes name a subject with no Local links.
+        if self.sparql_store.graph_has_subject(&local, subject) {
+            let lives_in = |keep: &dyn Fn(&DecoratedLinkExpression) -> bool| {
+                self.graph_of_subject(subject, keep)
+                    .map(|g| g.as_deref() == Some(local.as_str()))
+            };
+            let local_subject = lives_in(&|l| link_visible_to(l, viewer))?
+                || (!exists && lives_in(&|l| l.author == viewer)?);
+            return Ok(if local_subject { local } else { graph });
+        }
+        if !exists {
+            if let Some(owner_graph) = self.graph_of_subject(subject, |_| true)? {
+                if is_local_graph(&owner_graph) {
+                    return Err(anyhow!("Cannot write into graph {}", graph));
+                }
+            }
+        }
+        Ok(graph)
+    }
+
     pub async fn execute_commands(
         &mut self,
         commands: Vec<Command>,
@@ -4831,7 +5426,20 @@ impl PerspectiveInstance {
         parameters: Vec<Parameter>,
         batch_id: Option<String>,
         context: &AgentContext,
+        graph: Option<String>,
     ) -> Result<(), AnyError> {
+        // A command on an existing subject that names no graph writes where the
+        // subject lives: an edit to a Local or per-instance-graph subject must not
+        // land in the default graph, from where it would sync. A Local subject
+        // stays Local even when the command names a graph: a client that loaded
+        // it without a scope only knows the model's default graph.
+        let viewer = did_for_context(context)?;
+        let stored = self.graph_of_subject(&expression, |l| link_visible_to(l, &viewer))?;
+        let graph = match (graph, stored) {
+            (_, Some(stored)) if is_local_graph(&stored) => Some(stored),
+            (Some(graph), _) => Some(self.follow_local_subject(graph, &viewer)?),
+            (None, stored) => stored,
+        };
         //let execute_start = std::time::Instant::now();
         //log::info!("⚙️ EXECUTE COMMANDS: Starting execution of {} commands for expression '{}', batch_id: {:?}",
         //    commands.len(), expression, batch_id);
@@ -4926,6 +5534,7 @@ impl PerspectiveInstance {
                         status,
                         batch_id.clone(),
                         context,
+                        graph.clone(),
                     )
                     .await?;
                 }
@@ -5006,6 +5615,7 @@ impl PerspectiveInstance {
                         status,
                         batch_id.clone(),
                         context,
+                        graph.clone(),
                     )
                     .await?;
                 }
@@ -5124,8 +5734,14 @@ impl PerspectiveInstance {
                         })
                         .collect();
                     if !new_links.is_empty() {
-                        self.add_links(new_links, status.clone(), batch_id.clone(), context)
-                            .await?;
+                        self.add_links(
+                            new_links,
+                            status.clone(),
+                            batch_id.clone(),
+                            context,
+                            graph.clone(),
+                        )
+                        .await?;
                     }
 
                     if let Some(ref pred) = predicate {
@@ -5137,6 +5753,7 @@ impl PerspectiveInstance {
                             status,
                             batch_id.clone(),
                             context,
+                            graph.clone(),
                         )
                         .await?;
                     }
@@ -5410,6 +6027,7 @@ impl PerspectiveInstance {
         initial_values: Option<serde_json::Value>,
         batch_id: Option<String>,
         context: &AgentContext,
+        graph: Option<String>,
     ) -> Result<(), AnyError> {
         //let create_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Starting create_subject for expression '{}' - batch_id: {:?}",
@@ -5534,6 +6152,7 @@ impl PerspectiveInstance {
             vec![],
             batch_id.clone(),
             context,
+            graph,
         )
         .await?;
 
@@ -5613,8 +6232,15 @@ impl PerspectiveInstance {
             return Ok(());
         }
 
-        self.execute_commands(commands, expression_address, vec![], batch_id, context)
-            .await
+        self.execute_commands(
+            commands,
+            expression_address,
+            vec![],
+            batch_id,
+            context,
+            None,
+        )
+        .await
     }
 
     pub async fn get_subject_data(
@@ -5786,6 +6412,7 @@ impl PerspectiveInstance {
     async fn send_subscription_update(
         &self,
         subscription_id: String,
+        subscriber_did: String,
         result: String,
         delay: Option<Duration>,
     ) {
@@ -5798,6 +6425,7 @@ impl PerspectiveInstance {
                 perspective_uuid: uuid.clone(),
                 uuid,
                 subscription_id,
+                subscriber_did,
                 result,
             };
             get_global_pubsub()
@@ -5849,8 +6477,14 @@ impl PerspectiveInstance {
         } else {
             crate::agent::AgentContext::main_agent()
         };
+        // No DID, no subscription: an update must name the session it is for.
+        let subscriber_did = did_for_context(&agent_context)?;
         let result_string = if is_sparql_query(&query) {
-            self.sparql_query(query.clone())?
+            // As the subscriber reads: their own Local graph in, others' out.
+            // The shared instance would refuse their Local graph (#1358).
+            self.clone()
+                .for_viewer(subscriber_did.clone())
+                .sparql_query_with_graphs(query.clone(), None)?
         } else {
             let initial_result = self
                 .prolog_query_subscription_with_context(query.clone(), &agent_context)
@@ -5864,13 +6498,22 @@ impl PerspectiveInstance {
             HashSet::new() // Prolog queries: always re-check
         };
 
+        // Extract FROM graph IRIs from raw SPARQL subscriptions for automatic graph scoping
+        let graph_scope = if is_sparql_query(&query) {
+            extract_from_graph_iris(&query)
+        } else {
+            None
+        };
+
         let subscribed_query = SubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            subscriber_did,
             predicates,
             model_query_params: None,
+            graph_scope,
             holders: 1,
         };
 
@@ -5892,9 +6535,27 @@ impl PerspectiveInstance {
         class_name: String,
         query_json: String,
         user_email: Option<String>,
+        graph_iris: Option<Vec<String>>,
     ) -> Result<(String, String), AnyError> {
-        // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json).await?;
+        let agent_context = match user_email.as_ref() {
+            Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
+            None => crate::agent::AgentContext::main_agent(),
+        };
+        // No DID, no subscription: an update must name the session it is for.
+        let subscriber_did = did_for_context(&agent_context)?;
+        // Requested graphs, resolved for the subscriber (the Local alias becomes
+        // a concrete IRI), so change triggers compare against stored graphs.
+        let graph_iris = match graph_iris.filter(|g| !g.is_empty()) {
+            Some(requested) => self.read_scope(&agent_context, Some(&requested))?,
+            None => None,
+        };
+
+        // 1. Run the initial model query, as the subscriber reads.
+        let initial_result = self
+            .clone()
+            .for_viewer(subscriber_did.clone())
+            .model_query(&class_name, &query_json, graph_iris.as_deref())
+            .await?;
 
         // 2. Build trigger SPARQL from shape predicates resolved through the cache.
         let trigger_predicates =
@@ -5917,7 +6578,7 @@ impl PerspectiveInstance {
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
 
-        // 3. Check for existing subscription with same params
+        // 3. Check for existing subscription with same params (including graph_iris)
         let existing_subscription = {
             let queries = self.subscribed_queries.lock().await;
             queries
@@ -5926,6 +6587,7 @@ impl PerspectiveInstance {
                     if let Some(ref params) = q.model_query_params {
                         params.class_name == class_name
                             && params.query_json == query_json
+                            && params.graph_iris == graph_iris
                             && q.user_email == user_email
                     } else {
                         false
@@ -5958,11 +6620,14 @@ impl PerspectiveInstance {
             last_result: initial_result.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            subscriber_did,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
                 class_name,
                 query_json,
+                graph_iris: graph_iris.clone(),
             }),
+            graph_scope: graph_iris,
             holders: 1,
         };
 
@@ -6087,7 +6752,11 @@ impl PerspectiveInstance {
         Ok(found)
     }
 
-    async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
+    async fn check_subscribed_queries(
+        &self,
+        changed_predicates: ChangedPredicates,
+        changed_graphs: ChangedGraphs,
+    ) {
         let mut queries_to_remove = Vec::new();
         let mut query_futures: Vec<
             std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
@@ -6095,7 +6764,7 @@ impl PerspectiveInstance {
         let now = Instant::now();
 
         // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
-        // and model_query_params (if this is a model subscription).
+        // model_query_params, and graph_scope.
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
@@ -6109,13 +6778,22 @@ impl PerspectiveInstance {
                         query.last_keepalive,
                         query.predicates.clone(),
                         query.model_query_params.clone(),
+                        query.graph_scope.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries
+        for (
+            id,
+            query_string,
+            user_email,
+            last_keepalive,
+            sub_predicates,
+            model_params,
+            graph_scope,
+        ) in queries
         {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
@@ -6143,14 +6821,46 @@ impl PerspectiveInstance {
                 continue;
             }
 
+            // Graph scope filtering: if this subscription watches specific graphs,
+            // skip if none of the changed graphs overlap.
+            if let Some(ref scope) = graph_scope {
+                if !scope.is_empty() {
+                    match &changed_graphs {
+                        ChangedGraphs::NoneRecorded => continue, // No graph changes at all
+                        ChangedGraphs::DefaultGraphChanged => {
+                            // Default graph changed — graph-scoped subs might still be
+                            // relevant if predicates overlap. Let query re-evaluate.
+                        }
+                        ChangedGraphs::Specific(changed) => {
+                            let scope_set: HashSet<&str> =
+                                scope.iter().map(|s| s.as_str()).collect();
+                            if changed.iter().all(|g| !scope_set.contains(g.as_str())) {
+                                continue; // No overlap with watched graphs
+                            }
+                        }
+                    }
+                }
+            }
+
             // Each future returns Option<(id, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
-                let _agent_context = if let Some(email) = user_email {
+                let agent_context = if let Some(email) = user_email {
                     crate::agent::AgentContext::for_user_email(email)
                 } else {
                     crate::agent::AgentContext::main_agent()
+                };
+                // Read as the subscriber, recomputed on every run: graphs created
+                // since the subscription started belong in it, and other agents'
+                // Local graphs never do. The shared instance reads no Local graph
+                // at all (#1358), the subscriber's own included.
+                let view = match did_for_context(&agent_context) {
+                    Ok(did) => self_clone.for_viewer(did),
+                    Err(e) => {
+                        log::error!("❌ 🔗 subscription has no DID to read as: {}", e);
+                        return None;
+                    }
                 };
 
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
@@ -6160,8 +6870,13 @@ impl PerspectiveInstance {
                 // subscription's update. A class still missing fails this pass
                 // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
-                    match self_clone
-                        .model_query_within(&params.class_name, &params.query_json, Duration::ZERO)
+                    match view
+                        .model_query_within(
+                            &params.class_name,
+                            &params.query_json,
+                            params.graph_iris.as_deref(),
+                            Duration::ZERO,
+                        )
                         .await
                     {
                         Ok(r) => r,
@@ -6171,7 +6886,7 @@ impl PerspectiveInstance {
                         }
                     }
                 } else if is_sparql_query(&query_string) {
-                    match self_clone.sparql_query(query_string) {
+                    match view.sparql_query_with_graphs(query_string, None) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
@@ -6179,8 +6894,8 @@ impl PerspectiveInstance {
                         }
                     }
                 } else {
-                    match self_clone
-                        .prolog_query_subscription_with_context(query_string, &_agent_context)
+                    match view
+                        .prolog_query_subscription_with_context(query_string, &agent_context)
                         .await
                     {
                         Ok(result) => prolog_resolution_to_string(result),
@@ -6216,7 +6931,11 @@ impl PerspectiveInstance {
                             new_len
                         );
                         stored_query.last_result = result_string.clone();
-                        updates_to_send.push((id, result_string));
+                        updates_to_send.push((
+                            id,
+                            stored_query.subscriber_did.clone(),
+                            result_string,
+                        ));
                     } else {
                         log::trace!(
                             "📭 🔗 subscription {} result unchanged (len={})",
@@ -6229,8 +6948,9 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, result_string) in updates_to_send {
-            self.send_subscription_update(id, result_string, None).await;
+        for (id, subscriber_did, result_string) in updates_to_send {
+            self.send_subscription_update(id, subscriber_did, result_string, None)
+                .await;
         }
 
         // Remove timed out queries and notify prolog service
@@ -6258,6 +6978,39 @@ impl PerspectiveInstance {
                 }
             }
         }
+    }
+
+    /// Whether a write since the last check is waiting for one. A write
+    /// records its predicates on a spawned task, so a test waits for this
+    /// before calling [`Self::check_subscriptions_now`].
+    #[cfg(test)]
+    pub(crate) fn subscription_check_pending(&self) -> bool {
+        self.trigger_prolog_subscription_check
+            .load(Ordering::Acquire)
+    }
+
+    /// One subscription check over the changes recorded since the last one.
+    /// The loop calls it after its debounce window; a test calls it directly.
+    pub(crate) async fn check_subscriptions_now(&self) {
+        // Reset the trigger AFTER the loop's debounce sleep, so triggers that
+        // arrived during the window are covered by this check.
+        self.trigger_prolog_subscription_check
+            .swap(false, Ordering::AcqRel);
+        // Drain both fields as a single atomic snapshot (one lock) —
+        // see `changed_predicates_and_graphs` for why this must not
+        // be two separate lock/replace operations.
+        let (changed_preds, changed_graphs) = std::mem::replace(
+            &mut *self.changed_predicates_and_graphs.lock().await,
+            (ChangedPredicates::NoneRecorded, ChangedGraphs::NoneRecorded),
+        );
+
+        log::debug!(
+            "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
+            self.uuid,
+            changed_preds
+        );
+        self.check_subscribed_queries(changed_preds, changed_graphs)
+            .await;
     }
 
     async fn subscribed_queries_loop(&self) {
@@ -6289,22 +7042,7 @@ impl PerspectiveInstance {
             if should_check {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
-
-                // Atomically reset trigger AFTER the sleep, so we catch any
-                // triggers that arrived during the debounce window.
-                self.trigger_prolog_subscription_check
-                    .swap(false, Ordering::AcqRel);
-                let changed_preds = std::mem::replace(
-                    &mut *self.changed_predicates.lock().await,
-                    ChangedPredicates::NoneRecorded,
-                );
-
-                log::debug!(
-                    "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
-                    self.uuid,
-                    changed_preds
-                );
-                self.check_subscribed_queries(changed_preds).await;
+                self.check_subscriptions_now().await;
             }
 
             // Periodic subscription logging and proactive timeout cleanup
@@ -6577,7 +7315,17 @@ impl PerspectiveInstance {
         };
 
         let uuid = self.uuid.clone();
-        let configs = match load_processors(self).await {
+        // The pass reads as the agent it runs for, and from shared graphs only:
+        // it writes what it extracts as Shared, so no Local graph may reach the
+        // LLM or the pass's output, the running agent's own included.
+        let view = match did_for_context(context) {
+            Ok(did) => self.clone().for_viewer(did).for_shared_reads(),
+            Err(e) => {
+                log::warn!("auto_processor_tick [{}]: no DID for the pass: {e:#}", uuid);
+                return watcher.has_pending();
+            }
+        };
+        let configs = match load_processors(&view).await {
             Ok(cs) => cs,
             Err(e) => {
                 log::warn!(
@@ -6594,7 +7342,7 @@ impl PerspectiveInstance {
         // 1. Record new-since-last-processed turns per config (payload kept).
         for cfg in &configs {
             let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
-                self,
+                &view,
                 &cfg.source_scope_query,
             )
             .await
@@ -6610,7 +7358,7 @@ impl PerspectiveInstance {
                 }
             };
             let processed = match load_processed_source_ids(
-                self,
+                &view,
                 &cfg.processor_id,
                 now_ms,
                 cfg.source_window_ms,
@@ -6667,7 +7415,7 @@ impl PerspectiveInstance {
                 ready = ready.with_agent_did(&me);
             }
             emit(ready).await;
-            let mut perspective_clone = self.clone();
+            let mut perspective_clone = view.clone();
             // Stall-fallback: if this batch has been standing down for its online
             // elected author past `claim_ttl_ms`, escalate past election straight
             // to the claim (the min-DID claim still prevents doubles among peers
@@ -6817,11 +7565,58 @@ impl PerspectiveInstance {
 
         let mut persist_diff = PerspectiveDiff::empty();
 
+        // A subject this batch puts wholly in a Local graph keeps its children
+        // there too: a write into its own graph `ad4m://graph/<S>` follows it,
+        // as `follow_local_subject` does for stored subjects.
+        let mut staged_graphs: HashMap<&str, HashSet<Option<&str>>> = HashMap::new();
+        for link in &diff.additions {
+            // Links into S's own graph are the ones that may follow S; they do
+            // not decide where S lives.
+            if link
+                .graph
+                .as_deref()
+                .and_then(|g| g.strip_prefix("ad4m://graph/"))
+                == Some(link.data.source.as_str())
+            {
+                continue;
+            }
+            staged_graphs
+                .entry(link.data.source.as_str())
+                .or_default()
+                .insert(link.graph.as_deref());
+        }
+        let local_subjects: HashMap<String, String> = staged_graphs
+            .into_iter()
+            .filter_map(
+                |(subject, graphs)| match graphs.into_iter().collect::<Vec<_>>()[..] {
+                    [Some(graph)] if is_local_graph(graph) => {
+                        Some((subject.to_string(), graph.to_string()))
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+
         // Process additions
-        for link in diff.additions {
-            let status = link.status.unwrap_or(LinkStatus::Shared);
+        for mut link in diff.additions {
+            if let Some(local) = link
+                .graph
+                .as_deref()
+                .and_then(|g| g.strip_prefix("ad4m://graph/"))
+                .and_then(|subject| local_subjects.get(subject))
+            {
+                link.graph = Some(local.clone());
+            }
+            // A link in a Local graph is Local, however it got into the batch.
+            let status = if link.graph.as_deref().is_some_and(is_local_graph) {
+                LinkStatus::Local
+            } else {
+                link.status.unwrap_or(LinkStatus::Shared)
+            };
             let signed_expr = create_signed_expression(link.data.normalize(), context)?;
             let mut stored = LinkExpression::from(signed_expr);
+            // Re-signing builds a fresh expression without a graph; keep the batched one.
+            stored.graph = link.graph;
             stored.status = Some(status.clone());
             persist_diff.additions.push(stored.clone());
             let decorated = DecoratedLinkExpression::from((stored, status.clone()));
@@ -6944,6 +7739,14 @@ mod tests {
     use fake::{Fake, Faker};
     use uuid::Uuid;
 
+    /// The instance as the main agent reads it, its own Local graph included.
+    /// The shared instance reads no Local graph (#1358).
+    fn as_main(perspective: &PerspectiveInstance) -> PerspectiveInstance {
+        perspective
+            .clone()
+            .for_viewer(did_for_context(&AgentContext::main_agent()).unwrap())
+    }
+
     async fn setup() -> PerspectiveInstance {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
@@ -7022,6 +7825,7 @@ mod tests {
                 params(&["we://a", "we://b"]),
                 Some(batch_id.clone()),
                 &context,
+                None,
             )
             .await
             .unwrap();
@@ -7033,6 +7837,7 @@ mod tests {
                 params(&["we://a", "we://b", "we://c"]),
                 Some(batch_id.clone()),
                 &context,
+                None,
             )
             .await
             .unwrap();
@@ -7111,6 +7916,7 @@ mod tests {
                 vec![],
                 Some(batch_id.clone()),
                 &context,
+                None,
             )
             .await
             .unwrap();
@@ -7127,6 +7933,7 @@ mod tests {
                 params,
                 Some(batch_id.clone()),
                 &context,
+                None,
             )
             .await
             .unwrap();
@@ -7238,6 +8045,7 @@ mod tests {
                     LinkStatus::Shared,
                     None,
                     &context,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -7265,6 +8073,7 @@ mod tests {
                     params,
                     Some(batch_id.clone()),
                     &context,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -7382,6 +8191,7 @@ mod tests {
                 LinkStatus::Shared,
                 None,
                 &context,
+                None,
             )
             .await
             .unwrap();
@@ -7408,6 +8218,7 @@ mod tests {
                 params,
                 Some(batch_id.clone()),
                 &context,
+                None,
             )
             .await
             .unwrap();
@@ -7479,6 +8290,7 @@ mod tests {
                     LinkStatus::Local,
                     None,
                     &AgentContext::main_agent(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -7486,7 +8298,7 @@ mod tests {
         }
 
         let query = LinkQuery::default();
-        let mut links = perspective.get_links(&query).await.unwrap();
+        let mut links = as_main(&perspective).get_links(&query).await.unwrap();
         assert_eq!(links.len(), 5);
         let mut all_links_sorted = all_links.clone();
         let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
@@ -7558,6 +8370,7 @@ mod tests {
                     LinkStatus::Shared,
                     None,
                     &AgentContext::main_agent(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -7589,13 +8402,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_link() {
-        let mut perspective = setup().await;
+        let mut perspective = as_main(&setup().await);
         let link = create_link();
         let status = LinkStatus::Local;
 
         // Add a link to the perspective
         let expression = perspective
-            .add_link(link.clone(), status, None, &AgentContext::main_agent())
+            .add_link(
+                link.clone(),
+                status,
+                None,
+                &AgentContext::main_agent(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -7744,6 +8563,7 @@ mod tests {
                 LinkStatus::Shared,
                 Some(batch_id.clone()),
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -7777,6 +8597,7 @@ mod tests {
                 LinkStatus::Shared,
                 None,
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -7823,6 +8644,7 @@ mod tests {
                 LinkStatus::Shared,
                 None,
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -7841,6 +8663,7 @@ mod tests {
                 LinkStatus::Shared,
                 Some(batch_id.clone()),
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -7850,6 +8673,7 @@ mod tests {
                 LinkStatus::Shared,
                 Some(batch_id.clone()),
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -7899,6 +8723,7 @@ mod tests {
             },
             proof: Default::default(),
             status: None,
+            graph: None,
         };
         let result = perspective
             .remove_link(non_existent_link.clone(), Some(batch_id.clone()))
@@ -7912,6 +8737,7 @@ mod tests {
                 LinkStatus::Shared,
                 Some("invalid".to_string()),
                 &AgentContext::main_agent(),
+                None,
             )
             .await;
         assert!(result.is_err());
@@ -7948,6 +8774,7 @@ mod tests {
                 vec![],
                 Some(batch_id.clone()),
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -8015,6 +8842,7 @@ mod tests {
                 Some(serde_json::json!({ "body": "hi" })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject");
@@ -8088,6 +8916,7 @@ mod tests {
                 })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject");
@@ -8206,7 +9035,7 @@ mod tests {
             uri: &str,
             predicate: &str,
         ) -> Vec<LinkStatus> {
-            perspective
+            as_main(perspective)
                 .get_links(&LinkQuery {
                     source: Some(uri.to_string()),
                     predicate: Some(predicate.to_string()),
@@ -8231,6 +9060,7 @@ mod tests {
                 Some(serde_json::json!({ "title": "first" })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject");
@@ -8265,6 +9095,7 @@ mod tests {
                 Some(serde_json::json!({ "state": "running", "marks": ["a", "b"] })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject");
@@ -8356,11 +9187,12 @@ mod tests {
                 Some(serde_json::json!({ "currentState": "started" })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject");
 
-        let links = perspective
+        let links = as_main(&perspective)
             .get_links(&LinkQuery {
                 source: Some("t://flow/1".to_string()),
                 predicate: Some("t://current_state".to_string()),
@@ -8790,7 +9622,12 @@ mod tests {
                 .expect("add Task");
         };
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, Duration::from_secs(10)),
+            perspective.model_query_within(
+                "Board",
+                NESTED_INCLUDE_QUERY,
+                None,
+                Duration::from_secs(10)
+            ),
             late_sync
         );
 
@@ -8815,7 +9652,7 @@ mod tests {
 
         let started = Instant::now();
         let err = perspective
-            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, None, budget)
             .await
             .expect_err("Task's shape never arrives");
         let elapsed = started.elapsed();
@@ -8844,7 +9681,7 @@ mod tests {
 
         let started = Instant::now();
         let err = perspective
-            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, None, budget)
             .await
             .expect_err("Task is not registered");
         let elapsed = started.elapsed();
@@ -8927,7 +9764,7 @@ mod tests {
         };
         let started = Instant::now();
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, SHARED_BUDGET),
+            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, None, SHARED_BUDGET),
             late_task
         );
         let elapsed = started.elapsed();
@@ -8961,7 +9798,7 @@ mod tests {
         };
         let started = Instant::now();
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, SHARED_BUDGET),
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, None, SHARED_BUDGET),
             late_board
         );
         let elapsed = started.elapsed();
@@ -8987,7 +9824,7 @@ mod tests {
 
         // No board has tasks yet, so hydration does not need `Task`.
         let (board_sub, _) = perspective
-            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None)
+            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None, None)
             .await
             .expect("subscribe to Board");
         let (other_sub, _) = perspective
@@ -9008,7 +9845,7 @@ mod tests {
 
         let started = Instant::now();
         perspective
-            .check_subscribed_queries(ChangedPredicates::CheckAll)
+            .check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::NoneRecorded)
             .await;
         let elapsed = started.elapsed();
 
@@ -9322,7 +10159,7 @@ mod tests {
             board
         );
         let result_json = perspective
-            .model_query("TaskBoard", &query_json)
+            .model_query("TaskBoard", &query_json, None)
             .await
             .expect("model_query");
         let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
@@ -9418,7 +10255,7 @@ mod tests {
             post_root
         );
         let result_json = perspective
-            .model_query("BlogPost", &query_json)
+            .model_query("BlogPost", &query_json, None)
             .await
             .expect("model_query");
         let result: serde_json::Value = serde_json::from_str(&result_json).expect("parse result");
@@ -9494,7 +10331,7 @@ mod tests {
 
         // First query warms the cache (load_shape fires once).
         let result_json = perspective
-            .model_query("Recipe", "{}")
+            .model_query("Recipe", "{}", None)
             .await
             .expect("first query");
         assert!(result_json.contains("\"instances\""));
@@ -9530,6 +10367,7 @@ mod tests {
                 LinkStatus::Shared,
                 Some(batch_id.clone()),
                 &AgentContext::main_agent(),
+                None,
             )
             .await
             .unwrap();
@@ -9598,7 +10436,13 @@ mod tests {
         for _ in 0..50 {
             let link = create_link();
             perspective
-                .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+                .add_link(
+                    link,
+                    LinkStatus::Shared,
+                    None,
+                    &AgentContext::main_agent(),
+                    None,
+                )
                 .await
                 .unwrap();
         }
@@ -9647,13 +10491,19 @@ mod tests {
         let mut perspective = setup().await;
         let link = create_link();
         perspective
-            .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+            .add_link(
+                link,
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+                None,
+            )
             .await
             .unwrap();
 
         // Uncancelled — should return JSON with at least the inserted triple.
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = perspective
+        let result = as_main(&perspective)
             .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
             .await
             .expect("non-cancelled query should succeed");

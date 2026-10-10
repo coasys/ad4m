@@ -34,6 +34,7 @@ fn signed(signer: &TestSigner, source: &str, target: &str) -> LinkExpression {
         data: signed.data,
         proof: signed.proof,
         status: Some(LinkStatus::Shared),
+        graph: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn a_canonical_re_insert_clears_the_earlier_wire_target() {
         data: canonical.data,
         proof: canonical.proof,
         status: Some(LinkStatus::Shared),
+        graph: None,
     })
     .unwrap();
 

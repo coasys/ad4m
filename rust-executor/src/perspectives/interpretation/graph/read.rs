@@ -297,12 +297,15 @@ pub async fn existing_instance_context(
             })?;
         }
         let query = query_obj.to_string();
-        let result_json = perspective.model_query(&class, &query).await.map_err(|e| {
-            anyhow::anyhow!(
-                "existing_instance_context: model_query({class}) failed — refusing to \
+        let result_json = perspective
+            .model_query(&class, &query, None)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "existing_instance_context: model_query({class}) failed — refusing to \
                  proceed because an empty existing-set here would silently break dedup: {e:#}"
-            )
-        })?;
+                )
+            })?;
         let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
             anyhow::anyhow!("existing_instance_context: bad model_query result for {class}: {e:#}")
         })?;
@@ -474,9 +477,10 @@ mod tests {
                 predicate: Some("ns://body".into()),
                 target: envelope,
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("seed envelope body link");
@@ -523,9 +527,10 @@ mod tests {
                     predicate: Some(predicate.into()),
                     target: target.into(),
                 },
-                LinkStatus::Local,
+                LinkStatus::Shared,
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("seed link");
@@ -631,9 +636,10 @@ mod tests {
                         predicate: Some("ns://contains".into()),
                         target: task.into(),
                     },
-                    LinkStatus::Local,
+                    LinkStatus::Shared,
                     None,
                     &ctx,
+                    None,
                 )
                 .await
                 .expect("parent link");

@@ -76,7 +76,7 @@ async fn two_replicas_with_the_same_links_derive_the_same_state() {
     let mut b = seed_review_flow().await;
     let mut proposal_links = Vec::new();
     for uri in [&h1, &h2, &h3] {
-        proposal_links.extend(links_of(&a, uri).await);
+        proposal_links.extend(synced_links_of(&a, uri).await);
     }
     proposal_links.reverse();
     for link in proposal_links {
@@ -169,6 +169,7 @@ async fn reject_leaves_a_forged_link_claiming_our_did_alone() {
                     signature: "not-a-signature".to_string(),
                 },
                 status: Some(LinkStatus::Shared),
+                graph: None,
             },
             LinkStatus::Shared,
             None,

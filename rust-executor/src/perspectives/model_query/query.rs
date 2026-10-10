@@ -61,6 +61,7 @@ pub(super) fn guarded_reach(
     predicate: &str,
     direction: ScopeDirection,
     guard: LinkGuard,
+    graph_iris: Option<&[String]>,
 ) -> Result<Vec<(String, String)>, Error> {
     let pred = format!("<{predicate}>");
     // `?s` is always the frontier end of the step, `?o` the node it reaches.
@@ -81,7 +82,8 @@ pub(super) fn guarded_reach(
             "SELECT ?s ?o WHERE {{ {step} {} }}",
             values_or_str_filter("s", &frontier)
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let rows: Vec<Value> =
+            serde_json::from_str(&store.query_with_graphs(&sparql, graph_iris)?)?;
         let mut next: Vec<String> = Vec::new();
         for row in &rows {
             let (Some(s), Some(o)) = (row["s"].as_str(), row["o"].as_str()) else {
@@ -168,6 +170,7 @@ async fn walk_levels(
     predicate: &str,
     direction: ScopeDirection,
     levels: &[usize],
+    graph_iris: Option<&[String]>,
 ) -> Result<Vec<String>, Error> {
     let mut ordered: Vec<String> = Vec::new();
     // Seeded with the roots so that a cycle back to an anchor neither returns
@@ -206,7 +209,9 @@ async fn walk_levels(
             break;
         };
 
-        let json = store.query_async(&pagination_subquery).await?;
+        let json = store
+            .query_with_graphs_async(&pagination_subquery, graph_iris)
+            .await?;
         let rows: Vec<Value> = serde_json::from_str(&json)?;
 
         // Slicing and de-duplication are one pass, not two, because a node that is not going to be
@@ -274,8 +279,9 @@ pub async fn execute_model_query(
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
+    graph_iris: Option<&[String]>,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, shape, query_input, resolver, 0).await
+    execute_model_query_inner(store, shape, query_input, resolver, 0, graph_iris).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -289,6 +295,7 @@ pub(super) async fn execute_model_query_inner(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    graph_iris: Option<&[String]>,
 ) -> Result<ModelQueryResult, Error> {
     if depth > MAX_INCLUDE_DEPTH {
         log::warn!(
@@ -353,6 +360,7 @@ pub(super) async fn execute_model_query_inner(
                         safe_pred,
                         *direction,
                         LinkGuard::of(query_input),
+                        graph_iris,
                     )?;
                     walked_input = ModelQueryInput {
                         walked: Some(pairs),
@@ -400,7 +408,7 @@ pub(super) async fn execute_model_query_inner(
         && all_where_pushable(query_input, shape, Some(resolver))
     {
         if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_with_graphs(&sparql, graph_iris)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
                 .first()
@@ -638,7 +646,7 @@ pub(super) async fn execute_model_query_inner(
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query_async(&sparql).await?;
+            let result_json = store.query_with_graphs_async(&sparql, graph_iris).await?;
             serde_json::from_str(&result_json)?
         }
         InstanceQueryPlan::TwoPhase {
@@ -662,11 +670,14 @@ pub(super) async fn execute_model_query_inner(
                         &predicate,
                         direction,
                         levels,
+                        graph_iris,
                     )
                     .await?
                 }
                 _ => {
-                    let page_json = store.query_async(&pagination_subquery).await?;
+                    let page_json = store
+                        .query_with_graphs_async(&pagination_subquery, graph_iris)
+                        .await?;
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
                         slice_per_anchor(&mut page_results, n);
@@ -705,7 +716,9 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 {link_status}{proof_valid}{local_status}}}"#
                     );
-                    let result_json = store.query_async(&property_sparql).await?;
+                    let result_json = store
+                        .query_with_graphs_async(&property_sparql, graph_iris)
+                        .await?;
                     serde_json::from_str(&result_json)?
                 }
             }
@@ -752,6 +765,7 @@ pub(super) async fn execute_model_query_inner(
             &reverse_rels,
             query_input.link_status.as_ref(),
             query_input.include_unverified,
+            graph_iris,
         )?;
     }
 
@@ -783,7 +797,7 @@ pub(super) async fn execute_model_query_inner(
         instances.len()
     } else if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
-            let result_json = store.query(&count_sparql)?;
+            let result_json = store.query_with_graphs(&count_sparql, graph_iris)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
                 .first()
@@ -853,6 +867,7 @@ pub(super) async fn execute_model_query_inner(
             deep_query,
             query_input.link_status.as_ref(),
             query_input.include_unverified,
+            graph_iris,
         )?;
     }
 
@@ -868,6 +883,7 @@ pub(super) async fn execute_model_query_inner(
                 depth,
                 query_input.link_status.as_ref(),
                 query_input.include_unverified,
+                graph_iris,
             )
             .await?;
         }
@@ -899,6 +915,7 @@ pub(super) async fn execute_model_query_inner(
         query_input.link_status.as_ref(),
         query_input.include_unverified,
         &mut final_instances,
+        graph_iris,
     )
     .await?;
 
@@ -913,6 +930,7 @@ pub(super) async fn execute_model_query_inner(
             depth,
             query_input.link_status.as_ref(),
             query_input.include_unverified,
+            graph_iris,
         )
         .await?;
     }

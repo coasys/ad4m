@@ -420,6 +420,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
+            graph: None,
         }];
 
         // Set up test data in the complete pool first

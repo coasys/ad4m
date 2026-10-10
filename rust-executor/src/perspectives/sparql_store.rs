@@ -8,7 +8,8 @@ use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
 const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
@@ -350,6 +351,126 @@ fn strip_html_fn(args: &[Term]) -> Option<Term> {
     Some(Literal::new_simple_literal(&result).into())
 }
 
+/// Construct the canonical named-graph IRI for a given base expression.
+pub fn make_graph_iri(base_expression: &str) -> String {
+    format!("ad4m://graph/{}", base_expression)
+}
+
+/// What a writer or reader names to mean "my own Local graph". The executor
+/// resolves it per caller to [`local_graph_iri`].
+pub const LOCAL_GRAPH_ALIAS: &str = "ad4m://local";
+
+/// Prefix of every agent's Local graph: `ad4m://local/<did>`.
+const LOCAL_GRAPH_PREFIX: &str = "ad4m://local/";
+
+/// Stands for the store's default graph in a graph list, so a scope can name
+/// it next to named graphs (see [`SparqlStore::visible_scope`]).
+pub const DEFAULT_GRAPH: &str = "ad4m://graph-default";
+
+/// The Local graph of the agent `did`. Links in it never sync, and only that
+/// agent reads them.
+pub fn local_graph_iri(did: &str) -> String {
+    format!("{}{}", LOCAL_GRAPH_PREFIX, did)
+}
+
+/// The agent whose Local graph `iri` names, or `None` for any other graph.
+pub fn local_graph_owner(iri: &str) -> Option<&str> {
+    iri.strip_prefix(LOCAL_GRAPH_PREFIX)
+        .filter(|did| !did.is_empty())
+}
+
+/// Whether `iri` names a Local graph (the alias or a concrete one).
+pub fn is_local_graph(iri: &str) -> bool {
+    iri == LOCAL_GRAPH_ALIAS || local_graph_owner(iri).is_some()
+}
+
+/// Whether `viewer` reads graph `iri`: false only for another agent's Local graph.
+pub fn graph_visible_to(iri: &str, viewer: &str) -> bool {
+    local_graph_owner(iri).is_none_or(|owner| owner == viewer)
+}
+
+/// Whether `viewer` reads `link`: false only for a link in another agent's
+/// Local graph.
+pub fn link_visible_to(link: &DecoratedLinkExpression, viewer: &str) -> bool {
+    link.graph
+        .as_deref()
+        .is_none_or(|g| graph_visible_to(g, viewer))
+}
+
+/// Resolve a graph named by `viewer`: the alias becomes the viewer's own Local
+/// graph, and another agent's Local graph is refused. `viewer: None` is the
+/// executor itself, which may name any graph but has no alias to resolve.
+pub fn resolve_graph_for(iri: &str, viewer: Option<&str>) -> Result<String, Error> {
+    if iri == LOCAL_GRAPH_ALIAS {
+        return viewer
+            .map(local_graph_iri)
+            .ok_or_else(|| anyhow!("{} needs a calling agent", LOCAL_GRAPH_ALIAS));
+    }
+    match (local_graph_owner(iri), viewer) {
+        (Some(owner), Some(did)) if owner != did => {
+            Err(anyhow!("Graph {} belongs to another agent", iri))
+        }
+        _ => Ok(iri.to_string()),
+    }
+}
+
+/// A scope entry as a dataset graph: [`DEFAULT_GRAPH`] is the store's default
+/// graph, anything else a named graph.
+fn scope_graph_name(iri: &str) -> GraphName {
+    if iri == DEFAULT_GRAPH {
+        GraphName::DefaultGraph
+    } else {
+        GraphName::NamedNode(NamedNode::new_unchecked(iri))
+    }
+}
+
+/// Keep a query that declares its own dataset (`FROM`, `FROM NAMED`) or uses
+/// `GRAPH` out of the Local graphs outside `scope`. The query keeps its own
+/// dataset otherwise: `GRAPH ?g` ranges over every other named graph of the
+/// store (`named`), and a declared Local graph outside the scope is refused.
+fn restrict_dataset_to_scope(
+    dataset: &mut oxigraph::sparql::QueryDataset,
+    scope: &[String],
+    named: &[String],
+) -> Result<(), Error> {
+    let hidden: HashSet<&str> = named
+        .iter()
+        .filter(|g| local_graph_owner(g).is_some() && !scope.contains(g))
+        .map(String::as_str)
+        .collect();
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let is_hidden = |g: &str| hidden.contains(g.trim_start_matches('<').trim_end_matches('>'));
+    let declared = dataset
+        .default_graph_graphs()
+        .into_iter()
+        .flatten()
+        .map(|g| g.to_string())
+        .chain(
+            dataset
+                .available_named_graphs()
+                .into_iter()
+                .flatten()
+                .map(|g| g.to_string()),
+        );
+    for g in declared {
+        if is_hidden(&g) {
+            return Err(anyhow!("The query reads graph {} outside its scope", g));
+        }
+    }
+    if dataset.available_named_graphs().is_none() {
+        dataset.set_available_named_graphs(
+            named
+                .iter()
+                .filter(|g| !hidden.contains(g.as_str()))
+                .map(|g| NamedNode::new_unchecked(g).into())
+                .collect(),
+        );
+    }
+    Ok(())
+}
+
 /// Validates that a SPARQL query is read-only by parsing it with the SPARQL parser.
 /// Only SELECT, ASK, CONSTRUCT, and DESCRIBE queries are accepted.
 /// UPDATE operations (INSERT, DELETE, DROP, etc.) will fail to parse as a Query.
@@ -425,6 +546,8 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 #[derive(Clone)]
 pub struct SparqlStore {
     store: Arc<Store>,
+    /// Cache of registered named graphs to avoid redundant insert_named_graph calls.
+    registered_graphs: Arc<Mutex<HashSet<String>>>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -434,11 +557,38 @@ pub struct SparqlStore {
 /// `source_constraint` goes before the triple pattern (a `VALUES ?source {…}`
 /// block, or empty for every link). `filter` is ANDed with `isIRI(?source)`
 /// in a `FILTER`; it may use `?source`, `?predicate` and `?target`.
+///
+/// This reads the default graph only; [`SparqlStore::query_decorated_links`]
+/// adds the named graphs through [`named_graph_links_query`].
 pub(crate) fn decorated_links_query(source_constraint: &str, filter: &str) -> String {
     format!(
         r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {{
-    {source_constraint}
+{}
+}}"#,
+        decorated_links_pattern(source_constraint, filter)
+    )
+}
+
+/// [`decorated_links_query`] over every named graph. The whole pattern sits
+/// inside one `GRAPH ?g`, so a link's triple, reifier and annotations are
+/// matched in the same graph, and `?graph` carries that graph's IRI.
+fn named_graph_links_query(source_constraint: &str, filter: &str) -> String {
+    format!(
+        r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status ?graph WHERE {{
+  GRAPH ?g {{
+{}
+  }}
+  BIND(STR(?g) AS ?graph)
+}}"#,
+        decorated_links_pattern(source_constraint, filter)
+    )
+}
+
+fn decorated_links_pattern(source_constraint: &str, filter: &str) -> String {
+    format!(
+        r#"    {source_constraint}
     ?source ?predicate ?target .
     ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?source) && ({filter}))
@@ -448,8 +598,7 @@ SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proo
     OPTIONAL {{ ?reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?reifier <ad4m://ontology/status> ?status . }}
-    OPTIONAL {{ ?reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
-}}"#
+    OPTIONAL {{ ?reifier <ad4m://ontology/wireTarget> ?wireTarget . }}"#
     )
 }
 
@@ -482,6 +631,7 @@ impl SparqlStore {
         };
         Ok(SparqlStore {
             store: Arc::new(store),
+            registered_graphs: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -506,7 +656,26 @@ impl SparqlStore {
         let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
         let reifier_iri = make_reifier_iri(link);
 
-        // 1. Direct triple in default graph. `target_term` may be a typed
+        // Resolve graph from link's graph field
+        let graph_node = link.graph.as_ref().map(|iri| NamedNode::new_unchecked(iri));
+        let graph_ref = match &graph_node {
+            Some(node) => GraphNameRef::NamedNode(node.as_ref()),
+            None => GraphNameRef::DefaultGraph,
+        };
+
+        // If targeting a named graph, ensure it is registered (cached)
+        if let Some(ref node) = graph_node {
+            if self
+                .registered_graphs
+                .lock()
+                .unwrap()
+                .insert(node.as_str().to_string())
+            {
+                let _ = self.store.insert_named_graph(node.as_ref());
+            }
+        }
+
+        // 1. Direct triple in resolved graph. `target_term` may be a typed
         //    literal (for `literal:*` wire values) or a NamedNode.
         let target_ref: TermRef = match &target_term {
             Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
@@ -522,7 +691,7 @@ impl SparqlStore {
             source_iri.as_ref(),
             predicate_iri.as_ref(),
             target_ref,
-            GraphNameRef::DefaultGraph,
+            graph_ref,
         ))?;
 
         // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
@@ -538,10 +707,10 @@ impl SparqlStore {
             reifier_iri.as_ref(),
             rdf_reifies,
             TermRef::Triple(&triple_term),
-            GraphNameRef::DefaultGraph,
+            graph_ref,
         ))?;
 
-        // 3. Metadata on the reifier node (all default graph)
+        // 3. Metadata on the reifier node (all in resolved graph)
         let proof = &link.proof;
 
         // `proof.valid` is a read view over the signature: always compute it from
@@ -597,7 +766,7 @@ impl SparqlStore {
                     Some(reifier_iri.as_ref().into()),
                     Some(pred),
                     None,
-                    Some(GraphNameRef::DefaultGraph),
+                    Some(graph_ref),
                 )
                 .collect::<Result<Vec<_>, _>>()?;
             for quad in &stale {
@@ -610,7 +779,7 @@ impl SparqlStore {
                 reifier_iri.as_ref(),
                 pred,
                 TermRef::Literal(lit.as_ref()),
-                GraphNameRef::DefaultGraph,
+                graph_ref,
             ))?;
         }
 
@@ -646,13 +815,18 @@ impl SparqlStore {
         predicate: &str,
     ) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
+        let graph_node = link.graph.as_ref().map(|iri| NamedNode::new_unchecked(iri));
+        let graph_ref = match &graph_node {
+            Some(node) => GraphNameRef::NamedNode(node.as_ref()),
+            None => GraphNameRef::DefaultGraph,
+        };
         let quads: Vec<_> = self
             .store
             .quads_for_pattern(
                 Some(reifier_iri.as_ref().into()),
                 Some(NamedNodeRef::new_unchecked(predicate)),
                 None,
-                Some(GraphNameRef::DefaultGraph),
+                Some(graph_ref),
             )
             .collect::<Result<Vec<_>, _>>()?;
         if quads.is_empty() {
@@ -668,21 +842,28 @@ impl SparqlStore {
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
 
-        // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
+        // Resolve graph scope from link
+        let graph_node = link.graph.as_ref().map(|iri| NamedNode::new_unchecked(iri));
+        let graph_ref = match &graph_node {
+            Some(node) => GraphNameRef::NamedNode(node.as_ref()),
+            None => GraphNameRef::DefaultGraph,
+        };
+
+        // 1. Remove all quads where reifier is subject IN THIS GRAPH
         let quads: Vec<_> = self
             .store
             .quads_for_pattern(
                 Some(reifier_iri.as_ref().into()),
                 None,
                 None,
-                Some(GraphNameRef::DefaultGraph),
+                Some(graph_ref),
             )
             .collect::<Result<Vec<_>, _>>()?;
         for quad in &quads {
             self.store.remove(quad)?;
         }
 
-        // 2. Remove the direct triple IF no other reifier references it
+        // 2. Remove the direct triple IF no other reifier references it IN THIS GRAPH
         let (source, predicate, target_term) = make_direct_triple(link);
         let triple_term = Triple::new(source.clone(), predicate.clone(), target_term.clone());
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
@@ -693,7 +874,7 @@ impl SparqlStore {
                 None,
                 Some(rdf_reifies),
                 Some(TermRef::Triple(&triple_term)),
-                None,
+                Some(graph_ref),
             )
             .next()
             .is_some();
@@ -709,7 +890,7 @@ impl SparqlStore {
                 source.as_ref(),
                 predicate.as_ref(),
                 target_ref,
-                GraphNameRef::DefaultGraph,
+                graph_ref,
             ))?;
         }
 
@@ -718,18 +899,35 @@ impl SparqlStore {
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
     pub fn get_all_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        self.query_decorated_links(&decorated_links_query("", "isIRI(?predicate)"))
+        self.query_decorated_links("", "isIRI(?predicate)")
+    }
+
+    /// Read every link that matches `source_constraint` and `filter` (see
+    /// [`decorated_links_query`]) and decode each row, the same way
+    /// [`Self::get_all_links`] does. Links in the default graph come back with
+    /// `graph: None`. When the store has named graphs, a second pass reads
+    /// the links inside them and sets `graph` to the graph IRI; a store
+    /// without named graphs pays nothing for it.
+    pub(crate) fn query_decorated_links(
+        &self,
+        source_constraint: &str,
+        filter: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let mut links = self.decode_link_rows(&decorated_links_query(source_constraint, filter))?;
+        if self.has_named_graphs() {
+            links.extend(
+                self.decode_link_rows(&named_graph_links_query(source_constraint, filter))?,
+            );
+        }
+        Ok(links)
     }
 
     /// Run a SELECT that binds the link variables `?source ?predicate ?target
     /// ?author ?timestamp` (and optionally `?wireTarget ?proofKey ?proofSig
-    /// ?proofValid ?status`) and decode each solution into a link, the same way
-    /// [`Self::get_all_links`] does. Solutions that do not decode to a link
-    /// (non-IRI source, blank-node target, ...) are skipped.
-    pub(crate) fn query_decorated_links(
-        &self,
-        query: &str,
-    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+    /// ?proofValid ?status ?graph`) and decode each solution into a link.
+    /// Solutions that do not decode to a link (non-IRI source, blank-node
+    /// target, ...) are skipped.
+    fn decode_link_rows(&self, query: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let results = self
             .sparql_evaluator()
             .parse_query(query)
@@ -754,7 +952,8 @@ impl SparqlStore {
     }
 
     /// Query links matching optional filters using index-based pattern matching.
-    /// Scans direct triples in the default graph, then looks up reifiers for metadata.
+    /// Scans direct triples, then looks up reifiers for metadata. When named
+    /// graphs exist, scans all graphs and populates the graph field on results.
     /// `limit` truncates in iteration order (RocksDB scan order, not timestamp);
     /// callers that need a top-N page by timestamp should use
     /// [`Self::query_links_top_n_by_timestamp`] instead, which bounds memory.
@@ -893,12 +1092,24 @@ impl SparqlStore {
 
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
 
-        // Search direct triples in the default graph
-        for quad_result in
-            self.store
-                .quads_for_pattern(s_ref, p_ref, t_ref, Some(GraphNameRef::DefaultGraph))
+        // Scan all graphs when named graphs exist, otherwise default graph only
+        let graph_filter = if self.has_named_graphs() {
+            None
+        } else {
+            Some(GraphNameRef::DefaultGraph)
+        };
+
+        for quad_result in self
+            .store
+            .quads_for_pattern(s_ref, p_ref, t_ref, graph_filter)
         {
             let quad = quad_result?;
+
+            // Capture which graph this quad is in
+            let quad_graph = match &quad.graph_name {
+                GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+                _ => None, // DefaultGraph
+            };
 
             // Skip reifier and metadata predicates — only process data triples
             let pred_str = quad.predicate.as_str();
@@ -928,12 +1139,17 @@ impl SparqlStore {
                 quad.object.clone(),
             );
 
-            // Find all reifiers for this triple
+            // Find all reifiers for this triple (in the same graph)
+            let reifier_graph_ref = match &quad.graph_name {
+                GraphName::NamedNode(n) => GraphNameRef::NamedNode(n.as_ref()),
+                _ => GraphNameRef::DefaultGraph,
+            };
+
             for reifier_quad in self.store.quads_for_pattern(
                 None,
                 Some(rdf_reifies),
                 Some(TermRef::Triple(&triple_term)),
-                Some(GraphNameRef::DefaultGraph),
+                Some(reifier_graph_ref),
             ) {
                 let rq = reifier_quad?;
                 let reifier_node = match &rq.subject {
@@ -948,7 +1164,9 @@ impl SparqlStore {
                 // quads_for_pattern materialises an iterator (and likely a
                 // RocksDB snapshot); for a 10K-row query that's 6 × 10K =
                 // 60K iterator allocations on the hot path. One pass cuts
-                // that to 1 per link.
+                // that to 1 per link. Scan the reifier's own graph so
+                // annotations on links in named graphs are found, not just
+                // the default graph.
                 let mut author = String::new();
                 let mut timestamp = String::new();
                 let mut proof_key = String::new();
@@ -960,7 +1178,7 @@ impl SparqlStore {
                     Some(reifier_subject),
                     None,
                     None,
-                    Some(GraphNameRef::DefaultGraph),
+                    Some(reifier_graph_ref),
                 ) {
                     let aq = ann_quad?;
                     let pred_str = aq.predicate.as_str();
@@ -1050,6 +1268,7 @@ impl SparqlStore {
                         invalid: Some(!proof_valid),
                     },
                     status,
+                    graph: quad_graph.clone(),
                 };
 
                 if let ControlFlow::Break(_) = callback(link) {
@@ -1074,6 +1293,25 @@ impl SparqlStore {
         Ok(links
             .into_iter()
             .find(|l| l.author == author && l.timestamp == timestamp))
+    }
+
+    /// Every stored copy of one link expression, one per graph it sits in.
+    /// The reifier IRI leaves the graph out, so the same signed expression can
+    /// be stored in more than one graph; [`Self::get_link`] returns whichever
+    /// the store holds first.
+    pub fn get_link_copies(
+        &self,
+        source: &str,
+        predicate: Option<&str>,
+        target: &str,
+        author: &str,
+        timestamp: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let links = self.query_links(Some(source), predicate, Some(target), None, None, None)?;
+        Ok(links
+            .into_iter()
+            .filter(|l| l.author == author && l.timestamp == timestamp)
+            .collect())
     }
 
     /// Get all links with the given source.
@@ -1104,7 +1342,38 @@ impl SparqlStore {
         Ok(links
             .into_iter()
             .filter(|l| l.data.source.ends_with(source_suffix))
+            // Shapes and their actions act for every agent: a Local graph never defines them.
+            .filter(|l| !l.graph.as_deref().is_some_and(is_local_graph))
             .collect())
+    }
+
+    /// [`Self::query`] over the graphs every agent shares: Local graphs left
+    /// out. For reads that shape behaviour for all agents, such as SHACL shapes.
+    pub fn query_shared(&self, query_string: &str) -> Result<String, Error> {
+        match self.shared_scope()? {
+            Some(scope) => self.query_with_graphs(query_string, Some(&scope)),
+            None => self.query(query_string),
+        }
+    }
+
+    /// The graphs every agent shares: the default graph plus each named graph
+    /// that isn't Local. `None` when the store holds no Local graph, so the
+    /// read keeps its unscoped fast path.
+    ///
+    /// Known race (#812 review): this and [`Self::visible_scope`] decide on
+    /// the fast path before the query runs. If the first Local graph is
+    /// created in between, that one query reads every graph. The window is
+    /// one query wide; the graph index planned in #1317 removes it.
+    pub fn shared_scope(&self) -> Result<Option<Vec<String>>, Error> {
+        let named = self.named_graphs()?;
+        if !named.iter().any(|g| is_local_graph(g)) {
+            return Ok(None);
+        }
+        Ok(Some(
+            std::iter::once(DEFAULT_GRAPH.to_string())
+                .chain(named.into_iter().filter(|g| !is_local_graph(g)))
+                .collect(),
+        ))
     }
 
     fn sparql_evaluator(&self) -> SparqlEvaluator {
@@ -1176,6 +1445,13 @@ impl SparqlStore {
             _ => None,
         };
 
+        let graph_val = get_str("graph");
+        let graph = if graph_val.is_empty() {
+            None
+        } else {
+            Some(graph_val)
+        };
+
         Some(DecoratedLinkExpression {
             author,
             timestamp,
@@ -1191,11 +1467,11 @@ impl SparqlStore {
                 invalid: Some(!proof_valid),
             },
             status,
+            graph,
         })
     }
 
     /// Execute a read-only SPARQL SELECT query, returning a JSON string.
-    /// All data lives in the default graph — no union graph needed.
     ///
     /// Applies wire-format hydration to `?target`/`?t` bindings — this is
     /// the internal convention AD4M's own hydration/relation/projection
@@ -1204,7 +1480,7 @@ impl SparqlStore {
     /// same-named variable of their own silently reformatted), use
     /// [`Self::query_arbitrary`] instead.
     pub fn query(&self, query_string: &str) -> Result<String, Error> {
-        self.query_internal(query_string, true)
+        self.query_internal(query_string, None, true)
     }
 
     /// Execute a caller-supplied read-only SPARQL SELECT query (e.g. the
@@ -1215,26 +1491,117 @@ impl SparqlStore {
     /// (say, `SELECT ?target WHERE { ?r <ad4m://ontology/author> ?target }`)
     /// should get its plain lexical value back, not a silently mangled one.
     pub fn query_arbitrary(&self, query_string: &str) -> Result<String, Error> {
-        self.query_internal(query_string, false)
+        self.query_internal(query_string, None, false)
+    }
+
+    /// [`Self::query_arbitrary`] scoped to `graph_iris`, resolved the way
+    /// [`Self::query_with_graphs`] resolves them.
+    pub fn query_arbitrary_with_graphs(
+        &self,
+        query_string: &str,
+        graph_iris: Option<&[String]>,
+    ) -> Result<String, Error> {
+        self.query_internal(query_string, graph_iris, false)
+    }
+
+    /// Execute a SPARQL query with optional graph scoping.
+    ///
+    /// Dataset resolution logic (in priority order):
+    /// 1. If the query already declares its dataset via `FROM` / `FROM NAMED` /
+    ///    `GRAPH` — respect it as-is (query is self-describing).
+    /// 2. If `graph_iris: Some(&[...])` is provided externally — set those graphs
+    ///    as the default dataset.
+    /// 3. If the store has named graphs — union all graphs as default (backward-compat).
+    /// 4. Otherwise — use the store's default graph directly (fast path).
+    pub fn query_with_graphs(
+        &self,
+        query_string: &str,
+        graph_iris: Option<&[String]>,
+    ) -> Result<String, Error> {
+        self.query_internal(query_string, graph_iris, true)
     }
 
     fn query_internal(
         &self,
         query_string: &str,
+        graph_iris: Option<&[String]>,
         hydrate_target_vars: bool,
     ) -> Result<String, Error> {
         validate_readonly_query(query_string)?;
 
-        let results = self
-            .sparql_evaluator()
-            .parse_query(query_string)
-            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?
-            .on_store(&self.store)
-            .execute()
-            .map_err(|e| {
-                let truncated = &query_string[..query_string.len().min(500)];
-                anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
-            })?;
+        // Parse the query to inspect its dataset declaration
+        let parsed_query = oxigraph::sparql::Query::parse(query_string, None)
+            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?;
+
+        // Check if the query already declares its own dataset (FROM / FROM NAMED)
+        let query_has_dataset = !parsed_query.dataset().is_default_dataset();
+
+        // Also detect GRAPH keyword usage in the query text (indicates the user
+        // is writing cross-graph patterns and knows what they're doing).
+        // Uses word boundary + following `<` or `?` to avoid false positives from
+        // string literals, comments, or IRIs containing "GRAPH".
+        let query_has_graph_keyword = regex::Regex::new(r"(?i)\bGRAPH\s*[<\?]")
+            .unwrap()
+            .is_match(query_string);
+
+        let scope = graph_iris.filter(|i| !i.is_empty());
+        let results = if query_has_dataset || query_has_graph_keyword {
+            // Query is self-describing — respect its dataset declarations.
+            // This supports FROM clauses (model-generated), GRAPH patterns
+            // (cross-graph queries), and FROM NAMED (federated patterns).
+            // A scope still keeps it out of the Local graphs it leaves out.
+            let mut q = parsed_query;
+            if let Some(scope) = scope {
+                restrict_dataset_to_scope(q.dataset_mut(), scope, &self.named_graphs()?)?;
+            }
+            #[allow(deprecated)]
+            self.store
+                .query_opt(q, self.sparql_evaluator())
+                .map_err(|e| {
+                    let truncated = &query_string[..query_string.len().min(500)];
+                    anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+                })?
+        } else if let Some(iris) = scope {
+            // External graph scoping — override the default graph
+            let mut q = parsed_query;
+            q.dataset_mut()
+                .set_default_graph(iris.iter().map(|iri| scope_graph_name(iri)).collect());
+            // The regex above can miss a `GRAPH` pattern (`$g`, a comment, a
+            // prefixed name). Bound the named graphs here too, so privacy never
+            // depends on how the query is spelled.
+            restrict_dataset_to_scope(q.dataset_mut(), iris, &self.named_graphs()?)?;
+
+            #[allow(deprecated)]
+            self.store
+                .query_opt(q, self.sparql_evaluator())
+                .map_err(|e| {
+                    let truncated = &query_string[..query_string.len().min(500)];
+                    anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+                })?
+        } else if self.has_named_graphs() {
+            // No explicit scoping but store has named graphs — union all
+            let mut q = parsed_query;
+            q.dataset_mut().set_default_graph_as_union();
+
+            #[allow(deprecated)]
+            self.store
+                .query_opt(q, self.sparql_evaluator())
+                .map_err(|e| {
+                    let truncated = &query_string[..query_string.len().min(500)];
+                    anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+                })?
+        } else {
+            // Simple case: no named graphs, no scoping needed
+            self.sparql_evaluator()
+                .parse_query(query_string)
+                .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?
+                .on_store(&self.store)
+                .execute()
+                .map_err(|e| {
+                    let truncated = &query_string[..query_string.len().min(500)];
+                    anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+                })?
+        };
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -1308,6 +1675,107 @@ impl SparqlStore {
         }
     }
 
+    /// Check whether the store contains any named graphs.
+    pub fn has_named_graphs(&self) -> bool {
+        self.store
+            .named_graphs()
+            .next()
+            .transpose()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// List all named graph IRIs in the store.
+    pub fn named_graphs(&self) -> Result<Vec<String>, Error> {
+        let mut graphs = Vec::new();
+        for result in self.store.named_graphs() {
+            let term = result?;
+            if let NamedOrBlankNode::NamedNode(n) = term {
+                graphs.push(n.into_string());
+            }
+        }
+        Ok(graphs)
+    }
+
+    /// The graph scope a read by `viewer` runs in.
+    ///
+    /// - `requested` graphs: each resolved for the viewer ([`resolve_graph_for`]),
+    ///   so the Local alias works and another agent's Local graph is refused.
+    /// - Nothing requested: the default graph plus every named graph except other
+    ///   agents' Local graphs. `None` when nothing is hidden, so the read keeps
+    ///   its unscoped fast path.
+    ///
+    /// `viewer: None` is the executor itself, which sees everything. The
+    /// fast-path race noted on [`Self::shared_scope`] applies here too.
+    pub fn visible_scope(
+        &self,
+        viewer: Option<&str>,
+        requested: Option<&[String]>,
+    ) -> Result<Option<Vec<String>>, Error> {
+        if let Some(requested) = requested.filter(|r| !r.is_empty()) {
+            return requested
+                .iter()
+                .map(|iri| resolve_graph_for(iri, viewer))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some);
+        }
+        let Some(viewer) = viewer else {
+            return Ok(None);
+        };
+        let named = self.named_graphs()?;
+        if named.iter().all(|iri| graph_visible_to(iri, viewer)) {
+            return Ok(None);
+        }
+        Ok(Some(
+            std::iter::once(DEFAULT_GRAPH.to_string())
+                .chain(
+                    named
+                        .into_iter()
+                        .filter(|iri| graph_visible_to(iri, viewer)),
+                )
+                .collect(),
+        ))
+    }
+
+    /// Whether named graph `graph` holds a triple with subject `subject`. One
+    /// index seek.
+    pub fn graph_has_subject(&self, graph: &str, subject: &str) -> bool {
+        let subject = NamedNode::new_unchecked(subject);
+        let graph = NamedNode::new_unchecked(graph);
+        self.store
+            .quads_for_pattern(
+                Some(subject.as_ref().into()),
+                None,
+                None,
+                Some(graph.as_ref().into()),
+            )
+            .next()
+            .is_some()
+    }
+
+    /// Check whether a named graph exists.
+    pub fn contains_named_graph(&self, iri: &str) -> bool {
+        let node = NamedNode::new_unchecked(iri);
+        self.store
+            .contains_named_graph(node.as_ref())
+            .unwrap_or(false)
+    }
+
+    /// Register an (empty) named graph. Idempotent (cached).
+    pub fn create_named_graph(&self, iri: &str) -> Result<(), Error> {
+        if self
+            .registered_graphs
+            .lock()
+            .unwrap()
+            .insert(iri.to_string())
+        {
+            let node = NamedNode::new_unchecked(iri);
+            let _ = self.store.insert_named_graph(node.as_ref());
+        }
+        Ok(())
+    }
+
     /// Async wrapper around `query()` that runs the blocking SPARQL operation
     /// on a dedicated thread pool to avoid blocking the tokio runtime.
     pub async fn query_async(&self, query_string: &str) -> Result<String, Error> {
@@ -1316,6 +1784,29 @@ impl SparqlStore {
         tokio::task::spawn_blocking(move || store.query(&query))
             .await
             .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+    }
+
+    /// Async wrapper around `query_with_graphs()` that runs the blocking SPARQL
+    /// operation on a dedicated thread pool to avoid blocking the tokio runtime.
+    pub async fn query_with_graphs_async(
+        &self,
+        query_string: &str,
+        graph_iris: Option<&[String]>,
+    ) -> Result<String, Error> {
+        let store = self.clone();
+        let query = query_string.to_string();
+        let graphs = graph_iris.map(|g| g.to_vec());
+        tokio::task::spawn_blocking(move || store.query_with_graphs(&query, graphs.as_deref()))
+            .await
+            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+    }
+
+    /// Remove a named graph and all its quads. No-op if graph doesn't exist.
+    pub fn remove_named_graph_and_quads(&self, iri: &str) -> Result<(), Error> {
+        let node = NamedNode::new_unchecked(iri);
+        let _ = self.store.remove_named_graph(node.as_ref());
+        self.registered_graphs.lock().unwrap().remove(iri);
+        Ok(())
     }
 
     /// Cancellation-aware async wrapper around `query()`.
@@ -1346,6 +1837,18 @@ impl SparqlStore {
         query_string: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, Error> {
+        self.query_cancellable_with_graphs(query_string, None, cancel)
+            .await
+    }
+
+    /// [`Self::query_cancellable`] scoped to `graph_iris`, resolved the way
+    /// [`Self::query_with_graphs`] resolves them.
+    pub async fn query_cancellable_with_graphs(
+        &self,
+        query_string: &str,
+        graph_iris: Option<Vec<String>>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, Error> {
         if cancel.is_cancelled() {
             return Err(anyhow!("query cancelled"));
         }
@@ -1357,7 +1860,9 @@ impl SparqlStore {
         // external ?target/?t bindings into AD4M's internal literal:*: wire
         // format, which callers of an ad-hoc query string have no reason to
         // expect (CodeRabbit review, PR #855).
-        let handle = tokio::task::spawn_blocking(move || store.query_arbitrary(&query));
+        let handle = tokio::task::spawn_blocking(move || {
+            store.query_arbitrary_with_graphs(&query, graph_iris.as_deref())
+        });
 
         tokio::select! {
             biased;
@@ -1394,10 +1899,116 @@ impl SparqlStore {
     /// Clear the store and bulk-insert all provided links.
     pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
         self.clear()?;
+        self.registered_graphs.lock().unwrap().clear();
         for link in &links {
             self.insert_link_triples(link)?;
         }
         self.flush()?;
+        Ok(())
+    }
+    /// Batch-remove all links (across all graphs `viewer` reads) that target any
+    /// of the given IRIs. Other agents' Local graphs stay untouched.
+    /// Uses a single SPARQL query with VALUES clause instead of N individual queries.
+    pub fn remove_links_targeting_subjects(
+        &self,
+        subject_iris: &[String],
+        viewer: Option<&str>,
+    ) -> Result<(), Error> {
+        if subject_iris.is_empty() {
+            return Ok(());
+        }
+
+        // Build VALUES clause for batch lookup
+        let values = subject_iris
+            .iter()
+            .map(|s| format!("<{}>", s))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Find all reifiers of triples targeting our subjects (in any graph)
+        let query = format!(
+            r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            SELECT ?reifier ?s ?p ?target ?g WHERE {{
+                GRAPH ?g {{
+                    ?s ?p ?target .
+                    ?reifier rdf:reifies <<( ?s ?p ?target )>> .
+                }}
+                VALUES ?target {{ {} }}
+                FILTER(isIRI(?s) && isIRI(?p))
+            }}"#,
+            values
+        );
+
+        // Execute as union across all graphs
+        let mut q = oxigraph::sparql::Query::parse(&query, None)
+            .map_err(|e| anyhow!("Failed to parse batch cleanup query: {}", e))?;
+        q.dataset_mut().set_default_graph_as_union();
+
+        #[allow(deprecated)]
+        let results = self
+            .store
+            .query_opt(q, self.sparql_evaluator())
+            .map_err(|e| anyhow!("Batch cleanup query failed: {}", e))?;
+
+        if let QueryResults::Solutions(solutions) = results {
+            for solution in solutions {
+                let solution = solution?;
+                if let (Some(Term::NamedNode(reifier)), Some(Term::NamedNode(graph))) =
+                    (solution.get("reifier").cloned(), solution.get("g").cloned())
+                {
+                    if viewer.is_some_and(|v| !graph_visible_to(graph.as_str(), v)) {
+                        continue;
+                    }
+                    // Remove all quads where reifier is subject in that graph
+                    let graph_ref = GraphNameRef::NamedNode(graph.as_ref());
+                    let quads: Vec<_> = self
+                        .store
+                        .quads_for_pattern(
+                            Some(reifier.as_ref().into()),
+                            None,
+                            None,
+                            Some(graph_ref),
+                        )
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for quad in &quads {
+                        let _ = self.store.remove(quad);
+                    }
+
+                    // Remove the direct triple if no other reifier references it
+                    if let (
+                        Some(Term::NamedNode(s)),
+                        Some(Term::NamedNode(p)),
+                        Some(Term::NamedNode(t)),
+                    ) = (
+                        solution.get("s").cloned(),
+                        solution.get("p").cloned(),
+                        solution.get("target").cloned(),
+                    ) {
+                        let triple_term = Triple::new(s.clone(), p.clone(), t.clone());
+                        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+                        let still_referenced = self
+                            .store
+                            .quads_for_pattern(
+                                None,
+                                Some(rdf_reifies),
+                                Some(TermRef::Triple(&triple_term)),
+                                Some(graph_ref),
+                            )
+                            .next()
+                            .is_some();
+                        if !still_referenced {
+                            let _ = self.store.remove(QuadRef::new(
+                                s.as_ref(),
+                                p.as_ref(),
+                                TermRef::NamedNode(t.as_ref()),
+                                graph_ref,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -1429,6 +2040,7 @@ mod tests {
             data: signed.data,
             proof: signed.proof,
             status: Some(LinkStatus::Shared),
+            graph: None,
         }
     }
 
@@ -1455,6 +2067,7 @@ mod tests {
             data: signed.data,
             proof: signed.proof,
             status: Some(LinkStatus::Shared),
+            graph: None,
         }
     }
 
@@ -2907,6 +3520,7 @@ mod tests {
             data: signed.data,
             proof: signed.proof,
             status: Some(LinkStatus::Shared),
+            graph: None,
         }
     }
 
@@ -4153,6 +4767,398 @@ mod tests {
             "query() must keep wire-encoding ?t for internal callers: {}",
             internal_result
         );
+    }
+
+    // ── Named Graph Tests ──
+
+    #[test]
+    fn test_named_graph_insert_and_query() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let mut link = make_link(
+            &signer,
+            "ad4m://source1",
+            "ad4m://predicate1",
+            "ad4m://target1",
+        );
+        link.graph = Some("ad4m://graph/entity1".to_string());
+        svc.add_link(&link).unwrap();
+
+        // Should appear in graph-scoped query
+        let result = svc
+            .query_with_graphs(
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+                Some(&["ad4m://graph/entity1".to_string()]),
+            )
+            .unwrap();
+        assert!(
+            result.contains("ad4m://source1"),
+            "Graph-scoped query should find the link"
+        );
+
+        // Should appear in unscoped query (union all graphs)
+        let result = svc.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }").unwrap();
+        assert!(
+            result.contains("ad4m://source1"),
+            "Unscoped query should find the link via union"
+        );
+    }
+
+    #[test]
+    fn test_named_graph_scoped_query_excludes_other_graphs() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let mut link_a = make_link(&signer, "ad4m://src_a", "ad4m://pred", "ad4m://tgt_a");
+        link_a.graph = Some("ad4m://graph/graphA".to_string());
+        svc.add_link(&link_a).unwrap();
+
+        let mut link_b = make_link(&signer, "ad4m://src_b", "ad4m://pred", "ad4m://tgt_b");
+        link_b.graph = Some("ad4m://graph/graphB".to_string());
+        svc.add_link(&link_b).unwrap();
+
+        // Query scoped to graphA should only see link_a
+        let result = svc
+            .query_with_graphs(
+                "SELECT ?s WHERE { ?s <ad4m://pred> ?o }",
+                Some(&["ad4m://graph/graphA".to_string()]),
+            )
+            .unwrap();
+        assert!(result.contains("ad4m://src_a"), "Should see link in graphA");
+        assert!(
+            !result.contains("ad4m://src_b"),
+            "Should NOT see link in graphB when scoped to graphA"
+        );
+
+        // Query scoped to graphB should only see link_b
+        let result = svc
+            .query_with_graphs(
+                "SELECT ?s WHERE { ?s <ad4m://pred> ?o }",
+                Some(&["ad4m://graph/graphB".to_string()]),
+            )
+            .unwrap();
+        assert!(result.contains("ad4m://src_b"), "Should see link in graphB");
+        assert!(
+            !result.contains("ad4m://src_a"),
+            "Should NOT see link in graphA when scoped to graphB"
+        );
+    }
+
+    #[test]
+    fn test_bulk_delete_via_remove_named_graph() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        // Add 3 links to a named graph
+        for i in 0..3 {
+            let mut link = make_link(
+                &signer,
+                &format!("ad4m://src{}", i),
+                "ad4m://pred",
+                &format!("ad4m://tgt{}", i),
+            );
+            link.graph = Some("ad4m://graph/bulk_test".to_string());
+            svc.add_link(&link).unwrap();
+        }
+
+        // Add 1 link to default graph (should survive)
+        let default_link = make_link(
+            &signer,
+            "ad4m://default_src",
+            "ad4m://pred",
+            "ad4m://default_tgt",
+        );
+        svc.add_link(&default_link).unwrap();
+
+        // Verify all 4 links exist
+        let all = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(all.len(), 4, "Should have 4 total links before bulk delete");
+
+        // Bulk delete the named graph
+        svc.remove_named_graph_and_quads("ad4m://graph/bulk_test")
+            .unwrap();
+
+        // Only default graph link should remain
+        let all = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "Only default graph link should survive bulk delete"
+        );
+        assert_eq!(all[0].data.source, "ad4m://default_src");
+    }
+
+    #[test]
+    fn test_cross_graph_duplicate_triple() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        // Same (s,p,o) in two different graphs
+        let link_default = make_link_with_ts(
+            &signer,
+            "ad4m://entity",
+            "ad4m://name",
+            "ad4m://val",
+            "2024-01-15T10:00:00.000Z",
+        );
+        svc.add_link(&link_default).unwrap();
+
+        let mut link_named = make_link_with_ts(
+            &signer,
+            "ad4m://entity",
+            "ad4m://name",
+            "ad4m://val",
+            "2024-01-15T11:00:00.000Z",
+        );
+        link_named.graph = Some("ad4m://graph/g1".to_string());
+        svc.add_link(&link_named).unwrap();
+
+        // Unscoped query should see both (different reifiers)
+        let all = svc
+            .query_links(None, Some("ad4m://name"), None, None, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 2, "Should see both links (different reifiers)");
+
+        // Scoped to g1 should see only the named one
+        let result = svc
+            .query_with_graphs(
+                "SELECT ?s WHERE { ?s <ad4m://name> <ad4m://val> }",
+                Some(&["ad4m://graph/g1".to_string()]),
+            )
+            .unwrap();
+        assert!(result.contains("ad4m://entity"));
+
+        // Remove the named graph — only default link should remain
+        svc.remove_named_graph_and_quads("ad4m://graph/g1").unwrap();
+        let all = svc
+            .query_links(None, Some("ad4m://name"), None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "Only default graph link should remain after named graph removal"
+        );
+        assert!(
+            all[0].graph.is_none(),
+            "Remaining link should be in default graph"
+        );
+    }
+
+    #[test]
+    fn test_graph_field_preserved_through_query_links() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let mut link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.graph = Some("ad4m://graph/test_preserve".to_string());
+        svc.add_link(&link).unwrap();
+
+        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].graph.as_deref(),
+            Some("ad4m://graph/test_preserve"),
+            "Graph field should be preserved in query_links results"
+        );
+    }
+
+    #[test]
+    fn test_graph_field_preserved_through_get_all_links() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let mut link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.graph = Some("ad4m://graph/test_all".to_string());
+        svc.add_link(&link).unwrap();
+
+        let results = svc.get_all_links().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].graph.as_deref(),
+            Some("ad4m://graph/test_all"),
+            "Graph field should be preserved in get_all_links results"
+        );
+    }
+
+    #[test]
+    fn test_named_graph_lifecycle() {
+        let svc = new_service();
+
+        // Initially no named graphs
+        assert!(
+            !svc.has_named_graphs(),
+            "Should have no named graphs initially"
+        );
+        assert!(svc.named_graphs().unwrap().is_empty());
+
+        // Create a named graph
+        svc.create_named_graph("ad4m://graph/lifecycle_test")
+            .unwrap();
+        assert!(
+            svc.has_named_graphs(),
+            "Should have named graphs after creation"
+        );
+        assert!(svc.contains_named_graph("ad4m://graph/lifecycle_test"));
+        assert_eq!(svc.named_graphs().unwrap().len(), 1);
+
+        // Create remains idempotent
+        svc.create_named_graph("ad4m://graph/lifecycle_test")
+            .unwrap();
+        assert_eq!(svc.named_graphs().unwrap().len(), 1);
+
+        // Remove
+        svc.remove_named_graph_and_quads("ad4m://graph/lifecycle_test")
+            .unwrap();
+        assert!(!svc.contains_named_graph("ad4m://graph/lifecycle_test"));
+
+        // Remove non-existent remains a no-op
+        svc.remove_named_graph_and_quads("ad4m://graph/nonexistent")
+            .unwrap();
+    }
+
+    #[test]
+    fn test_graph_aware_remove_link() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        // Add link to named graph
+        let mut link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.graph = Some("ad4m://graph/remove_test".to_string());
+        svc.add_link(&link).unwrap();
+
+        // Add same (s,p,o) to default graph with different reifier
+        let default_link = make_link_with_ts(
+            &signer,
+            "ad4m://src",
+            "ad4m://pred",
+            "ad4m://tgt",
+            "2024-01-15T11:00:00.000Z",
+        );
+        svc.add_link(&default_link).unwrap();
+
+        assert_eq!(
+            svc.query_links(None, None, None, None, None, None)
+                .unwrap()
+                .len(),
+            2,
+            "Should have 2 links before removal"
+        );
+
+        // Remove only the named graph link
+        svc.remove_link(&link).unwrap();
+
+        let remaining = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "Should have 1 link after graph-scoped removal"
+        );
+        assert!(
+            remaining[0].graph.is_none(),
+            "Remaining link should stay in default graph"
+        );
+    }
+
+    #[test]
+    fn test_default_graph_link_has_no_graph_field() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+
+        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].graph.is_none(),
+            "Default graph links should have graph = None"
+        );
+    }
+
+    #[test]
+    fn test_make_graph_iri() {
+        assert_eq!(
+            make_graph_iri("expr://abc123"),
+            "ad4m://graph/expr://abc123"
+        );
+        assert_eq!(
+            make_graph_iri("literal://string:hello"),
+            "ad4m://graph/literal://string:hello"
+        );
+    }
+
+    #[test]
+    fn test_query_nonexistent_graph_returns_empty() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        // Add a link to default graph
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        svc.add_link(&link).unwrap();
+
+        // Query a non-existent graph should return empty
+        let result = svc
+            .query_with_graphs(
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+                Some(&["ad4m://graph/nonexistent".to_string()]),
+            )
+            .unwrap();
+        assert!(
+            !result.contains("ad4m://src"),
+            "Querying a non-existent named graph should not return default graph data"
+        );
+    }
+
+    #[test]
+    fn test_reinsert_in_named_graph_replaces_annotations() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let mut link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.graph = Some("ad4m://graph/reinsert".to_string());
+        svc.add_link(&link).unwrap();
+
+        // Same reifier, new status: the old status quad in the named graph has
+        // to go, or the link reads back twice with both statuses.
+        link.status = Some(LinkStatus::Local);
+        svc.add_link(&link).unwrap();
+
+        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1, "re-insert must not duplicate the link");
+        assert_eq!(results[0].status, Some(LinkStatus::Local));
+        assert_eq!(results[0].graph.as_deref(), Some("ad4m://graph/reinsert"));
+    }
+
+    #[test]
+    fn test_query_arbitrary_with_graphs_scopes_without_hydrating() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let mut in_a = make_link(
+            &signer,
+            "ad4m://src_a",
+            "ad4m://pred",
+            "literal:string:hello",
+        );
+        in_a.graph = Some("ad4m://graph/a".to_string());
+        svc.add_link(&in_a).unwrap();
+        let mut in_b = make_link(&signer, "ad4m://src_b", "ad4m://pred", "literal:string:bye");
+        in_b.graph = Some("ad4m://graph/b".to_string());
+        svc.add_link(&in_b).unwrap();
+
+        let rows: Vec<Value> = serde_json::from_str(
+            &svc.query_arbitrary_with_graphs(
+                "SELECT ?s ?target WHERE { ?s <ad4m://pred> ?target }",
+                Some(&["ad4m://graph/a".to_string()]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "scoped to graph a: {rows:?}");
+        assert_eq!(rows[0]["s"], "ad4m://src_a");
+        // Caller-supplied SPARQL gets the stored value, not the wire form
+        // `query_with_graphs` would re-encode `?target` into.
+        assert_eq!(rows[0]["target"], "hello");
     }
 
     // ── Source literal round-trip (no normalization) ─────────────────────

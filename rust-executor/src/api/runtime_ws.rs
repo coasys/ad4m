@@ -135,8 +135,10 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
                 WsRpcError::bad_request("perspective_uuid required for perspective export")
             })?;
+            // Export what the caller reads: other agents' Local graphs stay out.
             let perspective = crate::perspectives::get_perspective(uuid)
-                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?;
+                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?
+                .for_viewer(super::perspectives_ws::viewer_did(&ctx)?);
             let links = perspective
                 .get_links(&crate::types::LinkQuery {
                     source: None,

@@ -324,7 +324,13 @@ async fn instance_writes_honour_the_local_flag() {
             .await,
     );
 
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    // Read as the writer (the admin acts as the main agent): the shared
+    // instance reads no Local graph (#1358).
+    let main_did =
+        crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).unwrap();
+    let perspective = crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .for_viewer(main_did);
     let statuses = |predicate: &'static str| {
         let perspective = perspective.clone();
         let base_uri = base_uri.clone();
@@ -1960,6 +1966,7 @@ async fn removing_from_a_custom_resolve_language_collection_is_not_a_silent_no_o
                 source: album_uri.clone(),
                 predicate: "flux://album_photo".into(),
                 target: stored.into(),
+                graph: None,
             }))
             .await,
     );
@@ -2024,6 +2031,7 @@ async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
                 Some(json!({ "name": format!("channel-{i}") })),
                 Some(batch_id.clone()),
                 &agent_context,
+                None,
             )
             .await
             .unwrap_or_else(|e| panic!("staging channel {i}: {e:#}"));
@@ -2250,5 +2258,197 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
     assert!(
         messages.is_none_or(|m| m.is_empty()),
         "a failed add_to_collection must not leave the item linked: {got}"
+    );
+}
+
+/// Flows and interpretation runs read through these tools, so they read as
+/// the agent the run acts for: a user's Local graph stays out of a run on
+/// behalf of another agent, here the admin.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_does_not_read_another_agents_local_graph() {
+    use crate::agent::AgentContext;
+    use crate::mcp::tools::perspectives::QueryLinksParams;
+    use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+    use crate::types::{Link, LinkStatus};
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let email = format!("alice.{}@example.org", uuid::Uuid::new_v4());
+    crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
+    let alice = AgentContext::for_user_email(email);
+    let mut raw = crate::perspectives::get_perspective(&uuid).unwrap();
+    let link = |name: &str| Link {
+        source: "ad4m://notes".to_string(),
+        predicate: Some("ad4m://note".to_string()),
+        target: format!("ad4m://note/{name}"),
+    };
+    raw.add_link(
+        link("private"),
+        LinkStatus::Shared,
+        None,
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+    raw.add_link(
+        link("shared"),
+        LinkStatus::Shared,
+        None,
+        &AgentContext::main_agent(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let out = handler
+        .query_links(Parameters(QueryLinksParams {
+            perspective_id: uuid.clone(),
+            source: Some("ad4m://notes".to_string()),
+            predicate: None,
+            target: None,
+            graph: None,
+        }))
+        .await;
+    assert!(out.contains("ad4m://note/shared"), "{out}");
+    assert!(
+        !out.contains("ad4m://note/private"),
+        "a Local link leaked: {out}"
+    );
+}
+
+/// Write tools act as their caller too: the admin cannot remove a link that
+/// sits in a user's Local graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_tool_does_not_touch_another_agents_local_graph() {
+    use crate::agent::AgentContext;
+    use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+    use crate::types::{Link, LinkQuery, LinkStatus};
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".to_string(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let channel = created["base_uri"].as_str().unwrap().to_string();
+
+    let email = format!("alice.{}@example.org", uuid::Uuid::new_v4());
+    crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
+    let alice = AgentContext::for_user_email(email);
+    let mut raw = crate::perspectives::get_perspective(&uuid).unwrap();
+    let private = Link {
+        source: channel.clone(),
+        predicate: Some("ad4m://has_child".to_string()),
+        target: "ad4m://msg/private".to_string(),
+    };
+    raw.add_link(
+        private,
+        LinkStatus::Shared,
+        None,
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+
+    handler
+        .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+            perspective_id: uuid.clone(),
+            class_name: "Channel".into(),
+            base_uri: channel.clone(),
+            collection: "messages".into(),
+            item_uri: "ad4m://msg/private".into(),
+        }))
+        .await;
+
+    // Read as Alice: the shared instance reads no Local graph (#1358).
+    let kept = raw
+        .clone()
+        .for_viewer(crate::agent::did_for_context(&alice).unwrap())
+        .get_links(&LinkQuery {
+            target: Some("ad4m://msg/private".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(kept.len(), 1, "the admin removed Alice's Local link");
+}
+
+/// The tools of a pass read what the pass reads (#1324 review). The
+/// auto-processor's harness pass reads shared graphs only and applies what the
+/// LLM proposes as Shared, so a `_query` tool on it must not return an
+/// instance from the runner's own Local graph. The same tool on an ordinary
+/// view does, which shows the Local instance is reachable at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_on_shared_graphs_only_gives_its_tools_no_local_graph() {
+    use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Channel", CHANNEL_SDNA)]).await;
+    let uuid = perspective.persisted.lock().await.uuid.clone();
+    for (id, graph) in [
+        ("flux://channel/shared", None),
+        ("flux://channel/local", Some(LOCAL_GRAPH_ALIAS.to_string())),
+    ] {
+        perspective
+            .create_subject(
+                crate::perspectives::perspective_instance::SubjectClassOption {
+                    class_name: Some("Channel".to_string()),
+                    query: None,
+                },
+                id.to_string(),
+                Some(json!({ "name": id })),
+                None,
+                &ctx,
+                graph,
+            )
+            .await
+            .unwrap();
+    }
+    register_perspective(uuid.clone(), perspective.clone());
+    let _guard = PerspectiveGuard(uuid.clone());
+    let context = || McpContext {
+        admin_credential: Some("test-admin".to_string()),
+        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
+        dynamic_class_tools: true,
+    };
+    let query = |handler: Ad4mMcpHandler| {
+        let uuid = uuid.clone();
+        async move {
+            handler
+                .call_tool_by_name("channel_query", json!({ "perspective_id": uuid }))
+                .await
+                .unwrap()
+        }
+    };
+    let runner = crate::agent::did_for_context(&ctx).unwrap();
+
+    let ordinary = query(Ad4mMcpHandler::for_pass(
+        &perspective.clone().for_viewer(runner.clone()),
+        context(),
+    ))
+    .await;
+    assert!(
+        ordinary.contains("flux://channel/local") && ordinary.contains("flux://channel/shared"),
+        "{ordinary}"
+    );
+
+    let shared_only = query(Ad4mMcpHandler::for_pass(
+        &perspective.clone().for_viewer(runner).for_shared_reads(),
+        context(),
+    ))
+    .await;
+    assert!(
+        shared_only.contains("flux://channel/shared"),
+        "{shared_only}"
+    );
+    assert!(
+        !shared_only.contains("flux://channel/local"),
+        "a shared-only pass's tool read the runner's Local graph: {shared_only}"
     );
 }

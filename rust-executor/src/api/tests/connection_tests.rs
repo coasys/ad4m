@@ -177,8 +177,7 @@ async fn query_updates_reach_a_socket_without_a_watch() {
     socket.reply("w").await;
 
     let sub = uuid::Uuid::new_v4().to_string();
-    let update =
-        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
+    let update = json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "subscriberDid": DID, "result": "[]" });
     get_global_pubsub()
         .await
         .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
@@ -187,7 +186,7 @@ async fn query_updates_reach_a_socket_without_a_watch() {
     let got = socket.next_of(|m| m["subscriptionId"] == sub).await;
     assert_eq!(
         got,
-        json!({ "type": "query-subscription-update", "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" })
+        json!({ "type": "query-subscription-update", "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "subscriberDid": DID, "result": "[]" })
     );
 }
 
@@ -236,8 +235,7 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
     let mut alice = Socket::open().await;
 
     let sub = uuid::Uuid::new_v4().to_string();
-    let update =
-        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
+    let update = json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "subscriberDid": DID, "result": "[]" });
     get_global_pubsub()
         .await
         .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())

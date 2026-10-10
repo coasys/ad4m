@@ -22,6 +22,8 @@ mod interpretation_harness_e2e;
 // so it never reaches a release build.
 #[cfg(test)]
 pub(crate) mod interpretation_test_support;
+#[cfg(test)]
+pub(crate) mod local_graph_tests;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
@@ -884,12 +886,16 @@ mod tests {
                 key: "test-key".to_string(),
                 signature: "test-signature".to_string(),
             },
-            status: Some(LinkStatus::Local),
+            // Shared: a Local link written with no viewer lives in the main
+            // agent's Local graph (#1357), which this executor-level export,
+            // reading shared graphs only (#1358), leaves out.
+            status: Some(LinkStatus::Shared),
+            graph: None,
         };
         println!("test_link: {:?}", test_link);
 
         perspective
-            .add_link_expression(test_link.clone(), LinkStatus::Local, None)
+            .add_link_expression(test_link.clone(), LinkStatus::Shared, None)
             .await
             .expect("Failed to add link");
 

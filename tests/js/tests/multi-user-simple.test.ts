@@ -1317,6 +1317,63 @@ describe("Multi-User Simple integration tests", () => {
             console.log("✅ Concurrent reorders converged across both agents");
         });
 
+        // #812: a second user who joins a neighbourhood on the same node
+        // co-owns the same perspective. A Local link stays with its writer:
+        // the other co-owner can't read it, query it, or receive a
+        // subscription update that carries it.
+        it("keeps a co-owner's Local link out of the other co-owner's reads and subscription updates", async () => {
+            await createTestUser("localpriv1@example.com", "password1");
+            await createTestUser("localpriv2@example.com", "password2");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("localpriv1@example.com", "password1"));
+            const bob = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("localpriv2@example.com", "password2"));
+
+            const own = await alice.perspective.add("Local privacy");
+            await alice.perspective.addLink(own.uuid, new Link({ source: "test://public", predicate: "test://note", target: "test://shared" }));
+            const linkLanguage = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: "Local privacy" }));
+            const url = await alice.neighbourhood.publishFromPerspective(own.uuid, linkLanguage.address, new Perspective([]));
+            await bob.neighbourhood.joinFromUrl(url);
+            let aliceUuid = "";
+            let bobUuid = "";
+            await pollUntil(async () => {
+                aliceUuid = (await alice.perspective.all()).find(p => p.sharedUrl === url)?.uuid ?? "";
+                bobUuid = (await bob.perspective.all()).find(p => p.sharedUrl === url)?.uuid ?? "";
+                return !!aliceUuid && !!bobUuid;
+            }, { timeoutMs: 15000, label: "both users see the neighbourhood" });
+
+            const query = "SELECT ?s WHERE { ?s <test://note> ?o }";
+            const { subscriptionId } = await alice.perspective.subscribeQuery(aliceUuid, query);
+            const aliceUpdates: string[] = [];
+            const bobUpdates: string[] = [];
+            const stopAlice = alice.perspective.subscribeToQueryUpdates(subscriptionId, r => aliceUpdates.push(JSON.stringify(r)));
+            // Bob listens for Alice's subscription id. His client would drop an
+            // unknown id, so this listener sees what reaches his socket.
+            const stopBob = bob.perspective.subscribeToQueryUpdates(subscriptionId, r => bobUpdates.push(JSON.stringify(r)));
+
+            await alice.perspective.addLink(aliceUuid, new Link({ source: "test://alice-draft", predicate: "test://note", target: "test://secret" }), "local");
+
+            // Control: Alice reads her own Local link everywhere.
+            await pollUntil(async () => aliceUpdates.some(u => u.includes("test://alice-draft")),
+                { timeoutMs: 15000, label: "Alice's subscription update" });
+            const aliceLinks = await alice.perspective.queryLinks(aliceUuid, new LinkQuery({ predicate: "test://note" }));
+            expect(aliceLinks.map(l => l.data.source)).to.include("test://alice-draft");
+            expect(JSON.stringify(await alice.perspective.querySparql(aliceUuid, query))).to.include("test://alice-draft");
+
+            // Bob co-owns the perspective, and reads the shared link but not Alice's Local one.
+            const bobLinks = await bob.perspective.queryLinks(bobUuid, new LinkQuery({ predicate: "test://note" }));
+            expect(bobLinks.map(l => l.data.source)).to.include("test://public");
+            expect(bobLinks.map(l => l.data.source)).to.not.include("test://alice-draft");
+            const bobSparql = JSON.stringify(await bob.perspective.querySparql(bobUuid, query));
+            expect(bobSparql).to.include("test://public");
+            expect(bobSparql).to.not.include("test://alice-draft");
+            // Give a misrouted update the time Alice's took, and then some.
+            await sleep(2000);
+            expect(bobUpdates, "Alice's subscription update reached Bob's session").to.be.empty;
+
+            stopAlice();
+            stopBob();
+            await alice.perspective.disposeQuerySubscription(aliceUuid, subscriptionId);
+        });
+
         it("should use separate prolog pools for different users in shared neighbourhood", async () => {
             // Create two users
             const user1Result = await createTestUser("prolog1@example.com", "password1");

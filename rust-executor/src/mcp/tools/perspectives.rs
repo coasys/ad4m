@@ -40,6 +40,9 @@ pub struct AddLinkParams {
     pub predicate: String,
     /// Link target URI
     pub target: String,
+    /// Optional named graph IRI. Places the link in a named graph within
+    /// the perspective, enabling graph-scoped queries and bulk operations.
+    pub graph: Option<String>,
 }
 
 /// Parameters for querying links in a perspective
@@ -53,6 +56,9 @@ pub struct QueryLinksParams {
     pub predicate: Option<String>,
     /// Optional target URI filter
     pub target: Option<String>,
+    /// Optional named graph IRI filter. When set, only links in that
+    /// named graph appear in results.
+    pub graph: Option<String>,
 }
 
 /// Parameters for adding SDNA (subject class definition) to a perspective
@@ -226,7 +232,7 @@ impl Ad4mMcpHandler {
 
     /// Add a link to a perspective
     #[tool(
-        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal:string:Alice' — note the single colon: the legacy 'literal://string:…' spelling is not a parseable IRI and breaks every query that inlines it. In shared neighbourhoods, links sync to all members."
+        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal:string:Alice' — note the single colon: the legacy 'literal://string:…' spelling is not a parseable IRI and breaks every query that inlines it. In shared neighbourhoods, links sync to all members. Pass the optional 'graph' parameter (a named graph IRI) to place the link in a specific named graph within the perspective."
     )]
     pub async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
@@ -245,18 +251,28 @@ impl Ad4mMcpHandler {
                 };
 
                 match perspective
-                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .add_link(
+                        link,
+                        LinkStatus::Shared,
+                        None,
+                        &agent_context,
+                        p.graph.clone(),
+                    )
                     .await
                 {
                     Ok(decorated) => {
+                        let mut link_json = json!({
+                            "source": decorated.data.source,
+                            "predicate": decorated.data.predicate,
+                            "target": decorated.data.target,
+                            "timestamp": decorated.timestamp,
+                        });
+                        if let Some(ref g) = decorated.graph {
+                            link_json["graph"] = json!(g);
+                        }
                         let result = json!({
                             "success": true,
-                            "link": {
-                                "source": decorated.data.source,
-                                "predicate": decorated.data.predicate,
-                                "target": decorated.data.target,
-                                "timestamp": decorated.timestamp,
-                            }
+                            "link": link_json,
                         });
                         serde_json::to_string_pretty(&result)
                             .unwrap_or_else(|e| format!("Error: {}", e))
@@ -270,7 +286,7 @@ impl Ad4mMcpHandler {
 
     /// Query links in a perspective
     #[tool(
-        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values. A `literal://x:y` filter also matches the canonical `literal:x:y` spelling and vice versa, so a link written through add_link (which normalises) is found by the string it was written with."
+        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values. A `literal://x:y` filter also matches the canonical `literal:x:y` spelling and vice versa, so a link written through add_link (which normalises) is found by the string it was written with. Pass the optional 'graph' parameter to restrict results to a specific named graph."
     )]
     pub async fn query_links(&self, params: Parameters<QueryLinksParams>) -> String {
         let p = &params.0;
@@ -307,8 +323,13 @@ impl Ad4mMcpHandler {
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
                 let mut result: Vec<serde_json::Value> = Vec::new();
-                let mut seen: std::collections::HashSet<(String, String, String, String)> =
-                    std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<(
+                    String,
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                )> = std::collections::HashSet::new();
 
                 for (source, predicate, target) in filters {
                     let query = LinkQuery {
@@ -324,6 +345,11 @@ impl Ad4mMcpHandler {
                     };
 
                     for l in &links {
+                        if let Some(g) = p.graph.as_deref() {
+                            if l.graph.as_deref() != Some(g) {
+                                continue;
+                            }
+                        }
                         // Two filters can match the same link only if the store
                         // holds both spellings; dedupe so the caller never sees
                         // a row twice because of how it spelled the filter.
@@ -332,17 +358,22 @@ impl Ad4mMcpHandler {
                             l.data.predicate.clone().unwrap_or_default(),
                             l.data.target.clone(),
                             l.timestamp.clone(),
+                            l.graph.clone(),
                         );
                         if !seen.insert(key) {
                             continue;
                         }
-                        result.push(json!({
+                        let mut obj = json!({
                             "source": l.data.source,
                             "predicate": l.data.predicate,
                             "target": l.data.target,
                             "timestamp": l.timestamp,
                             "author": l.author,
-                        }));
+                        });
+                        if let Some(ref g) = l.graph {
+                            obj["graph"] = json!(g);
+                        }
+                        result.push(obj);
                     }
                 }
 

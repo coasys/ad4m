@@ -98,6 +98,19 @@ pub async fn run_flow_consensus_pass(
     flow_filter: Option<&[String]>,
     instance_filter: Option<&[String]>,
 ) -> Vec<FireOutcome> {
+    // The pass reads as the agent it records for: another agent's Local graph
+    // stays out of the flows, instances and votes it folds. It reads its
+    // agent's own Local graph even on a shared-reads view (the auto-processor
+    // hands it one): its cache and fired marks live there (#1360), and
+    // everything it writes is Local, so nothing it reads reaches a shared graph.
+    let mut view = match crate::agent::did_for_context(context) {
+        Ok(did) => perspective.clone().for_own_bookkeeping(did),
+        Err(e) => {
+            log::warn!("run_flow_consensus_pass: no DID for the pass: {e:#}");
+            return Vec::new();
+        }
+    };
+    let perspective = &mut view;
     let loaded = async {
         let mut flows_by_uri = load_shacl_flows(perspective).await?;
         retain_selected_flows(&mut flows_by_uri, flow_filter);
@@ -176,6 +189,11 @@ pub async fn run_flow_consensus_pass(
         // next pass an ordinary one, so an edge settling afterwards is not
         // missed. Invariant: no event flood on join; no missed events for
         // edges that settle after catch-up.
+        //
+        // On a co-owned perspective each owner catches up on their own (#1360).
+        // An acting call (propose, accept) therefore runs the agent's catch-up
+        // before its vote (`catch_up_before_acting`), or the pass after the
+        // vote would be the catch-up and swallow the edge the vote settles.
         let first_pass_here = already_marked.is_empty()
             && match has_local_cache(perspective, &record.instance_uri).await {
                 Ok(cached) => !cached,
@@ -317,6 +335,86 @@ pub(crate) async fn local_cached_state(
     }
 }
 
+/// Run `context`'s catch-up pass on `instance_uri` if none has run for that
+/// agent on this replica yet. An acting call (propose, accept) calls it before
+/// it writes its vote.
+///
+/// Each co-owner keeps their own cache and marks (#1360), so an agent's first
+/// pass on an instance is a silent catch-up (see [`run_flow_consensus_pass`]).
+/// Run after the vote, that catch-up would swallow the very edge the vote
+/// settles, and the acting call would report nothing. Run first, it records
+/// the history as it stood, and the pass after the vote is an ordinary one.
+pub(crate) async fn catch_up_before_acting(
+    perspective: &mut PerspectiveInstance,
+    instance_uri: &str,
+    context: &AgentContext,
+) {
+    let did = match crate::agent::did_for_context(context) {
+        Ok(did) => did,
+        Err(e) => {
+            log::warn!("catch_up_before_acting: no DID for the acting agent: {e:#}");
+            return;
+        }
+    };
+    let own = perspective.clone().for_own_bookkeeping(did);
+    match has_local_cache(&own, instance_uri).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let only = [instance_uri.to_string()];
+            // Empty on a first pass, which is silent. Not empty only when the
+            // cache is unreadable while marks exist (two Local `currentState`
+            // links, a non-literal target; see #1387): then these edges
+            // settled before the action and are not the call's to report.
+            let dropped =
+                run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+            if !dropped.is_empty() {
+                log::debug!(
+                    "catch_up_before_acting: {instance_uri} had an unreadable cache; {} earlier edge(s) recorded, not reported: {dropped:?}",
+                    dropped.len()
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!("catch_up_before_acting: reading the cache of {instance_uri} failed: {e:#}")
+        }
+    }
+}
+
+/// Record an acting call's step for every other agent that keeps flow
+/// bookkeeping on this perspective ([`flow_pass_agents`]), before the call
+/// returns.
+///
+/// Each agent's `currentState` and marks are their own (#1360), and the acting
+/// call's pass records for the actor only. Without this, the owner of a
+/// perspective another agent acts on (an admin client, or a co-owner) would
+/// read the state from before the action: until the debounced sweep on a
+/// co-owned perspective, and for good where nothing queues one. Their outcomes
+/// are only logged; the acting call reports its own.
+///
+/// [`flow_pass_agents`]: super::trigger::flow_pass_agents
+pub(crate) async fn record_for_other_agents(
+    perspective: &mut PerspectiveInstance,
+    instance_uri: &str,
+    actor: &AgentContext,
+) {
+    let actor_did = crate::agent::did_for_context(actor).ok();
+    let only = [instance_uri.to_string()];
+    for context in perspective.flow_pass_contexts().await {
+        if crate::agent::did_for_context(&context).ok() == actor_did {
+            continue;
+        }
+        let outcomes =
+            run_flow_consensus_pass(perspective, None, &context, None, Some(&only)).await;
+        if !outcomes.is_empty() {
+            log::debug!(
+                "record_for_other_agents: {} edge(s) of {instance_uri} recorded for {:?}",
+                outcomes.len(),
+                context.user_email
+            );
+        }
+    }
+}
+
 async fn has_local_cache(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
@@ -359,6 +457,7 @@ async fn write_state_and_marks(
                     LinkStatus::Local,
                     Some(batch_id.clone()),
                     context,
+                    None,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("marking {uri} fired failed: {e:#}"))?;
@@ -411,6 +510,7 @@ mod tests {
                 LinkStatus::Shared,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("add Shared currentState link");
@@ -434,9 +534,14 @@ mod tests {
         advance_flow_instance_state(&mut perspective, INST_URI, "identified", None, &ctx)
             .await
             .expect("write Local currentState link");
-        let result = local_cached_state(&perspective, INST_URI)
-            .await
-            .expect("local_cached_state");
+        let result = local_cached_state(
+            &perspective
+                .clone()
+                .for_viewer(crate::agent::did_for_context(&ctx).unwrap()),
+            INST_URI,
+        )
+        .await
+        .expect("local_cached_state");
         assert_eq!(
             result.as_deref(),
             Some("identified"),

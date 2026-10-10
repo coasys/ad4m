@@ -147,7 +147,7 @@ async fn seed_flow_and_instance(
     let flow_links = parse_flow_to_links(flow_json, "Delivery").expect("parse_flow_to_links");
     for link in flow_links {
         perspective
-            .add_link(link, LinkStatus::Local, None, ctx)
+            .add_link(link, LinkStatus::Local, None, ctx, None)
             .await
             .expect("add_link(flow definition)");
     }

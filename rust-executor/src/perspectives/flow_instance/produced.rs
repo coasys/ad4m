@@ -711,7 +711,7 @@ pub async fn mint_flow_receipt(
         });
     }
     perspective
-        .add_links(links, LinkStatus::Shared, None, context)
+        .add_links(links, LinkStatus::Shared, None, context, None)
         .await?;
 
     debug_assert!(is_terminal_state(flow, &receipt.terminal_state));

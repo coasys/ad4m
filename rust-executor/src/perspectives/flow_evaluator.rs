@@ -961,7 +961,7 @@ fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
-        PerspectiveInstance::model_query(self, class_name, query_json).await
+        PerspectiveInstance::model_query(self, class_name, query_json, None).await
     }
 
     /// `produced`'s loader, unchanged: scoped to the flow before it is
@@ -2841,6 +2841,7 @@ mod tests {
                     invalid: None,
                 },
                 status: None,
+                graph: None,
             }
         }
 

@@ -58,6 +58,7 @@ async fn create_subject_roundtrips_soa_instance() {
             Some(serde_json::json!({ "title": "Ship the MVP", "owner": "Nico" })),
             None,
             &ctx,
+            None,
         )
         .await
         .expect("create_subject");
@@ -1099,6 +1100,7 @@ async fn link_under_channel(
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("link subgroup under channel");
@@ -1513,6 +1515,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
                 LinkStatus::Local,
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("seed body");
@@ -1526,6 +1529,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
                 LinkStatus::Local,
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("seed author");
@@ -1706,6 +1710,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
                 LinkStatus::Local,
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("seed body");
@@ -1719,6 +1724,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
                 LinkStatus::Local,
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("seed author");
@@ -1967,6 +1973,7 @@ async fn auto_processor_high_level_signal_driven_pass() {
                         LinkStatus::Local,
                         None,
                         &ctx,
+                        None,
                     )
                     .await
                     .expect("seed channel message link");
@@ -2143,6 +2150,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
                         LinkStatus::Local,
                         None,
                         &ctx_main,
+                        None,
                     )
                     .await
                     .expect("seed channel message link");
@@ -2455,6 +2463,7 @@ async fn e2e_run_interpretation_honours_parent_scope() {
             LinkStatus::Local,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("parent link");

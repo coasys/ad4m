@@ -47,6 +47,7 @@ pub(crate) async fn replace_link(
             LinkStatus::Shared,
             batch_id,
             context,
+            None,
         )
         .await?;
     Ok(())

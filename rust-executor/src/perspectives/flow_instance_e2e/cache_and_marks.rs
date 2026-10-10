@@ -424,7 +424,7 @@ async fn drop_local_cache(f: &mut Fixture) {
 /// the sync trigger so the test controls when the pass runs.
 async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[&str]) {
     for uri in proposal_uris {
-        for link in links_of(from, uri).await {
+        for link in synced_links_of(from, uri).await {
             to.perspective
                 .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
                 .await
@@ -442,13 +442,19 @@ async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[
 /// `the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
+    // Seed B first: every fixture setup re-keys the main agent
+    // (`AgentService::init_global_test_instance`), and a fixture reads as the
+    // agent it was seeded for. B is re-stamped to the agent both replicas act
+    // as from here on; the cache its mint wrote for the old key is out of its
+    // view, which is the newcomer this test wants.
+    let mut b = seed_review_flow().await;
     let mut a = seed_review_flow().await;
+    b.perspective = b.perspective.clone().for_viewer(acting_did(&b));
     let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
     let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
 
     // Replica B: same definition, the flow instance as sync delivers it (no
     // cache), and A's history.
-    let mut b = seed_review_flow().await;
     drop_local_cache(&mut b).await;
     replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
 
@@ -532,4 +538,247 @@ async fn a_forged_fired_mark_moves_nothing() {
         "an unmarked but quorate edge is history the moment its votes exist"
     );
     assert_eq!(derived.settled[0].voters.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// The pass reads its own bookkeeping, whatever view it is handed (#812 review)
+// ---------------------------------------------------------------------------
+
+/// The auto-processor hands the pass a shared-reads view (#1324), and the
+/// cache and the marks are its runner's Local links (#1360). The pass still
+/// reads them: a settle is reported once, and a second pass adds no second
+/// `currentState` and no second mark.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_on_a_shared_reads_view_reads_its_own_cache_and_marks() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let minted = f.mint_one().await;
+    let shared_pass = |f: &Fixture| f.perspective.clone().for_shared_reads();
+
+    let mut view = shared_pass(&f);
+    let first = run_flow_consensus_pass(&mut view, None, &f.ctx, None, None).await;
+    assert_eq!(first.len(), 1, "the settle is reported: {first:?}");
+    let mut view = shared_pass(&f);
+    let rerun = run_flow_consensus_pass(&mut view, None, &f.ctx, None, None).await;
+    assert!(rerun.is_empty(), "reported twice: {rerun:?}");
+
+    let local_cache: Vec<_> = current_state_links(&f)
+        .await
+        .into_iter()
+        .filter(|l| l.status == Some(LinkStatus::Local))
+        .collect();
+    assert_eq!(local_cache.len(), 1, "{local_cache:?}");
+    let marks: Vec<_> = links_of(&f, &minted)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE))
+        .collect();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!(f.cached_state().await, "scoped");
+}
+
+/// Each co-owner keeps their own `currentState` (#1360): Bob's pass writes
+/// his cache into his Local graph and leaves Alice's (the fixture agent's)
+/// as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_pass_writes_their_own_cache_and_leaves_the_others() {
+    use crate::perspectives::sparql_store::local_graph_iri;
+    let mut f = seed_satisfied_fixture(None).await;
+    f.mint_one().await;
+    assert_eq!(consensus_pass(&mut f).await.len(), 1);
+    let alices_before = current_state_links(&f).await;
+    assert_eq!(alices_before.len(), 1, "{alices_before:?}");
+
+    let bob = second_agent("bob-own-cache@e2e.test");
+    let bob_did = crate::agent::did_for_context(&bob).unwrap();
+    run_flow_consensus_pass(&mut f.perspective, None, &bob, None, None).await;
+
+    let bobs: Vec<_> = f
+        .perspective
+        .clone()
+        .for_viewer(bob_did.clone())
+        .get_links(&LinkQuery {
+            source: Some(f.instance_uri.clone()),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(bobs.len(), 1, "{bobs:?}");
+    assert_eq!(bobs[0].graph, Some(local_graph_iri(&bob_did)));
+    assert_eq!(bobs[0].status, Some(LinkStatus::Local));
+    assert_eq!(
+        current_state_links(&f).await,
+        alices_before,
+        "Alice's cache was touched"
+    );
+}
+
+/// Since #1360 each co-owner keeps their own cache, so an agent's first pass on
+/// an instance is a silent catch-up. Run after the vote of an acting call, it
+/// swallowed the very edge that vote settles. The acting call now runs the
+/// catch-up before it votes (#812, CI `flow-task-handover`: "n:1 Start fires on
+/// proposeTransition").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_first_proposal_reports_the_edge_it_settles() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let bob = second_agent("bob-first-proposal@e2e.test");
+    let instance = f.instance_uri.clone();
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &bob,
+    )
+    .await
+    .expect("Bob proposes");
+    assert!(outcome.recorded_vote);
+    assert_eq!(
+        outcome.outcomes.len(),
+        1,
+        "Bob's n:1 edge is reported: {:?}",
+        outcome.outcomes
+    );
+}
+
+/// The same for a co-signer's first accept: the `{n: 2}` edge Bob's vote
+/// settles is reported, with no pass run for him beforehand.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_first_accept_reports_the_edge_it_settles() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let proposed = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the proposer");
+    assert!(
+        proposed.outcomes.is_empty(),
+        "one vote is short of {{n: 2}}"
+    );
+
+    let bob = second_agent("bob-first-accept@e2e.test");
+    let fired = accept_flow_proposal(&mut f.perspective, &proposed.proposal_uri, &bob)
+        .await
+        .expect("Bob co-signs");
+    assert_eq!(fired.len(), 1, "Bob's vote settles the edge: {fired:?}");
+}
+
+/// Multi-user mode for one test, with `users` as managed users; switched off
+/// again on drop, also when the test panics.
+struct MultiUserForTest;
+
+impl MultiUserForTest {
+    fn enable(users: &[(&str, &str)]) -> Self {
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(true).unwrap();
+            for (email, did) in users {
+                db.add_user(email, did, "pass").unwrap();
+            }
+        });
+        MultiUserForTest
+    }
+}
+
+impl Drop for MultiUserForTest {
+    fn drop(&mut self) {
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false)).unwrap();
+    }
+}
+
+/// Since #1360 each agent's `currentState` is their own. When one agent acts
+/// on a perspective another agent owns (an admin client, or a co-owner), the
+/// owner must not read the state from before the action once the call has
+/// returned. So the acting call records the step for every other agent that
+/// keeps bookkeeping here (#812, CI `flow-task-handover`: Alice's
+/// `currentStateName` after Bob's transitions).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_acting_call_records_the_new_state_for_the_perspectives_owner() {
+    use crate::perspectives::flow_instance::pass::local_cached_state;
+    let mut f = seed_satisfied_fixture(None).await;
+    let email = format!("alice-owner-{}@e2e.test", uuid::Uuid::new_v4());
+    let alice = second_agent(&email);
+    let alice_did = crate::agent::did_for_context(&alice).unwrap();
+    let _multi_user = MultiUserForTest::enable(&[(&email, &alice_did)]);
+    let mut handle = f.perspective.persisted.lock().await.clone();
+    handle.owners = Some(vec![alice_did.clone()]);
+    f.perspective.update_from_handle(handle).await;
+
+    // The fixture agent acts on Alice's perspective, as an admin client does.
+    let instance = f.instance_uri.clone();
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the acting agent proposes");
+    assert_eq!(outcome.derived_state, "scoped");
+
+    let alices = local_cached_state(&f.perspective.clone().for_viewer(alice_did), &instance)
+        .await
+        .unwrap();
+    assert_eq!(
+        alices.as_deref(),
+        Some("scoped"),
+        "Alice reads the new state"
+    );
+}
+
+/// The same for an accept: the `{n: 2}` edge another agent's co-signature
+/// settles is recorded for the perspective's owner before the call returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accept_records_the_new_state_for_the_perspectives_owner() {
+    use crate::perspectives::flow_instance::pass::local_cached_state;
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let email = format!("alice-owner-{}@e2e.test", uuid::Uuid::new_v4());
+    let alice = second_agent(&email);
+    let alice_did = crate::agent::did_for_context(&alice).unwrap();
+    let _multi_user = MultiUserForTest::enable(&[(&email, &alice_did)]);
+    let mut handle = f.perspective.persisted.lock().await.clone();
+    handle.owners = Some(vec![alice_did.clone()]);
+    f.perspective.update_from_handle(handle).await;
+    let instance = f.instance_uri.clone();
+    let alices = |f: &Fixture| {
+        let view = f.perspective.clone().for_viewer(alice_did.clone());
+        let instance = instance.clone();
+        async move { local_cached_state(&view, &instance).await.unwrap() }
+    };
+
+    let proposed = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the proposer");
+    assert_eq!(
+        alices(&f).await.as_deref(),
+        Some("identified"),
+        "one vote short"
+    );
+
+    let bob = second_agent("bob-cosigner@e2e.test");
+    accept_flow_proposal(&mut f.perspective, &proposed.proposal_uri, &bob)
+        .await
+        .expect("Bob co-signs");
+    assert_eq!(
+        alices(&f).await.as_deref(),
+        Some("scoped"),
+        "Alice reads the new state"
+    );
 }

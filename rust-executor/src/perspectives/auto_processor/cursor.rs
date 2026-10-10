@@ -254,6 +254,7 @@ mod tests {
                 LinkStatus::Shared,
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("seed run link");

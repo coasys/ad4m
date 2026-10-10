@@ -55,6 +55,7 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
             signature: lei.proof.signature.clone().unwrap_or_default(),
         },
         status: lei.status.clone(),
+        graph: lei.graph.clone(),
     };
     // `LinkStatus::Shared` is the enum's own `#[default]`, and the conversion
     // stores `Some(status)`. Profile links from a client that sent no status
@@ -971,6 +972,7 @@ mod tests {
                 invalid: claimed_valid.map(|v| !v),
             },
             status: None,
+            graph: None,
         }
     }
 

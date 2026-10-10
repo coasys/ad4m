@@ -206,8 +206,22 @@ impl PerspectiveInstance {
     /// published diff, so a synced one arrives here as well as through
     /// [`schedule_flow_consensus_pass`](Self::schedule_flow_consensus_pass);
     /// the queue folds the second into the pass the first queued.
-    pub(crate) fn schedule_flow_pass_on_definition_change(&self, diff: &DecoratedPerspectiveDiff) {
-        self.enqueue_flow_pass(FlowTouch::of_local_diff(diff));
+    ///
+    /// On a perspective with more than one owner, any flow-relevant local
+    /// write queues the pass, as a synced one does. Each owner keeps their
+    /// cache and marks in their own Local graph (#1360). A propose or accept
+    /// already records its step for every other agent before it returns
+    /// (`record_for_other_agents`); this sweep is the backstop for flow writes
+    /// that don't come through them, which would otherwise leave a co-owner on
+    /// the same executor reading a stale `currentState` until the next synced
+    /// link. The race between the two is #1387.
+    pub(crate) async fn schedule_flow_pass_on_local_write(&self, diff: &DecoratedPerspectiveDiff) {
+        let co_owned = self.persisted.lock().await.get_owners().len() > 1;
+        self.enqueue_flow_pass(if co_owned {
+            FlowTouch::of_diff(diff)
+        } else {
+            FlowTouch::of_local_diff(diff)
+        });
     }
 
     fn enqueue_flow_pass(&self, touch: FlowTouch) {
@@ -342,7 +356,7 @@ impl PerspectiveInstance {
     /// round-trip per user per pass. Note also that nothing here calls
     /// `ensure_user_key`: a missing key must never be answered by minting a
     /// fresh DID underneath an existing user.
-    async fn flow_pass_contexts(&self) -> Vec<AgentContext> {
+    pub(crate) async fn flow_pass_contexts(&self) -> Vec<AgentContext> {
         let owners = self.persisted.lock().await.get_owners();
         if owners.is_empty() {
             return flow_pass_agents(&[], None, &[]);
@@ -427,9 +441,8 @@ impl PerspectiveInstance {
 /// Cost note: each context currently re-reads the shared links too
 /// (`load_shacl_flows`, `load_flow_instances`, the read set). Only the
 /// cache and mark reads are genuinely per agent. Splitting
-/// `run_flow_consensus_pass` into derive-once / record-per-agent is the
-/// optimisation to make when the per-user `Local` links land, and is left
-/// until then so this change stays reviewable against that PR.
+/// `run_flow_consensus_pass` into derive-once / record-per-agent is #1388;
+/// it matters more since an acting call records for every other agent too.
 pub fn flow_pass_agents(
     owners: &[String],
     main_agent_did: Option<&str>,
@@ -503,6 +516,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         }
     }
 

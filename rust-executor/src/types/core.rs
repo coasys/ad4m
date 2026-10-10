@@ -150,6 +150,10 @@ pub struct LinkExpression {
     pub data: Link,
     pub proof: ExpressionProof,
     pub status: Option<LinkStatus>,
+    /// The named graph the link lives in; absent for the default graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub graph: Option<String>,
 }
 
 impl TryFrom<LinkExpressionInput> for LinkExpression {
@@ -170,6 +174,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
             },
             status: input.status,
+            graph: input.graph,
         })
     }
 }
@@ -188,6 +193,7 @@ impl LinkExpression {
             data,
             proof: ExpressionProof::default(),
             status: input.status,
+            graph: input.graph,
         }
     }
 
@@ -228,6 +234,7 @@ impl From<Expression<Link>> for LinkExpression {
             data: expr.data.normalize(),
             proof: expr.proof,
             status: None,
+            graph: None,
         }
     }
 }
@@ -242,6 +249,10 @@ pub struct DecoratedLinkExpression {
     pub proof: DecoratedExpressionProof,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<LinkStatus>,
+    /// The named graph the link lives in; absent for the default graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub graph: Option<String>,
 }
 
 impl DecoratedLinkExpression {
@@ -278,6 +289,7 @@ impl DecoratedLinkExpression {
 
 impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     fn from((expr, status): (LinkExpression, LinkStatus)) -> Self {
+        let graph = expr.graph.clone();
         let mut expr: Expression<Link> = expr.into();
         expr.data = expr.data.normalize();
         let verified_expr: VerifiedExpression<Link> = expr.into();
@@ -287,6 +299,7 @@ impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
             data: verified_expr.data,
             proof: verified_expr.proof,
             status: Some(status),
+            graph,
         }
     }
 }
@@ -302,6 +315,7 @@ impl From<DecoratedLinkExpression> for LinkExpression {
                 signature: decorated.proof.signature,
             },
             status: decorated.status,
+            graph: decorated.graph,
         }
     }
 }
@@ -535,6 +549,10 @@ pub struct TriggeredNotification {
 pub struct NotificationTriggeredEvent {
     pub perspective_uuid: String,
     pub notification: TriggeredNotification,
+    /// The agent the notification belongs to. The events socket delivers the
+    /// event to this agent's sessions only: the trigger ran as this agent
+    /// reads, so `trigger_match` may hold rows from their Local graph.
+    pub owner_did: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]

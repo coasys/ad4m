@@ -47,6 +47,7 @@ pub fn link(
             invalid: Some(!valid),
         },
         status: None,
+        graph: None,
     }
 }
 

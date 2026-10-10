@@ -94,8 +94,13 @@ async fn seed_fixture_with_requires(
 /// production links via `parse_flow_to_links`, so the tests read exactly the
 /// shapes the writer emits.
 pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str) -> Fixture {
-    let (mut perspective, mut shapes, ctx) =
+    let (perspective, mut shapes, ctx) =
         setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+    // The fixture acts as its agent, as a client's request does: the flow
+    // cache and fired marks are that agent's Local links (#1357), which the
+    // executor's shared instance does not read (#1358).
+    let mut perspective =
+        perspective.for_viewer(crate::agent::did_for_context(&ctx).expect("did_for_context"));
 
     let name = flow_json["name"].as_str().expect("flow JSON has a name");
     let flow_uri = format!(
@@ -105,7 +110,7 @@ pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str)
     let links = parse_flow_to_links(&flow_json.to_string(), name).expect("parse_flow_to_links");
     for link in links {
         perspective
-            .add_link(link, LinkStatus::Local, None, &ctx)
+            .add_link(link, LinkStatus::Shared, None, &ctx, None)
             .await
             .expect("add_link(flow definition)");
     }
@@ -173,6 +178,7 @@ impl Fixture {
                 status,
                 None,
                 &self.ctx,
+                None,
             )
             .await
             .unwrap_or_else(|e| panic!("add_link({predicate}): {e:#}"));

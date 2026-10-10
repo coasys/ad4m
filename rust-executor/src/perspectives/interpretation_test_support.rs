@@ -675,6 +675,7 @@ pub(crate) async fn seed_instance_with_props(
             Some(props),
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed_instance_with_props create_subject");
@@ -746,7 +747,7 @@ pub(crate) async fn model_instances(
 ) -> Vec<serde_json::Value> {
     let query = serde_json::json!({ "properties": props }).to_string();
     let result_json = perspective
-        .model_query(class, &query)
+        .model_query(class, &query, None)
         .await
         .unwrap_or_else(|e| panic!("model_instances: model_query({class}) failed: {e:#}"));
     let v: serde_json::Value = serde_json::from_str(&result_json).unwrap_or_else(|e| {
@@ -1050,6 +1051,8 @@ pub(crate) fn proposal(
 /// two direct links per message: `<msg> <ns://body> <literal:string:...>` and
 /// `<msg> <ns://author> <did:key:...>`. Mirrors the shape a Flux-style channel
 /// perspective would present and the SPARQL queries in these tests target.
+/// Shared, as a channel's messages are: a Local write lands in its writer's
+/// Local graph (#1357), which the auto-processor never reads.
 pub(crate) async fn seed_message(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     ctx: &crate::agent::AgentContext,
@@ -1066,9 +1069,10 @@ pub(crate) async fn seed_message(
                 predicate: Some(body_predicate.into()),
                 target: format!("literal:string:{body}"),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed_message body");
@@ -1079,9 +1083,10 @@ pub(crate) async fn seed_message(
                 predicate: Some("ns://author".into()),
                 target: author.into(),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed_message author");
@@ -1114,8 +1119,9 @@ pub(crate) fn delivery_flow_json_for(input_type: &str) -> String {
     .to_string()
 }
 
-/// Parse `flow_json` into links and add them all to `perspective`.
-/// Panics on any parse or add_link error; only for test scaffolding.
+/// Parse `flow_json` into links and add them all to `perspective`, Shared as
+/// a flow definition is. Panics on any parse or add_link error; only for test
+/// scaffolding.
 pub(crate) async fn seed_flow(
     perspective: &mut PerspectiveInstance,
     ctx: &AgentContext,
@@ -1127,7 +1133,7 @@ pub(crate) async fn seed_flow(
         super::shacl_parser::parse_flow_to_links(flow_json, flow_name).expect("parse_flow_to_links")
     {
         perspective
-            .add_link(link, LinkStatus::Local, None, ctx)
+            .add_link(link, LinkStatus::Shared, None, ctx, None)
             .await
             .expect("add_link(flow definition)");
     }

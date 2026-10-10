@@ -109,9 +109,13 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
-    async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
-        const result = await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
+    async querySparql<T = any>(uuid: string, query: string, graphs?: string[], options?: CallOptions): Promise<T> {
+        const result = await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query, graphs }, options)
         return JSON.parse(result) as T
+    }
+
+    async namedGraphs(uuid: string): Promise<string[]> {
+        return this.#apiClient.call('perspective.namedGraphs', { uuid })
     }
 
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
@@ -156,9 +160,9 @@ export class PerspectiveClient {
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
+    async modelQuery(uuid: string, className: string, queryJson: string, graphIris?: string[], options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
+            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson, graph_iris: graphIris }, options
         )
         return JSON.parse(resultJson)
     }
@@ -186,9 +190,9 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+    async modelSubscribe(uuid: string, className: string, queryJson: string, graphIris?: string[]): Promise<{ subscriptionId: string, result: any }> {
         const response = await this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
+            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson, graph_iris: graphIris }
         )
         return {
             subscriptionId: response.subscription_id,
@@ -211,16 +215,16 @@ export class PerspectiveClient {
         return { perspectiveRemove: result }
     }
 
-    async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+    async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression> {
         const added = await this.#apiClient.call(
-            'perspective.addLink', { uuid, link, status, batchId }
+            'perspective.addLink', { uuid, link, status, batchId, graph }
         )
         return LinkExpression.fromWire(added)
     }
 
-    async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
+    async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression[]> {
         const added = await this.#apiClient.call(
-            'perspective.addLinks', { uuid, links, status, batchId }
+            'perspective.addLinks', { uuid, links, status, batchId, graph }
         )
         return added.map(LinkExpression.fromWire)
     }
@@ -232,9 +236,9 @@ export class PerspectiveClient {
         return removed.map(LinkExpression.fromWire)
     }
 
-    async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
+    async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus, graph?: string): Promise<LinkExpressionMutations> {
         const diff = await this.#apiClient.call(
-            'perspective.linkMutations', { uuid, mutations: linkMutationsToWire(mutations), status }
+            'perspective.linkMutations', { uuid, mutations: linkMutationsToWire(mutations), status, graph }
         )
         return LinkExpressionMutations.fromWire(diff)
     }
@@ -460,15 +464,21 @@ export class PerspectiveClient {
         return typeof result === 'boolean' ? [result] : result
     }
 
-    async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
+    async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string, graph?: string): Promise<boolean> {
         return this.#apiClient.call(
-            'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
+            'perspective.executeCommands', { uuid, commands, expression, parameters, batchId, graph }
         )
     }
 
-    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
+    async removeNamedGraph(uuid: string, graphIri: string): Promise<boolean> {
         return this.#apiClient.call(
-            'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
+            'perspective.removeNamedGraph', { uuid, graphIri }
+        )
+    }
+
+    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string, graph?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId, graph }
         )
     }
 

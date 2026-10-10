@@ -799,6 +799,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -815,6 +816,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "user1".to_string(),
@@ -831,6 +833,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ]
     }
@@ -855,6 +858,7 @@ mod tests {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             });
         }
         links

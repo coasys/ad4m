@@ -472,6 +472,7 @@ impl Ad4mMcpHandler {
                 initial_values,
                 None,
                 &agent_context,
+                None,
             )
             .await
         {
@@ -488,7 +489,7 @@ impl Ad4mMcpHandler {
                     };
 
                     if let Err(e) = perspective
-                        .add_link(link, LinkStatus::Shared, None, &agent_context)
+                        .add_link(link, LinkStatus::Shared, None, &agent_context, None)
                         .await
                     {
                         return serde_json::to_string_pretty(&json!({
@@ -1024,7 +1025,7 @@ impl Ad4mMcpHandler {
                     .await;
 
             if let Err(e) = perspective
-                .add_link(link, status, Some(batch_id.clone()), &agent_context)
+                .add_link(link, status, Some(batch_id.clone()), &agent_context, None)
                 .await
             {
                 return format!("Error adding '{}' link (batch abandoned): {}", key, e);
@@ -1190,7 +1191,7 @@ impl Ad4mMcpHandler {
         .await;
 
         if let Err(e) = perspective
-            .add_link(link, status, Some(batch_id.clone()), &agent_context)
+            .add_link(link, status, Some(batch_id.clone()), &agent_context, None)
             .await
         {
             return format!(
@@ -1319,7 +1320,7 @@ impl Ad4mMcpHandler {
         .await;
 
         match perspective
-            .add_link(link, status, None, &agent_context)
+            .add_link(link, status, None, &agent_context, None)
             .await
         {
             Ok(_) => serde_json::to_string_pretty(&json!({

@@ -310,6 +310,7 @@ pub struct LinkExpressionInput {
     pub proof: ExpressionProofInput,
     pub timestamp: String,
     pub status: Option<LinkStatus>,
+    pub graph: Option<String>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -450,6 +451,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
                 invalid: input.proof.invalid,
             },
             status: input.status,
+            graph: input.graph,
         })
     }
 }
@@ -1396,6 +1398,10 @@ pub struct PerspectiveQuerySubscriptionFilter {
     pub perspective_uuid: String,
     pub uuid: String,
     pub subscription_id: String,
+    /// The agent that created the subscription. The events socket delivers
+    /// the update to this agent's session only: `result` was computed as
+    /// this agent reads, so it may hold rows from their Local graph.
+    pub subscriber_did: String,
     pub result: String,
 }
 

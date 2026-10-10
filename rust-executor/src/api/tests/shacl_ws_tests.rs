@@ -90,9 +90,10 @@ async fn seed_shape(
                 predicate: Some("ad4m://has_shacl".into()),
                 target: literal_name.clone(),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed has_shacl");
@@ -105,9 +106,10 @@ async fn seed_shape(
                 predicate: Some("ad4m://shacl_shape_uri".into()),
                 target: shape_uri.into(),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed shacl_shape_uri");
@@ -120,9 +122,10 @@ async fn seed_shape(
                 predicate: Some("sh://targetClass".into()),
                 target: target_class.into(),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed targetClass");
@@ -137,9 +140,10 @@ async fn seed_shape(
                     predicate: Some("sh://property".into()),
                     target: prop_uri.clone(),
                 },
-                LinkStatus::Local,
+                LinkStatus::Shared,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://property");
@@ -152,9 +156,10 @@ async fn seed_shape(
                     predicate: Some("sh://path".into()),
                     target: p.path.into(),
                 },
-                LinkStatus::Local,
+                LinkStatus::Shared,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://path");
@@ -167,9 +172,10 @@ async fn seed_shape(
                     predicate: Some("sh://datatype".into()),
                     target: p.datatype.into(),
                 },
-                LinkStatus::Local,
+                LinkStatus::Shared,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://datatype");
@@ -182,9 +188,10 @@ async fn seed_shape(
                     predicate: Some("sh://minCount".into()),
                     target: format!("literal:number:{}", p.min_count),
                 },
-                LinkStatus::Local,
+                LinkStatus::Shared,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://minCount");
@@ -196,9 +203,10 @@ async fn seed_shape(
                     predicate: Some("sh://maxCount".into()),
                     target: format!("literal:number:{}", p.max_count),
                 },
-                LinkStatus::Local,
+                LinkStatus::Shared,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://maxCount");

@@ -712,6 +712,7 @@ describe('PerspectiveClient', () => {
         const ws = lastOf(MockWebSocket.instances);
         const update = (subscriptionId: string, result: unknown) => event('query-subscription-update', {
             perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId, result: JSON.stringify(result),
+            subscriberDid: 'did:test:me',
         });
 
         ws.emit(perspectiveAdded('uuid-ignored'));
@@ -1424,7 +1425,7 @@ describe('Ad4mClient', () => {
             proof: { key: 'k', signature: 's', valid: true, invalid: false },
         } }));
         ws.emit(event('exception-occurred', { exception }));
-        ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification }));
+        ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification, ownerDid: OWNER }));
 
         for (const handler of Object.values(handlers)) {
             expect(handler).toHaveBeenCalledTimes(1);

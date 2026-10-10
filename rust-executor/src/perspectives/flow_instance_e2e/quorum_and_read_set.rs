@@ -262,7 +262,7 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
 
     let p = proposal(
         f.perspective
-            .model_query("FlowTransitionProposal", "{}")
+            .model_query("FlowTransitionProposal", "{}", None)
             .await
             .expect("query proposals"),
     );
@@ -313,7 +313,7 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
     consensus_pass(&mut f).await;
     let p = proposal(
         f.perspective
-            .model_query("FlowTransitionProposal", "{}")
+            .model_query("FlowTransitionProposal", "{}", None)
             .await
             .expect("query proposals"),
     );

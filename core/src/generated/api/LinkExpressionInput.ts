@@ -3,4 +3,4 @@ import type { ExpressionProofInput } from "./ExpressionProofInput";
 import type { LinkInput } from "./LinkInput";
 import type { LinkStatus } from "./LinkStatus";
 
-export type LinkExpressionInput = { author: string, data: LinkInput, proof: ExpressionProofInput, timestamp: string, status?: LinkStatus, };
+export type LinkExpressionInput = { author: string, data: LinkInput, proof: ExpressionProofInput, timestamp: string, status?: LinkStatus, graph?: string, };

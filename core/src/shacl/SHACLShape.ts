@@ -282,6 +282,8 @@ export class SHACLShape {
   /** Parent shape URIs for model inheritance (sh:node references) */
   parentShapes: string[];
 
+  /** Whether instances are stored in named graphs */
+  hasGraph: boolean;
   /** AD4M-specific: Natural-language hint that steers the generic LLM
    *  extractor when producing instances of this class.  Emitted as an
    *  `ad4m://interpretation_hint` link on the shape node itself and surfaced
@@ -309,6 +311,7 @@ export class SHACLShape {
     }
     this.properties = [];
     this.parentShapes = [];
+    this.hasGraph = false;
   }
 
   /**
@@ -386,7 +389,12 @@ export class SHACLShape {
       `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n` +
       `@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n` +
       `@prefix ad4m: <ad4m://> .\n\n` +
-      `<${this.nodeShapeUri}>\n  ${[...statements(this.nodeShapeUri), ...properties].join(' ;\n  ')} .\n`;
+      `<${this.nodeShapeUri}>\n  ${[
+        ...statements(this.nodeShapeUri),
+        // AD4M graph-rooting flag. Turtle only: it has no link form.
+        ...(this.hasGraph ? ['ad4m:hasGraph true'] : []),
+        ...properties,
+      ].join(' ;\n  ')} .\n`;
   }
 
   

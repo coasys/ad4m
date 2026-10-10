@@ -4,4 +4,9 @@ export type PerspectiveSparqlParams = { uuid: string, query: string,
 /**
  * Only `"sparql"` (the default) is accepted.
  */
-engine?: string, };
+engine?: string, 
+/**
+ * Named graphs to read; the Local alias names the caller's own Local
+ * graph. Absent: every graph the caller may read.
+ */
+graphs?: Array<string>, };

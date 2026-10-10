@@ -171,6 +171,7 @@ async fn each_collection_member_carries_its_own_author_timestamp_and_verdict() {
                 signature: decorated.proof.signature.clone(),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         };
         assert_eq!(
             decorated.proof.valid,

@@ -528,6 +528,19 @@ export class QuerySubscriptionProxy {
 /** Link status argument. The executor accepts either case and returns links
  *  with the upper-case form (`LinkExpression.status`). */
 export type LinkStatus = "shared" | "local" | "SHARED" | "LOCAL"
+
+/**
+ * Names the caller's own Local graph wherever a graph goes: on writes
+ * (`add`, `addLinks`, `linkMutations`, `Ad4mModel.create(..., { graph })`) and in
+ * graph-scoped reads. The executor stores it per agent as `ad4m://local/<did>`.
+ * Links in a Local graph never sync, and only their agent reads them.
+ */
+export const LOCAL_GRAPH = "ad4m://local"
+
+/** Whether `graph` names a Local graph: the alias or an agent's `ad4m://local/<did>`. */
+export function isLocalGraph(graph: string | undefined): boolean {
+    return graph === LOCAL_GRAPH || !!graph?.startsWith(`${LOCAL_GRAPH}/`)
+}
 interface Parameter {
     name: string
     value: string
@@ -710,10 +723,26 @@ export class PerspectiveProxy {
      * @param parameters - Optional parameters that replace "value" in actions
      * @param batchId - Optional batch ID to group this operation with others
      */
-    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
+    async executeAction(actions, expression, parameters: Parameter[], batchId?: string, graph?: string) {
+        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result
+    }
+
+    /**
+     * List all named graph IRIs in this perspective.
+     */
+    async graphs(): Promise<string[]> {
+        return await this.#client.namedGraphs(this.#handle.uuid);
+    }
+
+    /**
+     * Remove a named graph and all its quads.
+     */
+    async removeGraph(graphIri: string): Promise<boolean> {
+        const result = await this.#client.removeNamedGraph(this.#handle.uuid, graphIri);
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -1015,11 +1044,12 @@ export class PerspectiveProxy {
      * @param options - Optional call options (e.g. AbortSignal for cancellation)
      * @returns Query results as parsed JSON
      */
-    async querySparql<T = any>(query: string, options?: CallOptions): Promise<T> {
-        const cached = getCachedResult(this.#handle.uuid, query);
+    async querySparql<T = any>(query: string, graphs?: string[], options?: CallOptions): Promise<T> {
+        const cacheKey = graphs && graphs.length > 0 ? `${query}|${graphs.join(',')}` : query;
+        const cached = getCachedResult(this.#handle.uuid, cacheKey);
         if (cached !== undefined) return cached as T;
-        const result = await this.#client.querySparql(this.#handle.uuid, query, options);
-        setCachedResult(this.#handle.uuid, query, result);
+        const result = await this.#client.querySparql(this.#handle.uuid, query, graphs, options);
+        setCachedResult(this.#handle.uuid, cacheKey, result);
         return result as T;
     }
 
@@ -1034,8 +1064,8 @@ export class PerspectiveProxy {
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
-        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
+    async modelQuery(className: string, queryJson: string, graphIris?: string[], options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, graphIris, options);
     }
 
     /** Resolve each URI to the names of every subject class it is an instance of.
@@ -1107,8 +1137,8 @@ export class PerspectiveProxy {
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
      * @returns Object with `subscriptionId` and initial `result`
      */
-    async modelSubscribe(className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
-        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
+    async modelSubscribe(className: string, queryJson: string, graphIris?: string[]): Promise<{ subscriptionId: string, result: any }> {
+        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson, graphIris);
     }
 
     /**
@@ -1136,8 +1166,8 @@ export class PerspectiveProxy {
      * }, "local");
      * ```
      */
-    async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId)
+    async add(link: Link, status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression> {
+        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -1151,8 +1181,8 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      * @returns Array of created LinkExpressions
      */
-    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
+    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression[]> {
+        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -1176,10 +1206,11 @@ export class PerspectiveProxy {
      * 
      * @param mutations - Object containing links to add and remove
      * @param status - Whether new links should be shared
+     * @param graph - Named graph for the added links; {@link LOCAL_GRAPH} for the caller's Local graph
      * @returns Object containing results of the mutations
      */
-    async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
-        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status)
+    async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared', graph?: string): Promise<LinkExpressionMutations> {
+        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -1884,7 +1915,8 @@ export class PerspectiveProxy {
         subjectClass: T, 
         exprAddr: string,
         initialValues?: Record<string, any>,
-        batchId?: B
+        batchId?: B,
+        graph?: string
     ): Promise<B extends undefined ? T : string> {
         let className: string;
 
@@ -1898,7 +1930,8 @@ export class PerspectiveProxy {
                 }), 
                 exprAddr,
                 initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
+                batchId,
+                graph
             );
         } else {
             const obj = subjectClass as any;
@@ -1915,7 +1948,8 @@ export class PerspectiveProxy {
                 }), 
                 exprAddr,
                 initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
+                batchId,
+                graph
             );
         }
 

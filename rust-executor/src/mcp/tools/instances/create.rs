@@ -134,6 +134,7 @@ impl Ad4mMcpHandler {
                 initial_values,
                 Some(batch_id.clone()),
                 &agent_context,
+                None,
             )
             .await
         {
@@ -171,7 +172,13 @@ impl Ad4mMcpHandler {
                     target,
                 };
                 if let Err(e) = perspective
-                    .add_link(link, status.clone(), Some(batch_id.clone()), &agent_context)
+                    .add_link(
+                        link,
+                        status.clone(),
+                        Some(batch_id.clone()),
+                        &agent_context,
+                        None,
+                    )
                     .await
                 {
                     perspective.discard_batch(&batch_id).await;
@@ -198,6 +205,7 @@ impl Ad4mMcpHandler {
                     LinkStatus::Shared,
                     Some(batch_id.clone()),
                     &agent_context,
+                    None,
                 )
                 .await
             {

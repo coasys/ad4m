@@ -105,6 +105,7 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: format!("{class}Shape"),
         properties,
         include_relations: Vec::new(),
+        has_graph: false,
         interpretation_hint: None,
     }
 }
@@ -173,7 +174,7 @@ pub async fn execute_model_query_from_json(
     shape_json: &str,
 ) -> Result<super::types::ModelQueryResult, Error> {
     let (resolver, shape) = StaticShapeResolver::from_json(class_name, shape_json)?;
-    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver).await
+    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver, None).await
 }
 
 /// Test wrapper for `evaluate_getters_batch` that takes shape JSON.
@@ -185,7 +186,7 @@ pub fn evaluate_getters_batch_from_json(
     shape_json: &str,
 ) -> Result<serde_json::Value, Error> {
     let shape = parse_shape_from_json(shape_json, class_name)?;
-    super::getters::evaluate_getters_batch(store, &shape, instance_ids, property_names)
+    super::getters::evaluate_getters_batch(store, &shape, instance_ids, property_names, None)
 }
 
 /// Helper: build an InstanceLinks entry with explicit per-link timestamps.

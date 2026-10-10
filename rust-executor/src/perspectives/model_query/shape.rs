@@ -78,7 +78,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let result_json = store.query(&query)?;
+    let result_json = store.query_shared(&query)?;
     let results: Vec<Value> = serde_json::from_str(&result_json)?;
 
     if results.is_empty() {
@@ -136,7 +136,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let props_json = store.query(&props_query)?;
+    let props_json = store.query_shared(&props_query)?;
     let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
 
     // Property shapes can fan into multiple rows because their `rdf://type`
@@ -367,7 +367,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
     let class_hint = store
-        .query(&class_hint_query)
+        .query_shared(&class_hint_query)
         .ok()
         .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
         .and_then(|rows| {
@@ -380,6 +380,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         shape_uri,
         properties,
         include_relations,
+        has_graph: false, // Store-loaded shapes don't carry this; use JSON path
         interpretation_hint: class_hint,
     })
 }
@@ -388,6 +389,9 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 /// constructor actions encoded as `ad4m://constructor` literal JSON on
 /// the shape.  Returns the `target` of any `addLink` action whose
 /// `predicate` matches `predicate`.
+///
+/// Both reads leave Local graphs out, like the rest of the shape: a shape is
+/// cached per perspective and acts for every agent.
 fn initial_value_from_constructor(
     store: &SparqlStore,
     target_class: &str,
@@ -405,7 +409,7 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let shape_result_json = store.query(&shape_query).ok()?;
+    let shape_result_json = store.query_shared(&shape_query).ok()?;
     let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
     let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
 
@@ -418,7 +422,7 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let ctor_result_json = store.query(&ctor_query).ok()?;
+    let ctor_result_json = store.query_shared(&ctor_query).ok()?;
     let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;
     let ctor_literal = ctor_rows.first()?["ctor"].as_str()?.to_string();
 
@@ -724,6 +728,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         shape_uri,
         properties,
         include_relations,
+        has_graph: meta["graph"].as_bool().unwrap_or(false),
         interpretation_hint: None,
     })
 }

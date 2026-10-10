@@ -547,7 +547,7 @@ mod tests {
                 .expect("parse_flow_to_links")
             {
                 perspective
-                    .add_link(link, LinkStatus::Local, None, &ctx)
+                    .add_link(link, LinkStatus::Shared, None, &ctx, None)
                     .await
                     .expect("add_link(flow definition)");
             }
@@ -581,7 +581,7 @@ mod tests {
             parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
         {
             perspective
-                .add_link(link, LinkStatus::Local, None, &ctx)
+                .add_link(link, LinkStatus::Shared, None, &ctx, None)
                 .await
                 .expect("add_link(flow definition)");
         }
@@ -663,13 +663,16 @@ mod tests {
     async fn flow_instance_for_local_cache_hit_skips_derive() {
         use crate::perspectives::flow_classes::advance_flow_instance_state;
 
-        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        // Act as the agent whose cache it is: the cache is its Local link, and
+        // replacing it reads the old one first (#1357, #1358).
+        let mut perspective = perspective.for_viewer(crate::agent::did_for_context(&ctx).unwrap());
 
         for link in
             parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
         {
             perspective
-                .add_link(link, LinkStatus::Local, None, &ctx)
+                .add_link(link, LinkStatus::Shared, None, &ctx, None)
                 .await
                 .expect("add_link(flow definition)");
         }
