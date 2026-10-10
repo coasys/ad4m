@@ -69,10 +69,10 @@
     "auto-bind": "^5.0.1",
     "lit": "^2.3.1"
   },
-  "publishConfig": {
-    "devDependencies": {
-      "@coasys/ad4m": "*"
-    }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "connect"
   },
   "version": "0.13.0-test-interpretation-2"
 }

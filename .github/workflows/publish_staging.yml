@@ -633,8 +633,16 @@ jobs:
   # ============================================================================
   npm-publish:
     runs-on: ubuntu-latest
+    # Publishing uses npm trusted publishing: `id-token: write` lets npm get an OIDC token from
+    # GitHub, and the GITHUB_TOKEN can only read.
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      # The job publishes to npm and only reads git locally, so the checkout keeps no credentials.
       - uses: actions/checkout@v3
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
 
@@ -670,29 +678,55 @@ jobs:
           cd core
           sed -i 's/"private": true/"private": false/' package.json
 
-      - name: Publish core
-        run: cd core && npm publish --access public --tag ${{ env.NPM_TAG }}
+      # The npm tag is chosen from the version in ui/package.json, so every package must be at that
+      # version. Trusted publishing refuses a package whose `repository.url` does not match this
+      # repository, so that is checked here too: a failure before the first publish leaves nothing
+      # half-published. `gitHead` is written because `npm publish` records the commit a version was
+      # built from and `pnpm publish` does not.
+      - name: Check versions and repository, and set gitHead
+        env:
+          VERSION: ${{ steps.extract_version.outputs.version }}
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: |
+          GIT_HEAD="$(git rev-parse HEAD)"
+          for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
+            GIT_HEAD="$GIT_HEAD" node -e "
+              const fs = require('fs');
+              const file = '$dir/package.json';
+              const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+              if (pkg.version !== process.env.VERSION) {
+                console.error(pkg.name + ' is at ' + pkg.version + ', but ui/package.json is at ' + process.env.VERSION);
+                process.exit(1);
+              }
+              const url = ((pkg.repository && pkg.repository.url) || '').replace(/^git\+/, '').replace(/\.git$/, '');
+              if (url !== process.env.REPO_URL) {
+                console.error(pkg.name + ' has repository.url ' + JSON.stringify(url) + ', but trusted publishing needs ' + process.env.REPO_URL);
+                process.exit(1);
+              }
+              pkg.gitHead = process.env.GIT_HEAD;
+              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
+            "
+          done
 
-      - name: Publish connect
-        run: cd connect && npm publish --access public --tag ${{ env.NPM_TAG }}
-
-      - name: Publish ad4m hook helpers
-        run: cd ad4m-hooks/helpers && npm publish --access public --tag ${{ env.NPM_TAG }}
-
-      - name: Publish ad4m react hooks
-        run: cd ad4m-hooks/react && npm publish --access public --tag ${{ env.NPM_TAG }}
-
-
-      - name: Publish ad4m vue hooks
-        run: cd ad4m-hooks/vue && npm publish --access public --tag ${{ env.NPM_TAG }}
-
-      - name: Publish executor
-        run: cd executor && npm publish --access public --tag ${{ env.NPM_TAG }}
-
-
-      - name: Publish Test runner
-        run: cd test-runner && npm publish --access public --tag ${{ env.NPM_TAG }}
-
+      # `pnpm publish` replaces the `workspace:` specifiers with the exact version being published.
+      # `npm publish` copies them into the manifest, and npm cannot install a package that depends
+      # on one (#1217). `--no-git-checks` because the job publishes from `staging`, not main, and
+      # the install and the steps above change tracked files.
+      #
+      # Dependencies before dependents. A version that is already on npm is skipped, so a re-run of
+      # the same commit completes instead of failing.
+      - name: Publish
+        env:
+          VERSION: ${{ steps.extract_version.outputs.version }}
+        run: |
+          for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
+            NAME="$(node -p "require('./$dir/package.json').name")"
+            if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+              echo "$NAME@$VERSION is already published"
+              continue
+            fi
+            (cd "$dir" && pnpm publish --access public --tag "$NPM_TAG" --no-git-checks)
+          done
 
 
   # ============================================================================

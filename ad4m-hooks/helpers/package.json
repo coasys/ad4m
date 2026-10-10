@@ -19,10 +19,10 @@
   "devDependencies": {
     "@types/uuid": "^9.0.0"
   },
-  "publishConfig": {
-    "dependencies": {
-      "@coasys/ad4m": "*"
-    }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "ad4m-hooks/helpers"
   },
   "version": "0.13.0-test-interpretation-2"
 }
