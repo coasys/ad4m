@@ -189,6 +189,7 @@ mod tests {
                 settled_at: T1.to_string(),
                 atom_uris: vec![uncommitted_uri.clone()],
                 voters: vec![did_of(ALICE).to_string()],
+                counted: vec![],
             }],
             contested: None,
         };
@@ -270,6 +271,7 @@ mod tests {
                 settled_at: T2.to_string(),
                 atom_uris,
                 voters: vec![did_of(ALICE).to_string(), did_of(BOB).to_string()],
+                counted: vec![],
             }],
             contested: None,
         };

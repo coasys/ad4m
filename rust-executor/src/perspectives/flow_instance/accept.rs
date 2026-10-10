@@ -34,7 +34,7 @@ use super::atom::{
     check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
     FLOW_INSTANCE_PREDICATE,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{run_pass_after_vote, FireOutcome, OwnVote};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -56,12 +56,40 @@ use std::collections::HashMap;
 /// state, when its outputs commitment fails [`check_outputs_commitment`]
 /// (each failure names its own `OutputsRefusal`). Returns whatever
 /// settled as a result, which may be nothing: a vote that does not yet reach
-/// quorum is a landed vote, not a failure.
+/// quorum is a landed vote, not a failure. A settle this vote counts in is
+/// reported even when a concurrent pass recorded it first
+/// ([`run_pass_after_vote`]).
 pub async fn accept_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<FireOutcome>> {
+    let cast = cast_vote(perspective, proposal_uri, context).await?;
+    Ok(run_pass_after_vote(perspective, &cast.instance_uri, cast.own.as_ref(), context).await)
+}
+
+/// What [`cast_vote`] did, for the pass after it.
+#[derive(Debug)]
+pub(crate) struct CastVote {
+    pub instance_uri: String,
+    /// `Some` when this call wrote the acting DID's vote on a proposal that
+    /// had not yet contributed to a settled edge. `None` when the DID had
+    /// already voted (the call wrote nothing), or when the proposal already
+    /// settled an edge on an earlier visit to its state, in a cyclic flow:
+    /// a vote there counts in nothing. `Some` does not mean the vote will
+    /// count: a duplicate DID on a twin proposal, or a vote outside the
+    /// first `n`, does not, and [`run_pass_after_vote`] checks that.
+    pub own: Option<OwnVote>,
+}
+
+/// [`accept_flow_proposal`] up to the pass: every refusal, then the vote.
+/// Split out so a test can run a concurrent pass between the vote's write
+/// and the pass after it (#1332).
+pub(crate) async fn cast_vote(
+    perspective: &mut PerspectiveInstance,
+    proposal_uri: &str,
+    context: &AgentContext,
+) -> anyhow::Result<CastVote> {
     let links = proposal_links(perspective, proposal_uri).await?;
     let Some(instance_uri) = links.iter().find_map(|l| {
         (l.data.predicate.as_deref() == Some(FLOW_INSTANCE_PREDICATE))
@@ -166,14 +194,15 @@ pub async fn accept_flow_proposal(
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
-    Ok(run_flow_consensus_pass(
-        perspective,
-        None,
-        context,
-        None,
-        Some(std::slice::from_ref(&instance_uri)),
-    )
-    .await)
+    let settled_before = derived
+        .settled
+        .iter()
+        .any(|edge| edge.atom_uris.iter().any(|uri| uri == proposal_uri));
+    let own = (!already && !settled_before).then(|| OwnVote {
+        proposal_uri: proposal_uri.to_string(),
+        did,
+    });
+    Ok(CastVote { instance_uri, own })
 }
 
 /// Reject a proposal: retract the links on it that this replica signed.

@@ -792,3 +792,246 @@ async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
         "both DIDs on the `here → merged` edge are counted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A concurrent pass records the settle first (#1332)
+// ---------------------------------------------------------------------------
+//
+// `accept_flow_proposal` writes the vote, then runs a pass, and a pass
+// reports only what it records for the first time. Another pass on this
+// replica (the debounced sync sweep, or the definition-change sweep, run for
+// any user here) can read the vote in between and record the settle. The
+// caller's own pass then finds the edge marked. These tests run that pass
+// between the two halves of the call (`cast_vote`, then
+// `run_pass_after_vote`), so the race is deterministic.
+
+/// Alice proposes an `{n: 2}` edge, Bob's vote completes it, and Alice's
+/// pass records the settle before Bob's own pass runs. That is the CI
+/// failure of `flow-propose.test.ts` "two DIDs both calling
+/// proposeTransition on one n:2 edge reach quorum": Bob got `outcomes: []`
+/// for the vote that moved the instance.
+///
+/// Red if the pass after a vote reports only what it records for the first
+/// time (the `dev` behaviour, kept below as the control).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_that_completes_quorum_reports_the_settle_a_concurrent_pass_recorded() {
+    use crate::perspectives::flow_instance::accept::cast_vote;
+    use crate::perspectives::flow_instance::pass::run_pass_after_vote;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let alices =
+        propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+            .await
+            .expect("Alice mints");
+    assert!(alices.outcomes.is_empty(), "1 of 2 must not fire");
+
+    let bob = second_agent("bob-1332-race@e2e.test");
+    let bobs_did = crate::agent::did_for_context(&bob).expect("did_for_context(bob)");
+    let cast = cast_vote(&mut f.perspective, &alices.proposal_uri, &bob)
+        .await
+        .expect("Bob's vote lands");
+    assert!(
+        cast.own.is_some(),
+        "Bob's vote is new and can complete the edge"
+    );
+
+    // The concurrent pass: Alice's sweep reads Bob's vote and records first.
+    let swept = consensus_pass(&mut f).await;
+    assert_eq!(
+        swept.len(),
+        1,
+        "precondition: the concurrent pass recorded the settle: {swept:?}"
+    );
+    let mut quorum = vec![acting_did(&f), bobs_did];
+    quorum.sort();
+    assert_eq!(swept[0].voters, quorum);
+
+    // Control, the `dev` behaviour: a plain pass for Bob now finds the edge
+    // marked and reports nothing.
+    let plain = run_flow_consensus_pass(
+        &mut f.perspective,
+        None,
+        &bob,
+        None,
+        Some(std::slice::from_ref(&instance)),
+    )
+    .await;
+    assert!(plain.is_empty(), "control: {plain:?}");
+
+    let reported =
+        run_pass_after_vote(&mut f.perspective, &instance, cast.own.as_ref(), &bob).await;
+    assert_eq!(
+        reported, swept,
+        "Bob's call reports the settle his vote completed, whichever pass recorded it"
+    );
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// The other direction: the report is for the vote that completed the
+/// quorum, not for any vote on the edge. Carol's vote is dated before Bob's
+/// but reaches this replica after Bob voted, so the quorum is Alice and
+/// Carol. Bob's vote landed on the settled proposal and counts for nothing,
+/// and his call must not claim the settle a concurrent pass recorded.
+///
+/// Red if the lookup matches on the proposal alone, without checking that
+/// the caller is among the quorum's voters.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_outside_the_quorum_does_not_claim_a_settle_a_concurrent_pass_recorded() {
+    use crate::perspectives::flow_instance::accept::cast_vote;
+    use crate::perspectives::flow_instance::pass::run_pass_after_vote;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let alices =
+        propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+            .await
+            .expect("Alice mints");
+    tick().await;
+    let carols_instant = chrono::Utc::now();
+    tick().await;
+
+    let bob = second_agent("bob-1332-late@e2e.test");
+    let bobs_did = crate::agent::did_for_context(&bob).expect("did_for_context(bob)");
+    let cast = cast_vote(&mut f.perspective, &alices.proposal_uri, &bob)
+        .await
+        .expect("Bob's vote lands");
+    assert!(cast.own.is_some());
+
+    let carol = TestSigner::generate();
+    let vote = carol.sign_at(
+        Link {
+            source: alices.proposal_uri.clone(),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            target: carol.did.clone(),
+        }
+        .normalize(),
+        carols_instant,
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(vote), LinkStatus::Shared, None)
+        .await
+        .expect("sync Carol's earlier-dated vote");
+
+    let swept = consensus_pass(&mut f).await;
+    assert_eq!(swept.len(), 1, "precondition: {swept:?}");
+    assert!(
+        !swept[0].voters.contains(&bobs_did),
+        "precondition: the quorum is Alice and Carol, not Bob: {:?}",
+        swept[0].voters
+    );
+
+    let reported =
+        run_pass_after_vote(&mut f.perspective, &instance, cast.own.as_ref(), &bob).await;
+    assert!(
+        reported.is_empty(),
+        "Bob's vote completed nothing: {reported:?}"
+    );
+}
+
+/// The report is for the caller's *vote*, not for the caller's DID and the
+/// voted proposal taken separately. Twin proposals on one `{n: 3}` edge
+/// pool into one quorum. Alice is counted through her mint P1, and her
+/// later vote on Carol's twin P2 is a duplicate the fold skips. Dave's vote
+/// completes the quorum {Alice, Carol, Dave} over atoms {P1, P2}, and a
+/// concurrent pass records it. Alice is among the voters and P2 is among the
+/// atoms, but her P2 vote counts in nothing, so her call reports nothing.
+///
+/// Red if the lookup checks "DID among the voters" and "proposal among the
+/// atoms" independently.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicate_vote_on_a_twin_proposal_does_not_claim_a_settle_a_concurrent_pass_recorded() {
+    use crate::perspectives::flow_instance::accept::cast_vote;
+    use crate::perspectives::flow_instance::pass::run_pass_after_vote;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":3}"#).await;
+    let instance = f.instance_uri.clone();
+    let from = f.derived().await.state;
+    let seal = seal_for(&f, "scoped").await;
+
+    let p1 = propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+        .await
+        .expect("Alice mints P1")
+        .proposal_uri;
+    tick().await;
+    let carol = TestSigner::generate();
+    let p2 = sync_proposal_from(&mut f, &carol, "twin-1332", &from, "scoped", &seal).await;
+    sync_vote_from(&mut f, &carol, &p2).await;
+    assert_ne!(p1, p2, "precondition: two twin proposals on one edge");
+    assert_eq!(f.derived().await.state, from, "2 of 3 settles nothing");
+    tick().await;
+
+    // `acceptProposal(P2)`: `already` is per proposal, so the vote is written.
+    let cast = cast_vote(&mut f.perspective, &p2, &f.ctx)
+        .await
+        .expect("Alice's vote on the twin lands");
+    assert!(cast.own.is_some(), "precondition: a new vote was written");
+    tick().await;
+
+    let dave = TestSigner::generate();
+    sync_vote_from(&mut f, &dave, &p1).await;
+    let swept = consensus_pass(&mut f).await;
+    assert_eq!(swept.len(), 1, "precondition: {swept:?}");
+    let mut atoms = vec![p1.clone(), p2.clone()];
+    atoms.sort();
+    assert_eq!(
+        swept[0].contributing_proposal_uris, atoms,
+        "precondition: P2 is among the atoms"
+    );
+    assert!(
+        swept[0].voters.contains(&acting_did(&f)),
+        "precondition: Alice is among the voters, through P1: {:?}",
+        swept[0].voters
+    );
+    let edge = f.derived().await.settled[0].clone();
+    assert!(
+        !edge.counted.contains(&(acting_did(&f), p2.clone())),
+        "precondition: Alice's P2 vote is the duplicate the fold skipped: {:?}",
+        edge.counted
+    );
+
+    let reported =
+        run_pass_after_vote(&mut f.perspective, &instance, cast.own.as_ref(), &f.ctx).await;
+    assert!(
+        reported.is_empty(),
+        "Alice's P2 vote counts in nothing, Dave's completed the quorum: {reported:?}"
+    );
+}
+
+/// A vote on a proposal that settled an edge on an earlier visit to its
+/// state completes nothing, so it reports nothing. In a cyclic flow the
+/// instance is back in `review`, Alice's old `review → changes_requested`
+/// proposal is joinable again by the accept path's checks, and her
+/// `acceptedBy` on it is a new link. The settle it shows up in is history.
+///
+/// Red if the pass after a vote reports a settle of the voted proposal that
+/// was already settled before the vote.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_on_a_proposal_that_settled_an_earlier_visit_reports_nothing() {
+    let mut f = seed_review_flow().await;
+    let first = settle(&mut f, "r-1", "review", "changes_requested").await;
+    settle(&mut f, "c-1", "changes_requested", "review").await;
+    assert_eq!(
+        f.derived().await.state,
+        "review",
+        "precondition: back in review"
+    );
+
+    let fired = accept_flow_proposal(&mut f.perspective, &first, &f.ctx)
+        .await
+        .expect("the accept path's checks pass: the proposal leaves `review`");
+    assert!(
+        we_voted_on(&f, &first).await,
+        "precondition: a new vote was written"
+    );
+    assert!(
+        fired.is_empty(),
+        "a historic settle is not this vote's: {fired:?}"
+    );
+    assert_eq!(f.derived().await.state, "review");
+}

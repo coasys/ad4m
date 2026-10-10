@@ -858,6 +858,7 @@ mod tests {
             settled_at: "2026-09-16T00:00:00Z".to_string(),
             atom_uris: vec![],
             voters: vec!["did:key:z1".to_string()],
+            counted: vec![],
         };
         Contention {
             from_state: from_state.to_string(),
