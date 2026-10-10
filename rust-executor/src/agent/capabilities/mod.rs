@@ -20,6 +20,16 @@ use tokio::sync::RwLock;
 
 pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in seconds
 
+/// Wrong codes a capability request may receive before it stops accepting any code.
+/// The code has six digits, so without a limit anyone who learned a request id could
+/// try every code.
+pub const MAX_CODE_ATTEMPTS: u32 = 5;
+
+lazy_static! {
+    static ref FAILED_CODE_ATTEMPTS: std::sync::Mutex<HashMap<String, u32>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
 // Cache for last_seen timestamps to avoid repeated database lookups
 // Maps user_email -> (last_checked_timestamp, last_seen_value)
 #[derive(Clone)]
@@ -402,7 +412,33 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
 pub async fn generate_capability_token(request_id: String, rand: String) -> Result<String, String> {
     let auth_key = gen_request_key(&request_id, &rand);
 
-    let auth = get_request(&auth_key)?.ok_or("Can't find permitted request")?;
+    let auth = {
+        let mut attempts = FAILED_CODE_ATTEMPTS.lock().map_err(|e| e.to_string())?;
+        match get_request(&auth_key)? {
+            Some(auth) => {
+                attempts.remove(&request_id);
+                auth
+            }
+            // Callers without a token reach this, so only ids with a permitted request get an
+            // entry, and the entry goes when the request does. A made-up id records nothing.
+            None if !requests_map::has_requests_for(&request_id)? => {
+                attempts.remove(&request_id);
+                return Err("Can't find permitted request".to_string());
+            }
+            None => {
+                let count = attempts.entry(request_id.clone()).or_insert(0);
+                *count += 1;
+                if *count >= MAX_CODE_ATTEMPTS {
+                    requests_map::remove_requests_for(&request_id)?;
+                    attempts.remove(&request_id);
+                    return Err(
+                        "Too many wrong codes for this request; request access again".to_string(),
+                    );
+                }
+                return Err("Can't find permitted request".to_string());
+            }
+        }
+    };
 
     let cap_token = token::generate_jwt(
         auth.app_name.clone(),
@@ -424,11 +460,12 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         cap_token.clone(),
     )?;
 
+    // The event reaches every session that can approve apps; the token goes only to the caller.
     let apps_changed = Apps {
         auth: auth_for_publish,
         request_id: request_id.clone(),
         revoked: Some(false),
-        token: cap_token.clone(),
+        token: String::new(),
     };
     get_global_pubsub()
         .await
@@ -678,5 +715,159 @@ mod tests {
 
         // Note: We can't easily test the multi-user mode grant of LOGIN and CREATE capabilities
         // without setting up the database, but the logic is tested by integration tests
+    }
+}
+
+#[cfg(test)]
+mod app_token_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn test_auth_info() -> AuthInfo {
+        AuthInfo {
+            app_name: "Test app".to_string(),
+            app_desc: "An app for tests".to_string(),
+            app_domain: Some("test.example".to_string()),
+            app_url: Some("https://test.example".to_string()),
+            app_icon_path: None,
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+            user_email: None,
+        }
+    }
+
+    async fn permitted_request() -> (String, String) {
+        let request_id = request_capability(test_auth_info()).await;
+        let code = permit_capability(AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: test_auth_info(),
+        })
+        .unwrap();
+        (request_id, code)
+    }
+
+    // The code has six digits. Without a limit, anyone who learned a request id could try
+    // every code and receive the app's token.
+    #[tokio::test]
+    async fn a_request_stops_accepting_codes_after_too_many_wrong_ones() {
+        let (request_id, code) = permitted_request().await;
+        let wrong = if code == "100000" { "100001" } else { "100000" };
+        let mut last_err = String::new();
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            last_err = generate_capability_token(request_id.clone(), wrong.to_string())
+                .await
+                .unwrap_err();
+        }
+        assert!(last_err.contains("Too many wrong codes"), "{}", last_err);
+        assert!(generate_capability_token(request_id.clone(), code)
+            .await
+            .is_err());
+    }
+
+    // `agent.generateJwt` needs no token, so anyone can send made-up request ids. They must
+    // not leave entries behind, or repeated calls fill memory.
+    #[tokio::test]
+    async fn made_up_request_ids_leave_no_attempt_entries() {
+        for i in 0..10_000 {
+            let _ = generate_capability_token(format!("made-up-{}", i), "100000".to_string()).await;
+        }
+        let left = FAILED_CODE_ATTEMPTS
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|id| id.starts_with("made-up-"))
+            .count();
+        assert_eq!(left, 0);
+    }
+
+    // The entry for a real request goes once its codes are gone.
+    #[tokio::test]
+    async fn a_locked_out_request_leaves_no_attempt_entry() {
+        let (request_id, code) = permitted_request().await;
+        let wrong = if code == "100000" { "100001" } else { "100000" };
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            let _ = generate_capability_token(request_id.clone(), wrong.to_string()).await;
+        }
+        assert!(!FAILED_CODE_ATTEMPTS
+            .lock()
+            .unwrap()
+            .contains_key(&request_id));
+    }
+
+    // Request ids are UUIDs, which contain dashes, and the stored keys are `{id}-{code}`.
+    // Wrong codes sent for only the start of someone else's id must not lock that request out.
+    #[tokio::test]
+    async fn wrong_codes_for_a_prefix_of_an_id_leave_that_request_alone() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let dir = tempfile::tempdir().unwrap();
+        apps_map::set_data_file_path(dir.path().join("apps.json").to_str().unwrap().to_string());
+        let (request_id, code) = permitted_request().await;
+        let prefix = request_id.split('-').next().unwrap().to_string();
+        assert_ne!(prefix, request_id);
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            let _ = generate_capability_token(prefix.clone(), "100000".to_string()).await;
+        }
+        assert!(generate_capability_token(request_id, code).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_correct_code_after_a_few_wrong_ones_still_works() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let dir = tempfile::tempdir().unwrap();
+        apps_map::set_data_file_path(dir.path().join("apps.json").to_str().unwrap().to_string());
+        let (request_id, code) = permitted_request().await;
+        let wrong = if code == "100000" { "100001" } else { "100000" };
+        for _ in 0..MAX_CODE_ATTEMPTS - 1 {
+            assert!(
+                generate_capability_token(request_id.clone(), wrong.to_string())
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(generate_capability_token(request_id, code).await.is_ok());
+    }
+
+    // The `apps-changed` event and the app list reach sessions other than the app, so
+    // neither may carry the token. The executor still knows the token for revocation.
+    #[tokio::test]
+    async fn app_events_and_the_client_app_list_carry_no_token() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let dir = tempfile::tempdir().unwrap();
+        apps_map::set_data_file_path(dir.path().join("apps.json").to_str().unwrap().to_string());
+        let mut events = get_global_pubsub().await.subscribe(&APPS_CHANGED).await;
+
+        let (request_id, code) = permitted_request().await;
+        let token = generate_capability_token(request_id.clone(), code)
+            .await
+            .unwrap();
+        assert!(!token.is_empty());
+
+        let event = loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("an apps-changed event arrives")
+                .unwrap();
+            if let Ok(Some(app)) = serde_json::from_str::<Option<Apps>>(&msg) {
+                if app.request_id == request_id {
+                    break app;
+                }
+            }
+        };
+        assert!(event.token.is_empty(), "the event carried the app token");
+
+        let listed = apps_map::client_view()
+            .into_iter()
+            .find(|app| app.request_id == request_id)
+            .expect("the app appears in the list");
+        assert!(
+            listed.token.is_empty(),
+            "the app list carried the app token"
+        );
+
+        assert!(check_token_revoked(&token).is_ok());
+        apps_map::revoke_app(&request_id).unwrap();
+        assert!(check_token_revoked(&token).is_err());
     }
 }

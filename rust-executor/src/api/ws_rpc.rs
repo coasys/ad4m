@@ -108,10 +108,14 @@ async fn handle_ws(
         }
     });
 
+    // Capability requests, app changes and notification install requests go
+    // only to sessions that can approve apps.
+    let can_approve_apps = check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
     let events = super::events_ws::build_event_stream(
         token.clone(),
         ctx.user_email.clone(),
         ctx.is_admin_credential,
+        can_approve_apps,
     )
     .await;
     // Text frames until the socket closes or errors; pings and binary
