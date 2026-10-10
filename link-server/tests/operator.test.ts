@@ -271,6 +271,48 @@ test("every admit and remove is stored with the signed-in login, and the room ad
   });
 });
 
+test("a repeated add or a removal of a non-member is not recorded as a change", async () => {
+  await withOperator(async ({ server, opUrl, logs }) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const joiner = await createTestAgent();
+    const stranger = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+
+    assert.equal((await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "add", did: joiner.did })).status, 200);
+    assert.equal((await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "add", did: joiner.did })).status, 200);
+    assert.equal((await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "remove", did: stranger.did })).status, 200);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: joiner.did }, adminToken);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "remove", did: stranger.did }, adminToken);
+
+    assert.deepEqual(
+      server.built.db.getAclChanges(roomId).map((c) => [c.action, c.did]),
+      [["add", joiner.did]]
+    );
+    assert.equal(logs.filter((l) => l.includes("operator acl change")).length, 1);
+  });
+});
+
+test("addedBy covers the whole history, not only the last 100 changes", async () => {
+  await withOperator(async ({ server, opUrl }) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const joiner = await createTestAgent();
+    await authenticateAgent(server.url, roomId, admin);
+    await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "add", did: joiner.did }, { "x-forwarded-user": "HexaField" });
+    for (let i = 0; i < 150; i++) {
+      server.built.db.recordAclChange(roomId, `did:key:churn${i}`, i % 2 ? "remove" : "add", "jhweir", "operator");
+    }
+
+    const detail = await op<{
+      members: Array<{ did: string; addedBy: { actor: string } | null }>;
+      history: unknown[];
+    }>(`${opUrl}/api/rooms/${roomId}`);
+    assert.equal(detail.body.history.length, 100);
+    assert.equal(detail.body.members.find((m) => m.did === joiner.did)?.addedBy?.actor, "HexaField");
+  });
+});
+
 test("state changes need an Origin, or a Referer, from the admin page", async () => {
   await withOperator(async ({ server, opUrl }) => {
     const roomId = randomUUID();
@@ -296,6 +338,7 @@ test("state changes need an Origin, or a Referer, from the admin page", async ()
     assert.equal((await post(a.did, { origin: "https://prs.ad4m.dev.evil.example" })).status, 403);
     assert.equal((await post(a.did, { referer: "https://evil.example/link-admin/staging/" })).status, 403);
     assert.equal((await post(a.did, { origin: "null" })).status, 403);
+    assert.equal((await post(a.did, { origin: "null", referer: `${ORIGIN}/link-admin/staging/` })).status, 403);
     // A foreign Origin is not rescued by a good Referer.
     assert.equal((await post(a.did, { origin: "https://evil.example", referer: `${ORIGIN}/link-admin/staging/` })).status, 403);
     assert.equal(server.built.db.isMember(roomId, a.did), false);
@@ -372,14 +415,19 @@ test("CLI refuses an operator port without a token file, or on a non-loopback ad
       env: { ...process.env, OPERATOR_TOKEN_FILE: "", OPERATOR_PORT: "", OPERATOR_ORIGINS: "" },
       timeout: 30_000,
     });
-  const noOrigin = run(["--port", "0", "--operator-port", "0", "--operator-token-file", "/nonexistent"]);
+  const ephemeral = run([
+    "--port", "0", "--operator-port", "0", "--operator-token-file", "/nonexistent", "--operator-origin", ORIGIN,
+  ]);
+  assert.equal(ephemeral.status, 1);
+  assert.match(ephemeral.stderr, /Invalid --operator-port value: 0/);
+  const noOrigin = run(["--port", "0", "--operator-port", "13999", "--operator-token-file", "/nonexistent"]);
   assert.equal(noOrigin.status, 1);
   assert.match(noOrigin.stderr, /needs --operator-origin/);
-  const noToken = run(["--port", "0", "--operator-port", "0"]);
+  const noToken = run(["--port", "0", "--operator-port", "13999"]);
   assert.equal(noToken.status, 1);
   assert.match(noToken.stderr, /needs --operator-token-file/);
   const exposed = run([
-    "--port", "0", "--operator-port", "0", "--operator-token-file", "/nonexistent",
+    "--port", "0", "--operator-port", "13999", "--operator-token-file", "/nonexistent",
     "--operator-origin", ORIGIN, "--operator-host", "0.0.0.0",
   ]);
   assert.equal(exposed.status, 1);

@@ -62,7 +62,8 @@ function parseArgs(argv: string[]): CliArgs {
   let host = process.env.HOST ?? "0.0.0.0";
   let dataDir = process.env.DATA_DIR ?? "./data";
   let autoAdmit = envBool("AUTO_ADMIT");
-  let operatorPort = process.env.OPERATOR_PORT ? parsePort("OPERATOR_PORT", process.env.OPERATOR_PORT) : undefined;
+  // The operator port must be fixed: a reverse proxy points at it.
+  let operatorPort = process.env.OPERATOR_PORT ? parsePort("OPERATOR_PORT", process.env.OPERATOR_PORT, 1) : undefined;
   let operatorHost = process.env.OPERATOR_HOST ?? "127.0.0.1";
   let operatorTokenFile = process.env.OPERATOR_TOKEN_FILE || undefined;
   const operatorOrigins = (process.env.OPERATOR_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean);
@@ -100,7 +101,7 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       }
       case "--operator-port":
-        operatorPort = parsePort("--operator-port", argv[++i]);
+        operatorPort = parsePort("--operator-port", argv[++i], 1);
         break;
       case "--operator-host":
         operatorHost = requireValue("--operator-host", argv[++i]);
@@ -147,10 +148,10 @@ function parseArgs(argv: string[]): CliArgs {
   return { port, host, dataDir, autoAdmit, operatorPort, operatorHost, operatorTokenFile, operatorOrigins, operatorLabel };
 }
 
-function parsePort(name: string, value: string | undefined): number {
+function parsePort(name: string, value: string | undefined, min = 0): number {
   const parsed = Number(value ?? "");
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
-    console.error(`Invalid ${name} value: ${value} (must be an integer 0-65535)`);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > 65535) {
+    console.error(`Invalid ${name} value: ${value} (must be an integer ${min}-65535)`);
     process.exit(1);
   }
   return parsed;

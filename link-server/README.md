@@ -63,7 +63,7 @@ Control the server through environment variables or CLI flags:
 | `AUTO_ADMIT` | `--auto-admit` | `false` | Admit every agent automatically when they authenticate |
 | `MAX_DIFFS_PER_ROOM` | `--max-diffs` | `10000` | Maximum diff entries retained per room (older entries pruned) |
 | `BODY_LIMIT` | `--body-limit` | `10485760` | Maximum HTTP request body size in bytes (10 MiB) |
-| `OPERATOR_PORT` | `--operator-port` | off | Also serve the [admission UI](#admission-ui-operator-listener) and its API on this port |
+| `OPERATOR_PORT` | `--operator-port` | off | Also serve the [admission UI](#admission-ui-operator-listener) and its API on this port (1-65535; the proxy needs a fixed port) |
 | `OPERATOR_HOST` | `--operator-host` | `127.0.0.1` | Address of the operator listener; must be loopback |
 | `OPERATOR_TOKEN_FILE` | `--operator-token-file` | none | File (mode 600) holding the operator API token; required with `--operator-port` |
 | `OPERATOR_ORIGINS` (comma-separated) | `--operator-origin` (repeatable) | none | Origin the admission page is served from; POSTs from anywhere else are refused. Required with `--operator-port` |
@@ -116,7 +116,7 @@ One listener serves one instance. Run staging and prod as separate servers with 
 - Every `/api/*` call needs `Authorization: Bearer <operator token>`, compared in constant time. The token is read from a file that only its owner may read. It never goes on argv or into a URL, and the request log has no headers in it.
 - Every `/api/*` call also needs `X-Forwarded-User`, the signed-in login (GitHub login syntax). The proxy sets it from the sign-in subrequest. The header is trusted only because the listener is loopback-only and reached through that proxy, and the proxy must overwrite any value a client sends.
 - CSRF: the sign-in is a cookie, so every `POST` needs an `Origin` from `--operator-origin`. When a browser sends no `Origin`, a `Referer` on that origin is accepted instead. A request with neither is refused, as is one marked `Sec-Fetch-Site: cross-site`. `POST` also needs `Content-Type: application/json`.
-- **Who admitted whom:** every admit and remove is stored in the `acl_changes` table with the login (`source: "operator"`) and logged as `operator acl change`. Changes the room admin makes through `POST /rooms/:id/acl` are stored too, with the admin DID (`source: "room-admin"`). `GET /api/rooms/:id` returns them as `history`, and each member's `addedBy`.
+- **Who admitted whom:** every admit and remove is stored in the `acl_changes` table with the login (`source: "operator"`) and logged as `operator acl change`. Changes the room admin makes through `POST /rooms/:id/acl` are stored too, with the admin DID (`source: "room-admin"`). `GET /api/rooms/:id` returns the last 100 as `history`, and each member's `addedBy` (the latest add over the whole history). A repeated add or a removal of a non-member changes nothing and is not recorded.
 - The operator only manages rooms that exist (rooms are still created by their first agent). The operator cannot remove the room admin.
 
 **Trust model.** This gives the operator no power it does not already have: the server owns the ACL (and the SQLite file). But it makes ACL changes by the operator a supported path. The admin's server-link-language grants room keys to every ACL member that lacks them, so **a DID the operator admits can read the room's encrypted history** once the admin's executor has been online. Only run this listener where the server's operator is trusted with membership. Removing a member does not rotate the room key: the removed DID keeps the keys it had, but the ACL check stops it from fetching anything new.
@@ -246,7 +246,7 @@ GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be
 Operator listener (only with `--operator-port`; all `/api/*` need the operator token):
 
 ```
-GET  /                          admission page (+ /admin.js)
+GET  /                          admission page (+ /admin.js, /admin.css; CSP default-src 'self', no inline styles or scripts)
 GET  /api/whoami                -> { operator, instance }   (X-Forwarded-User, --operator-label)
 GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount }] }
 GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt,

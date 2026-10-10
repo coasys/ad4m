@@ -56,11 +56,15 @@ function requireAdmin(ctx: RouteContext) {
   };
 }
 
-/** Takes a DID out of a room: ACL row, sessions and open sockets, so access ends at once on every path. */
-export function removeMember(ctx: Pick<RouteContext, "db" | "auth" | "ws">, roomId: string, did: string): void {
-  ctx.db.removeAcl(roomId, did);
+/**
+ * Takes a DID out of a room: ACL row, sessions and open sockets, so access ends at once on every path.
+ * Returns false when the DID was not a member (sessions and sockets are still cleared).
+ */
+export function removeMember(ctx: Pick<RouteContext, "db" | "auth" | "ws">, roomId: string, did: string): boolean {
+  const removed = ctx.db.removeAcl(roomId, did);
   ctx.auth.revokeSessionsForDid(roomId, did);
   ctx.ws.disconnectDid(roomId, did);
+  return removed;
 }
 
 function rateLimitHook(limiter: SlidingWindowLimiter, keyOf: (request: FastifyRequest) => string) {
@@ -330,15 +334,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(400).send({ error: "did is required" });
       }
 
-      if (body.action === "remove") {
-        if (body.did === claims.did) {
-          return reply.code(400).send({ error: "admin cannot remove themselves from the ACL" });
-        }
-        removeMember(ctx, claims.roomId, body.did);
-      } else {
-        ctx.db.addAcl(claims.roomId, body.did);
+      if (body.action === "remove" && body.did === claims.did) {
+        return reply.code(400).send({ error: "admin cannot remove themselves from the ACL" });
       }
-      ctx.db.recordAclChange(claims.roomId, body.did, body.action, claims.did, "room-admin");
+      const changed =
+        body.action === "remove" ? removeMember(ctx, claims.roomId, body.did) : ctx.db.addAcl(claims.roomId, body.did);
+      // A repeated add or a removal of a non-member changes nothing, so it is not history.
+      if (changed) ctx.db.recordAclChange(claims.roomId, body.did, body.action, claims.did, "room-admin");
 
       const acl = ctx.db.getAcl(claims.roomId);
       const room = ctx.db.getRoom(claims.roomId)!;

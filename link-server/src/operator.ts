@@ -113,7 +113,8 @@ function originOf(url: string): string | null {
  */
 function sameOriginRequest(headers: Record<string, unknown>, allowed: Set<string>): boolean {
   const origin = headers["origin"];
-  if (typeof origin === "string" && origin !== "null") return allowed.has(origin);
+  // An opaque origin ("null": sandboxed frame, cross-origin redirect) is never the admin page.
+  if (typeof origin === "string") return origin !== "null" && allowed.has(origin);
   const referer = headers["referer"];
   if (typeof referer === "string") {
     const o = originOf(referer);
@@ -127,13 +128,10 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
   if (!room) return undefined;
   const online = new Set(ctx.telepresence.getOnlineAgents(roomId).map((a) => a.did));
   const history = ctx.db.getAclChanges(roomId);
-  // history is newest first, so the first "add" per DID is the one that admitted it.
-  const addedBy = new Map<string, { actor: string; source: string; at: string }>();
-  for (const change of history) {
-    if (change.action === "add" && !addedBy.has(change.did)) {
-      addedBy.set(change.did, { actor: change.actor, source: change.source, at: change.at });
-    }
-  }
+  // Over the whole history, not just the last 100 changes shown.
+  const addedBy = new Map(
+    ctx.db.getLatestAdds(roomId).map((c) => [c.did, { actor: c.actor, source: c.source, at: c.at }])
+  );
   return {
     id: room.id,
     admin: room.admin_did,
@@ -239,20 +237,19 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       const room = ctx.db.getRoom(roomId);
       if (!room) return reply.code(404).send({ error: "no such room" });
 
-      if (body.action === "remove") {
-        if (body.did === room.admin_did) {
-          return reply.code(400).send({ error: "the room admin cannot be removed" });
-        }
-        removeMember(ctx, roomId, body.did);
-      } else {
-        ctx.db.addAcl(roomId, body.did);
+      if (body.action === "remove" && body.did === room.admin_did) {
+        return reply.code(400).send({ error: "the room admin cannot be removed" });
       }
-      const operator = operatorOf(request.headers)!;
-      ctx.db.recordAclChange(roomId, body.did, body.action, operator, "operator");
-      request.log.info(
-        { operator, instance: opts.label ?? null, roomId, action: body.action, did: body.did },
-        "operator acl change"
-      );
+      const changed = body.action === "remove" ? removeMember(ctx, roomId, body.did) : ctx.db.addAcl(roomId, body.did);
+      // A double submit or a stale page changes nothing: no history row, no log line.
+      if (changed) {
+        const operator = operatorOf(request.headers)!;
+        ctx.db.recordAclChange(roomId, body.did, body.action, operator, "operator");
+        request.log.info(
+          { operator, instance: opts.label ?? null, roomId, action: body.action, did: body.did },
+          "operator acl change"
+        );
+      }
       return roomDetail(ctx, roomId);
     });
   }, { prefix: "/api" });

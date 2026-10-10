@@ -197,6 +197,10 @@ export class LinkServerDB {
       getAclChanges: this.raw.prepare(
         "SELECT * FROM acl_changes WHERE room_id = ? ORDER BY id DESC LIMIT ?"
       ),
+      getLatestAdds: this.raw.prepare(
+        `SELECT * FROM acl_changes WHERE id IN
+           (SELECT MAX(id) FROM acl_changes WHERE room_id = ? AND action = 'add' GROUP BY did)`
+      ),
 
       insertLink: this.raw.prepare(
         `INSERT OR IGNORE INTO links (room_id, link_hash, link_data, sequence)
@@ -307,12 +311,14 @@ export class LinkServerDB {
     return this.stmts.isMember.get(roomId, did) !== undefined;
   }
 
-  addAcl(roomId: string, did: string): void {
-    this.stmts.addAcl.run(roomId, did, new Date().toISOString());
+  /** Returns false when the DID was already a member. */
+  addAcl(roomId: string, did: string): boolean {
+    return this.stmts.addAcl.run(roomId, did, new Date().toISOString()).changes > 0;
   }
 
-  removeAcl(roomId: string, did: string): void {
-    this.stmts.removeAcl.run(roomId, did);
+  /** Returns false when the DID was not a member. */
+  removeAcl(roomId: string, did: string): boolean {
+    return this.stmts.removeAcl.run(roomId, did).changes > 0;
   }
 
   recordAclChange(
@@ -328,6 +334,11 @@ export class LinkServerDB {
   /** Newest first. */
   getAclChanges(roomId: string, limit = 100): AclChangeRow[] {
     return this.stmts.getAclChanges.all(roomId, limit) as AclChangeRow[];
+  }
+
+  /** The latest "add" per DID over the whole history: who admitted each current member. */
+  getLatestAdds(roomId: string): AclChangeRow[] {
+    return this.stmts.getLatestAdds.all(roomId) as AclChangeRow[];
   }
 
   setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string, x25519Signature?: string): void {
