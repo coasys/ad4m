@@ -175,6 +175,10 @@ export class WsManager {
   }
 
   private handleMessage(conn: Connection, raw: Buffer | ArrayBuffer | Buffer[]): void {
+    // `ws` still emits messages while a socket is CLOSING (until the peer
+    // answers the close frame or the close timeout fires). A member removed
+    // from the room must not keep talking into it, so only OPEN sockets count.
+    if (conn.socket.readyState !== conn.socket.OPEN) return;
     if (!conn.limiter.check(conn.id).allowed) {
       // Drop the message silently — the client can retry after the window slides.
       return;
