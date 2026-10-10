@@ -292,6 +292,44 @@ async fn a_synced_vote_triggers_this_replicas_own_pass() {
     );
 }
 
+/// The vote's author retracting it through sync moves the cache back the
+/// same way (#1176): the vote the tombstone ends reaches the trigger as a
+/// removal, so the tombstone alone queues this replica's pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_retraction_triggers_this_replicas_own_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let minted = f.mint_one().await;
+    let bob = TestSigner::generate();
+    let vote = LinkExpression::from(
+        bob.sign(
+            Link {
+                source: minted.clone(),
+                predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                target: bob.did.clone(),
+            }
+            .normalize(),
+        ),
+    );
+    sync_in(&f, vec![vote.clone()]).await;
+    assert!(
+        cache_reaches(&f, "scoped").await,
+        "precondition: Bob's vote settled the edge"
+    );
+
+    let retraction = bob.sign(
+        crate::perspectives::monotonic::retraction_for(&vote)
+            .expect("tombstone")
+            .normalize(),
+    );
+    sync_in(&f, vec![LinkExpression::from(retraction)]).await;
+
+    assert!(
+        cache_reaches(&f, "identified").await,
+        "the synced retraction must trigger the pass that heals the cache back"
+    );
+}
+
 /// A peer's change to the flow's definition re-derives every instance: the
 /// fold reads the rules the reader holds now, so the cache must follow when
 /// they change. Raising Scoped's rule to `{n: 2}` after one vote settled it

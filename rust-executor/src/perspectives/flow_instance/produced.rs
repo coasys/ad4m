@@ -79,7 +79,11 @@
 //! "no valid outputs" (Lal's review of #1127). "I could not read every
 //! receipt" is not "there are none" — the same rule that makes an unknown
 //! flow an error. A flood under F's index can still make F's question
-//! unanswerable, but loudly, and only F's.
+//! unanswerable, but loudly, and only F's. Index and body links are flow
+//! links, so they are monotonic (`perspectives::monotonic`, #1176): nobody
+//! can remove a genuine receipt's index link, and nobody but each junk
+//! link's author can end it (by `ad4m://flow/retracted`), so a flood lasts
+//! until its authors retract it. A remedy is tracked in #1177.
 //!
 //! # The quorum time
 //!
@@ -338,7 +342,8 @@ pub fn output_matches_class(output: &OutputRef, queried_name: &str, target_class
 /// bound a member could make every `producedByFlow` query parse and verify
 /// thousands of junk bodies. Over the budget the read **errors**
 /// ([`ReceiptBudgetExceeded`]); it never drops candidates, because a dropped
-/// candidate could be the one genuine witness (see the module header).
+/// candidate could be the one genuine witness (see the module header). The
+/// error is permanent until the flood's authors retract their links (#1177).
 pub const MAX_FLOW_RECEIPTS: usize = 256;
 
 /// `flow --> receipt`: the per-flow index [`mint_flow_receipt`] writes, so a
