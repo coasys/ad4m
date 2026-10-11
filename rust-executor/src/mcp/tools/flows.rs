@@ -1,14 +1,21 @@
 //! Flow (state machine) tools
 //!
 //! Tools for managing flows — finite state machines that track expression state transitions.
+//! `add_flow`, `get_flows`, `flow_proposal_accept`, `flow_proposal_reject` and
+//! `flow_valid_outputs` call the RPC method that does their job through the handler map, so
+//! its guard applies. `flow_state` and `flow_actions` have no RPC method: they read the
+//! perspective through [`Ad4mMcpHandler::get_readable_perspective`].
 
-use super::Ad4mMcpHandler;
+use super::instances::pretty;
+use super::{decode, perspective_error, Ad4mMcpHandler};
+use crate::api::ws_handler::WsRpcError;
 use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, FlowInstanceRecord,
 };
-use crate::perspectives::perspective_instance::{PerspectiveInstance, SdnaType};
+use crate::perspectives::get_perspective;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
-use crate::types::LinkQuery;
+use crate::types::DecoratedLinkExpression;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -80,31 +87,20 @@ impl Ad4mMcpHandler {
     pub async fn add_flow(&self, params: Parameters<AddFlowParams>) -> String {
         let p = &params.0;
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                match perspective
-                    .add_sdna(
-                        p.flow_name.clone(),
-                        String::new(),
-                        SdnaType::Flow,
-                        Some(p.shacl_json.clone()),
-                        &agent_context,
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        let result = json!({
-                            "success": true,
-                            "perspective_id": p.perspective_id,
-                            "flow_name": p.flow_name,
-                        });
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error adding flow: {}", e),
-                }
-            }
-            Err(e) => e,
+        let params = json!({
+            "uuid": p.perspective_id,
+            "name": p.flow_name,
+            "sdnaType": "flow",
+            "shaclJson": p.shacl_json,
+        });
+        match self.call_method("perspective.addSdna", params).await {
+            Ok(_) => pretty(&json!({
+                "success": true,
+                "perspective_id": p.perspective_id,
+                "flow_name": p.flow_name,
+            })),
+            Err(e) if e.code == 500 => format!("Error adding flow: {}", e.message),
+            Err(e) => perspective_error(&p.perspective_id, e),
         }
     }
 
@@ -113,29 +109,25 @@ impl Ad4mMcpHandler {
     pub async fn get_flows(&self, params: Parameters<GetFlowsParams>) -> String {
         let p = &params.0;
 
-        match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => {
-                match perspective
-                    .get_links(&LinkQuery {
-                        source: Some("ad4m://self".to_string()),
-                        predicate: Some("ad4m://has_flow".to_string()),
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(links) => {
-                        let flow_names: Vec<String> =
-                            links.iter().map(|l| l.data.target.clone()).collect();
-                        serde_json::to_string_pretty(&json!({
-                            "flows": flow_names,
-                            "count": flow_names.len(),
-                        }))
-                        .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error querying flows: {}", e),
-                }
+        let params = json!({
+            "uuid": p.perspective_id,
+            "source": "ad4m://self",
+            "predicate": "ad4m://has_flow",
+        });
+        match self.call_method("perspective.queryLinks", params).await {
+            Ok(links) => {
+                let links: Vec<DecoratedLinkExpression> = match decode(links) {
+                    Ok(links) => links,
+                    Err(e) => return e,
+                };
+                let flow_names: Vec<String> = links.into_iter().map(|l| l.data.target).collect();
+                pretty(&json!({
+                    "flows": flow_names,
+                    "count": flow_names.len(),
+                }))
             }
-            Err(e) => e,
+            Err(e) if e.code == 500 => format!("Error querying flows: {}", e.message),
+            Err(e) => perspective_error(&p.perspective_id, e),
         }
     }
 
@@ -378,25 +370,18 @@ impl Ad4mMcpHandler {
     pub async fn flow_proposal_accept(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                match crate::perspectives::flow_instance::accept::accept_flow_proposal(
-                    &mut perspective,
-                    &p.proposal_uri,
-                    &agent_context,
-                )
-                .await
-                {
-                    Ok(fired) => serde_json::to_string_pretty(&json!({
-                        "success": true,
-                        "proposal_uri": p.proposal_uri,
-                        "fired": fired,
-                    }))
-                    .unwrap_or_else(|e| format!("Error: {}", e)),
-                    Err(e) => format!("Error accepting proposal: {:#}", e),
-                }
-            }
-            Err(e) => e,
+        let params = json!({ "uuid": p.perspective_id, "proposalUri": p.proposal_uri });
+        match self
+            .call_method("perspective.acceptFlowProposal", params)
+            .await
+        {
+            Ok(fired) => pretty(&json!({
+                "success": true,
+                "proposal_uri": p.proposal_uri,
+                "fired": fired,
+            })),
+            Err(e) if e.code == 500 => format!("Error accepting proposal: {}", e.message),
+            Err(e) => perspective_error(&p.perspective_id, e),
         }
     }
 
@@ -406,25 +391,18 @@ impl Ad4mMcpHandler {
     pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((mut perspective, agent_context)) => {
-                match crate::perspectives::flow_instance::accept::reject_flow_proposal(
-                    &mut perspective,
-                    &p.proposal_uri,
-                    &agent_context,
-                )
-                .await
-                {
-                    Ok(retracted) => serde_json::to_string_pretty(&json!({
-                        "success": true,
-                        "proposal_uri": p.proposal_uri,
-                        "retracted_links": retracted,
-                    }))
-                    .unwrap_or_else(|e| format!("Error: {}", e)),
-                    Err(e) => format!("Error rejecting proposal: {:#}", e),
-                }
-            }
-            Err(e) => e,
+        let params = json!({ "uuid": p.perspective_id, "proposalUri": p.proposal_uri });
+        match self
+            .call_method("perspective.rejectFlowProposal", params)
+            .await
+        {
+            Ok(result) => pretty(&json!({
+                "success": true,
+                "proposal_uri": p.proposal_uri,
+                "retracted_links": result["retractedLinks"],
+            })),
+            Err(e) if e.code == 500 => format!("Error rejecting proposal: {}", e.message),
+            Err(e) => perspective_error(&p.perspective_id, e),
         }
     }
 
@@ -434,31 +412,138 @@ impl Ad4mMcpHandler {
     pub async fn flow_valid_outputs(&self, params: Parameters<FlowValidOutputsParams>) -> String {
         let p = &params.0;
 
-        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => perspective,
-            Err(e) => return e,
+        // The method takes the canonical flow URI. Resolving the name reads the perspective,
+        // so the method's guard runs first.
+        let params =
+            |flow: &str| json!({ "uuid": p.perspective_id, "flow": flow, "state": p.state });
+        if let Err(e) = self
+            .admit_method("perspective.flowValidOutputs", &params(&p.flow_name))
+            .await
+        {
+            return perspective_error(&p.perspective_id, e);
+        }
+        let Some(perspective) = get_perspective(&p.perspective_id) else {
+            return perspective_error(&p.perspective_id, WsRpcError::not_found(""));
         };
-
         let (flow_uri, _) = match Self::resolve_flow(&perspective, &p.flow_name).await {
             Ok(resolved) => resolved,
             Err(e) => return format!("Error listing valid outputs: {:#}", e),
         };
 
-        match crate::perspectives::flow_instance::produced::flow_valid_outputs(
-            &perspective,
-            &flow_uri,
-            p.state.as_deref(),
-        )
-        .await
+        match self
+            .call_method("perspective.flowValidOutputs", params(&flow_uri))
+            .await
         {
-            Ok(outputs) => serde_json::to_string_pretty(&json!({
+            Ok(outputs) => pretty(&json!({
                 "flow": flow_uri,
                 "state": p.state,
                 "valid_outputs": outputs,
-            }))
-            .unwrap_or_else(|e| format!("Error: {}", e)),
-            Err(e) => format!("Error listing valid outputs: {:#}", e),
+            })),
+            Err(e) if e.code == 500 => format!("Error listing valid outputs: {}", e.message),
+            Err(e) => perspective_error(&p.perspective_id, e),
         }
+    }
+}
+
+/// The tools answer as their RPC methods' guards do (#851).
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::agent::capabilities::{
+        perspective_query_capability, ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY,
+    };
+    use crate::agent::session::Principal;
+    use crate::mcp::tools::test_support::{app, handler_as, perspective, setup, status, user};
+
+    // Flow writes checked PERSPECTIVE_CREATE; the methods check the update capability on the
+    // perspective.
+    #[tokio::test]
+    async fn flow_writes_need_the_update_capability() {
+        setup();
+        let uuid = perspective(None).await;
+        let handler = handler_as(app(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
+        let added = handler
+            .add_flow(Parameters(AddFlowParams {
+                perspective_id: uuid.clone(),
+                flow_name: "Delivery".into(),
+                shacl_json: "{}".into(),
+            }))
+            .await;
+        assert_eq!(status(&added), Some(403), "{added}");
+        let proposal = || {
+            Parameters(FlowProposalParams {
+                perspective_id: uuid.clone(),
+                proposal_uri: "ad4m://flow/proposal/none".into(),
+            })
+        };
+        let accepted = handler.flow_proposal_accept(proposal()).await;
+        assert_eq!(status(&accepted), Some(403), "{accepted}");
+        let rejected = handler.flow_proposal_reject(proposal()).await;
+        assert_eq!(status(&rejected), Some(403), "{rejected}");
+
+        // Past the guard the handler answers for the unknown proposal.
+        let operator = handler_as(Principal::Operator)
+            .flow_proposal_accept(proposal())
+            .await;
+        assert!(
+            operator.starts_with("Error accepting proposal"),
+            "{operator}"
+        );
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
+
+    // Flow reads checked no capability.
+    #[tokio::test]
+    async fn flow_reads_need_the_query_capability() {
+        setup();
+        let uuid = perspective(None).await;
+        let get = |principal| {
+            let uuid = uuid.clone();
+            async move {
+                handler_as(principal)
+                    .get_flows(Parameters(GetFlowsParams {
+                        perspective_id: uuid,
+                    }))
+                    .await
+            }
+        };
+        let refused = get(app(vec![])).await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+        let listed = get(app(vec![perspective_query_capability(vec![uuid.clone()])])).await;
+        let listed: serde_json::Value = serde_json::from_str(&listed).expect(&listed);
+        assert_eq!(listed["count"], 0, "{listed}");
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
+
+    // The guard runs before the flow name is resolved against the perspective.
+    #[tokio::test]
+    async fn valid_outputs_of_another_users_perspective_read_as_missing() {
+        setup();
+        let uuid = perspective(Some(vec!["did:key:mcp-flow-owner".into()])).await;
+        let outputs = |principal| {
+            let uuid = uuid.clone();
+            async move {
+                handler_as(principal)
+                    .flow_valid_outputs(Parameters(FlowValidOutputsParams {
+                        perspective_id: uuid,
+                        flow_name: "Delivery".into(),
+                        state: None,
+                    }))
+                    .await
+            }
+        };
+        let other = outputs(user(
+            "flow.other@example.org",
+            "did:key:mcp-flow-other",
+            vec![ALL_CAPABILITY.clone()],
+        ))
+        .await;
+        assert_eq!(status(&other), Some(404), "{other}");
+        assert!(other.contains("Perspective not found"), "{other}");
+
+        let operator = outputs(Principal::Operator).await;
+        assert_eq!(status(&operator), None, "{operator}");
+        crate::perspectives::remove_perspective(&uuid).await;
     }
 }
 
