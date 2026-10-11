@@ -1,9 +1,8 @@
-//! Who is calling: one [`Session`] per connection (Plan 20, step 1).
+//! Who is calling: one [`Session`] per connection.
 //!
 //! [`Session::open`] is the one place that turns a token into an identity. It reproduces
-//! today's rules from `capabilities_on`, `is_admin_credential_token_on`,
-//! `user_email_from_token` and `resolve_user_session`, which later steps move onto it and
-//! then delete. Nothing calls it yet.
+//! the rules of `capabilities_on`, `is_admin_credential_token_on`, `user_email_from_token`
+//! and `resolve_user_session`, whose callers move onto it later. Nothing calls it yet.
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, check_token_revoked, decode_jwt,
@@ -74,8 +73,7 @@ pub struct Session {
     pub reach: ListenerReach,
     /// `None` for the operator and anonymous callers: they have no token that expires.
     expires_at: Option<u64>,
-    /// Revocation still matches the raw token (`apps_map`); step 2 replaces it with
-    /// `TokenId`.
+    /// `apps_map` revokes by the raw token, so `check` needs it.
     token: String,
 }
 
@@ -174,7 +172,7 @@ impl Session {
 
 #[cfg(test)]
 mod resolution_tests {
-    //! One test per row of Plan 20 §5.1's resolution table.
+    //! One test per way a token resolves.
     use super::*;
     use crate::agent::capabilities::{
         apps_map, AuthInfo, AuthInfoExtended, ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY,
@@ -188,18 +186,27 @@ mod resolution_tests {
         Some(ADMIN.to_string())
     }
 
-    fn app_token() -> String {
+    fn app_token(capabilities: Option<Vec<Capability>>) -> String {
         setup_wallet();
         setup_agent();
         crate::agent::capabilities::token::generate_jwt(
             "an app".to_string(),
             3600,
             AuthInfo {
-                capabilities: Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]),
+                capabilities,
                 ..AuthInfo::default()
             },
         )
         .unwrap()
+    }
+
+    /// The anonymous set reads the multi-user setting. Initialises the database only when no
+    /// test has, so it does not wipe one another test is using.
+    fn ensure_db() {
+        use crate::db::Ad4mDb;
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
     }
 
     #[test]
@@ -217,6 +224,7 @@ mod resolution_tests {
         let local = Session::open("", &None, ListenerReach::Loopback).unwrap();
         assert!(local.is_operator());
 
+        ensure_db();
         let remote = Session::open("", &None, ListenerReach::Network).unwrap();
         assert!(matches!(remote.principal, Principal::Anonymous { .. }));
         assert!(
@@ -227,25 +235,33 @@ mod resolution_tests {
 
     #[test]
     fn no_token_on_a_node_with_a_credential_is_anonymous() {
-        let session = Session::open("", &admin(), ListenerReach::Loopback).unwrap();
-        assert!(matches!(session.principal, Principal::Anonymous { .. }));
-        assert!(
-            session.may(&AGENT_AUTH_CAPABILITY),
-            "may request a capability"
-        );
-        assert!(!session.may(&PERSPECTIVE_CREATE_CAPABILITY));
+        ensure_db();
+        for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+            let session = Session::open("", &admin(), reach).unwrap();
+            assert!(matches!(session.principal, Principal::Anonymous { .. }));
+            assert!(
+                session.may(&AGENT_AUTH_CAPABILITY),
+                "may request a capability"
+            );
+            assert!(!session.may(&PERSPECTIVE_CREATE_CAPABILITY));
+        }
     }
 
     #[test]
     fn anonymous_callers_may_sign_up_only_in_multi_user_mode() {
+        ensure_db();
+        let single = Session::open("", &admin(), ListenerReach::Network).unwrap();
+        assert!(!single.may(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY));
+
         let _multi_user = MultiUserMode::on();
-        let session = Session::open("", &admin(), ListenerReach::Network).unwrap();
-        assert!(session.may(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY));
+        let multi = Session::open("", &admin(), ListenerReach::Network).unwrap();
+        assert!(multi.may(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY));
     }
 
     #[test]
     fn a_token_without_a_user_is_an_app_limited_to_its_capabilities() {
-        let session = Session::open(&app_token(), &admin(), ListenerReach::Network).unwrap();
+        let token = app_token(Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
+        let session = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
         assert!(matches!(session.principal, Principal::App { .. }));
         assert!(session.may(&PERSPECTIVE_CREATE_CAPABILITY));
         assert!(!session.may(&ALL_CAPABILITY));
@@ -254,33 +270,37 @@ mod resolution_tests {
     }
 
     #[test]
-    fn a_user_token_is_the_user_with_their_did() {
+    fn a_token_without_capabilities_may_only_request_one() {
+        let session = Session::open(&app_token(None), &admin(), ListenerReach::Network).unwrap();
+        assert!(session.may(&AGENT_AUTH_CAPABILITY));
+        assert!(!session.may(&PERSPECTIVE_CREATE_CAPABILITY));
+    }
+
+    #[test]
+    fn a_user_token_is_the_user_with_their_did_whatever_the_multi_user_setting() {
         setup_wallet();
         setup_agent();
         let email = "session.user@example.org";
         AgentService::ensure_user_key_exists(email).unwrap();
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let expected_did = AgentService::get_user_did_by_email(email).unwrap();
 
-        let session = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
-        match &session.principal {
-            Principal::User { email: e, did, .. } => {
-                assert_eq!(e, email);
-                assert_eq!(did, &AgentService::get_user_did_by_email(email).unwrap());
+        let open = || Session::open(&token, &admin(), ListenerReach::Network).unwrap();
+        let single = open();
+        let multi_user = MultiUserMode::on();
+        let multi = open();
+        drop(multi_user);
+
+        for session in [single, multi] {
+            match &session.principal {
+                Principal::User { email: e, did, .. } => {
+                    assert_eq!(e, email);
+                    assert_eq!(did, &expected_did);
+                }
+                other => panic!("expected a user, got {other:?}"),
             }
-            other => panic!("expected a user, got {other:?}"),
+            assert!(!session.is_operator());
         }
-        assert!(!session.is_operator());
-    }
-
-    #[test]
-    fn a_user_token_stays_the_user_when_multi_user_mode_is_off() {
-        setup_wallet();
-        setup_agent();
-        let email = "session.single@example.org";
-        AgentService::ensure_user_key_exists(email).unwrap();
-        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
-        let session = Session::open(&token, &admin(), ListenerReach::Loopback).unwrap();
-        assert!(matches!(session.principal, Principal::User { .. }));
     }
 
     #[test]
@@ -311,9 +331,26 @@ mod resolution_tests {
     }
 
     #[test]
+    fn a_locked_wallet_opens_no_session_and_says_so() {
+        let token = app_token(None);
+        let backend = crate::wallet::wallet_backend();
+        backend.lock("session-locked-test");
+        let result = Session::open(&token, &admin(), ListenerReach::Network);
+        // Unlock before asserting, so a failure cannot leave the shared wallet locked.
+        backend
+            .unlock("session-locked-test")
+            .expect("restore the shared wallet");
+
+        match result {
+            Err(AuthError::Invalid(e)) => assert!(e.contains("Executor is locked"), "{e}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_revoked_token_opens_no_session_and_ends_an_open_one() {
         crate::test_utils::use_test_apps_file();
-        let token = app_token();
+        let token = app_token(None);
         let request_id = format!("session-{}", uuid::Uuid::new_v4());
         let app = AuthInfoExtended {
             request_id: request_id.clone(),
