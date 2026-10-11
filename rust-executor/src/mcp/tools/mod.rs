@@ -41,15 +41,16 @@ pub mod subscriptions;
 
 use super::caller::Opened;
 use super::server::McpContext;
-use crate::agent::capabilities::{defs::PERSPECTIVE_CREATE_CAPABILITY, Capability, ListenerReach};
+use crate::agent::capabilities::{
+    perspective_query_capability, perspective_update_capability, Capability, ListenerReach,
+};
 use crate::agent::session::{AuthError, Session};
 use crate::agent::AgentContext;
-use crate::api::guards::Admission;
+use crate::api::guards::{Admission, Guard};
 use crate::api::perspectives_ws::ACCESS_DENIED;
 use crate::api::ws_handler::{shared_handler_map, WsRpcError};
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::PerspectiveHandle;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext},
     model::{
@@ -311,19 +312,6 @@ impl Ad4mMcpHandler {
         authenticated(self.caller(RequestAuth::default()).await)
     }
 
-    /// The caller's session if it holds `capability`.
-    pub(crate) async fn require(&self, capability: &Capability) -> Result<Arc<Session>, String> {
-        let session = self.session().await?;
-        if !session.may(capability) {
-            return Err(format!(
-                "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
-                session.capabilities(),
-                capability
-            ));
-        }
-        Ok(session)
-    }
-
     /// Call the RPC method `method` with `params` as this tool call's caller, through the
     /// handler map: the method's guard decides who may call it, exactly as on the RPC socket
     /// (#851). A caller without a working, authenticated session gets 401.
@@ -565,84 +553,67 @@ impl Ad4mMcpHandler {
         resp.to_string()
     }
 
-    /// Check if the current user can access a perspective.
-    /// In multi-user mode, only perspectives owned by the user (or unowned) are accessible.
-    /// In single-user mode, all perspectives are accessible.
-    pub(crate) async fn can_access_perspective(&self, perspective: &PerspectiveHandle) -> bool {
-        // A token that no longer works, or none, reaches nothing, not the main agent's
-        // perspectives.
-        match self.get_agent_context().await {
-            Ok(context) => crate::helpers::can_access_perspective(&context.user_email, perspective),
-            Err(_) => false,
-        }
+    /// Whether the caller may read perspective `uuid`: the guard of the RPC methods that
+    /// read one. The dynamic tool list offers the classes of these perspectives only.
+    pub(crate) async fn may_read_perspective(&self, uuid: &str) -> bool {
+        self.admitted_perspective(uuid, perspective_query_capability)
+            .await
+            .is_ok()
     }
 
-    /// Get a perspective by ID, verifying the agent is authenticated, has the required capability,
-    /// and has access to this perspective (multi-user isolation).
-    /// This is the standard entry point for tool handlers: the perspective, the caller's
-    /// session, its ownership check and its capability check in one place.
-    pub(crate) async fn get_perspective_with_auth(
+    /// Perspective `uuid` and the caller's session, if the caller passes
+    /// `Guard::perspective(capability)`, the guard of the RPC methods that read
+    /// (`perspective_query_capability`) or change (`perspective_update_capability`) a
+    /// perspective. The operator reaches every perspective, a user only its own, an app the
+    /// unowned ones and the main agent's; every caller but the operator needs the capability.
+    /// A refusal answers as [`perspective_error`]; a caller without a working, authenticated
+    /// session gets 401 (the in-process harness does not go through `call_tool`).
+    async fn admitted_perspective(
         &self,
-        perspective_id: &str,
-        required_capability: &crate::agent::capabilities::Capability,
-    ) -> Result<(PerspectiveInstance, AgentContext), String> {
-        let perspective = get_perspective(perspective_id).ok_or_else(|| {
-            json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
-        })?;
-
-        let agent_context = self.get_agent_context().await?;
-
-        // Check perspective ownership/access (multi-user isolation)
-        let handle = perspective.persisted.lock().await.clone();
-        if !crate::helpers::can_access_perspective(&agent_context.user_email, &handle) {
-            return Err(
-                json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string(),
-            );
-        }
-
-        if let Err(e) = self.require(required_capability).await {
-            return Err(format!("Capability error: {}", e));
-        }
-
-        Ok((perspective, agent_context))
+        uuid: &str,
+        capability: fn(Vec<String>) -> Capability,
+    ) -> Result<(PerspectiveInstance, Arc<Session>), String> {
+        let session = self
+            .session()
+            .await
+            .map_err(|e| method_error(WsRpcError::unauthorized(e)))?;
+        Guard::perspective(capability)
+            .admit(
+                "this tool",
+                &json!({ "uuid": uuid }),
+                &request_context(session.clone()),
+            )
+            .await
+            .map_err(|e| perspective_error(uuid, e))?;
+        // Removed between the guard and here: missing, as the guard would answer.
+        let perspective = get_perspective(uuid)
+            .ok_or_else(|| perspective_error(uuid, WsRpcError::not_found(String::new())))?;
+        Ok((perspective, session))
     }
 
-    /// Convenience wrapper for read operations — checks perspective access but no write capability.
-    ///
-    /// The caller needs a working session that is not anonymous: the operator (the admin
-    /// credential, or no token on a loopback listener of a node without one), an app or a
-    /// user. `call_tool` refuses everyone else already; the in-process harness does not go
-    /// through `call_tool`, so the check runs here too.
+    /// Perspective `perspective_id`, if the caller may read it: the guard of the perspective
+    /// RPC methods that read, `Guard::perspective(perspective_query_capability)`.
     pub(crate) async fn get_readable_perspective(
         &self,
         perspective_id: &str,
     ) -> Result<PerspectiveInstance, String> {
-        let agent_context = self
-            .get_agent_context()
-            .await
-            .map_err(|e| json!({"error": e}).to_string())?;
-
-        let perspective = get_perspective(perspective_id).ok_or_else(|| {
-            json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
-        })?;
-
-        let handle = perspective.persisted.lock().await.clone();
-        if !crate::helpers::can_access_perspective(&agent_context.user_email, &handle) {
-            return Err(
-                json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string(),
-            );
-        }
-
+        let (perspective, _) = self
+            .admitted_perspective(perspective_id, perspective_query_capability)
+            .await?;
         Ok(perspective)
     }
 
-    /// Convenience wrapper for write operations (most common case)
+    /// Perspective `perspective_id` and the agent the caller writes as, if the caller may
+    /// change it: the guard of the perspective RPC methods that write,
+    /// `Guard::perspective(perspective_update_capability)`.
     pub(crate) async fn get_writable_perspective(
         &self,
         perspective_id: &str,
     ) -> Result<(PerspectiveInstance, AgentContext), String> {
-        self.get_perspective_with_auth(perspective_id, &PERSPECTIVE_CREATE_CAPABILITY)
-            .await
+        let (perspective, session) = self
+            .admitted_perspective(perspective_id, perspective_update_capability)
+            .await?;
+        Ok((perspective, session.acts_as()))
     }
 
     /// Extract a required string argument from the args map (used by dynamic tools)
@@ -914,6 +885,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod agent_context_tests {
     use super::*;
+    use crate::agent::capabilities::PERSPECTIVE_CREATE_CAPABILITY;
     use crate::test_utils::{
         ensure_db, expired_user_token, setup_agent, setup_wallet, MultiUserMode,
     };
@@ -1007,10 +979,7 @@ mod agent_context_tests {
         setup_agent();
         let session = handler("test-admin").session().await.unwrap();
         assert!(session.is_operator());
-        assert!(handler("test-admin")
-            .require(&crate::agent::capabilities::ALL_CAPABILITY)
-            .await
-            .is_ok());
+        assert!(session.may(&crate::agent::capabilities::ALL_CAPABILITY));
         assert_eq!(
             handler("test-admin").get_my_did(profile_params()).await,
             crate::agent::did()
@@ -1021,15 +990,9 @@ mod agent_context_tests {
     async fn an_app_token_is_limited_to_its_capabilities_and_acts_as_the_node() {
         let token = app_token(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]);
         let handler = handler(&token);
-        assert!(handler
-            .require(&PERSPECTIVE_CREATE_CAPABILITY)
-            .await
-            .is_ok());
-        let err = handler
-            .require(&crate::agent::capabilities::LANGUAGE_READ_CAPABILITY)
-            .await
-            .unwrap_err();
-        assert!(err.contains("Capability is not matched"), "{err}");
+        let session = handler.session().await.unwrap();
+        assert!(session.may(&PERSPECTIVE_CREATE_CAPABILITY));
+        assert!(!session.may(&crate::agent::capabilities::LANGUAGE_READ_CAPABILITY));
         assert!(handler.get_agent_context().await.unwrap().is_main_agent);
         assert!(!gets_mint_code(&handler).await);
     }

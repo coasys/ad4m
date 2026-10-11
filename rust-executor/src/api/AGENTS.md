@@ -130,7 +130,10 @@ test; a method whose params need more than `uuid` adds an entry to `EXTRA_PARAMS
 The MCP tools that wrap an RPC method dispatch through the same map
 (`ws_handler::shared_handler_map`, `mcp::tools::call_method`), so the guards hold on MCP too.
 `tests/method_matrix_mcp_tests.rs` runs each of them as every matrix caller and checks it
-against `admit` of its methods (see `mcp/AGENTS.md`).
+against `admit` of its methods (see `mcp/AGENTS.md`). The MCP tools with no RPC method that
+take a perspective run `Guard::perspective(perspective_query_capability)` (read) or
+`Guard::perspective(perspective_update_capability)` (write) themselves; the same file checks
+them against those two guards.
 
 ## Protocol
 

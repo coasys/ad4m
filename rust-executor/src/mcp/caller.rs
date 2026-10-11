@@ -192,7 +192,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_bad_header_is_refused_and_not_remembered() {
+        // Decoding the header as a JWT reads the agent's key name from the config.
         setup_wallet();
+        setup_agent();
         ensure_db();
         let caller = Caller::default();
         let err = caller
@@ -224,6 +226,7 @@ mod tests {
     #[tokio::test]
     async fn a_login_token_that_opens_no_session_is_remembered_as_refused() {
         setup_wallet();
+        setup_agent();
         let caller = Caller::default();
         caller
             .sign_in("not-a-jwt", &admin(), ListenerReach::Network)

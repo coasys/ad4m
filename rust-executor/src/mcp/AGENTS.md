@@ -18,7 +18,7 @@ Model Context Protocol server exposing AD4M to LLM agents (`rmcp`). Transport in
   an extension); a request with a forwarding header reads as `Network`, as on RPC.
 - `call_tool` resolves the caller on every call and refuses non-`AUTH_TOOLS`
   calls unless the session works and is not anonymous. Tools read it through
-  `session()` / `require(cap)` / `get_agent_context()`, which run
+  `session()` / `get_agent_context()` and the perspective helpers, which run
   `Session::check` again, so a revoked, expired or logged-out token is refused
   mid-session. The in-process harness (`harness_bridge.rs`) skips `call_tool`, so
   these helpers are the check there.
@@ -61,11 +61,19 @@ causes no side effect.
 - `api/tests/method_matrix_mcp_tests.rs` runs every wrapping tool as each method-matrix
   caller and checks that it allows and refuses as its methods' guards do. A new tool goes into
   its `tools()` list or its `NOT_WRAPPED` list; `every_tool_is_classified` fails otherwise.
-- Tools with no RPC method keep their own logic and take their checks from the `Session`
-  (`get_readable_perspective`, `get_writable_perspective`, `require`): `describe_perspective`,
-  the `instance_*` tools, `instance_transcript`, `flow_state`, `flow_actions`,
-  `generate_waker_query`, `get_mention_waker_config`, `get_documentation`, `auth_status`, and
-  the dynamic per-class tools.
+- Tools with no RPC method keep their own logic: `describe_perspective`, the `instance_*`
+  tools, `instance_transcript`, `flow_state`, `flow_actions`, `generate_waker_query`,
+  `get_mention_waker_config`, `get_documentation`, `auth_status`, and the dynamic per-class
+  tools. Those that take a perspective get it through `get_readable_perspective` /
+  `get_writable_perspective`, which run the guard of the perspective RPC methods,
+  `Guard::perspective(perspective_query_capability | perspective_update_capability)`, on the
+  caller's `RequestContext` and answer refusals through `perspective_error`. So the operator
+  reaches every perspective, a user only its own, an app the unowned and main-agent ones, with
+  the capability RPC requires. A dynamic write tool checks the write rule before it looks up
+  the class; `generate_dynamic_tools` lists classes of perspectives the caller may read
+  (`may_read_perspective`). `every_perspective_tool_without_a_method_follows_the_perspective_rule`
+  (in the MCP matrix tests) runs each of them as every matrix caller; a new perspective tool
+  without an RPC method goes into its `perspective_tools()` list.
 - `auth_status` reports the same resolved session (principal, did, capabilities,
   or the `AuthError`), so `authenticated` is true exactly when a tool call passes.
 

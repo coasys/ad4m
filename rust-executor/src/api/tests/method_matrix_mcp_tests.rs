@@ -12,6 +12,11 @@
 //!
 //! [`every_tool_is_classified`] fails for a new tool that is in neither list, so a tool that
 //! wraps an RPC method cannot skip the matrix.
+//!
+//! The tools with no RPC method that take a perspective (`NOT_WRAPPED`, and the dynamic
+//! per-class tools) run the same rows against the RPC rule for reading or changing a
+//! perspective, `Guard::perspective(perspective_query_capability | perspective_update_capability)`
+//! ([`every_perspective_tool_without_a_method_follows_the_perspective_rule`]).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -23,13 +28,18 @@ use serde_json::{json, Value};
 use super::method_matrix_tests::{
     perspective_rows, resource_rows, Caller, Target, World, OTHER_USER_DID, USER_DID, USER_EMAIL,
 };
-use crate::agent::capabilities::{anonymous_capabilities_when, Capability, ListenerReach};
+use crate::agent::capabilities::{
+    anonymous_capabilities_when, perspective_query_capability, perspective_update_capability,
+    Capability, ListenerReach,
+};
 use crate::agent::session::{Principal, Session, TokenId};
 use crate::api::guards::{Admission, Guard};
 use crate::api::ws_handler::shared_handler_map;
-use crate::mcp::tools::test_support::{handler_as, RuntimeService};
+use crate::mcp::tools::test_support::{handler_as, status, RuntimeService};
 use crate::mcp::tools::{auth, flows, instances, languages, neighbourhoods, perspectives};
-use crate::mcp::tools::{profiles, request_context, Ad4mMcpHandler};
+use crate::mcp::tools::{
+    perspective_error, profiles, request_context, subscriptions, Ad4mMcpHandler,
+};
 
 type Answer = Pin<Box<dyn Future<Output = String>>>;
 
@@ -588,7 +598,8 @@ fn tools() -> Vec<Tool> {
     ]
 }
 
-/// The tools with no RPC method: they keep their own checks on the `Session`.
+/// The tools with no RPC method. Those that take a perspective follow the RPC perspective rule
+/// ([`perspective_tools`]).
 const NOT_WRAPPED: &[&str] = &[
     "auth_status",
     "describe_perspective",
@@ -736,6 +747,279 @@ async fn every_wrapping_tool_allows_and_refuses_as_its_methods_guards_do() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     // 12 perspective tools × 13 rows, 17 others × 5 rows: the walk reached them all.
     assert!(checked >= 12 * 13 + 17 * 5, "only {checked} rows checked");
+}
+
+/// What a tool that wraps no RPC method does to its perspective: the RPC rule it must follow.
+#[derive(Clone, Copy, Debug)]
+enum Access {
+    /// `Guard::perspective(perspective_query_capability)`.
+    Read,
+    /// `Guard::perspective(perspective_update_capability)`.
+    Write,
+}
+
+impl Access {
+    fn guard(self) -> Guard {
+        match self {
+            Access::Read => Guard::perspective(perspective_query_capability),
+            Access::Write => Guard::perspective(perspective_update_capability),
+        }
+    }
+}
+
+/// A tool with no RPC method that works on one perspective.
+struct PerspectiveTool {
+    name: &'static str,
+    access: Access,
+    run: Run,
+}
+
+/// Runs the dynamic per-class tool `name`, whose class the matrix perspectives do not have.
+fn dynamic(handler: Ad4mMcpHandler, name: &'static str, uuid: String) -> Answer {
+    Box::pin(async move {
+        let arguments =
+            json!({ "perspective_id": uuid, "expression_address": "matrix://e", "value": "v" });
+        let result = handler
+            .handle_dynamic_tool(name, arguments.as_object().cloned())
+            .await
+            .expect("a dynamic tool answers");
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect()
+    })
+}
+
+fn perspective_tools() -> Vec<PerspectiveTool> {
+    use Access::*;
+    let tool = |name: &'static str, access: Access, run: Run| PerspectiveTool { name, access, run };
+    const CLASS: &str = "Matrix";
+    vec![
+        tool("describe_perspective", Read, |h, uuid| {
+            Box::pin(async move {
+                h.describe_perspective(Parameters(instances::DescribePerspectiveParams {
+                    perspective_id: uuid,
+                }))
+                .await
+            })
+        }),
+        tool("instance_query", Read, |h, uuid| {
+            Box::pin(async move {
+                h.instance_query(Parameters(instances::InstanceQueryParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    filter: None,
+                    parent: None,
+                    limit: None,
+                    offset: None,
+                }))
+                .await
+            })
+        }),
+        tool("instance_get", Read, |h, uuid| {
+            Box::pin(async move {
+                h.instance_get(Parameters(instances::InstanceGetParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    base_uri: "matrix://e".into(),
+                }))
+                .await
+            })
+        }),
+        tool("instance_transcript", Read, |h, uuid| {
+            Box::pin(async move {
+                h.instance_transcript(Parameters(instances::InstanceTranscriptParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    parent: "matrix://s".into(),
+                    limit: None,
+                    text_property: None,
+                }))
+                .await
+            })
+        }),
+        tool("instance_create", Write, |h, uuid| {
+            Box::pin(async move {
+                h.instance_create(Parameters(instances::InstanceCreateParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    properties: None,
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await
+            })
+        }),
+        tool("instance_update", Write, |h, uuid| {
+            Box::pin(async move {
+                h.instance_update(Parameters(instances::InstanceUpdateParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    base_uri: "matrix://e".into(),
+                    properties: Default::default(),
+                }))
+                .await
+            })
+        }),
+        tool("instance_remove", Write, |h, uuid| {
+            Box::pin(async move {
+                h.instance_remove(Parameters(instances::InstanceRemoveParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    base_uri: "matrix://e".into(),
+                }))
+                .await
+            })
+        }),
+        tool("instance_add_to_collection", Write, |h, uuid| {
+            Box::pin(async move {
+                h.instance_add_to_collection(Parameters(instances::InstanceAddToCollectionParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    base_uri: "matrix://e".into(),
+                    collection: "items".into(),
+                    item_uri: "matrix://t".into(),
+                }))
+                .await
+            })
+        }),
+        tool("instance_remove_from_collection", Write, |h, uuid| {
+            Box::pin(async move {
+                h.instance_remove_from_collection(Parameters(
+                    instances::InstanceRemoveFromCollectionParams {
+                        perspective_id: uuid,
+                        class_name: CLASS.into(),
+                        base_uri: "matrix://e".into(),
+                        collection: "items".into(),
+                        item_uri: "matrix://t".into(),
+                    },
+                ))
+                .await
+            })
+        }),
+        tool("flow_state", Read, |h, uuid| {
+            Box::pin(async move {
+                h.flow_state(Parameters(flows::FlowExprParams {
+                    perspective_id: uuid,
+                    flow_name: "F".into(),
+                    expression_address: "matrix://e".into(),
+                }))
+                .await
+            })
+        }),
+        tool("flow_actions", Read, |h, uuid| {
+            Box::pin(async move {
+                h.flow_actions(Parameters(flows::FlowExprParams {
+                    perspective_id: uuid,
+                    flow_name: "F".into(),
+                    expression_address: "matrix://e".into(),
+                }))
+                .await
+            })
+        }),
+        tool("generate_waker_query", Read, |h, uuid| {
+            Box::pin(async move {
+                h.generate_waker_query(Parameters(subscriptions::SubscribeToModelParams {
+                    perspective_id: uuid,
+                    class_name: CLASS.into(),
+                    parent: None,
+                    predicate: None,
+                    target_value: None,
+                }))
+                .await
+            })
+        }),
+        tool("get_mention_waker_config", Read, |h, uuid| {
+            Box::pin(async move {
+                h.get_mention_waker_config(Parameters(subscriptions::MentionWakerConfigParams {
+                    perspective_id: uuid,
+                    name_override: None,
+                }))
+                .await
+            })
+        }),
+        // The dynamic per-class tools: reads and writes, plain and per property.
+        tool("matrix_query", Read, |h, uuid| {
+            dynamic(h, "matrix_query", uuid)
+        }),
+        tool("matrix_get_items", Read, |h, uuid| {
+            dynamic(h, "matrix_get_items", uuid)
+        }),
+        tool("matrix_create", Write, |h, uuid| {
+            dynamic(h, "matrix_create", uuid)
+        }),
+        tool("matrix_set_name", Write, |h, uuid| {
+            dynamic(h, "matrix_set_name", uuid)
+        }),
+    ]
+}
+
+/// The refusal status `access`'s RPC rule gives `session` on perspective `uuid` (`None`: it
+/// allows), mapped as a tool maps it ([`perspective_error`]). A caller without an
+/// authenticated session gets 401: MCP refuses it before any rule.
+async fn rule_refusal(access: Access, session: Arc<Session>, uuid: &str) -> Option<u64> {
+    if !session.is_authenticated() {
+        return Some(401);
+    }
+    let params = json!({ "uuid": uuid });
+    match access
+        .guard()
+        .admit("matrix", &params, &request_context(session))
+        .await
+    {
+        Ok(Admission::Granted) => None,
+        Ok(Admission::Hidden) => unreachable!("Guard::perspective does not hide existence"),
+        Err(e) => status(&perspective_error(uuid, e)),
+    }
+}
+
+/// The tools with no RPC method that take a perspective (the dynamic per-class tools too) allow
+/// and refuse every matrix caller on every matrix perspective as the RPC rule for reading
+/// or changing a perspective does, with the same status.
+#[tokio::test]
+async fn every_perspective_tool_without_a_method_follows_the_perspective_rule() {
+    let tools = perspective_tools();
+    let mut uncovered: Vec<&str> = NOT_WRAPPED
+        .iter()
+        .copied()
+        .filter(|name| !matches!(*name, "auth_status" | "get_documentation"))
+        .filter(|name| !tools.iter().any(|t| t.name == *name))
+        .collect();
+    uncovered.sort();
+    assert!(
+        uncovered.is_empty(),
+        "NOT_WRAPPED tools without rows: {uncovered:?}"
+    );
+
+    let world = World::new().await;
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for tool in &tools {
+        let caps = vec![tool
+            .access
+            .guard()
+            .capability("*")
+            .expect("a perspective guard checks a capability")];
+        for &(caller, target, _) in perspective_rows() {
+            let uuid = world.uuid(target);
+            let session = session(caller, &caps);
+            let expected = rule_refusal(tool.access, session.clone(), &uuid).await;
+            let answer = (tool.run)(handler_as(session.principal.clone()), uuid).await;
+            let actual = status(&answer).filter(|s| matches!(s, 401 | 403 | 404));
+            if actual != expected {
+                failures.push(format!(
+                    "{} ({:?}) as {caller:?} on {target:?}: the rule answers {expected:?}, \
+                     the tool {actual:?}: {answer}",
+                    tool.name, tool.access,
+                ));
+            }
+            checked += 1;
+        }
+    }
+    world.remove().await;
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(checked, tools.len() * perspective_rows().len());
 }
 
 /// Every static tool is either in the matrix or has no RPC method.

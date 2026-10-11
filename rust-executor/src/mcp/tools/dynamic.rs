@@ -25,12 +25,10 @@ impl Ad4mMcpHandler {
         for p in perspectives.iter() {
             let handle = p.persisted.lock().await.clone();
 
-            // Multi-user isolation: skip perspectives the user can't access
-            if !self.can_access_perspective(&handle).await {
+            let uuid = handle.uuid.clone();
+            if !self.may_read_perspective(&uuid).await {
                 continue;
             }
-
-            let uuid = handle.uuid.clone();
 
             let perspective = match get_perspective(&uuid) {
                 Some(p) => p,
@@ -330,16 +328,20 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // Find actual class name (preserving original case)
+        // Find actual class name (preserving original case). A write checks the write guard
+        // here already, so a caller who may not write is refused as the write would refuse it.
         let class_name = {
-            let perspective = match self.get_readable_perspective(&perspective_id).await {
+            let writes = !matches!(operation, "query" | "list" | "get");
+            let perspective = if writes {
+                self.get_writable_perspective(&perspective_id)
+                    .await
+                    .map(|(p, _)| p)
+            } else {
+                self.get_readable_perspective(&perspective_id).await
+            };
+            let perspective = match perspective {
                 Ok(p) => p,
-                Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Perspective not found: {}",
-                        perspective_id
-                    ))]));
-                }
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             };
             match shacl::find_class_name(&perspective, class_name_lower).await {
                 Some(name) => name,
@@ -946,12 +948,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
@@ -1054,11 +1051,6 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let _agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
         let (mut perspective, _agent_ctx) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
@@ -1119,7 +1111,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
@@ -1132,11 +1124,6 @@ impl Ad4mMcpHandler {
         {
             Ok(pred) => pred,
             Err(e) => return format!("Error resolving property '{}': {}", property_name, e),
-        };
-
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
         };
 
         let target = Self::create_property_expression(
@@ -1224,7 +1211,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (perspective, _agent_ctx) = match self.get_writable_perspective(perspective_id).await {
+        let perspective = match self.get_readable_perspective(perspective_id).await {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -1276,7 +1263,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
@@ -1289,11 +1276,6 @@ impl Ad4mMcpHandler {
         {
             Ok(pred) => pred,
             Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
-        };
-
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
         };
 
         let target = Self::create_property_expression(
