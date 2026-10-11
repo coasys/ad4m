@@ -42,6 +42,12 @@ impl PerspectiveInstance {
         first_result: impl std::future::Future<Output = Result<String, AnyError>>,
     ) -> Result<(String, u64, String), AnyError> {
         let id = uuid::Uuid::new_v4().to_string();
+        log::info!(
+            "🔗 subscription {} created for connection {} [{}]",
+            id,
+            query.connection,
+            self.uuid
+        );
         self.subscribed_queries
             .lock()
             .await
@@ -126,6 +132,13 @@ impl PerspectiveInstance {
             {
                 log::warn!("Failed to notify prolog service of subscription end: {}", e);
             }
+        }
+        if !removed.is_empty() {
+            log::info!(
+                "🔗 {} subscription(s) dropped [{}]",
+                removed.len(),
+                self.uuid
+            );
         }
         removed.len()
     }
