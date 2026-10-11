@@ -203,6 +203,7 @@ async fn add_matching_link(perspective: &mut PerspectiveInstance) {
                     signature: "test-signature".to_string(),
                 },
                 status: Some(LinkStatus::Local),
+                graph: None,
             },
             LinkStatus::Local,
             None,

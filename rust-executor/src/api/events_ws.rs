@@ -374,24 +374,6 @@ pub(crate) async fn build_event_stream_for(
         };
     }
 
-    // Like `did_stream!`, for filters that wait on the perspective handle
-    // (see `perspective_is_owned_by`).
-    macro_rules! owned_stream {
-        ($rx:expr, $ty:expr, $did:expr, $filter_fn:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| {
-                    let current_did = $did.clone();
-                    async move {
-                        let msg = result.ok()?;
-                        $filter_fn(&msg, current_did.as_deref())
-                            .await
-                            .then(|| wrap_event($ty, &msg))
-                    }
-                })
-        };
-    }
-
     macro_rules! did_stream_nested {
         ($rx:expr, $ty:expr, $key:expr, $did:expr, $filter_fn:expr) => {
             BroadcastStream::new($rx)
@@ -1470,7 +1452,7 @@ mod perspective_is_owned_by_tests {
         let persisted = instance.persisted.clone();
         register_perspective(uuid.clone(), instance);
         let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        // The same chain as `owned_stream!`.
+        // The same chain as the query-subscription stream.
         let mut stream = Box::pin(
             BroadcastStream::new(rx)
                 .filter_map(|r| async { handle_broadcast_result(r) })
@@ -2080,7 +2062,6 @@ mod event_spec_tests {
                     perspective_id: p(),
                     trigger_match: "[]".into(),
                 },
-                owner_did: "did:x".into(),
             }),
             uuid_of(PerspectiveQuerySubscriptionFilter {
                 perspective_uuid: p(),

@@ -1716,7 +1716,7 @@ async fn a_triggered_notification_reaches_only_its_owner() {
     use crate::api::events_ws::matches_notification_owner;
     use crate::pubsub::RUNTIME_NOTIFICATION_TRIGGERED_TOPIC;
 
-    let (alice, alice_did) = user("alice");
+    let (_, alice_did) = user("alice");
     let (_, bob_did) = user("bob");
     let p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
     // The session filter checks ownership through the global registry.

@@ -538,11 +538,11 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
     ] {
         let links = definition(rule);
         let via_add_flow = perspective
-            .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx)
+            .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx, None)
             .await
             .map(|_| ());
         let via_add_sdna = perspective
-            .add_links(links.clone(), LinkStatus::Local, None, &ctx)
+            .add_links(links.clone(), LinkStatus::Local, None, &ctx, None)
             .await
             .map(|_| ());
         for (path, result) in [
@@ -567,7 +567,7 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
 
     let links = definition(PLAIN_GATE);
     perspective
-        .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx)
+        .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx, None)
         .await
         .expect("a definition whose rule reads adds");
     assert_eq!(stored(&perspective, NAMESPACE).await, links.len());

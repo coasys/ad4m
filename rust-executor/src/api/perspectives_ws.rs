@@ -292,7 +292,7 @@ async fn get_perspective_handler(
 /// The agent whose view of a perspective a request reads: other agents' Local
 /// graphs stay out of it.
 pub(crate) fn viewer_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
-    crate::agent::did_for_context(&AgentContext::from_auth_token(ctx.auth_token.clone()))
+    crate::agent::did_for_context(&AgentContext::from_request(ctx))
         .map_err(|e| WsRpcError::internal(e.to_string()))
 }
 

@@ -1425,7 +1425,7 @@ describe('Ad4mClient', () => {
             proof: { key: 'k', signature: 's', valid: true, invalid: false },
         } }));
         ws.emit(event('exception-occurred', { exception }));
-        ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification, ownerDid: OWNER }));
+        ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification }));
 
         for (const handler of Object.values(handlers)) {
             expect(handler).toHaveBeenCalledTimes(1);
