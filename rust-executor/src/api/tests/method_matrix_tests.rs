@@ -244,7 +244,106 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("perspective.flowValidOutputs", || json!({ "flow": "f" })),
     ("perspective.getShaclTargetClass", || json!({ "name": "S" })),
     ("perspective.getShacl", || json!({ "name": "S" })),
+    ("perspective.update", || json!({ "name": "n" })),
+    ("perspective.addLink", || json!({ "link": link() })),
+    ("perspective.addLinkExpression", || {
+        json!({ "link": {
+            "author": "did:key:a",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "data": link(),
+            "proof": { "key": "k", "signature": "s" },
+        } })
+    }),
+    ("perspective.addLinks", || json!({ "links": [link()] })),
+    (
+        "perspective.updateLink",
+        || json!({ "oldLink": link_expression(), "newLink": link() }),
+    ),
+    (
+        "perspective.removeLink",
+        || json!({ "link": link_expression() }),
+    ),
+    (
+        "perspective.removeLinks",
+        || json!({ "links": [link_expression()] }),
+    ),
+    (
+        "perspective.linkMutations",
+        || json!({ "mutations": { "additions": [link()], "removals": [] } }),
+    ),
+    (
+        "perspective.addSdna",
+        || json!({ "name": "C", "sdnaType": "subject_class" }),
+    ),
+    (
+        "perspective.executeCommands",
+        || json!({ "commands": "[]", "expression": "e" }),
+    ),
+    (
+        "perspective.createSubject",
+        || json!({ "subjectClass": "C", "expressionAddress": "e" }),
+    ),
+    ("perspective.commitBatch", || json!({ "batchId": "b" })),
+    (
+        "perspective.runInterpretation",
+        || json!({ "transcript": [], "basePrefix": "test://" }),
+    ),
+    (
+        "perspective.runInterpretationWithHarness",
+        || json!({ "transcript": [], "basePrefix": "test://", "maxToolCalls": 1 }),
+    ),
+    ("perspective.addAutoProcessor", || {
+        json!({
+            "processorId": "p",
+            "sourceScopeQuery": "SELECT * {}",
+            "interpretationClasses": ["C"],
+            "debounceMs": 0,
+            "batchMax": 1,
+            "claimTtlMs": 1,
+        })
+    }),
+    (
+        "perspective.removeAutoProcessor",
+        || json!({ "processorId": "p" }),
+    ),
+    (
+        "perspective.acceptInterpretation",
+        || json!({ "base": "b" }),
+    ),
+    (
+        "perspective.rejectInterpretation",
+        || json!({ "base": "b" }),
+    ),
+    (
+        "perspective.acceptFlowProposal",
+        || json!({ "proposalUri": "p" }),
+    ),
+    (
+        "perspective.rejectFlowProposal",
+        || json!({ "proposalUri": "p" }),
+    ),
+    (
+        "perspective.proposeFlowTransition",
+        || json!({ "instanceUri": "i", "toState": "s" }),
+    ),
+    (
+        "perspective.mintFlowReceipt",
+        || json!({ "instanceUri": "i" }),
+    ),
 ];
+
+fn link() -> Value {
+    json!({ "source": "s", "target": "t" })
+}
+
+fn link_expression() -> Value {
+    json!({
+        "author": "did:key:a",
+        "data": link(),
+        "proof": {},
+        "timestamp": "2026-01-01T00:00:00Z",
+    })
+}
 
 fn entanglement_proof() -> Value {
     json!({
@@ -559,6 +658,19 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     world.remove().await;
+}
+
+#[test]
+fn every_method_on_one_perspective_has_a_guard() {
+    let map = build_handler_map();
+    let unguarded: Vec<&str> = map
+        .guards()
+        .into_iter()
+        .filter(|(name, guard)| name.starts_with("perspective.") && guard.is_none())
+        .map(|(name, _)| name)
+        .collect();
+    // Neither names one perspective: `all` lists the caller's, `create` makes a new one.
+    assert_eq!(unguarded, vec!["perspective.all", "perspective.create"]);
 }
 
 #[tokio::test]

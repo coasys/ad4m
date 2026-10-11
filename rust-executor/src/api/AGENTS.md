@@ -19,23 +19,22 @@ REST/WS shim. Split plan: spec item 6.
 handlers), `runtime`, `users`. Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
-Handler shape today (`perspectives_ws.rs::add_link` is representative):
+Handler shape (`perspectives_ws.rs::add_link` is representative):
 
 ```rust
 async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;                       // ParamExt
-    check_capability(&ctx.capabilities, &perspective_update_capability(vec![uuid.clone()]))
-        .map_err(|e| WsRpcError::forbidden(e))?;                  // repeated in every handler
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let mut perspective = guarded_perspective(&params).await?;     // the guard checked access
     let agent_context = ctx.acts_as();                              // the session's user, or the main agent
     ...
     Ok(serde_json::to_value(result)?)
 }
+// registered with .guard(Guard::perspective(perspective_update_capability))
 ```
 
-A guard (next section) replaces the capability and access block. **Every new method
+A guard (next section) checks the capability and the access, so the handler does neither: a
+perspective handler only fetches the perspective (`guarded_perspective`). **Every new method
 registers a guard**, or, until its module moves to guards, checks a capability itself (or is
 registered with an explicit comment saying why not), and takes `AgentContext` from the session
 (`ctx.acts_as()`) for anything that signs, bills or writes. Never
@@ -48,14 +47,13 @@ A method declares who may call it where it registers:
 ```rust
 map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>("perspective.get", handler)
     .read()
-    .guard(Guard::Perspective {
-        capability: perspective_query_capability,
-        uuid: uuid_param,
-        hides_existence: true,
-    });
-map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
-    .guard(Guard::Node(AGENT_READ_CAPABILITY.clone()));
+    .guard(Guard::perspective_or_null(perspective_query_capability));
+map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
+    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
 ```
+
+`Guard::perspective(cap)` and `Guard::perspective_or_null(cap)` build `Guard::Perspective` on
+the `uuid` param (`hides_existence` false and true).
 
 `HandlerMap::dispatch` runs, in order: find the method (404) → params deserialize into `P`
 (400) → the guard's capability (403) → the guard's rule (403, or `null` without running the
@@ -73,7 +71,13 @@ Capabilities stay: every guard checks one first, and the rule adds whose data th
 A method takes at most one guard (a second panics). A method without one still dispatches,
 leaving every check to its handler; `build_handler_map` logs the unguarded methods at startup.
 A guard runs before the handler's own checks, so adding one changes nothing for callers the
-handler already refuses with the same code.
+handler already refuses with the same code. A handler check that is not part of the guard
+(compute credits, param validation beyond the contract type) now runs after the access check:
+a call that fails both gets the access answer.
+
+Guarded today: `Node` on the node-wide methods of `agent`, `ai`, `hosting`, `language` and
+`runtime` that refuse user sessions; `Perspective` on every `perspective.*` method that names one
+perspective. The rest still check in their handlers until their module moves to guards.
 
 `tests/method_matrix_tests.rs` walks every guarded method in `build_handler_map()` and calls
 `admit` as each kind of caller (operator, app with and without the capability, user, another
