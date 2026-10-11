@@ -99,7 +99,10 @@ impl std::fmt::Display for RevokeAllError {
 /// Revokes every token of the user `email` issued up to now, and closes their open
 /// connections. Tokens issued later work: `generate_user_jwt` issues them after the cutoff.
 pub fn revoke_all_sessions(email: &str) -> Result<(), RevokeAllError> {
-    let cutoff = now();
+    // Past any earlier cutoff: a login between two calls in the same second is issued at
+    // the first cutoff + 1, and the second call must still reach it.
+    let previous = SessionCutoffs::global().get(email);
+    let cutoff = now().max(previous.map_or(0, |c| c + 1));
     let saved = Ad4mDb::global_instance()
         .lock()
         .map_err(|e| e.to_string())

@@ -648,6 +648,30 @@ mod session_revocation_tests {
         assert!(open(&others).is_ok(), "another user's token works");
     }
 
+    // Two revoke-alls within one second, with a login between them: the second must still
+    // end that login, whose iat is the first cutoff + 1.
+    #[tokio::test]
+    async fn a_second_revoke_all_in_the_same_second_ends_a_login_made_between_them() {
+        setup();
+        let email = managed_user("revoke-all-twice");
+        let first = generate_user_jwt(&email, "test").unwrap();
+        crate::agent::revoked::revoke_all_sessions(&email).unwrap();
+        let between = generate_user_jwt(&email, "test").unwrap();
+        assert!(
+            open(&between).is_ok(),
+            "a login after the first cutoff works"
+        );
+
+        crate::agent::revoked::revoke_all_sessions(&email).unwrap();
+        assert_eq!(open(&between).unwrap_err(), AuthError::Revoked);
+        assert_eq!(open(&first).unwrap_err(), AuthError::Revoked);
+        let after = generate_user_jwt(&email, "test").unwrap();
+        assert!(
+            open(&after).is_ok(),
+            "a login after the second cutoff works"
+        );
+    }
+
     #[tokio::test]
     async fn the_operator_revokes_any_users_sessions_and_a_user_only_their_own() {
         setup();
