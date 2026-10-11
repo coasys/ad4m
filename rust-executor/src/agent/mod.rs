@@ -2311,7 +2311,7 @@ mod agent_context_tests {
             request_id: request_key.clone(),
             auth: capabilities::AuthInfo::default(),
         };
-        capabilities::apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_key.clone(), app, &token);
         capabilities::apps_map::revoke_app(&request_key).unwrap();
         assert!(AgentContext::from_auth_token(token, false).is_err());
         capabilities::apps_map::remove_app(&request_key).unwrap();

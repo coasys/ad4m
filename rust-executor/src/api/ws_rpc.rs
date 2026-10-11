@@ -508,7 +508,7 @@ mod connection_context_tests {
             request_id: request_id.clone(),
             auth: AuthInfo::default(),
         };
-        apps_map::insert_app(request_id.clone(), app, revoked.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_id.clone(), app, &revoked);
         apps_map::revoke_app(&request_id).unwrap();
 
         let refused = [
@@ -538,7 +538,7 @@ mod connection_context_tests {
             request_id: request_id.clone(),
             auth: AuthInfo::default(),
         };
-        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_id.clone(), app, &token);
 
         let ctx =
             connection_context(&token, &Some(ADMIN.into()), false, ListenerReach::Network).unwrap();
@@ -761,7 +761,7 @@ mod socket_tests {
             request_id: request_key.clone(),
             auth: AuthInfo::default(),
         };
-        apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_key.clone(), app, &token);
         (request_key, token)
     }
 
@@ -946,7 +946,7 @@ mod socket_tests {
             request_id: request_key.clone(),
             auth: AuthInfo::default(),
         };
-        apps_map::insert_app(request_key.clone(), app, revoked.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_key.clone(), app, &revoked);
         apps_map::revoke_app(&request_key).unwrap();
         let expired = crate::test_utils::expired_user_token("socket.expired@example.org");
 

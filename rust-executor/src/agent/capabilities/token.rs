@@ -1,5 +1,7 @@
 use super::types::*;
+use crate::agent::session::TokenId;
 use crate::config::get_global_config;
+use crate::secret::Secret;
 use crate::wallet::wallet_backend;
 use deno_core::{anyhow::anyhow, error::AnyError};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
@@ -17,6 +19,22 @@ pub fn generate_jwt(
     generate_jwt_issued_from(audience, expiration_time, capabilities, 0)
 }
 
+/// A token as issued: the JWT for its one receiver, and the id and expiry the executor keeps.
+pub struct IssuedToken {
+    pub jwt: Secret,
+    pub id: TokenId,
+    pub expires_at: u64,
+}
+
+/// [`generate_jwt`], with the new token's id and expiry beside it.
+pub fn issue_jwt(
+    audience: String,
+    expiration_time: u64,
+    capabilities: AuthInfo,
+) -> Result<IssuedToken, AnyError> {
+    issue_jwt_from(audience, expiration_time, capabilities, 0)
+}
+
 /// [`generate_jwt`] with an issue time (`iat`) of `earliest` at the soonest (Unix seconds).
 /// A user's tokens are issued after the user's session cutoff this way, even within the
 /// second of a `user.revokeAllSessions`.
@@ -26,6 +44,15 @@ pub fn generate_jwt_issued_from(
     capabilities: AuthInfo,
     earliest: u64,
 ) -> Result<String, AnyError> {
+    issue_jwt_from(audience, expiration_time, capabilities, earliest).map(|t| t.jwt.expose_once())
+}
+
+fn issue_jwt_from(
+    audience: String,
+    expiration_time: u64,
+    capabilities: AuthInfo,
+    earliest: u64,
+) -> Result<IssuedToken, AnyError> {
     let backend = wallet_backend();
     let name = signing_key_name();
 
@@ -55,7 +82,11 @@ pub fn generate_jwt_issued_from(
         &EncodingKey::from_secret(secret_key.as_slice()),
     )?;
 
-    Ok(token)
+    Ok(IssuedToken {
+        jwt: Secret::new(token),
+        id: TokenId(payload.nonce().to_string()),
+        expires_at: payload.expires_at(),
+    })
 }
 
 pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
@@ -86,12 +117,13 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     Ok(result.claims)
 }
 
-/// The id and expiry of a token this node stored itself, read without the wallet.
+/// The id and expiry of a token, read without the wallet.
 ///
 /// Skips the signature check, so never use it to decide who a caller is. It serves
-/// revocation: the app registry holds only tokens this node issued, and the operator may
-/// revoke them while the wallet is locked. `None` when the token does not parse: such a token
-/// opens no session either.
+/// revocation, which the operator may do while the wallet is locked: revoking an app by its
+/// JWT, and migrating an app registry file that still holds raw tokens. A forged token
+/// names only an id; revoking that id refuses no genuine token that the id does not belong
+/// to. `None` when the token does not parse: such a token opens no session either.
 pub fn read_stored_token_id(token: &str) -> Option<(crate::agent::session::TokenId, u64)> {
     let mut validation = jsonwebtoken::Validation::new(Algorithm::HS256);
     validation.insecure_disable_signature_validation();

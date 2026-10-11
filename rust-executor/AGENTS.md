@@ -61,6 +61,15 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
 - **Capabilities**: every WS handler checks `check_capability(&ctx.capabilities, &X_CAPABILITY)`
   itself (`agent/capabilities/defs.rs`). MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
+- **App approval**: `agent.requestCapability` records a `PendingApproval` by request id
+  (`agent/capabilities/pending.rs`); `agent.permitCapability` sets its code; `agent.generateJwt`
+  redeems it once. A request expires 10 minutes after the request or the approval; five wrong
+  codes delete it. The JWT goes only to the redeeming caller: the app registry
+  (`apps_map.rs`, `apps_data.json`) keeps the token's id and expiry, never the token, and
+  `getApps` sends `token: ""`. Older registry files with raw tokens are migrated on load.
+- **Secrets** (`secret.rs`): credentials are `Secret`s (no `Serialize`). `api/tests/secret_leak_tests.rs`
+  calls every read method as each principal and fails if a seeded secret reaches a reply or an
+  event; a new read method needing parameters gets them in its `params` table.
 - **Multi-user**: `AgentContext` (`agent/mod.rs`) carries main-agent vs managed-user (by email).
   Any signing/DID/billing path takes it explicitly.
 - **Notifications** post perspective data to any webhook URL. Their grant, update and delivery
