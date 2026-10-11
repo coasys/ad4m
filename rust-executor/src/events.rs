@@ -128,6 +128,9 @@ pub enum Audience {
     /// The sessions that act as one of these DIDs. A user acts as their own DID; the
     /// operator and apps act as the node's main agent.
     Dids(Vec<String>),
+    /// The operator, and the sessions that act as one of these DIDs: for the auto-processor
+    /// topics, which the operator sees on every perspective, other sessions only on theirs.
+    OperatorAndDids(Vec<String>),
 }
 
 impl Audience {

@@ -63,6 +63,14 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   session when it names none. `hosting-user-info-changed` goes to the user's DID (looked up by
   email at publish) and the main agent's (the operator and apps see every user's).
   `message-received` has no publisher; a new one uses `Audience::Authenticated`.
+  `model-loading-status` goes to everyone; `transcription-text` to the stream owner's DID.
+  `auto-processor-event` goes to `Audience::OperatorAndDids([pass owner])` when the owner may
+  read the perspective, else to the operator; `auto-processor-neighbourhood-state` to the
+  operator and the perspective's owners (every authenticated session for an unowned
+  perspective). `auto_processor::events::emit` reads the owners from the handle when it
+  publishes, so no emitter may hold the perspective's handle lock while it emits. Only
+  `query-subscription-update` stays on the string path, until live queries belong to a
+  connection (#1207).
   `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` and the approval exceptions (`CapabilityRequested`,

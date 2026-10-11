@@ -115,20 +115,7 @@ pub(crate) async fn subscribe_and_process<
 lazy_static::lazy_static! {
     static ref GLOBAL_PUB_SUB: Arc<PubSub> = Arc::new(PubSub::new());
 
-    pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
-    pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
-    pub static ref AUTO_PROCESSOR_EVENT_TOPIC: String = "auto-processor-event-topic".to_owned();
-    /// Neighbourhood observation of an auto-processor pass: fires when THIS
-    /// executor claims, finishes, or abandons a batch. Payload is a
-    /// perspective-scoped `AutoProcessorNeighbourhoodState` — no batch
-    /// payload, no LLM I/O — so anyone with perspective read access can see
-    /// "someone is auto-processing" without seeing WHAT they are processing.
-    /// Cross-executor sync (e.g. a peer's claim reaching us via Holochain)
-    /// is not covered here; consumers who need cross-peer visibility can
-    /// subscribe to `link-added` and filter for `has_claim`.
-    pub static ref AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC: String =
-        "auto-processor-neighbourhood-state-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

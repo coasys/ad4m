@@ -32,11 +32,11 @@
 //! | `message-received`            | `message`     | typed: authenticated (no publisher yet) | Runtime message received |
 //! | `notification-triggered`      | `notification` + `perspectiveUuid` | typed: notification owner DID | Notification triggered |
 //! | `exception-occurred`          | `exception`   | typed: per type, see `Audience::for_exception` | Exception occurred |
-//! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
-//! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
-//! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
-//! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
-//! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
+//! | `transcription-text`          | (inline)      | typed: the stream owner's DID | AI transcription text         |
+//! | `model-loading-status`        | (inline)      | typed: everyone        | AI model loading status              |
+//! | `query-subscription-update`   | (inline)      | string: perspective owner | Live query subscription update    |
+//! | `auto-processor-event`        | (inline)      | typed: operator + pass owner | Auto-processor pass step signal |
+//! | `auto-processor-neighbourhood-state` | (inline) | typed: operator + readers | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
 //! ## Client → Server messages
 //!
@@ -56,7 +56,7 @@ use axum::{
 };
 use futures::stream::StreamExt;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::event_interest::{self, SharedInterest};
 use crate::agent::capabilities::*;
@@ -64,50 +64,7 @@ use crate::agent::session::Session;
 use crate::agent::session_registry::SessionRegistry;
 use crate::agent::{did_for_context, AgentContext};
 use crate::events::{Event, Topic};
-
-/// Cached DID for a single WebSocket subscription, with lazy re-resolution.
-///
-/// The DID for a session may resolve after the socket opens (a client that
-/// connects before `agent.generate()` completes has no DID yet). Caching
-/// `None` once and never retrying — the pre-#881-refresh behaviour — meant
-/// per-DID event filters (auto-processor, later others) silently dropped
-/// every event for the rest of the connection.
-///
-/// `LazyDid` seeds with the initial resolution and re-tries on every `get()`
-/// while the cache is still empty. Once a DID has been observed it is fixed
-/// for the lifetime of the socket — the auth token identifies one session,
-/// so a resolved DID cannot change without a fresh connection.
-///
-/// Fail-closed by construction: `get()` returning `None` means "we still
-/// don't know who this is" and filters must drop the event, not accept it.
-pub(crate) struct LazyDid {
-    cached: Mutex<Option<String>>,
-    context: AgentContext,
-}
-
-impl LazyDid {
-    pub(crate) fn new(context: AgentContext, initial: Option<String>) -> Self {
-        Self {
-            cached: Mutex::new(initial),
-            context,
-        }
-    }
-
-    /// Return the cached DID, or attempt one resolution if we don't have
-    /// one yet. Cheap once resolved: subsequent calls hit the cache.
-    pub(crate) fn get(&self) -> Option<String> {
-        let mut guard = self.cached.lock().unwrap();
-        if guard.is_none() {
-            *guard = did_for_context(&self.context).ok();
-        }
-        guard.clone()
-    }
-}
-use crate::pubsub::{
-    get_global_pubsub, AI_MODEL_LOADING_STATUS, AI_TRANSCRIPTION_TEXT_TOPIC,
-    AUTO_PROCESSOR_EVENT_TOPIC, AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-};
+use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -274,15 +231,9 @@ pub async fn events_ws(
         .map_err(|e| ApiError::Forbidden(e))?;
 
     let user_email = context.user_email().map(str::to_string);
-    // Captured before the upgrade so the stream builder knows whether the
-    // caller is an admin credential. Admin is the ONLY escape hatch for
-    // per-DID filters — an ordinary session whose DID hasn't resolved yet
-    // must not be silently promoted to admin (CodeRabbit #881 review, Nico
-    // 2026-08-19: "do not treat an unresolved DID as administrator access").
-    let is_admin = context.is_operator();
     let session = context.session.clone();
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, session, user_email, is_admin)))
+    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, session, user_email)))
 }
 
 /// Build the merged event stream for a given user.
@@ -294,15 +245,13 @@ pub(crate) async fn build_event_stream(
     session: Arc<Session>,
     interest: SharedInterest,
     user_email: Option<String>,
-    is_admin: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     // The session's own agent, taken from the session: a token that stops decoding cannot
-    // turn it into the main agent. Resolve the DID once at subscription time — avoids
-    // repeated DB / AgentService lookups on every single event. If the client connected
-    // before `agent.generate()` completed this returns `None`; the per-DID filters below
-    // fail closed on `None` until re-resolution succeeds.
-    let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
-    build_event_stream_for(session, interest, resolved_did, user_email, is_admin).await
+    // turn it into the main agent. Resolved once at subscription time, for the live-query
+    // filter; `None` (a client that connected before `agent.generate()`) lets every update
+    // through, as single-user mode.
+    let resolved_did = did_for_context(&AgentContext::for_session(user_email)).ok();
+    build_event_stream_for(session, interest, resolved_did).await
 }
 
 /// [`build_event_stream`] with the session DID already resolved (tests
@@ -311,177 +260,30 @@ pub(crate) async fn build_event_stream_for(
     session: Arc<Session>,
     interest: SharedInterest,
     resolved_did: Option<String>,
-    user_email: Option<String>,
-    is_admin: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
 
-    let session_context = AgentContext::for_session(user_email.clone());
-
-    // Clone the pre-resolved DID for each filter closure
-    let d_trans = resolved_did.clone();
-    let d_query_sub = resolved_did.clone();
-
-    // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
-    // a client that connected before `agent.generate()` can still receive its
-    // events once the DID resolves — the filter re-tries on every event while
-    // the cache is empty and stops trying once a DID is observed (CodeRabbit
-    // #881: "Resolve the DID after it becomes available"). The two auto-processor
-    // streams share one lazy cell.
-    let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
-    let d_auto_processor_state = d_auto_processor.clone();
-
     let pubsub = get_global_pubsub().await;
 
-    // ── Helper macros ──
-
-    macro_rules! did_stream {
-        ($rx:expr, $ty:expr, $did:expr, $filter_fn:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| {
-                    let current_did = $did.clone();
-                    async move {
-                        match result {
-                            Ok(ref msg) if $filter_fn(msg, current_did.as_deref()) => {
-                                Some(wrap_event($ty, msg))
-                            }
-                            _ => None,
-                        }
-                    }
-                })
-        };
-    }
-
-    // Like `did_stream!`, for filters that wait on the perspective handle
-    // (see `perspective_is_owned_by`).
-    macro_rules! owned_stream {
-        ($rx:expr, $ty:expr, $did:expr, $filter_fn:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| {
-                    let current_did = $did.clone();
-                    async move {
-                        let msg = result.ok()?;
-                        $filter_fn(&msg, current_did.as_deref())
-                            .await
-                            .then(|| wrap_event($ty, &msg))
-                    }
-                })
-        };
-    }
-
-    macro_rules! broadcast_stream {
-        ($rx:expr, $ty:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| async move {
-                    match result {
-                        Ok(msg) => Some(wrap_event($ty, &msg)),
-                        _ => None,
-                    }
-                })
-        };
-    }
-
-    // ── AI events ──
-    let s_trans = did_stream!(
-        pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await,
-        events::TRANSCRIPTION_TEXT,
-        d_trans,
-        matches_transcription_user
-    );
-    let s_loading = broadcast_stream!(
-        pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await,
-        events::MODEL_LOADING_STATUS
-    );
-
     // ── Query subscriptions ──
-    let s_query_sub = owned_stream!(
+    // The last string topic: it waits for the perspective handle to check the owner (see
+    // `perspective_is_owned_by`) until live queries belong to a connection (#1207).
+    let s_query_sub = BroadcastStream::new(
         pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
-        events::QUERY_SUBSCRIPTION_UPDATE,
-        d_query_sub,
-        matches_perspective_owner
-    );
-
-    // ── Auto-processor step signals ──
-    // DID-scoped: an event is delivered ONLY to the DID whose pass produced
-    // it (Nico's call, CodeRabbit #881). In multi-user hosting mode the
-    // hosting agent's session does NOT see events for a managed user's
-    // pass — even though both share the executor — so provenance /
-    // observability match reality. See
-    // [`matches_auto_processor_pass_owner`] for the exact rule.
-    //
-    // Inlined (not `did_stream!`) so the filter closure can (a) capture
-    // `is_admin` and (b) call `LazyDid::get()` for per-event re-resolution.
-    // Ordinary sessions whose DID has not yet resolved MUST NOT be silently
-    // treated as administrator; the filter fails closed in that case. Only
-    // an explicit admin credential grants the "see everything" escape hatch.
-    // Once the DID resolves (agent.generate() completes on the same socket),
-    // subsequent events are delivered normally without a reconnect (CodeRabbit
-    // #881, follow-up).
-    let s_auto_processor = {
-        let rx = pubsub.subscribe(&AUTO_PROCESSOR_EVENT_TOPIC).await;
-        let admin = is_admin;
-        BroadcastStream::new(rx)
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| {
-                let did_cell = d_auto_processor.clone();
-                async move {
-                    let current_did = did_cell.get();
-                    let msg = result.ok()?;
-                    matches_auto_processor_pass_owner(&msg, current_did.as_deref(), admin)
-                        .await
-                        .then(|| wrap_event(events::AUTO_PROCESSOR_EVENT, &msg))
-                }
-            })
-    };
-
-    // ── Auto-processor neighbourhood-state (Nico 2026-08-19 follow-up) ──
-    // Perspective-scoped observability: anyone with perspective read access
-    // sees "someone is auto-processing this" without seeing the batch
-    // payload or the LLM I/O. Distinct from `auto-processor-event` above,
-    // which is DID-scoped to the pass owner. Inlined (not `did_stream!`)
-    // so the filter closure can capture `is_admin` — same reasoning as the
-    // pass-owner stream: an unresolved DID (client connected before
-    // agent.generate) must not be promoted to admin.
-    let s_auto_processor_state = {
-        let rx = pubsub
-            .subscribe(&AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC)
-            .await;
-        let admin = is_admin;
-        BroadcastStream::new(rx)
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| {
-                let did_cell = d_auto_processor_state.clone();
-                async move {
-                    let current_did = did_cell.get();
-                    let msg = result.ok()?;
-                    matches_auto_processor_neighbourhood_state_reader(
-                        &msg,
-                        current_did.as_deref(),
-                        admin,
-                    )
-                    .await
-                    .then(|| wrap_event(events::AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, &msg))
-                }
-            })
-    };
-
-    // ── Merge all streams ──
-    let top = stream::select(
-        s_trans,
-        stream::select(
-            s_loading,
-            stream::select(
-                s_query_sub,
-                stream::select(s_auto_processor, s_auto_processor_state),
-            ),
-        ),
-    );
+    )
+    .filter_map(|r| async { handle_broadcast_result(r) })
+    .filter_map(move |result| {
+        let current_did = resolved_did.clone();
+        async move {
+            let msg = result.ok()?;
+            matches_perspective_owner(&msg, current_did.as_deref())
+                .await
+                .then(|| wrap_event(events::QUERY_SUBSCRIPTION_UPDATE, &msg))
+        }
+    });
 
     // ── Typed events: the session decides who ──
     let typed = {
@@ -499,7 +301,7 @@ pub(crate) async fn build_event_stream_for(
     // Events end with the token: expiry and revokeToken() stop them as they stop requests.
     // Then the socket's interest decides what it gets.
     Box::pin(
-        stream::select(top.map(Outgoing::Wire), typed)
+        stream::select(s_query_sub.map(Outgoing::Wire), typed)
             .take_while(move |_| futures::future::ready(session.check().is_ok()))
             .filter_map(move |out| {
                 futures::future::ready(match out {
@@ -567,7 +369,6 @@ async fn handle_events_ws(
     mut socket: WebSocket,
     session: Arc<Session>,
     user_email: Option<String>,
-    is_admin: bool,
 ) {
     log::info!("Events WebSocket connected");
 
@@ -576,8 +377,7 @@ async fn handle_events_ws(
     let _registered = SessionRegistry::global().register(&session, revoked.clone());
 
     let interest = SharedInterest::default();
-    let mut event_stream =
-        build_event_stream(session, interest.clone(), user_email, is_admin).await;
+    let mut event_stream = build_event_stream(session, interest.clone(), user_email).await;
 
     loop {
         tokio::select! {
@@ -689,20 +489,6 @@ pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &
     )
 }
 
-pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(user_did)) = map.get("userDid") {
-                    return user_did == did;
-                }
-            }
-            true
-        }
-    }
-}
-
 /// Multi-user: only events about a perspective the session owns. An event
 /// without `perspectiveUuid`, or one that does not parse, reaches nobody: every
 /// publisher of these topics sets the field.
@@ -723,111 +509,6 @@ fn event_perspective_uuid(msg: &str) -> Option<String> {
         .get("perspectiveUuid")?
         .as_str()
         .map(str::to_string)
-}
-
-/// Whether `did` owns the event's perspective. Resolved before the synchronous
-/// `_with` filters run, because the check waits for the perspective handle.
-/// Admins and unresolved DIDs never need it.
-async fn event_perspective_owned(msg: &str, current_did: Option<&str>, is_admin: bool) -> bool {
-    match (is_admin, current_did, event_perspective_uuid(msg)) {
-        (false, Some(did), Some(uuid)) => perspective_is_owned_by(&uuid, did).await,
-        _ => false,
-    }
-}
-
-/// Auto-processor events are delivered ONLY to the DID whose pass produced
-/// the event — Nico's call for CodeRabbit #881: even a perspective owner
-/// should not see events for a managed user's pass unless that user is also
-/// the caller. A missing `perspectiveUuid` or `agentDid` (malformed event)
-/// fails closed.
-///
-/// `is_admin` is the ONLY escape hatch: an admin credential (checked at WS
-/// setup, `AuthContext::is_operator`) sees every event. An ordinary
-/// session whose DID has not yet resolved (`did_for_context` failed —
-/// happens when the client connects before `agent.generate()` completes)
-/// is treated as fail-closed, NOT as admin, per CodeRabbit's second-round
-/// review. Nico 2026-08-19: "do not treat an unresolved DID as
-/// administrator access."
-///
-/// Neighbourhood-state filter is similarly gated below.
-pub(crate) async fn matches_auto_processor_neighbourhood_state_reader(
-    msg: &str,
-    current_did: Option<&str>,
-    is_admin: bool,
-) -> bool {
-    let owned = event_perspective_owned(msg, current_did, is_admin).await;
-    matches_auto_processor_neighbourhood_state_reader_with(msg, current_did, is_admin, |_, _| owned)
-}
-
-fn matches_auto_processor_neighbourhood_state_reader_with(
-    msg: &str,
-    current_did: Option<&str>,
-    is_admin: bool,
-    owned_check: impl Fn(&str, &str) -> bool,
-) -> bool {
-    if is_admin {
-        return true;
-    }
-    // Non-admin + unresolved DID fails closed — same reasoning as
-    // `matches_auto_processor_pass_owner`.
-    let Some(did) = current_did else {
-        return false;
-    };
-    let map = match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => return false,
-    };
-    let uuid = match map.get("perspectiveUuid") {
-        Some(serde_json::Value::String(u)) => u.as_str(),
-        _ => return false,
-    };
-    owned_check(uuid, did)
-}
-
-pub(crate) async fn matches_auto_processor_pass_owner(
-    msg: &str,
-    current_did: Option<&str>,
-    is_admin: bool,
-) -> bool {
-    let owned = event_perspective_owned(msg, current_did, is_admin).await;
-    matches_auto_processor_pass_owner_with(msg, current_did, is_admin, |_, _| owned)
-}
-
-fn matches_auto_processor_pass_owner_with(
-    msg: &str,
-    current_did: Option<&str>,
-    is_admin: bool,
-    owned_check: impl Fn(&str, &str) -> bool,
-) -> bool {
-    if is_admin {
-        return true;
-    }
-    // Non-admin + unresolved DID: fail closed. The previous behaviour
-    // (`None => true`) leaked every event to any ordinary session whose
-    // DID hadn't finished resolving.
-    let Some(did) = current_did else {
-        return false;
-    };
-    let map = match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => return false,
-    };
-    let uuid = match map.get("perspectiveUuid") {
-        Some(serde_json::Value::String(u)) => u.as_str(),
-        _ => return false,
-    };
-    if !owned_check(uuid, did) {
-        return false;
-    }
-    // Agent-DID filter: only the DID whose pass produced this event sees it.
-    // A pass by a managed user is delivered to that user's client, not to the
-    // hosting agent, even though both share the executor.
-    match map.get("agentDid") {
-        Some(serde_json::Value::String(agent)) => agent == did,
-        // No `agentDid` on the event → malformed or executor-side pass with
-        // no attribution; fail closed rather than leak to every observer.
-        _ => false,
-    }
 }
 
 /// Whether `did` owns (or nobody owns) perspective `uuid`. Fails closed for an
@@ -851,256 +532,13 @@ async fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
 }
 
 #[cfg(test)]
-mod auto_processor_filter_tests {
-    //! `matches_auto_processor_pass_owner` — CodeRabbit #881 review + Nico's
-    //! Aug-19 call: an event is delivered ONLY to the DID whose pass produced
-    //! it, so a hosting agent's session never sees events for a managed
-    //! user's pass. `is_admin` (from `AuthContext::is_operator`) is
-    //! the only escape hatch — an unresolved DID is NOT silently promoted.
-    //!
-    //! `perspective_is_owned_by` now fails closed when the perspective is not
-    //! in the global registry or the lock is contended (CodeRabbit #903);
-    //! these tests inject a stub `owned_check` so we exercise the
-    //! DID-attribution portion in isolation. `perspective_is_owned_by`
-    //! itself is covered separately in `perspective_is_owned_by_tests`.
-    use super::matches_auto_processor_pass_owner_with;
-
-    /// Stub owner-check: always grants access. Isolates the DID-attribution
-    /// logic from the perspective-registry lookup.
-    fn owns(_uuid: &str, _did: &str) -> bool {
-        true
-    }
-
-    /// Stub owner-check: always denies access. Simulates the fail-closed path
-    /// when the perspective is missing or the lock is contended.
-    fn owns_nothing(_uuid: &str, _did: &str) -> bool {
-        false
-    }
-
-    #[test]
-    fn admin_sees_every_event_regardless_of_did() {
-        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        // Admin + no resolved DID: still delivers (the explicit escape hatch).
-        assert!(matches_auto_processor_pass_owner_with(
-            msg, None, true, owns
-        ));
-        // Admin + some other DID: still delivers.
-        assert!(matches_auto_processor_pass_owner_with(
-            msg,
-            Some("did:key:bob"),
-            true,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn unresolved_did_non_admin_fails_closed() {
-        // The CodeRabbit-flagged case: an ordinary session whose DID hasn't
-        // resolved (`did_for_context` failed — happens when the client
-        // connects before `agent.generate()` finishes) MUST NOT be treated
-        // as administrator. Previously `None => true` leaked every event
-        // to that session; now it drops.
-        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner_with(
-            msg, None, false, owns,
-        ));
-    }
-
-    #[test]
-    fn matching_agent_did_delivers() {
-        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(matches_auto_processor_pass_owner_with(
-            msg,
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn mismatched_agent_did_drops() {
-        let msg = r#"{"perspectiveUuid":"p","agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner_with(
-            msg,
-            Some("did:key:bob"),
-            false,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn missing_agent_did_fails_closed() {
-        // Malformed / no attribution → do not leak to every observer.
-        let msg = r#"{"perspectiveUuid":"p"}"#;
-        assert!(!matches_auto_processor_pass_owner_with(
-            msg,
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn missing_perspective_uuid_fails_closed() {
-        let msg = r#"{"agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner_with(
-            msg,
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn malformed_json_fails_closed() {
-        assert!(!matches_auto_processor_pass_owner_with(
-            "not json",
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-        assert!(!matches_auto_processor_pass_owner_with(
-            "[]",
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-    }
-
-    /// Regression for CodeRabbit #903 CR #2: even when the DID-attribution
-    /// check would pass (agent-did matches session-did), a failing ownership
-    /// check MUST drop the event. Simulates a stale/missing perspective or
-    /// lock contention.
-    #[test]
-    fn perspective_ownership_denied_drops_event() {
-        let msg = r#"{"perspectiveUuid":"missing","agentDid":"did:key:alice"}"#;
-        assert!(!matches_auto_processor_pass_owner_with(
-            msg,
-            Some("did:key:alice"),
-            false,
-            owns_nothing,
-        ));
-    }
-}
-
-#[cfg(test)]
-mod auto_processor_neighbourhood_state_tests {
-    //! [`matches_auto_processor_neighbourhood_state_reader`] — perspective-
-    //! owner scoped, deliberately broadcast semantics (Nico 2026-08-19:
-    //! "we should be able to see if anyone was autoprocessing"). Fails
-    //! closed on missing perspectiveUuid or malformed JSON. `is_admin`
-    //! is the only escape hatch for `None DID`; an unresolved-DID
-    //! ordinary session is treated as fail-closed (CodeRabbit
-    //! second-round #881).
-    //!
-    //! `perspective_is_owned_by` now fails closed for missing perspectives
-    //! and lock contention (CodeRabbit #903 CR #2); these tests inject a
-    //! stub `owned_check` to exercise the parse + missing-field portion
-    //! in isolation.
-    use super::matches_auto_processor_neighbourhood_state_reader_with;
-
-    fn owns(_uuid: &str, _did: &str) -> bool {
-        true
-    }
-
-    fn owns_nothing(_uuid: &str, _did: &str) -> bool {
-        false
-    }
-
-    #[test]
-    fn admin_sees_every_event_regardless_of_did() {
-        let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(matches_auto_processor_neighbourhood_state_reader_with(
-            msg, None, true, owns,
-        ));
-        assert!(matches_auto_processor_neighbourhood_state_reader_with(
-            msg,
-            Some("did:key:bob"),
-            true,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn unresolved_did_non_admin_fails_closed() {
-        // Regression for the CodeRabbit-flagged case (Nico 2026-08-19):
-        // an ordinary session whose DID hasn't resolved (client connected
-        // before `agent.generate()` completes) must NOT be silently
-        // treated as administrator.
-        let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
-            msg, None, false, owns,
-        ));
-    }
-
-    #[test]
-    fn any_reader_did_gets_event_regardless_of_claimant() {
-        // Broadcast semantics (once DID is resolved): not filtered by
-        // claimant. Bob observes Alice's pass on the same executor.
-        let msg = r#"{"perspectiveUuid":"p","claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(matches_auto_processor_neighbourhood_state_reader_with(
-            msg,
-            Some("did:key:bob"),
-            false,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn missing_perspective_uuid_fails_closed() {
-        let msg = r#"{"claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
-            msg,
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-    }
-
-    #[test]
-    fn malformed_json_fails_closed() {
-        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
-            "not json",
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
-            "[]",
-            Some("did:key:alice"),
-            false,
-            owns,
-        ));
-    }
-
-    /// Regression for CodeRabbit #903 CR #2: perspective missing from the
-    /// registry / lock contended → fail closed instead of delivering. Before
-    /// the fix, `perspective_is_owned_by` returned `true` in both cases,
-    /// which let non-admin readers receive neighbourhood-state events for
-    /// perspectives they can't access.
-    #[test]
-    fn ownership_check_denied_drops_event() {
-        let msg =
-            r#"{"perspectiveUuid":"missing","claimantDid":"did:key:alice","phase":"claimed"}"#;
-        assert!(!matches_auto_processor_neighbourhood_state_reader_with(
-            msg,
-            Some("did:key:bob"),
-            false,
-            owns_nothing,
-        ));
-    }
-}
-
-#[cfg(test)]
 mod perspective_is_owned_by_tests {
     //! `perspective_is_owned_by` fails closed for a perspective that is not
     //! registered (CodeRabbit #903), and waits for a perspective whose handle
     //! a write holds instead of failing: a failed `try_lock` here used to drop
     //! live-query updates published during writes.
     use super::{
-        handle_broadcast_result, matches_auto_processor_neighbourhood_state_reader,
-        matches_auto_processor_pass_owner, matches_perspective_owner, perspective_is_owned_by,
-        wrap_event,
+        handle_broadcast_result, matches_perspective_owner, perspective_is_owned_by, wrap_event,
     };
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::perspectives::{register_perspective, unregister_perspective};
@@ -1154,7 +592,7 @@ mod perspective_is_owned_by_tests {
         let persisted = instance.persisted.clone();
         register_perspective(uuid.clone(), instance);
         let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        // The same chain as `owned_stream!`.
+        // The same chain as the live-query stream in `build_event_stream_for`.
         let mut stream = Box::pin(
             BroadcastStream::new(rx)
                 .filter_map(|r| async { handle_broadcast_result(r) })
@@ -1180,62 +618,6 @@ mod perspective_is_owned_by_tests {
             "a parked ownership check holds the handle after the write released it"
         );
     }
-
-    #[tokio::test]
-    async fn auto_processor_filters_refuse_a_non_owner() {
-        let handle = PerspectiveHandle::new_with_owner("p".into(), "did:key:alice".into());
-        let uuid = handle.uuid.clone();
-        register_perspective(uuid.clone(), PerspectiveInstance::new(handle, None));
-        let state = serde_json::json!({ "perspectiveUuid": uuid }).to_string();
-        let pass = serde_json::json!({ "perspectiveUuid": uuid, "agentDid": "did:key:bob" });
-        let pass = pass.to_string();
-        assert!(
-            matches_auto_processor_neighbourhood_state_reader(&state, Some("did:key:alice"), false)
-                .await
-        );
-        assert!(
-            !matches_auto_processor_neighbourhood_state_reader(&state, Some("did:key:bob"), false)
-                .await
-        );
-        assert!(!matches_auto_processor_pass_owner(&pass, Some("did:key:bob"), false).await);
-        unregister_perspective(&uuid);
-    }
-}
-
-#[cfg(test)]
-mod lazy_did_tests {
-    //! `LazyDid` — CodeRabbit #881 follow-up: once the DID resolves on a
-    //! session that connected DID-less, subsequent events must be delivered
-    //! without a reconnect.
-    use super::LazyDid;
-
-    #[test]
-    fn resolved_at_construction_stays_resolved() {
-        // Happy path: the caller already had a DID at socket-open time.
-        // `get()` returns it verbatim, no re-resolution attempt needed.
-        let lazy = LazyDid::new(
-            crate::agent::AgentContext::main_agent(),
-            Some("did:key:alice".into()),
-        );
-        assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
-        // Idempotent — repeated calls keep returning the same DID.
-        assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
-    }
-
-    // The `None` initial + fail-to-re-resolve branch requires an initialised
-    // `Ad4mDb` (`did_for_context` looks up user context from the DB), which
-    // isn't available in this unit-test module. That branch is exercised
-    // end-to-end by every session-open path in `tests/js` where the client
-    // sends no bearer token / an unresolved DID — all such flows must land
-    // on `matches_auto_processor_pass_owner(msg, None, false) => false`,
-    // covered by `unresolved_did_non_admin_fails_closed` above.
-    //
-    // The positive lazy-resolve path (started `None`, becomes `Some`
-    // mid-stream after `agent.generate()`) is exercised end-to-end by any
-    // integration test that opens the events-ws socket before generating an
-    // agent — reproducing it as a pure Rust unit test would require standing
-    // up an in-process `AgentContext` + `agent::generate()` + DB, which is
-    // what the integration suite already does.
 }
 
 #[cfg(test)]
@@ -1353,11 +735,7 @@ mod app_approval_event_tests {
         let mut streams = Vec::new();
         for (name, session, approver) in sessions {
             let all = event_interest::watching_all();
-            streams.push((
-                name,
-                approver,
-                build_event_stream(session, all, None, false).await,
-            ));
+            streams.push((name, approver, build_event_stream(session, all, None).await));
         }
 
         let auth = AuthInfo {
@@ -1413,7 +791,7 @@ mod app_approval_event_tests {
             Principal::Operator,
             ListenerReach::Loopback,
         ));
-        let mut stream = build_event_stream(operator, all, None, true).await;
+        let mut stream = build_event_stream(operator, all, None).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -1556,7 +934,7 @@ mod audience_matrix_tests {
 
     /// A stream that watches every event, as a socket that asked for all of them.
     async fn open(session: Arc<Session>) -> Stream {
-        build_event_stream_for(session, event_interest::watching_all(), None, None, false).await
+        build_event_stream_for(session, event_interest::watching_all(), None).await
     }
 
     /// The tags of this run's events that `stream` delivers before `fence`. Events reach a
@@ -1689,6 +1067,83 @@ mod audience_matrix_tests {
             );
             let topic = Topic::NeighbourhoodSignal;
             cases.push((format!("signal-{name}"), topic, signal.audience, to));
+        }
+        // Transcription text goes to the stream's owner (`matches_transcription_user` before).
+        for (name, did, to) in [
+            ("a", A, vec!["user A"]),
+            ("main", &main, main_agent.to_vec()),
+        ] {
+            let audience = Audience::agent(Some(did));
+            cases.push((
+                format!("transcription-of-{name}"),
+                Topic::AiTranscriptionText,
+                audience,
+                to,
+            ));
+        }
+        // The auto-processor topics: the operator always, and the pass owner or the
+        // perspective's readers (`matches_auto_processor_*` before; their `is_admin` case is
+        // the operator).
+        {
+            use crate::perspectives::auto_processor::events::{
+                neighbourhood_state_audience, pass_audience, Readers,
+            };
+            let owners =
+                |dids: &[&str]| Readers::Owners(dids.iter().map(|d| d.to_string()).collect());
+            let pass = Topic::AutoProcessorEvent;
+            let state = Topic::AutoProcessorNeighbourhoodState;
+            for (name, topic, audience, to) in [
+                (
+                    "pass-of-a",
+                    pass,
+                    pass_audience(owners(&[A]), Some(A)),
+                    vec!["operator", "user A"],
+                ),
+                (
+                    "pass-of-a-on-b",
+                    pass,
+                    pass_audience(owners(&[B]), Some(A)),
+                    vec!["operator"],
+                ),
+                (
+                    "pass-of-main",
+                    pass,
+                    pass_audience(Readers::Anyone, Some(&main)),
+                    main_agent.to_vec(),
+                ),
+                (
+                    "pass-unknown",
+                    pass,
+                    pass_audience(Readers::Unknown, Some(A)),
+                    vec!["operator"],
+                ),
+                (
+                    "pass-no-owner",
+                    pass,
+                    pass_audience(Readers::Anyone, None),
+                    vec!["operator"],
+                ),
+                (
+                    "state-of-a-b",
+                    state,
+                    neighbourhood_state_audience(owners(&[A, B])),
+                    vec!["operator", "user A", "user B"],
+                ),
+                (
+                    "state-unowned",
+                    state,
+                    neighbourhood_state_audience(Readers::Anyone),
+                    vec!["operator", "app", "permit app", "user A", "user B"],
+                ),
+                (
+                    "state-unknown",
+                    state,
+                    neighbourhood_state_audience(Readers::Unknown),
+                    vec!["operator"],
+                ),
+            ] {
+                cases.push((name.to_string(), topic, audience, to));
+            }
         }
         // Exceptions go per type (`exception_visible` before): approval requests to the
         // sessions that may approve apps, the others to every session.
@@ -2115,6 +1570,112 @@ mod audience_matrix_tests {
         }
     }
 
+    // The auto-processor's publishers: a pass's step signal reaches the operator and the pass
+    // owner where the owner may read the perspective; a neighbourhood-state event reaches the
+    // operator and every reader. The readers come from the registered handle at publish.
+    #[tokio::test]
+    async fn auto_processor_events_reach_the_operator_and_the_readers() {
+        use crate::perspectives::auto_processor::events::{
+            emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
+            AutoProcessorStep, NeighbourhoodPhase,
+        };
+        use crate::perspectives::perspective_instance::PerspectiveInstance;
+        use crate::perspectives::{register_perspective, unregister_perspective};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = crate::agent::did();
+        let sessions = sessions();
+        let mut streams = Vec::new();
+        for (name, session) in &sessions {
+            streams.push((*name, open(session.clone()).await));
+        }
+
+        let run = uuid::Uuid::new_v4().to_string();
+        let uuid = |name: &str| format!("{run}-{name}");
+        for (name, owners) in [
+            ("owned-by-a", Some(vec![A.to_string()])),
+            ("owned-by-a-b", Some(vec![A.to_string(), B.to_string()])),
+            ("unowned", None),
+        ] {
+            let handle = crate::types::PerspectiveHandle {
+                uuid: uuid(name),
+                owners,
+                ..Default::default()
+            };
+            register_perspective(uuid(name), PerspectiveInstance::new(handle, None));
+        }
+        // The processor id names the case.
+        let pass = |perspective: &str, case: &str, did: Option<&str>| {
+            let event =
+                AutoProcessorEvent::new(&uuid(perspective), case, AutoProcessorStep::Claimed);
+            match did {
+                Some(did) => event.with_agent_did(did),
+                None => event,
+            }
+        };
+        emit(pass("owned-by-a", "pass-of-a", Some(A))).await;
+        emit(pass("owned-by-a", "pass-of-b", Some(B))).await;
+        emit(pass("unowned", "pass-of-main", Some(&main))).await;
+        emit(pass("not-registered", "pass-unknown", Some(A))).await;
+        emit(pass("owned-by-a", "pass-no-owner", None)).await;
+        let state = |perspective: &str, case: &str| {
+            let phase = NeighbourhoodPhase::Claimed;
+            AutoProcessorNeighbourhoodState::new(&uuid(perspective), case, A, "batch", phase)
+        };
+        emit_neighbourhood_state(state("owned-by-a-b", "state-of-a-b")).await;
+        emit_neighbourhood_state(state("unowned", "state-unowned")).await;
+        emit_neighbourhood_state(state("not-registered", "state-unknown")).await;
+        let fence = uuid("fence");
+        get_global_pubsub().await.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            serde_json::json!({ "perspectiveUuid": fence }),
+        ));
+        for name in ["owned-by-a", "owned-by-a-b", "unowned"] {
+            unregister_perspective(&uuid(name));
+        }
+
+        for (name, stream) in &mut streams {
+            let mut got = BTreeSet::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let msg = stream.next().await.expect("the stream stays open");
+                    let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+                    let Some(p) = v["perspectiveUuid"]
+                        .as_str()
+                        .filter(|u| u.starts_with(&run))
+                    else {
+                        continue;
+                    };
+                    if p == fence {
+                        return;
+                    }
+                    got.insert(v["processorId"].as_str().unwrap().to_string());
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the fence never arrived; got {got:?}"));
+            let expected: &[&str] = match *name {
+                "operator" => &[
+                    "pass-of-a",
+                    "pass-of-b",
+                    "pass-of-main",
+                    "pass-unknown",
+                    "pass-no-owner",
+                    "state-of-a-b",
+                    "state-unowned",
+                    "state-unknown",
+                ],
+                "app" | "permit app" => &["pass-of-main", "state-unowned"],
+                "user A" => &["pass-of-a", "state-of-a-b", "state-unowned"],
+                "user B" => &["state-of-a-b", "state-unowned"],
+                _ => &[],
+            };
+            let expected: BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
+            assert_eq!(got, expected, "{name}");
+        }
+    }
+
     // The socket's `events.watch` narrows typed events as it narrows string ones.
     #[tokio::test]
     async fn a_socket_gets_only_the_typed_events_it_watches() {
@@ -2129,7 +1690,7 @@ mod audience_matrix_tests {
             &serde_json::json!({ "link-added": ["wanted"] }),
             &interest,
         );
-        let mut stream: Stream = build_event_stream_for(session, interest, None, None, true).await;
+        let mut stream: Stream = build_event_stream_for(session, interest, None).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
@@ -2194,20 +1755,13 @@ mod token_expiry_tests {
 
     /// Builds a user's event stream, publishes one event and returns what the stream yields.
     async fn next_event(session: Session) -> Option<String> {
-        let mut stream = build_event_stream(
-            Arc::new(session),
-            event_interest::watching_all(),
-            Some(USER.to_string()),
-            false,
-        )
-        .await;
-        get_global_pubsub()
-            .await
-            .publish(
-                &AI_MODEL_LOADING_STATUS,
-                &r#"{"model":"m","status":"loading"}"#.to_string(),
-            )
-            .await;
+        let all = event_interest::watching_all();
+        let mut stream = build_event_stream(Arc::new(session), all, Some(USER.to_string())).await;
+        get_global_pubsub().await.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            crate::events::Audience::Everyone,
+            serde_json::json!({ "model": "m", "status": "loading" }),
+        ));
         tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .expect("the stream must answer, not hang")

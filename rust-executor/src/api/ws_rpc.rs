@@ -170,7 +170,6 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
             ctx.session.clone(),
             conn.interest(),
             ctx.user_email().map(str::to_string),
-            ctx.is_operator(),
         )
         .await
     } else {
@@ -665,7 +664,8 @@ mod event_gate_tests {
 mod socket_tests {
     use super::*;
     use crate::db::Ad4mDb;
-    use crate::pubsub::{get_global_pubsub, AI_MODEL_LOADING_STATUS};
+    use crate::events::{Audience, Event, Topic};
+    use crate::pubsub::get_global_pubsub;
     use crate::test_utils::{setup_agent, setup_wallet};
     use futures::SinkExt;
     use std::time::Duration;
@@ -1096,13 +1096,14 @@ mod socket_tests {
         }
 
         // Publish until the admin socket sees an event, so both streams had time to subscribe.
-        let event = r#"{"model":"socket-test","status":"loading"}"#.to_string();
+        let event = json!({ "model": "socket-test", "status": "loading" });
         let seen = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                get_global_pubsub()
-                    .await
-                    .publish(&AI_MODEL_LOADING_STATUS, &event)
-                    .await;
+                get_global_pubsub().await.publish_event(Event::new(
+                    Topic::AiModelLoadingStatus,
+                    Audience::Everyone,
+                    &event,
+                ));
                 if let Ok(Some(Ok(WsMessage::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(200), admin.next()).await
                 {

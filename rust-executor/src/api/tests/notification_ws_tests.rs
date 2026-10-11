@@ -747,9 +747,9 @@ async fn triggered_event_reaches_only_the_owners_stream() {
         ListenerReach::Loopback,
     ));
     let alice_session = user_session(ALICE, &alice_did);
-    let mut alice = build_event_stream(alice_session, all(), None, false).await;
-    let mut bob = build_event_stream(user_session(BOB, &bob_did), all(), None, false).await;
-    let mut main = build_event_stream(operator, all(), None, true).await;
+    let mut alice = build_event_stream(alice_session, all(), None).await;
+    let mut bob = build_event_stream(user_session(BOB, &bob_did), all(), None).await;
+    let mut main = build_event_stream(operator, all(), None).await;
 
     fire(&alice_did).await;
     let a = next(&mut alice).await;

@@ -1,8 +1,8 @@
 //! Step signals for the auto-processor (P-B2c).
 //!
 //! The watch loop and [`super::watcher::run_one_pass`] publish an
-//! [`AutoProcessorEvent`] at each meaningful step of a pass onto the global
-//! [`AUTO_PROCESSOR_EVENT_TOPIC`] PubSub topic. This is the same PubSub
+//! [`AutoProcessorEvent`] at each meaningful step of a pass as a typed
+//! `auto-processor-event` (`Topic::AutoProcessorEvent`). This is the same PubSub
 //! mechanism the WS-RPC layer already rides for its own subscriptions, so:
 //!   * **tests** can `subscribe()` and `await` a specific step instead of
 //!     polling the graph or sleeping — the whole pass is observable without
@@ -14,10 +14,10 @@
 //! Emission is fire-and-forget: a pass never fails or blocks because nobody is
 //! listening (`broadcast::Sender::send` drops silently with no receivers).
 
-use crate::pubsub::{
-    get_global_pubsub, AUTO_PROCESSOR_EVENT_TOPIC, AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC,
-};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// One step in an auto-processor pass. Ordered roughly by lifecycle; a single
@@ -246,34 +246,107 @@ impl AutoProcessorEvent {
     }
 }
 
-/// Publish an event on the global auto-processor topic. Fire-and-forget: never
-/// errors, never blocks a pass on the absence of listeners.
-pub async fn emit(event: AutoProcessorEvent) {
-    match serde_json::to_string(&event) {
-        Ok(json) => {
-            get_global_pubsub()
-                .await
-                .publish(&AUTO_PROCESSOR_EVENT_TOPIC, &json)
-                .await;
-        }
-        Err(e) => log::warn!("auto_processor::events: failed to serialize event: {e:#}"),
+/// Who may read a perspective, read from its handle when an event about it is published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Readers {
+    /// The perspective has no owners: every session with a DID may read it.
+    Anyone,
+    /// These DIDs own the perspective.
+    Owners(Vec<String>),
+    /// No perspective with this UUID is registered.
+    Unknown,
+}
+
+/// Who may read perspective `uuid` now. Waits for the handle; no emitter holds it while it
+/// emits.
+pub(crate) async fn readers(uuid: &str) -> Readers {
+    let Some(instance) = crate::perspectives::get_perspective(uuid) else {
+        return Readers::Unknown;
+    };
+    let owners = instance.persisted.lock().await.owners.clone();
+    match owners.filter(|owners| !owners.is_empty()) {
+        Some(owners) => Readers::Owners(owners),
+        None => Readers::Anyone,
     }
 }
 
-/// Raw subscription to the auto-processor event topic (JSON strings). The WS
-/// layer and typed helpers build on this.
-pub async fn subscribe() -> broadcast::Receiver<String> {
-    get_global_pubsub()
-        .await
-        .subscribe(&AUTO_PROCESSOR_EVENT_TOPIC)
-        .await
+/// Who receives a pass's step signal: the operator always; the pass owner (`agent_did`)
+/// when it may read the perspective. The rule `matches_auto_processor_pass_owner` applied
+/// per socket: a hosting agent never sees a managed user's pass, and an event without an
+/// owner reaches only the operator.
+pub(crate) fn pass_audience(readers: Readers, agent_did: Option<&str>) -> Audience {
+    let may_read = |did: &str| match &readers {
+        Readers::Anyone => true,
+        Readers::Owners(owners) => owners.iter().any(|o| o == did),
+        Readers::Unknown => false,
+    };
+    match agent_did {
+        Some(did) if may_read(did) => Audience::OperatorAndDids(vec![did.to_string()]),
+        _ => Audience::Operator,
+    }
+}
+
+/// Who receives a neighbourhood-state event: the operator always, and every reader of the
+/// perspective, whoever claimed the batch. The rule
+/// `matches_auto_processor_neighbourhood_state_reader` applied per socket. An unowned
+/// perspective's readers are every session with a DID: every session that holds a token or
+/// is the operator.
+pub(crate) fn neighbourhood_state_audience(readers: Readers) -> Audience {
+    match readers {
+        Readers::Anyone => Audience::Authenticated,
+        Readers::Owners(owners) => Audience::OperatorAndDids(owners),
+        Readers::Unknown => Audience::Operator,
+    }
+}
+
+/// Publish an event on the auto-processor topic, to its audience ([`pass_audience`]).
+/// Fire-and-forget: never errors, never blocks a pass on the absence of listeners.
+pub async fn emit(event: AutoProcessorEvent) {
+    let audience = pass_audience(
+        readers(&event.perspective_uuid).await,
+        event.agent_did.as_deref(),
+    );
+    get_global_pubsub().await.publish_event(Event::new(
+        Topic::AutoProcessorEvent,
+        audience,
+        &event,
+    ));
+}
+
+/// Events of one topic from now on, as the JSON of each payload.
+pub struct EventReceiver {
+    rx: broadcast::Receiver<Arc<Event>>,
+    topic: Topic,
+}
+
+impl EventReceiver {
+    async fn of(topic: Topic) -> EventReceiver {
+        let rx = get_global_pubsub().await.subscribe_events();
+        EventReceiver { rx, topic }
+    }
+
+    /// The next event of the topic, as its payload's JSON.
+    pub async fn recv(&mut self) -> Result<String, broadcast::error::RecvError> {
+        loop {
+            let event = self.rx.recv().await?;
+            if event.topic == self.topic {
+                return Ok(event.payload.to_string());
+            }
+        }
+    }
+}
+
+/// Subscription to the auto-processor event topic (JSON strings), whoever the events'
+/// audience.
+pub async fn subscribe() -> EventReceiver {
+    EventReceiver::of(Topic::AutoProcessorEvent).await
 }
 
 /// Test/consumer helper: block until an [`AutoProcessorEvent`] satisfying
 /// `pred` is published, or `timeout` elapses. Returns the matching event, or
 /// `None` on timeout. Deserialization failures and lagged messages are skipped.
 pub async fn next_event_matching<F>(
-    rx: &mut broadcast::Receiver<String>,
+    rx: &mut EventReceiver,
     timeout: std::time::Duration,
     mut pred: F,
 ) -> Option<AutoProcessorEvent>
@@ -367,28 +440,19 @@ impl AutoProcessorNeighbourhoodState {
     }
 }
 
-/// Publish a neighbourhood-state event on the dedicated topic.
-/// Fire-and-forget, same rules as [`emit`].
+/// Publish a neighbourhood-state event on the dedicated topic, to its audience
+/// ([`neighbourhood_state_audience`]). Fire-and-forget, same rules as [`emit`].
 pub async fn emit_neighbourhood_state(event: AutoProcessorNeighbourhoodState) {
-    match serde_json::to_string(&event) {
-        Ok(json) => {
-            get_global_pubsub()
-                .await
-                .publish(&AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, &json)
-                .await;
-        }
-        Err(e) => {
-            log::warn!("auto_processor::events: failed to serialize neighbourhood state: {e:#}")
-        }
-    }
-}
-
-/// Raw subscription to the neighbourhood-state topic (JSON strings).
-pub async fn subscribe_neighbourhood_state() -> broadcast::Receiver<String> {
+    let audience = neighbourhood_state_audience(readers(&event.perspective_uuid).await);
+    let topic = Topic::AutoProcessorNeighbourhoodState;
     get_global_pubsub()
         .await
-        .subscribe(&AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC)
-        .await
+        .publish_event(Event::new(topic, audience, &event));
+}
+
+/// Subscription to the neighbourhood-state topic (JSON strings).
+pub async fn subscribe_neighbourhood_state() -> EventReceiver {
+    EventReceiver::of(Topic::AutoProcessorNeighbourhoodState).await
 }
 
 /// Everything the interpretation engine needs to emit its own
@@ -413,4 +477,86 @@ pub struct InterpretationEmitContext {
     /// because the one-shot path (which has no claim and no batch) supplies
     /// a synthetic key instead — see `run_interpretation_handler`.
     pub batch_key: String,
+}
+
+#[cfg(test)]
+mod audience_tests {
+    //! The per-socket rules the auto-processor topics had before they named their audience,
+    //! as the audience the publisher now names. Who receives each audience is pinned by
+    //! `events_ws::audience_matrix_tests`.
+    use super::*;
+
+    fn owners(dids: &[&str]) -> Readers {
+        Readers::Owners(dids.iter().map(|d| d.to_string()).collect())
+    }
+
+    fn operator_and(did: &str) -> Audience {
+        Audience::OperatorAndDids(vec![did.to_string()])
+    }
+
+    #[test]
+    fn a_pass_reaches_its_owner_where_the_owner_may_read_and_always_the_operator() {
+        let alice = Some("did:key:alice");
+        assert_eq!(
+            pass_audience(owners(&["did:key:alice"]), alice),
+            operator_and("did:key:alice")
+        );
+        assert_eq!(
+            pass_audience(Readers::Anyone, alice),
+            operator_and("did:key:alice")
+        );
+        // A pass owner who does not own the perspective, an unknown perspective, or an
+        // event without an owner: the operator only.
+        assert_eq!(
+            pass_audience(owners(&["did:key:bob"]), alice),
+            Audience::Operator
+        );
+        assert_eq!(pass_audience(Readers::Unknown, alice), Audience::Operator);
+        assert_eq!(
+            pass_audience(owners(&["did:key:alice"]), None),
+            Audience::Operator
+        );
+    }
+
+    #[test]
+    fn neighbourhood_state_reaches_every_reader_and_always_the_operator() {
+        assert_eq!(
+            neighbourhood_state_audience(owners(&["did:key:alice", "did:key:bob"])),
+            Audience::OperatorAndDids(vec!["did:key:alice".into(), "did:key:bob".into()])
+        );
+        assert_eq!(
+            neighbourhood_state_audience(Readers::Anyone),
+            Audience::Authenticated
+        );
+        assert_eq!(
+            neighbourhood_state_audience(Readers::Unknown),
+            Audience::Operator
+        );
+    }
+
+    #[tokio::test]
+    async fn readers_come_from_the_registered_handle() {
+        use crate::perspectives::perspective_instance::PerspectiveInstance;
+        use crate::perspectives::{register_perspective, unregister_perspective};
+        use crate::types::PerspectiveHandle;
+        assert_eq!(readers("no-such-perspective").await, Readers::Unknown);
+        for (owners_list, expected) in [
+            (
+                Some(vec!["did:key:alice".to_string()]),
+                owners(&["did:key:alice"]),
+            ),
+            (Some(vec![]), Readers::Anyone),
+            (None, Readers::Anyone),
+        ] {
+            let handle = PerspectiveHandle {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                owners: owners_list,
+                ..Default::default()
+            };
+            let uuid = handle.uuid.clone();
+            register_perspective(uuid.clone(), PerspectiveInstance::new(handle, None));
+            assert_eq!(readers(&uuid).await, expected);
+            unregister_perspective(&uuid);
+        }
+    }
 }

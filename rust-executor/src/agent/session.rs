@@ -283,10 +283,14 @@ impl Session {
             Audience::Authenticated => !matches!(self.principal, Principal::Anonymous { .. }),
             Audience::Operator => self.is_operator(),
             Audience::Approvers => self.may(&AGENT_PERMIT_CAPABILITY),
-            Audience::Dids(dids) => self
-                .acts_as_did()
-                .is_some_and(|did| dids.iter().any(|d| d == did)),
+            Audience::Dids(dids) => self.acts_as_one_of(dids),
+            Audience::OperatorAndDids(dids) => self.is_operator() || self.acts_as_one_of(dids),
         }
+    }
+
+    fn acts_as_one_of(&self, dids: &[String]) -> bool {
+        self.acts_as_did()
+            .is_some_and(|did| dids.iter().any(|d| d == did))
     }
 
     /// A session for `principal` that never expires.
