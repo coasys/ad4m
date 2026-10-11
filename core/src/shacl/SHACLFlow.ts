@@ -180,6 +180,14 @@ export interface ConsensusRule {
    * query are counted. Two evaluation shapes (design §7.2):
    *   Shape 1 — `didProperty` present: run once, extract DIDs from matches.
    *   Shape 2 — `$did` templated in `where`: run per candidate.
+   *
+   * The executor refuses a rule with a key it does not know, anywhere in
+   * the rule (a misspelt `fromRole`, or `grantedByFlow` inside it), and a
+   * key written twice. `addFlow` rejects such a definition before storing
+   * it, with an error naming the state and the key. A definition that
+   * arrived by sync is refused when read: the edge fires for nobody and the
+   * executor log names the key. It does not drop the key and read a wider
+   * gate.
    */
   fromRole?: ModelQuery;
 }

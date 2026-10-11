@@ -839,6 +839,133 @@ async fn the_install_request_and_the_list_never_carry_the_webhook_credential() {
         .expose_for_compare(WEBHOOK_AUTH));
 }
 
+/// `update_params` with `webhookUrl` set, and `webhookAuth` replaced by `auth` (left out for
+/// `None`), as a client that read the notification back sends it.
+fn webhook_update(id: &str, perspective_id: &str, url: &str, auth: Option<&str>) -> Value {
+    let mut params = update_params(id, &[perspective_id]);
+    params["webhookUrl"] = json!(url);
+    match auth {
+        Some(auth) => params["webhookAuth"] = json!(auth),
+        None => {
+            params.as_object_mut().unwrap().remove("webhookAuth");
+        }
+    }
+    params
+}
+
+fn stored_auth_is(id: &str, auth: &str) -> bool {
+    stored(id).unwrap().webhook_auth.expose_for_compare(auth)
+}
+
+// Clients see only `hasWebhookAuth`, so an update that leaves out `webhookAuth` keeps the
+// stored credential; `""` clears it and a value replaces it.
+#[tokio::test]
+async fn an_update_without_webhook_auth_keeps_the_stored_credential() {
+    setup();
+    let mut perspectives = Perspectives::default();
+    let main = perspectives.add(None);
+    let id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
+    let update = |auth| webhook_update(&id, &main.uuid, "https://webhook.test", auth);
+
+    let reply = call("runtime.updateNotification", update(None), admin_ctx())
+        .await
+        .unwrap();
+    assert_eq!(reply, json!(true));
+    assert!(stored_auth_is(&id, WEBHOOK_AUTH));
+
+    // `null` reads as left out.
+    let mut params = update(None);
+    params["webhookAuth"] = Value::Null;
+    call("runtime.updateNotification", params, admin_ctx())
+        .await
+        .unwrap();
+    assert!(stored_auth_is(&id, WEBHOOK_AUTH));
+
+    call(
+        "runtime.updateNotification",
+        update(Some("wh-replaced")),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert!(stored_auth_is(&id, "wh-replaced"));
+
+    call("runtime.updateNotification", update(Some("")), admin_ctx())
+        .await
+        .unwrap();
+    assert!(stored_auth_is(&id, ""));
+    assert!(!stored(&id).unwrap().view().has_webhook_auth);
+}
+
+// The credential goes only to the webhook it was set for: moving the notification to
+// another URL without sending it again would hand the stored credential to the new URL.
+#[tokio::test]
+async fn moving_the_webhook_needs_the_credential_again() {
+    setup();
+    let mut perspectives = Perspectives::default();
+    let main = perspectives.add(None);
+    let id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
+    let before = stored(&id);
+
+    let err = call(
+        "runtime.updateNotification",
+        webhook_update(&id, &main.uuid, "https://attacker.test/collect", None),
+        admin_ctx(),
+    )
+    .await
+    .expect_err("the stored credential must not follow the URL");
+    assert_eq!(err.code, 400, "{}", err.message);
+    assert!(
+        err.message.contains("send webhookAuth again"),
+        "{}",
+        err.message
+    );
+    assert!(!err.message.contains(WEBHOOK_AUTH), "{}", err.message);
+    assert_eq!(stored(&id), before, "a refused update changes nothing");
+
+    // The same URL, written differently, is not a move.
+    call(
+        "runtime.updateNotification",
+        webhook_update(&id, &main.uuid, "HTTPS://webhook.test/", None),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert!(stored_auth_is(&id, WEBHOOK_AUTH));
+
+    let reply = call(
+        "runtime.updateNotification",
+        webhook_update(&id, &main.uuid, "https://moved.test/hook", Some("wh-moved")),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert!(!reply.to_string().contains("wh-moved"), "{reply}");
+    let moved = stored(&id).unwrap();
+    assert_eq!(moved.webhook_url, "https://moved.test/hook");
+    assert!(moved.webhook_auth.expose_for_compare("wh-moved"));
+
+    // With no credential stored, there is nothing to send along: the URL may move freely.
+    call(
+        "runtime.updateNotification",
+        webhook_update(&id, &main.uuid, "https://moved.test/hook", Some("")),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    call(
+        "runtime.updateNotification",
+        webhook_update(&id, &main.uuid, "https://elsewhere.test/hook", None),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stored(&id).unwrap().webhook_url,
+        "https://elsewhere.test/hook"
+    );
+}
+
 // Redaction stops at the executor's own outputs: the webhook still gets the credential as
 // its bearer token. The body is the triggered event, so it shows only `hasWebhookAuth`.
 #[tokio::test]
