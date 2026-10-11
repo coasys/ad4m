@@ -163,7 +163,10 @@ export class ApiClient {
                 this._onOpen(ws)
             }
             ws.onclose = (event?: CloseEvent) => {
-                reject(closedError())
+                // Classify the close for watchApplied() as for every other waiting call.
+                reject(event?.code === CLOSE_AUTH_FAILED
+                    ? new RpcError(401, event.reason || 'token expired or revoked')
+                    : closedError(event?.code === CLOSE_TRY_AGAIN_LATER ? event.reason : undefined))
                 if (event?.code === CLOSE_AUTH_FAILED && this._ws === ws) {
                     this._failAuth(event.reason || 'token expired or revoked')
                 } else {
