@@ -159,17 +159,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(Value::Bool(true))
 }
 
-async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // An import writes rows as they are in the file: notifications with their `granted` flag
-    // and `owner_did`, and users with their password hashes. With AGENT_UPDATE alone, an app
-    // token or a managed user could import a granted notification on someone else's
-    // perspectives. Only the operator imports, as only the operator grants notifications.
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden(
-            "Permission denied: only the node operator (admin credential) can import data",
-        ));
-    }
-
+async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -421,16 +411,7 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::Bool(true))
 }
 
-async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // Only the operator approves notifications: the launcher holds the admin credential. An
-    // app token with AGENT_UPDATE must not approve the notification it created, and managed
-    // users hold no admin credential either.
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden(
-            "Permission denied: only the node operator (admin credential) can grant notifications",
-        ));
-    }
-
+async fn grant_notification(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     let body: NotificationGrantRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -726,8 +707,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // also checks the perspective's owner in the handler.
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
         .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    // An import writes rows as they are in the file: notifications with their `granted` flag
+    // and `owner_did`, users with their password hashes. Only the operator imports, as only
+    // the operator grants notifications.
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Operator);
     map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
         .long()
         .guard(Guard::Operator);
@@ -786,14 +770,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         update_notification,
     )
     .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
-    // Approving a notification is the operator's: the handler refuses every other session
-    // with its own message (`ctx.is_operator()`). `Node` would answer a user session with
-    // the guard's message instead.
+    // Approving a notification is the operator's: an app must not approve the notification
+    // it created, and a managed user holds no admin credential.
     map.method::<RuntimeGrantNotificationParams, bool>(
         "runtime.grantNotification",
         grant_notification,
     )
-    .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Operator);
     map.method::<RuntimeNotificationIdParams, bool>(
         "runtime.deleteNotification",
         delete_notification,
@@ -862,24 +845,25 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
         .read()
         .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
-    // Always error: the remaining unyt endpoints have no implementation yet. Every caller
-    // gets the 501.
+    // Always error: the remaining unyt endpoints have no implementation yet. The operator
+    // gets the 501, every other caller the guard's 403.
+    // Operator until implemented: set the real guard with the handler.
     map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl)
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl)
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
 }
 
 // ── Contracts ──

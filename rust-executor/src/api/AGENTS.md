@@ -84,17 +84,18 @@ a call that fails both gets the access answer.
 Which guard each method has:
 
 - `Open`: the methods that check no capability: `agent.isLocked`, `runtime.info`,
-  `runtime.tlsDomain`, `runtime.freeHostingEnabled`, the `runtime.unyt*` stubs (501),
-  `user.credits` (501), `user.logout` and `user.revokeAllSessions` (their handlers check the
-  session's principal).
+  `runtime.tlsDomain`, `runtime.freeHostingEnabled`, `user.credits` (501), `user.logout` and
+  `user.revokeAllSessions` (their handlers check the session's principal).
 - `Operator`: `runtime.openLink`, `runtime.restartHolochain`, `runtime.setHostRates`,
-  `runtime.setUnytMembraneProof`, `user.setMultiUserEnabled`, `user.freeAccess`.
+  `runtime.setUnytMembraneProof`, `runtime.importData` (it writes rows as they are in the
+  file, granted notifications and password hashes included), `runtime.grantNotification`,
+  `user.setMultiUserEnabled`, `user.freeAccess`, and the `runtime.unyt*` stubs (501 to the
+  operator) until each gets a handler and its real guard.
 - `Node`: the node-wide methods that refuse user sessions (agent keys, apps, trust list and
   entanglement writes, `agent.permitCapability`, AI models, hosting wallet, language
-  publish/remove/settings, export/import, friends and outbox, link-language template writes,
+  publish/remove/settings, `runtime.exportData`, friends and outbox, link-language template writes,
   `runtime.addHcAgentInfos`, `runtime.setFreeHostingEnabled`, `runtime.quit`, `user.list`,
-  `user.wallet`, `user.emailTest`). `runtime.importData` keeps its handler's
-  `ctx.is_operator()` check: the guard admits apps. `runtime.exportData` of one perspective
+  `user.wallet`, `user.emailTest`). `runtime.exportData` of one perspective
   checks `get_perspective_with_access` in its handler (a `db` export names none), so an app
   exports only the unowned and the main agent's perspectives.
 - `Anonymous`: `agent.requestCapability`, `agent.generateJwt`, `user.create`, `user.login`,
@@ -105,8 +106,6 @@ Which guard each method has:
   `perspective.create`, which the caller's user owns, `hosting.setHotWallet`, which also
   refuses a session without a user). `perspective.all` lists the caller's own perspectives
   (every one to the operator).
-  `runtime.grantNotification` keeps its handler's `ctx.is_operator()` check, so a user gets
-  the handler's message.
   `ai.tasks` lists a user's own tasks, and every task to the operator and apps.
   Some read node-wide data that users read today: `agent.getApps`,
   `agent.getTrustedAgents`, `ai.models`, `language.*` reads, link-language templates,

@@ -103,10 +103,6 @@ async fn user_sessions_cannot_call_node_operations() {
             json!({ "type": "db", "filePath": export_path.to_str().unwrap() }),
         ),
         (
-            "runtime.importData",
-            json!({ "type": "db", "filePath": export_path.to_str().unwrap() }),
-        ),
-        (
             "ai.discoverModels",
             json!({ "baseUrl": "https://api.example.org/v1" }),
         ),
