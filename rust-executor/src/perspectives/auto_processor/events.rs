@@ -249,9 +249,8 @@ impl AutoProcessorEvent {
 /// Who may read a perspective, read from its handle when an event about it is published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Readers {
-    /// The perspective has no owners: every session with a DID may read it.
-    Anyone,
-    /// These DIDs own the perspective.
+    /// These DIDs may read the perspective: its owners, or the main agent for an unowned
+    /// perspective (`perspectives::event_recipients`, the audience of every perspective topic).
     Owners(Vec<String>),
     /// No perspective with this UUID is registered.
     Unknown,
@@ -263,11 +262,8 @@ pub(crate) async fn readers(uuid: &str) -> Readers {
     let Some(instance) = crate::perspectives::get_perspective(uuid) else {
         return Readers::Unknown;
     };
-    let owners = instance.persisted.lock().await.owners.clone();
-    match owners.filter(|owners| !owners.is_empty()) {
-        Some(owners) => Readers::Owners(owners),
-        None => Readers::Anyone,
-    }
+    let handle = instance.persisted.lock().await;
+    Readers::Owners(crate::perspectives::event_recipients(&handle))
 }
 
 /// Who receives a pass's step signal: the operator always; the pass owner (`agent_did`)
@@ -276,7 +272,6 @@ pub(crate) async fn readers(uuid: &str) -> Readers {
 /// owner reaches only the operator.
 pub(crate) fn pass_audience(readers: Readers, agent_did: Option<&str>) -> Audience {
     let may_read = |did: &str| match &readers {
-        Readers::Anyone => true,
         Readers::Owners(owners) => owners.iter().any(|o| o == did),
         Readers::Unknown => false,
     };
@@ -287,13 +282,10 @@ pub(crate) fn pass_audience(readers: Readers, agent_did: Option<&str>) -> Audien
 }
 
 /// Who receives a neighbourhood-state event: the operator always, and every reader of the
-/// perspective, whoever claimed the batch. The rule
-/// `matches_auto_processor_neighbourhood_state_reader` applied per socket. An unowned
-/// perspective's readers are every session with a DID: every session that holds a token or
-/// is the operator.
+/// perspective, whoever claimed the batch. An unowned perspective's reader is the main
+/// agent, as for every other perspective topic.
 pub(crate) fn neighbourhood_state_audience(readers: Readers) -> Audience {
     match readers {
-        Readers::Anyone => Audience::Authenticated,
         Readers::Owners(owners) => Audience::OperatorAndDids(owners),
         Readers::Unknown => Audience::Operator,
     }
@@ -501,10 +493,6 @@ mod audience_tests {
             pass_audience(owners(&["did:key:alice"]), alice),
             operator_and("did:key:alice")
         );
-        assert_eq!(
-            pass_audience(Readers::Anyone, alice),
-            operator_and("did:key:alice")
-        );
         // A pass owner who does not own the perspective, an unknown perspective, or an
         // event without an owner: the operator only.
         assert_eq!(
@@ -525,28 +513,29 @@ mod audience_tests {
             Audience::OperatorAndDids(vec!["did:key:alice".into(), "did:key:bob".into()])
         );
         assert_eq!(
-            neighbourhood_state_audience(Readers::Anyone),
-            Audience::Authenticated
-        );
-        assert_eq!(
             neighbourhood_state_audience(Readers::Unknown),
             Audience::Operator
         );
     }
 
+    // An unowned perspective's reader is the main agent, as for every perspective topic:
+    // its neighbourhood state used to reach every authenticated session, users included.
     #[tokio::test]
     async fn readers_come_from_the_registered_handle() {
         use crate::perspectives::perspective_instance::PerspectiveInstance;
         use crate::perspectives::{register_perspective, unregister_perspective};
         use crate::types::PerspectiveHandle;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = crate::agent::did();
         assert_eq!(readers("no-such-perspective").await, Readers::Unknown);
         for (owners_list, expected) in [
             (
                 Some(vec!["did:key:alice".to_string()]),
                 owners(&["did:key:alice"]),
             ),
-            (Some(vec![]), Readers::Anyone),
-            (None, Readers::Anyone),
+            (Some(vec![]), owners(&[&main])),
+            (None, owners(&[&main])),
         ] {
             let handle = PerspectiveHandle {
                 uuid: uuid::Uuid::new_v4().to_string(),

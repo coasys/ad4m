@@ -405,7 +405,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         // Drop any link-language -> perspective cache entries that
         // pointed at this uuid. Without this, the cache keeps a
         // stale PerspectiveHandle forever; the slow-path fallback
-        // self-heals for the async lookup but `publish_telepresence_signal_sync`
+        // self-heals for the async lookup but the fast path
         // in handle_telepresence_signal_from_link_language uses the
         // cached handle DIRECTLY without verifying get_perspective
         // still returns Some, so signals would keep flowing for a
@@ -436,18 +436,14 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
             }
         }
 
-        // Only the owners: unlike added and updated, an unowned perspective's removal
-        // reaches no session.
-        let owners = instance.persisted.lock().await.owners.clone();
-        publish_to_each_owner(
-            Topic::PerspectiveRemoved,
-            owners.unwrap_or_default(),
-            |owner| PerspectiveRemovedWithOwner {
+        let recipients = event_recipients(&*instance.persisted.lock().await);
+        publish_to_each_owner(Topic::PerspectiveRemoved, recipients, |owner| {
+            PerspectiveRemovedWithOwner {
                 perspective_uuid: uuid.to_string(),
                 uuid: uuid.to_string(),
                 owner,
-            },
-        );
+            }
+        });
     }
 
     removed_instance
@@ -559,7 +555,7 @@ pub fn handle_telepresence_signal_from_link_language(
     // delay spawned tasks by seconds when the executor is busy with Deno operations.
     if let Some(handle) = cached_perspective_handle(&language_address) {
         signal.verify_signatures();
-        publish_telepresence_signal_sync(handle, signal, recipient_did);
+        publish_telepresence_signal(handle, signal, recipient_did);
     } else {
         // Slow path: need to look up perspective by language address
         tokio::spawn(handle_telepresence_signal_from_link_language_impl(
@@ -570,61 +566,39 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// `neighbourhood-signal-received` for `signal` on `handle`, to `recipient`. A signal without
-/// a recipient goes to every session, as `matches_signal_recipient` let it through.
+/// The `signal` event that carries `signal` on `handle` to the sessions of `recipient`. The
+/// payload names the recipient.
 pub(crate) fn signal_event(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
-    recipient: Option<String>,
+    recipient: String,
 ) -> Event {
-    let audience = match &recipient {
-        Some(did) => Audience::Dids(vec![did.clone()]),
-        None => Audience::Everyone,
-    };
+    let audience = Audience::Dids(vec![recipient.clone()]);
     let payload = NeighbourhoodSignalFilter {
         perspective_uuid: handle.uuid.clone(),
         perspective: handle,
         signal,
-        recipient,
+        recipient: Some(recipient),
     };
     Event::new(Topic::NeighbourhoodSignal, audience, payload)
 }
 
-/// Publishes a telepresence signal from the link language: to `recipient_did`, or else
-/// once to each owner, or else (no owners) to every session.
+/// Publishes a telepresence signal from the link language: to `recipient_did`, or else once
+/// to each of the perspective's [`event_recipients`] (its owners, or the main agent for an
+/// unowned perspective), each copy naming that DID as `recipient`. Never to every session.
 pub(crate) fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
     recipient_did: Option<String>,
 ) {
+    let recipients = match recipient_did {
+        Some(recipient) => vec![recipient],
+        None => event_recipients(&handle),
+    };
     let pubsub = get_global_pubsub_sync();
-    if let Some(recipient) = recipient_did {
-        pubsub.publish_event(signal_event(handle, signal, Some(recipient)));
-    } else if let Some(owners) = handle.owners.clone().filter(|o| !o.is_empty()) {
-        for owner_did in owners {
-            pubsub.publish_event(signal_event(
-                handle.clone(),
-                signal.clone(),
-                Some(owner_did),
-            ));
-        }
-    } else {
-        pubsub.publish_event(signal_event(handle, signal, None));
+    for recipient in recipients {
+        pubsub.publish_event(signal_event(handle.clone(), signal.clone(), recipient));
     }
-}
-
-/// [`publish_telepresence_signal`] for the cached-handle path in the Deno op. One
-/// difference kept from before typed events: a handle with an empty owner list publishes
-/// nothing here.
-fn publish_telepresence_signal_sync(
-    handle: PerspectiveHandle,
-    signal: PerspectiveExpression,
-    recipient_did: Option<String>,
-) {
-    if recipient_did.is_none() && handle.owners.as_ref().is_some_and(|o| o.is_empty()) {
-        return;
-    }
-    publish_telepresence_signal(handle, signal, recipient_did);
 }
 
 pub async fn handle_telepresence_signal_from_link_language_impl(

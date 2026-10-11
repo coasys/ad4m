@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::agent::capabilities::{ListenerReach, ALL_CAPABILITY};
+use crate::agent::capabilities::{get_user_default_capabilities, ListenerReach, ALL_CAPABILITY};
 use crate::agent::session::{Principal, Session, TokenId};
 use crate::api::events_ws::build_event_stream_for;
 use crate::api::tests::support::{admin_ctx, registered_perspective};
@@ -28,7 +28,7 @@ fn listener(did: &str) -> Arc<Session> {
         token_id: TokenId(format!("listener-{did}")),
         email: format!("{did}@example.org"),
         did: did.to_string(),
-        caps: vec![],
+        caps: get_user_default_capabilities(),
     };
     Arc::new(Session::for_test(user, ListenerReach::Network))
 }
