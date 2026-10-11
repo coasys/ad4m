@@ -127,6 +127,8 @@ pub struct Apps {
     pub auth: AuthInfo,
     pub request_id: String,
     pub revoked: Option<bool>,
+    /// Always empty: the executor does not keep app tokens, and an app receives its token
+    /// once, from `agent.generateJwt`. The field stays for clients that require it.
     pub token: String,
 }
 

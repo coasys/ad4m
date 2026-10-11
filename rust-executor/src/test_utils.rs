@@ -146,9 +146,8 @@ pub fn expired_user_token(email: &str) -> String {
 
 /// Points the app registry at one temp file for the whole test process. Tests that insert
 /// apps call this and use their own unique keys: a temp dir per test would race when tests
-/// run in parallel, because the registry's file path is global.
-/// Points the app registry at a temporary file, and opens an in-memory database for the
-/// revoked tokens when no test has opened one.
+/// run in parallel, because the registry's file path is global. Also opens an in-memory
+/// database for the revoked tokens when no test has opened one.
 pub fn use_test_apps_file() {
     {
         let db = crate::db::Ad4mDb::global_instance();
@@ -163,4 +162,16 @@ pub fn use_test_apps_file() {
     crate::agent::capabilities::apps_map::set_data_file_path(
         dir.path().join("apps.json").to_string_lossy().into(),
     );
+}
+
+/// Registers an approved app for `token`, as `agent.generateJwt` does: under the token's id.
+pub fn insert_app_with_token(
+    request_id: String,
+    info: crate::agent::capabilities::AuthInfoExtended,
+    token: &str,
+) {
+    let (id, expires_at) =
+        crate::agent::capabilities::read_stored_token_id(token).expect("a token this node issued");
+    crate::agent::capabilities::apps_map::insert_app(request_id, info, id, expires_at)
+        .expect("the app registry takes the app");
 }

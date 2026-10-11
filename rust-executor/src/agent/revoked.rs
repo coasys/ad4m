@@ -333,7 +333,7 @@ mod tests {
                 request_id: request_id.clone(),
                 auth: AuthInfo::default(),
             };
-            apps_map::insert_app(request_id.clone(), info, token.clone()).unwrap();
+            crate::test_utils::insert_app_with_token(request_id.clone(), info, &token);
             let id = read_stored_token_id(&token).unwrap().0;
             (request_id, id)
         };

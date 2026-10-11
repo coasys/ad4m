@@ -26,7 +26,8 @@ use std::sync::OnceLock;
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. Revocation by id needs no
 /// change to the token format.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct TokenId(pub String);
 
 /// The kind of caller behind a connection.
@@ -598,7 +599,7 @@ mod resolution_tests {
             request_id: request_id.clone(),
             auth: AuthInfo::default(),
         };
-        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_id.clone(), app, &token);
         (request_id, token)
     }
 

@@ -267,8 +267,7 @@ mod session_tests {
             request_id: request_id.clone(),
             auth: crate::agent::capabilities::AuthInfo::default(),
         };
-        crate::agent::capabilities::apps_map::insert_app(request_id.clone(), app, revoked.clone())
-            .unwrap();
+        crate::test_utils::insert_app_with_token(request_id.clone(), app, &revoked);
         crate::agent::capabilities::apps_map::revoke_app(&request_id).unwrap();
 
         let expired = crate::test_utils::expired_user_token("rest.expired@example.org");

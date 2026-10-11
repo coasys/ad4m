@@ -376,7 +376,9 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
     Ok(rand)
 }
 
-pub async fn generate_capability_token(request_id: String, rand: String) -> Result<String, String> {
+/// Redeems a permitted request's code for the app's token. The token goes only to the
+/// caller: the app registry keeps its id.
+pub async fn generate_capability_token(request_id: String, rand: String) -> Result<Secret, String> {
     let auth_key = gen_request_key(&request_id, &rand);
 
     let auth = {
@@ -407,7 +409,7 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         }
     };
 
-    let cap_token = token::generate_jwt(
+    let issued = token::issue_jwt(
         auth.app_name.clone(),
         DEFAULT_TOKEN_VALID_PERIOD,
         auth.clone(),
@@ -424,7 +426,8 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
             request_id: request_id.clone(),
             auth,
         },
-        cap_token.clone(),
+        issued.id,
+        issued.expires_at,
     )?;
 
     // The event reaches every session that can approve apps; the token goes only to the caller.
@@ -440,7 +443,7 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         Some(apps_changed),
     ));
 
-    Ok(cap_token)
+    Ok(issued.jwt)
 }
 
 pub fn gen_random_digits() -> String {
@@ -797,9 +800,10 @@ mod app_token_tests {
     }
 
     // The `apps-changed` event and the app list reach sessions other than the app, so
-    // neither may carry the token. The executor still knows the token for revocation.
+    // neither may carry the token. The executor does not store it either: the registry
+    // keeps the token's id, which is enough to revoke it.
     #[tokio::test]
-    async fn app_events_and_the_client_app_list_carry_no_token() {
+    async fn app_events_the_app_list_and_the_registry_carry_no_token() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::use_test_apps_file();
@@ -808,7 +812,8 @@ mod app_token_tests {
         let (request_id, code) = permitted_request().await;
         let token = generate_capability_token(request_id.clone(), code)
             .await
-            .unwrap();
+            .unwrap()
+            .expose_once();
         assert!(!token.is_empty());
 
         let event = loop {
@@ -828,14 +833,20 @@ mod app_token_tests {
         };
         assert!(event.token.is_empty(), "the event carried the app token");
 
-        let listed = apps_map::client_view()
-            .into_iter()
+        let apps = apps_map::get_apps();
+        let listed = apps
+            .iter()
             .find(|app| app.request_id == request_id)
             .expect("the app appears in the list");
         assert!(
             listed.token.is_empty(),
             "the app list carried the app token"
         );
+        assert!(!serde_json::to_string(&apps).unwrap().contains(&token));
+        let record = apps_map::get_app(&request_id).unwrap().unwrap();
+        assert!(!format!("{record:?}").contains(&token));
+        let file = std::fs::read_to_string(apps_map::get_data_file_path()).unwrap();
+        assert!(file.contains(&request_id) && !file.contains(&token));
 
         assert!(capabilities_from_token(token.clone(), &None).is_ok());
         apps_map::revoke_app(&request_id).unwrap();
@@ -854,7 +865,7 @@ mod app_token_tests {
             request_id: request_id.clone(),
             auth: test_auth_info(),
         };
-        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_id.clone(), app, &token);
         assert!(capabilities_from_token(token.clone(), &None).is_ok());
 
         apps_map::revoke_app(&request_id).unwrap();

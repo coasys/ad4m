@@ -115,7 +115,7 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(serde_json::to_value(apps_map::client_view())?)
+    Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
 /// agent.byDid — get agent by DID
@@ -523,7 +523,7 @@ async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
     let request_id = params.require_str("id")?;
     apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::client_view())?)
+    Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
 /// Approved apps belong to the node's operator. The default user capabilities include
@@ -621,7 +621,7 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let cap_token = generate_capability_token(body.request_id, body.rand)
         .await
         .map_err(|e| WsRpcError::internal(e))?;
-    Ok(Value::String(cap_token))
+    Ok(Value::String(cap_token.expose_once()))
 }
 
 /// agent.revokeToken — revoke token
@@ -641,7 +641,7 @@ async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             return Err(WsRpcError::internal(e.to_string()))
         }
     }
-    Ok(serde_json::to_value(apps_map::client_view())?)
+    Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
 /// Revokes `token` by its id when it is a valid user token this node issued.
@@ -1142,7 +1142,7 @@ mod revoke_token_tests {
             request_id: request_id.clone(),
             auth: AuthInfo::default(),
         };
-        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        crate::test_utils::insert_app_with_token(request_id.clone(), app, &token);
         (request_id, token)
     }
 

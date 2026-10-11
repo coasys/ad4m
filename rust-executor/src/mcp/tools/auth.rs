@@ -231,7 +231,7 @@ impl Ad4mMcpHandler {
         match generate_capability_token(p.request_id.clone(), p.code.clone()).await {
             Ok(cap_token) => {
                 self.store_token_and_respond(
-                    cap_token,
+                    cap_token.expose_once(),
                     None,
                     "JWT generated and stored. You are now authenticated.",
                 )
