@@ -21,6 +21,9 @@
  *      its author, timestamp and the stored signature verdict, so a member
  *      written under someone else's name with a signature that does not verify
  *      reads `valid: false` next to a genuine one.
+ *   7. Each row carries its link's status (`"SHARED"` / `"LOCAL"`), spelled as
+ *      `perspective.get()` spells it, so a reader can tell its own Local
+ *      bookkeeping from a Shared link (#1103).
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-links.test.ts
@@ -403,6 +406,36 @@ describe("Ad4mModel — links option (per-link rows)", function () {
       );
     } finally {
       builder.dispose();
+    }
+  });
+
+  // ── 7. status ────────────────────────────────────────────────────────────
+
+  it("each row carries its link's status, as perspective.get() returns it", async () => {
+    const post = await TestPost.create(perspective, { title: "marked" });
+    await perspective.add(
+      new Link({ source: post.id, predicate: TOMBSTONE, target: "literal://string:shared" }),
+    );
+    await perspective.add(
+      new Link({ source: post.id, predicate: TOMBSTONE, target: "literal://string:local" }),
+      "local",
+    );
+
+    const [found] = await TestPost.findAll(perspective, {
+      where: { id: post.id },
+      links: [TOMBSTONE],
+    });
+    const rows = found.__links![TOMBSTONE];
+    expect(rows).to.have.length(2);
+    const statusOf = (target: string) => rows.find((r) => r.data.target === target)?.status;
+    expect(statusOf("literal://string:shared")).to.equal("SHARED");
+    expect(statusOf("literal://string:local")).to.equal("LOCAL");
+
+    const stored = await perspective.get(
+      new LinkQuery({ source: post.id, predicate: TOMBSTONE }),
+    );
+    for (const link of stored) {
+      expect(statusOf(link.data.target), link.data.target).to.equal(link.status);
     }
   });
 });

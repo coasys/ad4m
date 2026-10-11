@@ -12,8 +12,9 @@ use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::{DecoratedLinkExpression, LinkExpression};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-/// One proposal exactly as the store returned it: every link on it, from
-/// every author, each carrying its own signature verdict.
+/// One proposal as the store returned it: every verified link on it, from
+/// every author, each carrying its own signature verdict and status
+/// (`atom::load_proposal_links`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposalLinks {
     pub uri: String,
@@ -28,8 +29,8 @@ pub struct ProposalLinks {
 ///
 /// Both halves are the same kind of thing: **signed links**, carried raw.
 ///
-/// - `proposals` — every link of every proposal, from every author, each with
-///   its own signature verdict.
+/// - `proposals` — every verified link of every proposal, from every author,
+///   each with its own signature verdict.
 /// - `role_grants` — the grant links and revocation tombstones behind each
 ///   voter's membership, carried *before* any authority filter.
 ///
