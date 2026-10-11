@@ -551,18 +551,13 @@ mod session_revocation_tests {
     }
 
     fn open(token: &str) -> Result<Session, AuthError> {
-        Session::open(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+        Session::open(token, &Some(ADMIN.into()), ListenerReach::Network)
     }
 
     /// The context of a socket that presents `token`.
     fn ctx(token: &str) -> Arc<RequestContext> {
-        let auth = AuthContext::open(
-            token,
-            &Some(ADMIN.to_string()),
-            false,
-            ListenerReach::Network,
-        )
-        .unwrap_or_else(|e| panic!("the token opens a session: {e}"));
+        let auth = AuthContext::open(token, &Some(ADMIN.into()), false, ListenerReach::Network)
+            .unwrap_or_else(|e| panic!("the token opens a session: {e}"));
         Arc::new(auth.to_request_context())
     }
 

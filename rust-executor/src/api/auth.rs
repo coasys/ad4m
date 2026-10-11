@@ -5,6 +5,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use super::errors::ApiError;
 use crate::agent::capabilities::{Capability, ListenerReach};
 use crate::agent::session::{AuthError, Session};
+use crate::secret::Secret;
 use crate::types::RequestContext;
 
 /// Who is calling, resolved once from the token: by the HTTP extractor (REST and the
@@ -28,7 +29,7 @@ impl AuthContext {
     /// token opens a session (the operator or an anonymous caller).
     pub fn open(
         token: &str,
-        admin_credential: &Option<String>,
+        admin_credential: &Option<Secret>,
         auto_permit_cap_requests: bool,
         reach: ListenerReach,
     ) -> Result<Self, AuthError> {
@@ -66,7 +67,7 @@ impl AuthContext {
 /// AppState shared across all API handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
     pub auto_permit_cap_requests: bool,
 }
 
@@ -192,7 +193,7 @@ mod session_tests {
             .unwrap();
         let (mut parts, _) = request.into_parts();
         let state = AppState {
-            admin_credential: Some("the-admin-credential".to_string()),
+            admin_credential: Some("the-admin-credential".into()),
             auto_permit_cap_requests: false,
         };
         let auth = AuthContext::from_request_parts(&mut parts, &state)
@@ -222,7 +223,7 @@ mod session_tests {
         }
         let (mut parts, _) = request.body(()).unwrap().into_parts();
         let state = AppState {
-            admin_credential: Some("the-admin-credential".to_string()),
+            admin_credential: Some("the-admin-credential".into()),
             auto_permit_cap_requests: false,
         };
         AuthContext::from_request_parts(&mut parts, &state).await
@@ -237,7 +238,7 @@ mod session_tests {
             crate::user_management::generate_user_jwt("rest.nokey@example.org", "test").unwrap();
         let refused = AuthContext::open(
             &token,
-            &Some("the-admin-credential".to_string()),
+            &Some("the-admin-credential".into()),
             false,
             ListenerReach::Network,
         );

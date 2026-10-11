@@ -17,6 +17,7 @@ use crate::ai_service::harness::provider::{
 use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::secret::Secret;
 use crate::types::LinkStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1274,12 +1275,11 @@ pub async fn run_interpretation_with_harness_and_model(
 /// as the main agent, as on the RPC socket. An executor-owned pass (the auto-processor's,
 /// with no caller token) keeps the unauthenticated local path it always had: with a
 /// credential set, the handler would ask it to authenticate and hide its read tools.
-fn harness_admin_credential(auth_token: &Option<String>) -> Option<String> {
+fn harness_admin_credential(auth_token: &Option<String>) -> Option<Secret> {
     auth_token.as_ref()?;
     // An empty env credential is none, as in `Ad4mConfig::prepare`.
-    crate::config::configured_admin_credential().or_else(|| {
-        crate::config::non_empty_credential(std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
-    })
+    crate::config::configured_admin_credential()
+        .or_else(|| Secret::non_empty(std::env::var("AD4M_ADMIN_CREDENTIAL").ok()))
 }
 
 #[cfg(test)]
@@ -1290,23 +1290,23 @@ mod harness_credential_tests {
     #[test]
     fn an_executor_owned_pass_keeps_the_unauthenticated_path() {
         let config = Ad4mConfig {
-            admin_credential: Some("configured-admin".to_string()),
+            admin_credential: Some("configured-admin".into()),
             ..Ad4mConfig::default()
         };
         set_global_config(config);
-        assert_eq!(harness_admin_credential(&None), None);
+        assert!(harness_admin_credential(&None).is_none());
         set_global_config(Ad4mConfig::default());
     }
 
     #[test]
     fn a_pass_with_a_caller_token_checks_it_against_the_configured_credential() {
         let config = Ad4mConfig {
-            admin_credential: Some("configured-admin".to_string()),
+            admin_credential: Some("configured-admin".into()),
             ..Ad4mConfig::default()
         };
         set_global_config(config);
         let credential = harness_admin_credential(&Some("configured-admin".to_string()));
-        assert_eq!(credential.as_deref(), Some("configured-admin"));
+        assert!(credential.is_some_and(|c| c.expose_for_compare("configured-admin")));
         set_global_config(Ad4mConfig::default());
     }
 }

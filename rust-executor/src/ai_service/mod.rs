@@ -3137,7 +3137,7 @@ mod transcription_owner_tests {
         let token = crate::test_utils::expired_user_token("expired@example.org");
         let auth = crate::api::auth::AuthContext::open(
             &token,
-            &Some("the-admin-credential".to_string()),
+            &Some("the-admin-credential".into()),
             false,
             crate::agent::capabilities::ListenerReach::Network,
         );

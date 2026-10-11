@@ -62,7 +62,6 @@ use serde_json::json;
 
 // HTTP request parts injected by rmcp's streamable-HTTP transport into each request's extensions.
 // Used to extract the Authorization header for admin-credential bypass.
-use crate::utils::constant_time_eq;
 use axum::http::request::Parts as HttpRequestParts;
 
 /// The credential carried by this request's `Authorization` header, if any.
@@ -231,18 +230,18 @@ impl Ad4mMcpHandler {
             .clone()
             .unwrap_or_default();
 
-        let admin_cred = self.context.admin_credential.as_deref();
+        let admin_cred = &self.context.admin_credential;
 
         // 1. Session token matches admin credential → pass
         if let Some(cred) = admin_cred {
-            if !session_token.is_empty() && constant_time_eq(&session_token, cred) {
+            if !session_token.is_empty() && cred.expose_for_compare(&session_token) {
                 return true;
             }
         }
 
         // 2. Session token is a valid JWT → pass
         if !session_token.is_empty() {
-            let caps = capabilities_from_token(session_token.clone(), admin_cred.map(String::from));
+            let caps = capabilities_from_token(session_token.clone(), admin_cred);
             if caps.is_ok() {
                 return true;
             }
@@ -286,20 +285,21 @@ impl Ad4mMcpHandler {
         let Some(header_token) = header_token else {
             return false;
         };
-        let admin_cred = self.context.admin_credential.as_deref();
+        let admin_cred = &self.context.admin_credential;
 
-        // Header matches admin credential → store & pass
+        // Header matches admin credential → store & pass. The header's value is the
+        // credential, so the secret itself is never read out.
         if let Some(cred) = admin_cred {
-            if constant_time_eq(&header_token, cred) {
+            if cred.expose_for_compare(&header_token) {
                 let mut guard = self.context.auth_token.write().await;
-                *guard = Some(cred.to_string());
+                *guard = Some(header_token);
                 return true;
             }
         }
 
         // Header is a valid JWT → store & pass
         if !header_token.is_empty()
-            && capabilities_from_token(header_token.clone(), admin_cred.map(String::from)).is_ok()
+            && capabilities_from_token(header_token.clone(), admin_cred).is_ok()
         {
             let mut guard = self.context.auth_token.write().await;
             *guard = Some(header_token);
@@ -516,8 +516,7 @@ impl Ad4mMcpHandler {
     /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
     pub(crate) async fn get_capabilities(&self) -> Result<Vec<Capability>, String> {
         let token = self.get_auth_token().await;
-        let admin_cred = self.context.admin_credential.clone();
-        capabilities_from_token(token.unwrap_or_default(), admin_cred)
+        capabilities_from_token(token.unwrap_or_default(), &self.context.admin_credential)
     }
 
     /// Whether the current caller may auto-permit a capability request.
@@ -833,7 +832,7 @@ mod agent_context_tests {
 
     fn handler(session_token: &str) -> Ad4mMcpHandler {
         Ad4mMcpHandler::new(McpContext {
-            admin_credential: Some("test-admin".to_string()),
+            admin_credential: Some("test-admin".into()),
             auth_token: std::sync::Arc::new(tokio::sync::RwLock::new(Some(
                 session_token.to_string(),
             ))),

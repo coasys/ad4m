@@ -12,8 +12,8 @@ pub use types::*;
 
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
+use crate::secret::Secret;
 use crate::types::*;
-use crate::utils::constant_time_eq;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,7 +82,7 @@ impl ListenerReach {
 
 /// [`is_admin_credential_token_on`] for a caller on a loopback listener: for the MCP server,
 /// where [`capabilities_from_token`] explains why loopback holds.
-pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+pub fn is_admin_credential_token(token: &str, admin_credential: &Option<Secret>) -> bool {
     is_admin_credential_token_on(token, admin_credential, ListenerReach::Loopback)
 }
 
@@ -92,11 +92,11 @@ pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>)
 /// but only on a loopback listener. On a network listener it is an anonymous caller (#1059).
 pub fn is_admin_credential_token_on(
     token: &str,
-    admin_credential: &Option<String>,
+    admin_credential: &Option<Secret>,
     reach: ListenerReach,
 ) -> bool {
     match admin_credential {
-        Some(cred) => constant_time_eq(token, cred),
+        Some(cred) => cred.expose_for_compare(token),
         None => token.is_empty() && reach == ListenerReach::Loopback,
     }
 }
@@ -288,7 +288,7 @@ pub async fn track_last_seen(user_email: &str) {
 /// start without one. The exception is an explicit `MCP_HOST`, which it warns about.
 pub fn capabilities_from_token(
     token: String,
-    admin_credential: Option<String>,
+    admin_credential: &Option<Secret>,
 ) -> Result<Vec<Capability>, String> {
     capabilities_on(token, admin_credential, ListenerReach::Loopback)
 }
@@ -319,11 +319,11 @@ pub fn anonymous_capabilities() -> Vec<Capability> {
 /// The capabilities of a caller that presents `token` on a listener with this reach.
 pub fn capabilities_on(
     token: String,
-    admin_credential: Option<String>,
+    admin_credential: &Option<Secret>,
     reach: ListenerReach,
 ) -> Result<Vec<Capability>, String> {
     // The same test that decides `is_admin_credential`, so the two cannot disagree.
-    if is_admin_credential_token_on(&token, &admin_credential, reach) {
+    if is_admin_credential_token_on(&token, admin_credential, reach) {
         return Ok(vec![ALL_CAPABILITY.clone()]);
     }
 
@@ -616,12 +616,12 @@ mod tests {
             ListenerReach::Network
         ));
 
-        let local = Ok(capabilities_on(empty.clone(), None, ListenerReach::Loopback).unwrap());
+        let local = Ok(capabilities_on(empty.clone(), &None, ListenerReach::Loopback).unwrap());
         assert!(check_capability(&local, &AGENT_READ_CAPABILITY).is_ok());
 
         // The anonymous set reads the multi-user setting.
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
-        let remote = Ok(capabilities_on(empty, None, ListenerReach::Network).unwrap());
+        let remote = Ok(capabilities_on(empty, &None, ListenerReach::Network).unwrap());
         assert!(check_capability(&remote, &AGENT_READ_CAPABILITY).is_err());
         assert!(check_capability(&remote, &AGENT_AUTH_CAPABILITY).is_ok());
     }
@@ -629,15 +629,20 @@ mod tests {
     // The admin credential works on any listener: it is what makes a network listener safe.
     #[test]
     fn the_admin_credential_is_the_operator_on_the_network() {
-        let credential = Some("the-admin-credential".to_string());
+        let credential = Some(Secret::from("the-admin-credential"));
         assert!(is_admin_credential_token_on(
             "the-admin-credential",
             &credential,
             ListenerReach::Network
         ));
+        assert!(!is_admin_credential_token_on(
+            "the-admin-credential-",
+            &credential,
+            ListenerReach::Network
+        ));
         let capabilities = capabilities_on(
             "the-admin-credential".to_string(),
-            credential,
+            &credential,
             ListenerReach::Network,
         );
         assert!(check_capability(&capabilities, &AGENT_READ_CAPABILITY).is_ok());
@@ -646,7 +651,7 @@ mod tests {
     #[test]
     fn unauthenticated_users_can_check_multi_user_enabled() {
         // Empty token (unauthenticated) should have capability to check if multi-user is enabled
-        let capabilities = capabilities_from_token(String::new(), None).unwrap();
+        let capabilities = capabilities_from_token(String::new(), &None).unwrap();
         assert!(
             check_capability(
                 &Ok(capabilities),
@@ -660,7 +665,7 @@ mod tests {
     #[test]
     fn unauthenticated_users_get_login_capability_in_multi_user_mode() {
         // Empty token (unauthenticated) should have the right capabilities
-        let capabilities = capabilities_from_token(String::new(), None).unwrap();
+        let capabilities = capabilities_from_token(String::new(), &None).unwrap();
 
         // Should have read enabled capability (to check if multi-user is on)
         assert!(
@@ -832,9 +837,9 @@ mod app_token_tests {
             "the app list carried the app token"
         );
 
-        assert!(capabilities_from_token(token.clone(), None).is_ok());
+        assert!(capabilities_from_token(token.clone(), &None).is_ok());
         apps_map::revoke_app(&request_id).unwrap();
-        assert!(capabilities_from_token(token, None).is_err());
+        assert!(capabilities_from_token(token, &None).is_err());
     }
 
     // MCP resolves tokens without a `Session`, by the same revoked set (#396).
@@ -850,11 +855,11 @@ mod app_token_tests {
             auth: test_auth_info(),
         };
         apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
-        assert!(capabilities_from_token(token.clone(), None).is_ok());
+        assert!(capabilities_from_token(token.clone(), &None).is_ok());
 
         apps_map::revoke_app(&request_id).unwrap();
         apps_map::remove_app(&request_id).unwrap();
-        assert!(capabilities_from_token(token.clone(), None).is_err());
+        assert!(capabilities_from_token(token.clone(), &None).is_err());
         assert!(crate::agent::AgentContext::from_auth_token(token, false).is_err());
     }
 }

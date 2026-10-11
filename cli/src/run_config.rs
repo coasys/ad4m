@@ -341,7 +341,9 @@ impl RunArgs {
         let mut secrets =
             ExecutorSecrets::from_env(env, &file).context("cannot read the executor's secrets")?;
         // A flag beats the environment, as for every other setting.
-        overlay(&mut secrets.admin_credential, &self.admin_credential);
+        if let Some(credential) = &self.admin_credential {
+            secrets.admin_credential = Some(credential.clone().into());
+        }
 
         let mut config = file.to_ad4m_config(&secrets)?;
         config.network_bootstrap_seed = self.network_bootstrap_seed;
@@ -434,6 +436,14 @@ pub(crate) mod tests {
         let mut full = vec!["ad4m-executor"];
         full.extend_from_slice(argv);
         Cli::try_parse_from(full)?.run.resolve(process_env)
+    }
+
+    fn credential_is(resolved: &ResolvedRun, expected: &str) -> bool {
+        resolved
+            .config
+            .admin_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare(expected))
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
@@ -801,10 +811,7 @@ pub(crate) mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(
-            resolved.config.admin_credential.as_deref(),
-            Some("admin-secret")
-        );
+        assert!(credential_is(&resolved, "admin-secret"));
         assert_eq!(
             resolved.config.smtp_config.as_ref().unwrap().password,
             "smtp-secret"
@@ -828,10 +835,7 @@ pub(crate) mod tests {
             &[("AD4M_ADMIN_CREDENTIAL_FILE", &admin)],
         )
         .unwrap();
-        assert_eq!(
-            resolved.config.admin_credential.as_deref(),
-            Some("from-flag")
-        );
+        assert!(credential_is(&resolved, "from-flag"));
 
         let err = resolve(
             &["--config", &config],

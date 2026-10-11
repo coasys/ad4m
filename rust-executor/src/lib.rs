@@ -15,6 +15,7 @@ pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
+pub mod secret;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
@@ -49,6 +50,7 @@ use crate::{
     languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
+pub use secret::Secret;
 
 #[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
@@ -426,7 +428,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)
         {
-            if internal == admin {
+            if admin.expose_for_compare(internal) {
                 panic!(
                     "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
                      Using the same value collapses two trust boundaries."

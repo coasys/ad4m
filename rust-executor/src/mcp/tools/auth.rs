@@ -477,7 +477,7 @@ mod capability_mint_tests {
 
     fn handler_with_admin_credential() -> Ad4mMcpHandler {
         Ad4mMcpHandler::new(McpContext {
-            admin_credential: Some("test-admin-credential".to_string()),
+            admin_credential: Some("test-admin-credential".into()),
             auth_token: Arc::new(RwLock::new(None)),
             dynamic_class_tools: false,
         })

@@ -20,6 +20,7 @@
 
 use super::tools::Ad4mMcpHandler;
 use crate::config::TlsConfig;
+use crate::secret::Secret;
 use anyhow::Result;
 use log::{info, warn};
 use rmcp::transport::streamable_http_server::{
@@ -32,7 +33,7 @@ use tokio::sync::RwLock;
 /// MCP Server context, similar to REST's RequestContext
 #[derive(Clone)]
 pub struct McpContext {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
     pub auth_token: Arc<RwLock<Option<String>>>,
     /// Whether the dynamic per-class SHACL tools are exposed over this MCP
     /// transport (listed by `tools/list`, callable by `tools/call`). Off by
@@ -228,7 +229,7 @@ fn is_loopback(host: &str) -> bool {
 /// This runs an HTTP server that accepts MCP protocol requests.
 /// AI agents can connect via HTTP to interact with AD4M.
 pub async fn start_mcp_server(
-    admin_credential: Option<String>,
+    admin_credential: Option<Secret>,
     auth_token: Option<String>,
     config: McpServerConfig,
 ) -> Result<()> {
@@ -534,7 +535,7 @@ mod tests {
         let rpc_tls_port = held_port.wrapping_add(1);
 
         let context = McpContext {
-            admin_credential: Some("cred".to_string()),
+            admin_credential: Some("cred".into()),
             auth_token: Arc::new(RwLock::new(None)),
             dynamic_class_tools: false,
         };
@@ -657,7 +658,7 @@ mod tests {
             }),
         };
         tokio::spawn(start_mcp_server(
-            Some("test-admin-cred".to_string()),
+            Some("test-admin-cred".into()),
             None,
             config,
         ));
@@ -789,7 +790,7 @@ mod tests {
             }),
         };
         tokio::spawn(start_mcp_server(
-            Some("test-admin-cred".to_string()),
+            Some("test-admin-cred".into()),
             None,
             config,
         ));

@@ -124,7 +124,7 @@ async fn setup_with(
     let uuid = perspective.persisted.lock().await.uuid.clone();
     register_perspective(uuid.clone(), perspective);
     let handler = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
+        admin_credential: Some("test-admin".into()),
         auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
         dynamic_class_tools,
     });
@@ -1328,7 +1328,7 @@ async fn dynamic_tools_are_hidden_unless_flag_is_set() {
 
     // Same perspective, flag on: both surfaces are advertised.
     let shown = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".to_string()),
+        admin_credential: Some("test-admin".into()),
         auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
         dynamic_class_tools: true,
     });

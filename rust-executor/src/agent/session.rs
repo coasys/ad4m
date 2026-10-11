@@ -21,6 +21,7 @@ use super::capabilities::{
 use super::revoked::{RevokedSet, SessionCutoffs};
 use super::AgentService;
 use crate::events::{Audience, Event};
+use crate::secret::Secret;
 use std::sync::OnceLock;
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. Revocation by id needs no
@@ -117,7 +118,7 @@ impl Session {
     /// The identity of a caller that presents `token` on a listener with this reach.
     pub fn open(
         token: &str,
-        admin_credential: &Option<String>,
+        admin_credential: &Option<Secret>,
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
         let session = |principal, expires_at, issued_at| Session {
@@ -335,8 +336,8 @@ mod resolution_tests {
 
     const ADMIN: &str = "the-admin-credential";
 
-    fn admin() -> Option<String> {
-        Some(ADMIN.to_string())
+    fn admin() -> Option<Secret> {
+        Some(Secret::from(ADMIN))
     }
 
     fn app_token(capabilities: Option<Vec<Capability>>) -> String {
