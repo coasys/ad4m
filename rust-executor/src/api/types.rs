@@ -6,9 +6,6 @@ use crate::types::{
     LinkInput, LinkMutations, ModelType,
 };
 
-// Re-export for use in handler files
-pub use crate::agent::capabilities::user_email_from_token;
-
 // ── Agent ──
 
 #[derive(Deserialize, TS)]

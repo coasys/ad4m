@@ -51,7 +51,6 @@ impl Socket {
         let conn = Connection::new(
             Arc::new(build_handler_map()),
             admin_ctx(),
-            String::new(),
             request_check,
             tx,
         );
@@ -281,7 +280,6 @@ async fn an_event_stream_that_ends_ends_the_session() {
     let conn = Connection::new(
         Arc::new(build_handler_map()),
         admin_ctx(),
-        String::new(),
         TokenCheck::new("", false),
         tx,
     );

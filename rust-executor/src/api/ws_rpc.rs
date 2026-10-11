@@ -25,10 +25,9 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
-use crate::agent::session::Session;
 use crate::types::RequestContext;
 
-use super::auth::AppState;
+use super::auth::{AppState, AuthContext};
 use super::event_interest;
 use super::ws_handler::HandlerMap;
 
@@ -65,57 +64,23 @@ pub async fn ws_rpc(
         state.auto_permit_cap_requests,
         reach,
     );
-    ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token, token_check))
+    ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token_check))
 }
 
 /// The context a connection keeps for its lifetime, and the check its requests and events
 /// run. The dispatcher clones the context and injects a fresh `cancel_token` per request.
 ///
-/// A token that opens a [`Session`] takes its identity from it. A token that opens none
-/// (invalid, expired, revoked, or a user whose DID does not load) still gets a connection
-/// with `Err` capabilities, as before sessions existed, so every capability check refuses it.
+/// The identity is the [`AuthContext`]'s: a token that opens no session (invalid, expired,
+/// revoked, or a user whose DID does not load) still gets a connection with `Err`
+/// capabilities, as before sessions existed, so every capability check refuses it.
 fn connection_context(
     token: &str,
     admin_credential: &Option<String>,
     auto_permit_cap_requests: bool,
     reach: ListenerReach,
 ) -> (Arc<RequestContext>, TokenCheck) {
-    let (capabilities, is_admin_credential, user_email, user_did, token_check, session) =
-        match Session::open(token, admin_credential, reach) {
-            Ok(session) => {
-                let session = Arc::new(session);
-                let user = session.user();
-                (
-                    Ok(session.capabilities()),
-                    session.is_operator(),
-                    user.map(|(email, _)| email.to_string()),
-                    user.map(|(_, did)| did.to_string()),
-                    TokenCheck::for_session(session.clone()),
-                    Some(session),
-                )
-            }
-            // The admin credential always opens a session, so this caller is not the operator.
-            Err(_) => {
-                let (capabilities, user_email, user_did) = super::auth::resolve_user_session(
-                    token,
-                    capabilities_on(token.to_string(), admin_credential.clone(), reach),
-                );
-                let token_check = TokenCheck::new(token, false);
-                (capabilities, false, user_email, user_did, token_check, None)
-            }
-        };
-
-    let ctx = Arc::new(RequestContext {
-        capabilities,
-        auto_permit_cap_requests,
-        auth_token: token.to_string(),
-        is_admin_credential,
-        user_email,
-        user_did,
-        cancel_token: None,
-        session,
-    });
-    (ctx, token_check)
+    let auth = AuthContext::open(token, admin_credential, auto_permit_cap_requests, reach);
+    (Arc::new(auth.to_request_context()), auth.token_check())
 }
 
 /// Whether a connection receives the event stream: any authenticated session, meaning the
@@ -135,11 +100,12 @@ async fn handle_ws(
     socket: WebSocket,
     handler_map: Arc<HandlerMap>,
     ctx: Arc<RequestContext>,
-    token: String,
     token_check: TokenCheck,
 ) {
     // Track last_seen at connect time (also updated on each RPC call below)
-    track_last_seen_from_token(token.clone()).await;
+    if let Some(email) = &ctx.user_email {
+        track_last_seen(email).await;
+    }
 
     let (mut ws_sink, ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -160,7 +126,7 @@ async fn handle_ws(
     } else {
         Box::pin(futures::stream::pending())
     };
-    let conn = Connection::new(handler_map, ctx, token, token_check, tx);
+    let conn = Connection::new(handler_map, ctx, token_check, tx);
 
     // ── Writer task ─────────────────────────────────────────────────────
     let writer_session_over = conn.session_over.clone();
@@ -221,7 +187,6 @@ type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>
 pub(crate) struct Connection {
     handler_map: Arc<HandlerMap>,
     ctx: Arc<RequestContext>,
-    token: String,
     token_check: TokenCheck,
     /// Fires when the token stops working. The connection then closes, so the client
     /// authenticates again instead of waiting on a socket that answers nothing.
@@ -236,14 +201,12 @@ impl Connection {
     pub(crate) fn new(
         handler_map: Arc<HandlerMap>,
         ctx: Arc<RequestContext>,
-        token: String,
         token_check: TokenCheck,
         tx: mpsc::UnboundedSender<String>,
     ) -> Self {
         Self {
             handler_map,
             ctx,
-            token,
             token_check,
             session_over: CancellationToken::new(),
             tx,
@@ -352,7 +315,6 @@ impl Connection {
 
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
-        let token = self.token.clone();
         let inflight = self.inflight.clone();
         let token_check = self.token_check.clone();
         let session_over = self.session_over.clone();
@@ -378,7 +340,9 @@ impl Connection {
             // Refresh last_seen on every RPC dispatch so long-lived
             // connections don't appear stale. Internally throttled to one
             // DB write per 5 minutes per user.
-            track_last_seen_from_token(token.clone()).await;
+            if let Some(email) = &base_ctx.user_email {
+                track_last_seen(email).await;
+            }
 
             // Build a per-request context that carries the cancel token,
             // so handlers can clone it into long-running operations.

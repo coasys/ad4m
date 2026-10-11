@@ -19,13 +19,15 @@ use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
-fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
+/// Refuses a request whose user has no compute credits left. A caller without a user
+/// (the operator, an app) pays nothing.
+fn check_compute_credits_ws(user_email: Option<&str>) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+    if let Some(email) = user_email {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
@@ -361,7 +363,7 @@ async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_email.as_deref())?;
 
     let body: PromptRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -371,7 +373,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .prompt(body.task_id, body.prompt, Some(ctx.auth_token.clone()))
+        .prompt(body.task_id, body.prompt, ctx.user_email.clone())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -381,7 +383,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_email.as_deref())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -391,7 +393,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(body.model_id, body.text, Some(ctx.auth_token.clone()))
+        .embed(body.model_id, body.text, ctx.user_email.clone())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -411,7 +413,7 @@ async fn open_transcription_stream(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_email.as_deref())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -421,12 +423,7 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let stream_id = service
-        .open_transcription_stream(
-            body.model_id,
-            body.params.map(|p| p.into()),
-            ctx.auth_token.clone(),
-            ctx.is_admin_credential,
-        )
+        .open_transcription_stream(body.model_id, body.params.map(|p| p.into()), &ctx)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -448,7 +445,7 @@ async fn close_transcription_stream(
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     service
-        .close_transcription_stream(&body.stream_id, &ctx.auth_token)
+        .close_transcription_stream(&body.stream_id, &ctx)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -519,7 +516,8 @@ pub async fn feed_transcription_stream(
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
-    check_compute_credits_ws(&context.auth_token).map_err(|e| ApiError::Forbidden(e.message))?;
+    check_compute_credits_ws(context.user_email.as_deref())
+        .map_err(|e| ApiError::Forbidden(e.message))?;
 
     let stream_ids_header = headers
         .get("x-stream-ids")
@@ -568,7 +566,7 @@ pub async fn feed_transcription_stream(
     let mut errors: Vec<String> = Vec::new();
     for stream_id in &stream_ids {
         if let Err(e) = service
-            .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
+            .feed_transcription_stream(stream_id, audio_f32.clone(), &context)
             .await
         {
             log::warn!("Error feeding stream {}: {}", stream_id, e);
@@ -780,5 +778,42 @@ mod model_key_tests {
     fn operator_sessions_see_the_keys() {
         let model = model_for_session(remote_model(), &ctx(None));
         assert_eq!(model.api.as_ref().unwrap().api_key, "sk-provider-secret");
+    }
+}
+
+#[cfg(test)]
+mod compute_credit_tests {
+    use super::*;
+
+    // #1175: the check used to decode the caller's token again to find the user. It now
+    // takes the user the request resolved, so it needs no token.
+    #[test]
+    fn the_check_reads_the_credits_of_the_requests_user() {
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        let broke = format!("broke-{id}@example.org");
+        let funded = format!("funded-{id}@example.org");
+        let was_free = Ad4mDb::with_global_instance(|db| {
+            db.add_user(&broke, "did:key:broke", "pw")?;
+            db.add_user(&funded, "did:key:funded", "pw")?;
+            db.set_user_credits(&funded, 5.0)?;
+            let was_free = db.get_free_hosting_enabled()?;
+            db.set_free_hosting_enabled(false)?;
+            Ok::<_, anyhow::Error>(was_free)
+        })
+        .unwrap();
+
+        let results = (
+            check_compute_credits_ws(Some(&broke)),
+            check_compute_credits_ws(Some(&funded)),
+            check_compute_credits_ws(None),
+        );
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(was_free)).unwrap();
+
+        assert_eq!(results.0.unwrap_err().code, 403, "a user without credits");
+        assert!(results.1.is_ok(), "a user with credits");
+        assert!(results.2.is_ok(), "a caller without a user pays nothing");
     }
 }

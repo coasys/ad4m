@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
-use crate::agent::capabilities::{check_capability, TokenCheck, AI_TRANSCRIBE_CAPABILITY};
+use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::types::ModelType;
@@ -51,7 +51,8 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         let _ = socket.close().await;
         return;
     }
-    let token_check = TokenCheck::new(&auth.auth_token, auth.is_admin_credential);
+    let token_check = auth.token_check();
+    let caller = auth.to_request_context();
 
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
@@ -177,19 +178,12 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
                 // Tear down any prior session before opening a new one.
                 if let Some(old_sid) = stream_id.take() {
-                    let _ = service
-                        .close_transcription_stream(&old_sid, &auth.auth_token)
-                        .await;
+                    let _ = service.close_transcription_stream(&old_sid, &caller).await;
                 }
                 delta_rx = None;
 
                 let sid = match service
-                    .open_transcription_stream(
-                        model_id.clone(),
-                        None,
-                        auth.auth_token.clone(),
-                        auth.is_admin_credential,
-                    )
+                    .open_transcription_stream(model_id.clone(), None, &caller)
                     .await
                 {
                     Ok(id) => id,
@@ -249,7 +243,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 };
                 if delta_rx.is_none() {
                     match service
-                        .feed_transcription_stream_with_broadcast(sid, samples, &auth.auth_token)
+                        .feed_transcription_stream_with_broadcast(sid, samples, &caller)
                         .await
                     {
                         Ok(rx) => delta_rx = Some(rx),
@@ -259,7 +253,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                     }
                 } else {
                     if let Err(e) = service
-                        .feed_transcription_stream(sid, samples, &auth.auth_token)
+                        .feed_transcription_stream(sid, samples, &caller)
                         .await
                     {
                         let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
@@ -288,9 +282,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
     if let Some(ref sid) = stream_id {
         if let Ok(service) = AIService::global_instance().await {
-            let _ = service
-                .close_transcription_stream(sid, &auth.auth_token)
-                .await;
+            let _ = service.close_transcription_stream(sid, &caller).await;
         }
     }
     let _ = socket.close().await;

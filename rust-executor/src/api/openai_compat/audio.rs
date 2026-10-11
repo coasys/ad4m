@@ -96,9 +96,8 @@ pub async fn transcriptions(
 
     let samples = audio_decode(&bytes, content_type.as_deref())?;
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
+    if let Some(email) = &auth.user_email {
+        check_compute_credits(email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -106,12 +105,7 @@ pub async fn transcriptions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let text = service
-        .transcribe_buffer(
-            model_id,
-            samples,
-            auth.auth_token.clone(),
-            auth.is_admin_credential,
-        )
+        .transcribe_buffer(model_id, samples, &auth.to_request_context())
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -127,12 +121,11 @@ pub async fn speech(
 ) -> Result<Response, OpenAIError> {
     check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
+    if let Some(email) = &auth.user_email {
+        check_compute_credits(email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
         let amount = billing_amounts::speech_amount(req.input.chars().count());
-        bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
+        bill_compute(email, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
 
     let response_format = req

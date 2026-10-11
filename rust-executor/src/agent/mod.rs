@@ -42,7 +42,7 @@ impl AgentContext {
     /// token acts as its user, whatever the multi-user setting says. Any other token, such as
     /// an expired, revoked or unreadable one, acts as nobody: this returns an error, never the
     /// main agent. The caller says whether the token is the admin credential, because only the
-    /// caller knows it.
+    /// caller knows it. Only MCP uses it: every other caller asks its request's `acts_as()`.
     pub fn from_auth_token(
         auth_token: String,
         is_admin_credential: bool,

@@ -541,11 +541,9 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 /// Admin-credential token used by all handler-driven tests. Sending this
-/// as `Authorization: Bearer <token>` makes capabilities_from_token()
-/// short-circuit to ALL_CAPABILITY without hitting Ad4mDb for the
-/// capability lookup itself — but the auth extractor still calls
-/// `track_last_seen_from_token` → `user_email_from_token` which reads
-/// `multi_user_enabled` from Ad4mDb before any early return. So we
+/// as `Authorization: Bearer <token>` opens an operator session with
+/// ALL_CAPABILITY without hitting Ad4mDb for the capability lookup itself.
+/// The handlers still read Ad4mDb (free hosting, credits, models), so we
 /// initialise an in-memory DB once per test binary. See init_test_db().
 const TEST_ADMIN_TOKEN: &str = "marvin-test-admin-credential";
 
@@ -554,9 +552,7 @@ const TEST_ADMIN_TOKEN: &str = "marvin-test-admin-credential";
 /// the DB mutex, we clear the poison and reinstall.
 ///
 /// Called from every handler-driven test (via router_and_db()) because
-/// axum's AuthContext extractor unconditionally invokes
-/// `track_last_seen_from_token` → `user_email_from_token`, which reads
-/// `multi_user_enabled` from Ad4mDb before deciding to no-op.
+/// the handlers read Ad4mDb before they reach the AIService boundary.
 fn init_test_db() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -769,11 +765,10 @@ async fn transcriptions_handler_does_not_bill() {
 // Per-endpoint operation-label + amount contract.
 //
 // Handler-driven router tests can't reach the billing path for speech
-// end-to-end here because the handler gates billing on
-// `user_email_from_token(auth_token).is_some()`, which requires a
-// JWT-shaped token — constructing which would need the Wallet
-// initialised (heavy). The admin credential token used by the router
-// tests deliberately bypasses that path.
+// end-to-end here because the handler gates billing on the request's
+// user (`auth.user_email`), which requires a user session — a user JWT
+// and a user key in the Wallet (heavy). The admin credential token used
+// by the router tests deliberately bypasses that path.
 //
 // The contract we care about is instead covered by three layered
 // assertions elsewhere in this file:
@@ -790,7 +785,7 @@ async fn transcriptions_handler_does_not_bill() {
 //
 // The transcription "handler MUST NOT bill" invariant IS driven
 // end-to-end below — the transcriptions handler doesn't gate its
-// (deliberately absent) bill on user_email_from_token, so a router
+// (deliberately absent) bill on the request's user, so a router
 // request with any token exercises the code path far enough to prove
 // the invariant.
 // ---------------------------------------------------------------------------
@@ -979,53 +974,6 @@ async fn chat_completions_stream_does_not_bill_at_setup() {
 
 use crate::ai_service::{AIService, PromptResult};
 
-/// Ensure the global wallet has a "main" keypair (decode_jwt signs and
-/// verifies with it) and return a user JWT whose `sub` is `email`.
-///
-/// Mints against the *current* global "main" key. Safe under the project's
-/// single-threaded test convention (`--test-threads=1`, see package.json);
-/// a parallel test rotating the key via `test_utils::setup_wallet()`
-/// between mint and decode would break verification.
-fn user_jwt_token(email: &str) -> String {
-    use jsonwebtoken::{encode, EncodingKey, Header};
-    // Use the trait-based wallet_backend (same path as decode_jwt) so the
-    // signing and verification keys match.
-    let local = std::sync::Arc::new(crate::wallet::LocalWallet::new());
-    let _ = crate::wallet::try_init_wallet_backend(
-        local as std::sync::Arc<dyn crate::wallet::WalletBackend>,
-    );
-    crate::config::set_global_config(crate::config::Ad4mConfig::default());
-
-    let backend = crate::wallet::wallet_backend();
-    let key_name = crate::agent::capabilities::token::signing_key_name();
-    if !backend.key_exists(&key_name) {
-        backend
-            .generate_keypair(&key_name)
-            .expect("generate signing key");
-    }
-    let secret = backend
-        .get_secret_key(&key_name)
-        .expect("signing key must exist");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    encode(
-        &Header::default(),
-        &serde_json::json!({
-            "iss": "ad4m-test",
-            "sub": email,
-            "aud": "ad4m-test",
-            "exp": now + 3600,
-            "iat": now,
-            "nonce": "test-nonce",
-            "capabilities": { "appName": "test", "appDesc": "test" },
-        }),
-        &EncodingKey::from_secret(secret.as_slice()),
-    )
-    .unwrap()
-}
-
 fn sample_prompt_result() -> PromptResult {
     PromptResult {
         text: "hello world".to_string(),
@@ -1076,15 +1024,20 @@ async fn stream_completion_bills_once_on_success() {
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::Success);
 
-    // bill_prompt_if_authed needs multi-user mode on + a user JWT, and
-    // bill_ai_operation needs a priced model. The guard restores both even
-    // if an assertion below panics.
+    // bill_ai_operation needs a priced model; multi-user mode matches a
+    // user session. The guard restores both even if an assertion below panics.
     let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
 
-    let token = user_jwt_token("billing-user@ex.test");
+    // #1175: billing takes the user the request resolved. No token exists
+    // here, so nothing can decode one to find the user.
     let (tx, rx) = tokio::sync::oneshot::channel();
-    AIService::bill_and_forward_stream_result(Some(token), "gpt-4", Ok(sample_prompt_result()), tx)
-        .await;
+    AIService::bill_and_forward_stream_result(
+        Some("billing-user@ex.test".to_string()),
+        "gpt-4",
+        Ok(sample_prompt_result()),
+        tx,
+    )
+    .await;
     let forwarded = rx.await.unwrap().unwrap();
     assert_eq!(forwarded.text, "hello world");
     assert_eq!(forwarded.prompt_tokens, 10);
@@ -1122,13 +1075,13 @@ async fn stream_error_does_not_bill() {
     // even if error streams did bill.
     let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
 
-    // A valid user token is passed on purpose: the skip must come from
-    // the Err gate, not from token absence (matches prompt_messages, which
-    // bills only after a successful prompt).
+    // A user is passed on purpose: the skip must come from the Err gate,
+    // not from a missing user (matches prompt_messages, which bills only
+    // after a successful prompt).
     let result: Result<PromptResult, anyhow::Error> = Err(anyhow::anyhow!("inference failed"));
     let (tx, rx) = tokio::sync::oneshot::channel();
     AIService::bill_and_forward_stream_result(
-        Some(user_jwt_token("billing-user@ex.test")),
+        Some("billing-user@ex.test".to_string()),
         "gpt-4",
         result,
         tx,
@@ -1146,7 +1099,7 @@ async fn stream_error_does_not_bill() {
 }
 
 #[tokio::test]
-async fn stream_without_token_does_not_bill() {
+async fn stream_without_a_user_does_not_bill() {
     init_test_db();
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::Success);
