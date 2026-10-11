@@ -425,10 +425,14 @@ It is the same name and the same check as the [`producedByFlow` model-query filt
 <Callout type="warning" emoji="⚠️">
   Spell the key exactly. A `consensusRule` with a key the engine does not
   know — a misspelt key, or `grantedByFlow`, the name this gate had before it
-  was renamed — is refused, the same as a rule that does not decode: the edge
-  it governs fires for nobody, and the executor log names the key (for
-  example `` unknown key `fromRole.grantedByFlow` ``). The key is not dropped,
-  so the gate never falls back to plain `fromRole`
+  was renamed — is refused, the same as a rule that does not decode. `addFlow`
+  refuses it up front: the call rejects with an error naming the state and
+  the key (for example `` unknown key `fromRole.grantedByFlow` (renamed to
+  `producedByFlow` in #1076) ``), and nothing of the definition is stored. A
+  definition that reached the store another way — synced from a peer, or
+  written before this check existed — is refused when it is read: the edge it
+  governs fires for nobody, and the executor log names the key. The key is
+  never dropped, so the gate never falls back to plain `fromRole`
   ([#1144](https://github.com/coasys/ad4m/issues/1144); `flow-task-handover.test.ts`
   Part 4). This covers every object in the rule: the rule itself, `fromRole`
   and its `or` arms, `count`, `producedByFlow`, an object `linkedTo`, and
@@ -500,7 +504,7 @@ The refusals a developer will meet, what each one means, and what to do:
 | a query or role gate on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
 | a `fromRole` with `producedByFlow` and a `count` satisfied by zero (e.g. `{ max: 0 }`) | error: refusing to gate | a receipt that fails to verify would make the voter eligible, not ineligible | drop the `count`, or gate on a positive count |
 | a `fromRole` with `producedByFlow` but no `state` | the rule does not decode; the edge is refused | a grant without a named state would also be granted by a run that settled into "rejected" | name the state the granting run must settle into |
-| a `consensusRule` with a key the engine does not know (e.g. `grantedByFlow`, `formRole`, `count: { mxa }`) | the rule is refused; the edge fires for nobody; the executor log names the key | a dropped key would widen the gate or remove it | fix the key named in the log |
+| a `consensusRule` with a key the engine does not know (e.g. `grantedByFlow`, `formRole`, `count: { mxa }`), or a key written twice | `addFlow` rejects and stores nothing, naming the state and the key; a definition that arrived by sync is refused when read: the edge fires for nobody and the executor log names the key | a dropped key would widen the gate or remove it | fix the key named in the error |
 | a malformed `producedByFlow` filter (wrong shape, or nested inside OR/AND/NOT) | error | a filter that cannot be read must not admit everything | fix the filter shape: `{ flow, state? }` at the top level of `where` |
 
 Limits that are absences, not errors — do not go looking for these:
