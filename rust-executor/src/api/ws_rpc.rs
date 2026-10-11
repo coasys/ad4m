@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
 use crate::agent::session::AuthError;
+use crate::agent::session_registry::{Registered, SessionRegistry};
 use crate::types::RequestContext;
 
 use super::auth::{AppState, AuthContext};
@@ -97,6 +98,19 @@ pub(crate) fn may_receive_events(ctx: &RequestContext) -> bool {
 /// "policy violation"). Clients read it as "log in again".
 pub(crate) const CLOSE_TOKEN_ENDED: u16 = 1008;
 
+/// The close frame of a session whose token stopped working: expired, or revoked. Every
+/// socket sends the same frame, so clients handle each case alike.
+pub(crate) fn token_ended_frame() -> CloseFrame {
+    CloseFrame {
+        code: CLOSE_TOKEN_ENDED,
+        reason: "token expired or revoked".into(),
+    }
+}
+
+/// How long a connection whose token stopped working still waits for the replies of calls
+/// in flight before it closes. A call that ends its own session gets its reply this way.
+const REPLY_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Closes a socket whose token opened no session, before anything else runs on it.
 /// `reason` says why: expired, unauthorized, or the identity did not load.
 ///
@@ -108,6 +122,11 @@ pub(crate) async fn close_refused(mut socket: WebSocket, reason: String) {
         reason: close_reason(&reason).into(),
     };
     let _ = socket.send(Message::Close(Some(close))).await;
+}
+
+/// Closes a socket whose token stopped working while it was open.
+pub(crate) async fn close_token_ended(socket: &mut WebSocket) {
+    let _ = socket.send(Message::Close(Some(token_ended_frame()))).await;
 }
 
 /// `reason`, cut to the 123 bytes a close frame carries.
@@ -160,17 +179,21 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
             tokio::select! {
                 biased;
                 _ = writer_session_over.cancelled() => {
-                    // Deliver what is already queued (the 401 reply), then close.
-                    while let Ok(msg) = rx.try_recv() {
+                    // Deliver what is queued (the 401 reply) and the replies of calls in
+                    // flight, until they finish or the grace ends, then close.
+                    let grace = tokio::time::sleep(REPLY_GRACE);
+                    tokio::pin!(grace);
+                    loop {
+                        let msg = tokio::select! {
+                            msg = rx.recv() => msg,
+                            _ = &mut grace => None,
+                        };
+                        let Some(msg) = msg else { break };
                         if ws_sink.send(Message::Text(msg.into())).await.is_err() {
                             return;
                         }
                     }
-                    let close = CloseFrame {
-                        code: CLOSE_TOKEN_ENDED,
-                        reason: "token expired or revoked".into(),
-                    };
-                    let _ = ws_sink.send(Message::Close(Some(close))).await;
+                    let _ = ws_sink.send(Message::Close(Some(token_ended_frame()))).await;
                     return;
                 }
                 msg = rx.recv() => match msg {
@@ -212,12 +235,15 @@ pub(crate) struct Connection {
     handler_map: Arc<HandlerMap>,
     /// Carries the session that every request checks again.
     ctx: Arc<RequestContext>,
-    /// Fires when the token stops working. The connection then closes, so the client
-    /// authenticates again instead of waiting on a socket that answers nothing.
+    /// Fires when the token stops working: a failed check, or a revocation through the
+    /// session registry. The connection then closes, so the client authenticates again
+    /// instead of waiting on a socket that answers nothing.
     session_over: CancellationToken,
     tx: mpsc::UnboundedSender<String>,
     inflight: InflightRegistry,
     interest: event_interest::SharedInterest,
+    /// Keeps an app or user connection in the session registry while it is served.
+    _registered: Option<Registered>,
 }
 
 impl Connection {
@@ -227,13 +253,16 @@ impl Connection {
         ctx: Arc<RequestContext>,
         tx: mpsc::UnboundedSender<String>,
     ) -> Self {
+        let session_over = CancellationToken::new();
+        let registered = SessionRegistry::global().register(&ctx.session, session_over.clone());
         Self {
             handler_map,
             ctx,
-            session_over: CancellationToken::new(),
+            session_over,
             tx,
             inflight: Default::default(),
             interest: Default::default(),
+            _registered: registered,
         }
     }
 
@@ -678,14 +707,42 @@ mod socket_tests {
         }
     }
 
-    // revokeToken() used to leave open connections working: the token was checked at the
-    // upgrade only. The operator revokes through the RPC, by the app's JWT (#1060).
-    #[tokio::test]
-    async fn a_token_revoked_mid_connection_gets_401_and_the_socket_closes() {
-        let addr = start_server().await;
+    /// The close frame the server sends within `limit`, skipping any other frame. `None`
+    /// when the socket stays open that long or ends without a close frame.
+    async fn close_within(ws: &mut Client, limit: Duration) -> Option<(u16, String)> {
+        tokio::time::timeout(limit, async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(WsMessage::Close(frame))) => {
+                        return frame.map(|f| (u16::from(f.code), f.reason.to_string()))
+                    }
+                    Some(Ok(_)) => continue,
+                    _ => return None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Waits until no connection of `token_id` is registered; false after `limit`.
+    async fn registry_empties(token_id: &crate::agent::session::TokenId, limit: Duration) -> bool {
+        use crate::agent::session_registry::SessionRegistry;
+        tokio::time::timeout(limit, async {
+            while SessionRegistry::global().connections_of(token_id) > 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// An approved app with every capability: its request id and its token.
+    fn approved_app(name: &str) -> (String, String) {
         crate::test_utils::use_test_apps_file();
         let token = generate_jwt(
-            "socket-test".to_string(),
+            name.to_string(),
             3600,
             AuthInfo {
                 capabilities: Some(vec![ALL_CAPABILITY.clone()]),
@@ -699,10 +756,38 @@ mod socket_tests {
             auth: AuthInfo::default(),
         };
         apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
+        (request_key, token)
+    }
 
-        let mut ws = connect(addr, &token).await;
-        let before = call(&mut ws, "1", "agent.status").await;
+    // revokeToken() used to leave open sockets open until their next request or event. Now
+    // each of the token's sockets closes at the revoke, with the frame a failed check sends.
+    // The operator revokes through the RPC, by the app's JWT (#1060).
+    #[tokio::test]
+    async fn every_socket_of_a_token_closes_with_1008_when_it_is_revoked() {
+        let addr = start_server().await;
+        let (request_key, token) = approved_app("socket-test");
+        let (token_id, _) = read_stored_token_id(&token).unwrap();
+
+        let mut rpc = connect(addr, &token).await;
+        let before = call(&mut rpc, "1", "agent.status").await;
         assert_ne!(before["error"]["code"], 401, "{before}");
+        let mut sockets = vec![("rpc", rpc)];
+        for (name, path) in [
+            ("events", "/api/v1/ws/events"),
+            ("realtime", "/v1/realtime"),
+        ] {
+            let url = format!("ws://{addr}{path}?token={token}");
+            sockets.push((name, tokio_tungstenite::connect_async(url).await.unwrap().0));
+        }
+        // Every socket registers before it serves; wait until all three have.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            use crate::agent::session_registry::SessionRegistry;
+            while SessionRegistry::global().connections_of(&token_id) < 3 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the three sockets register");
 
         let mut operator = connect(addr, ADMIN).await;
         let revoked = call_with(
@@ -713,10 +798,40 @@ mod socket_tests {
         )
         .await;
         assert!(revoked.get("error").is_none(), "{revoked}");
-        let after = call(&mut ws, "2", "agent.status").await;
-        assert_eq!(after["error"]["code"], 401, "{after}");
-        assert_eq!(close_code(&mut ws).await, Some(CLOSE_TOKEN_ENDED));
+
+        // No socket sends anything after the revoke.
+        for (name, ws) in &mut sockets {
+            let close = close_within(ws, Duration::from_secs(3)).await;
+            let (code, reason) = close.unwrap_or_else(|| panic!("{name}: no close at the revoke"));
+            assert_eq!(code, CLOSE_TOKEN_ENDED, "{name}");
+            assert_eq!(reason, token_ended_frame().reason.as_str(), "{name}");
+        }
+        assert!(
+            registry_empties(&token_id, Duration::from_secs(5)).await,
+            "closed sockets leave the registry"
+        );
         apps_map::remove_app(&request_key).unwrap();
+    }
+
+    // Revoking one app leaves another app's socket open.
+    #[tokio::test]
+    async fn revoking_a_token_leaves_other_tokens_sockets_open() {
+        let addr = start_server().await;
+        let (revoked_key, _) = approved_app("socket-test-revoked");
+        let (other_key, other) = approved_app("socket-test-other");
+        let mut ws = connect(addr, &other).await;
+        let before = call(&mut ws, "1", "agent.status").await;
+        assert_ne!(before["error"]["code"], 401, "{before}");
+
+        apps_map::revoke_app(&revoked_key).unwrap();
+        assert_eq!(
+            close_within(&mut ws, Duration::from_millis(500)).await,
+            None
+        );
+        let after = call(&mut ws, "2", "agent.status").await;
+        assert_ne!(after["error"]["code"], 401, "{after}");
+        apps_map::remove_app(&revoked_key).unwrap();
+        apps_map::remove_app(&other_key).unwrap();
     }
 
     // A dead token used to get a connection whose every call failed a capability check, so

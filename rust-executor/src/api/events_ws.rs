@@ -43,7 +43,7 @@
 
 use axum::{
     extract::{
-        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
     response::Response,
@@ -54,6 +54,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::agent::capabilities::*;
 use crate::agent::session::Session;
+use crate::agent::session_registry::SessionRegistry;
 use crate::agent::{did_for_context, AgentContext};
 
 /// Cached DID for a single WebSocket subscription, with lazy re-resolution.
@@ -725,6 +726,10 @@ async fn handle_events_ws(
 ) {
     log::info!("Events WebSocket connected");
 
+    // Fires when the token is revoked: the socket closes at once, not at the next event.
+    let revoked = tokio_util::sync::CancellationToken::new();
+    let _registered = SessionRegistry::global().register(&session, revoked.clone());
+
     let interest: super::event_interest::SharedInterest = Default::default();
     let event_stream = build_event_stream(session, user_email, is_admin, can_approve_apps).await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
@@ -734,6 +739,10 @@ async fn handle_events_ws(
 
     loop {
         tokio::select! {
+            _ = revoked.cancelled() => {
+                super::ws_rpc::close_token_ended(&mut socket).await;
+                break;
+            }
             // Forward events from PubSub to WebSocket
             event = event_stream.next() => {
                 match event {
@@ -744,11 +753,7 @@ async fn handle_events_ws(
                     }
                     // The stream ends when the token stops working.
                     None => {
-                        let close = CloseFrame {
-                            code: super::ws_rpc::CLOSE_TOKEN_ENDED,
-                            reason: "token expired or revoked".into(),
-                        };
-                        let _ = socket.send(Message::Close(Some(close))).await;
+                        super::ws_rpc::close_token_ended(&mut socket).await;
                         break;
                     }
                 }

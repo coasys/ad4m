@@ -37,6 +37,7 @@ use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
 use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
+use crate::agent::session_registry::SessionRegistry;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::api::errors::ApiError;
@@ -63,6 +64,11 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
     }
     let session = auth.session.clone();
     let caller = auth.to_request_context();
+    // Fires when the token is revoked: the socket closes at once, not at the next message.
+    let revoked = tokio_util::sync::CancellationToken::new();
+    let _registered = SessionRegistry::global().register(&session, revoked.clone());
+    // Set when the token stopped working: the socket then closes with 1008.
+    let mut token_ended = false;
 
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
@@ -74,22 +80,29 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         let mut rx_taken = delta_rx.take();
 
         enum Ev {
+            Revoked,
             Ws(Option<Result<Message, axum::Error>>),
             Delta(Result<String, broadcast::error::RecvError>),
         }
 
-        let ev = if let Some(ref mut rx) = rx_taken {
-            tokio::select! {
-                msg = socket.recv() => Ev::Ws(msg),
-                text = rx.recv() => Ev::Delta(text),
-            }
-        } else {
-            Ev::Ws(socket.recv().await)
+        let ev = tokio::select! {
+            _ = revoked.cancelled() => Ev::Revoked,
+            msg = socket.recv() => Ev::Ws(msg),
+            text = async {
+                match rx_taken.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => Ev::Delta(text),
         };
 
         delta_rx = rx_taken;
 
         let msg = match ev {
+            Ev::Revoked => {
+                token_ended = true;
+                break;
+            }
             Ev::Delta(Ok(text)) => {
                 if !text.is_empty() {
                     let delta = json!({
@@ -113,6 +126,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         // session, as they do on the RPC socket.
         if let Err(e) = session.check() {
             let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
+            token_ended = true;
             break;
         }
 
@@ -295,7 +309,11 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
             let _ = service.close_transcription_stream(sid, &caller).await;
         }
     }
-    let _ = socket.close().await;
+    if token_ended {
+        crate::api::ws_rpc::close_token_ended(&mut socket).await;
+    } else {
+        let _ = socket.close().await;
+    }
 }
 
 async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {

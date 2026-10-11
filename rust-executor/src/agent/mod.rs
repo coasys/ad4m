@@ -13,6 +13,7 @@ use crate::wallet::wallet_backend;
 pub mod capabilities;
 pub mod revoked;
 pub mod session;
+pub mod session_registry;
 pub mod signatures;
 
 /// Validate that a user email is safe to use as a filesystem path segment.

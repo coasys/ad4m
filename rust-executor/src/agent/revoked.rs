@@ -10,6 +10,7 @@
 
 use super::capabilities::TOKEN_EXPIRY_LEEWAY_SECONDS;
 use super::session::TokenId;
+use super::session_registry::SessionRegistry;
 use crate::db::{Ad4mDb, Ad4mDbResult};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -94,14 +95,16 @@ pub fn load_at_start() -> Result<(), String> {
     Ok(())
 }
 
-/// Revokes a token in the executor's set and in the database, and drops the ids whose tokens
-/// have expired from both. The set takes the id even when the database write fails, so the
-/// token stays revoked until a restart.
+/// Revokes a token in the executor's set and in the database, drops the ids whose tokens
+/// have expired from both, and closes the token's open connections. The set takes the id
+/// even when the database write fails, so the token stays revoked until a restart.
 pub fn revoke(id: TokenId, expires_at: u64) -> Result<(), String> {
     let now = now();
     let set = RevokedSet::global();
     set.prune(now);
     set.revoke(id.clone(), expires_at);
+    // After the set takes the id: a connection that registers later fails its own check.
+    SessionRegistry::global().end(&id);
 
     let db = Ad4mDb::global_instance();
     let db = db.lock().map_err(|e| e.to_string())?;
