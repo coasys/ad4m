@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
+use crate::agent::capabilities::TokenCheck;
 use crate::api::events_ws::build_event_stream_for;
 use crate::api::tests::support::{admin_conn_ctx, admin_ctx, registered_perspective};
 use crate::api::ws_handler::{build_handler_map, HandlerMap};
@@ -33,20 +34,25 @@ impl Socket {
     }
 
     async fn open_as(did: &str) -> Self {
-        Self::open_with_as(build_handler_map(), did).await
+        Self::open_with(did, TokenCheck::new("", false)).await
     }
 
-    async fn open_with(handlers: HandlerMap) -> Self {
-        Self::open_with_as(handlers, DID).await
+    /// A socket whose requests check `request_check`; its event stream never ends.
+    async fn open_with(did: &str, request_check: TokenCheck) -> Self {
+        Self::open_full(build_handler_map(), did, request_check).await
     }
 
-    async fn open_with_as(handlers: HandlerMap, did: &str) -> Self {
+    async fn open_with_handlers(handlers: HandlerMap) -> Self {
+        Self::open_full(handlers, DID, TokenCheck::new("", false)).await
+    }
+
+    async fn open_full(handlers: HandlerMap, did: &str, request_check: TokenCheck) -> Self {
         let connection_id = uuid::Uuid::new_v4().to_string();
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
         // `admin_ctx()` holds every capability, so this socket can approve apps.
         let events = build_event_stream_for(
-            crate::agent::capabilities::TokenCheck::new("", false),
+            TokenCheck::new("", false),
             Some(did.into()),
             None,
             false,
@@ -54,8 +60,13 @@ impl Socket {
             Some(connection_id.clone()),
         )
         .await;
-        let ctx = admin_conn_ctx(&connection_id);
-        let conn = Connection::new(Arc::new(handlers), ctx, String::new(), tx);
+        let conn = Connection::new(
+            Arc::new(handlers),
+            admin_conn_ctx(&connection_id),
+            String::new(),
+            request_check,
+            tx,
+        );
         let served = tokio::spawn(serve(conn, UnboundedReceiverStream::new(incoming), events));
         Self {
             connection_id,
@@ -269,7 +280,7 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
         },
     );
 
-    let mut socket = Socket::open_with(handlers).await;
+    let mut socket = Socket::open_with_handlers(handlers).await;
     let early = socket.subscribe(&p.0).await;
     socket.send(json!({ "id": "b", "type": "test.block" }));
     socket.send(json!({ "id": "l", "type": "test.subscribeLate" }));
@@ -404,6 +415,7 @@ async fn an_event_stream_that_ends_ends_the_session() {
         Arc::new(build_handler_map()),
         admin_ctx(),
         String::new(),
+        TokenCheck::new("", false),
         tx,
     );
     tokio::time::timeout(
@@ -416,4 +428,22 @@ async fn an_event_stream_that_ends_ends_the_session() {
     )
     .await
     .expect("serve returns once the event stream ends");
+}
+
+#[tokio::test]
+async fn a_token_that_expired_gets_401_and_ends_the_connection() {
+    // The client keeps its side open: only the failed token check may end `serve`.
+    let an_hour_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 3600;
+    let expired = TokenCheck::with_expiry("expired-jwt", an_hour_ago);
+    let mut socket = Socket::open_with(DID, expired).await;
+    socket.send(json!({ "id": "1", "type": "agent.status" }));
+    assert_eq!(socket.reply("1").await["error"]["code"], 401);
+    tokio::time::timeout(Duration::from_secs(5), &mut socket.served)
+        .await
+        .expect("serve returns once the token stops working")
+        .unwrap();
 }

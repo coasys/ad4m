@@ -24,7 +24,7 @@
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification` + `perspectiveUuid` | perspective owner | Notification triggered   |
+//! | `notification-triggered`      | `notification` + `perspectiveUuid` | notification owner DID | Notification triggered |
 //! | `exception-occurred`          | `exception`   | per type, see [`exception_visible`] | Exception occurred      |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
@@ -285,8 +285,7 @@ pub(crate) async fn build_event_stream(
     // repeated DB / AgentService lookups on every single event. If the client connected
     // before `agent.generate()` completed this returns `None`; the per-DID filters below
     // fail closed on `None` until re-resolution succeeds.
-    let resolved_did: Option<String> =
-        did_for_context(&AgentContext::for_session(user_email.clone())).ok();
+    let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
     build_event_stream_for(
         token_check,
         resolved_did,
@@ -311,6 +310,8 @@ pub(crate) async fn build_event_stream_for(
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
 
+    let session_context = AgentContext::for_session(user_email.clone());
+
     // Clone the pre-resolved DID for each filter closure
     let d_persp_added = resolved_did.clone();
     let d_persp_removed = resolved_did.clone();
@@ -318,30 +319,23 @@ pub(crate) async fn build_event_stream_for(
     // Lazy for the same reason as the auto-processor below: the launcher's socket opens
     // before `agent.generate()` on first run, and must still get sync-state afterwards.
     // Like the auto-processor cell, it resolves from the session, never from the token.
-    let d_sync = Arc::new(LazyDid::new(
-        AgentContext::for_session(user_email.clone()),
-        resolved_did.clone(),
-    ));
+    let d_sync = Arc::new(LazyDid::new(session_context.clone(), resolved_did.clone()));
     let d_link_added = resolved_did.clone();
     let d_link_removed = resolved_did.clone();
     let d_link_updated = resolved_did.clone();
     let d_agent_status = resolved_did.clone();
     let d_agent_updated = resolved_did.clone();
     let d_trans = resolved_did.clone();
-    let d_notif = resolved_did.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
-    // #881: "Resolve the DID after it becomes available"). Both auto-processor
-    // streams share the same lazy cell — one resolution serves both.
-    // The cell resolves from the session, never from the token (see `build_event_stream`).
-    let d_auto_processor = Arc::new(LazyDid::new(
-        AgentContext::for_session(user_email.clone()),
-        resolved_did,
-    ));
+    // #881: "Resolve the DID after it becomes available"). The auto-processor
+    // and notification streams share one lazy cell.
+    let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
+    let d_notif = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -378,24 +372,6 @@ pub(crate) async fn build_event_stream_for(
                             }
                             _ => None,
                         }
-                    }
-                })
-        };
-    }
-
-    // Like `did_stream!`, for filters that wait on the perspective handle
-    // (see `perspective_is_owned_by`).
-    macro_rules! owned_stream {
-        ($rx:expr, $ty:expr, $did:expr, $filter_fn:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| {
-                    let current_did = $did.clone();
-                    async move {
-                        let msg = result.ok()?;
-                        $filter_fn(&msg, current_did.as_deref())
-                            .await
-                            .then(|| wrap_event($ty, &msg))
                     }
                 })
         };
@@ -567,14 +543,25 @@ pub(crate) async fn build_event_stream_for(
         events::MESSAGE_RECEIVED,
         "message"
     );
-    let s_notif = owned_stream!(
-        pubsub
+    // Inlined (not `did_stream!`) so the filter reads the shared `LazyDid`.
+    let s_notif = {
+        let rx = pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-            .await,
-        events::NOTIFICATION_TRIGGERED,
-        d_notif,
-        matches_perspective_owner
-    );
+            .await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did = d_notif.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) if matches_notification_owner(msg, did.get().as_deref()) => {
+                            Some(wrap_event(events::NOTIFICATION_TRIGGERED, msg))
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
     let s_exc =
         BroadcastStream::new(pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await)
             .filter_map(|r| async { handle_broadcast_result(r) })
@@ -932,9 +919,22 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
     }
 }
 
+/// A triggered notification carries its owner's trigger matches and webhook
+/// secret, so only sessions whose DID equals `notification.notification.ownerDid`
+/// receive it. The perspective's other owners do not. A session without a DID,
+/// or a malformed event, matches nothing.
+pub(crate) fn matches_notification_owner(msg: &str, session_did: Option<&str>) -> bool {
+    session_did.is_some_and(|did| {
+        serde_json::from_str::<NotificationTriggeredEvent>(msg)
+            .is_ok_and(|event| event.notification.notification.owner_did == did)
+    })
+}
+
 /// Multi-user: only events about a perspective the session owns. An event
 /// without `perspectiveUuid`, or one that does not parse, reaches nobody: every
-/// publisher of these topics sets the field.
+/// publisher of these topics sets the field. Test-only since query updates route by
+/// connection; the tests use it to pin `perspective_is_owned_by`'s waiting.
+#[cfg(test)]
 pub(crate) async fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
     let Some(did) = current_did else {
         return true;
@@ -1499,6 +1499,69 @@ mod lazy_did_tests {
 }
 
 #[cfg(test)]
+mod notification_owner_filter_tests {
+    //! A triggered notification carries the owner's trigger matches and
+    //! webhook secret, so only the owner's sessions may receive it.
+    use super::matches_notification_owner;
+    use crate::types::{Notification, NotificationTriggeredEvent, TriggeredNotification};
+
+    fn event(owner: &str) -> String {
+        serde_json::to_string(&NotificationTriggeredEvent {
+            perspective_uuid: "perspective".to_string(),
+            notification: TriggeredNotification {
+                notification: Notification {
+                    id: "notification".to_string(),
+                    granted: true,
+                    description: String::new(),
+                    app_name: String::new(),
+                    app_url: String::new(),
+                    app_icon_path: String::new(),
+                    trigger: String::new(),
+                    perspective_ids: vec!["perspective".to_string()],
+                    webhook_url: String::new(),
+                    webhook_auth: "secret".to_string(),
+                    owner_did: owner.to_string(),
+                },
+                perspective_id: "perspective".to_string(),
+                trigger_match: "[]".to_string(),
+            },
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn triggered_notification_reaches_only_its_owners_sessions() {
+        let main_agents = event("did:key:main");
+        assert!(matches_notification_owner(
+            &main_agents,
+            Some("did:key:main")
+        ));
+        assert!(!matches_notification_owner(
+            &main_agents,
+            Some("did:key:alice")
+        ));
+
+        let alices = event("did:key:alice");
+        assert!(matches_notification_owner(&alices, Some("did:key:alice")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:bob")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:main")));
+        assert!(!matches_notification_owner(&alices, None));
+    }
+
+    #[test]
+    fn malformed_event_reaches_nobody() {
+        assert!(!matches_notification_owner(
+            "not json",
+            Some("did:key:main")
+        ));
+        assert!(!matches_notification_owner(
+            r#"{"perspectiveUuid":"p","notification":{}}"#,
+            Some("did:key:main")
+        ));
+    }
+}
+
+#[cfg(test)]
 mod app_approval_event_tests {
     use super::*;
     use crate::types::{ExceptionInfo, ExceptionType};
@@ -1861,7 +1924,7 @@ mod event_spec_tests {
                     notification: serde_json::from_value(serde_json::json!({
                         "id": "n", "granted": true, "description": "", "appName": "",
                         "appUrl": "", "appIconPath": "", "trigger": "", "perspectiveIds": [],
-                        "webhookUrl": "", "webhookAuth": "", "userEmail": null,
+                        "webhookUrl": "", "webhookAuth": "", "ownerDid": "did:x",
                     }))
                     .unwrap(),
                     perspective_id: p(),

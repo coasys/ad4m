@@ -79,7 +79,8 @@ pub async fn ws_rpc(
         connection_id: Some(uuid::Uuid::new_v4().to_string()),
     });
 
-    ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token))
+    let token_check = TokenCheck::new(&token, is_admin);
+    ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token, token_check))
 }
 
 /// Whether a connection receives the event stream: any authenticated session, meaning the
@@ -100,6 +101,7 @@ async fn handle_ws(
     handler_map: Arc<HandlerMap>,
     ctx: Arc<RequestContext>,
     token: String,
+    token_check: TokenCheck,
 ) {
     // Track last_seen at connect time (also updated on each RPC call below)
     track_last_seen_from_token(token.clone()).await;
@@ -107,26 +109,24 @@ async fn handle_ws(
     let (mut ws_sink, ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    let conn = Connection::new(handler_map, ctx, token, tx);
-
-    // A socket without a valid token gets no event stream at all; a pending
-    // stream keeps `serve` from reading its end as a failed token.
-    let events = if may_receive_events(&conn.ctx) {
+    // A socket without a valid token gets no events: a stream that never yields.
+    let events: EventStream = if may_receive_events(&ctx) {
         // Capability requests, app changes and notification install requests go
         // only to sessions that can approve apps.
         let can_approve_apps =
-            check_capability(&conn.ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
+            check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
         super::events_ws::build_event_stream(
-            conn.token_check.clone(),
-            conn.ctx.user_email.clone(),
-            conn.ctx.is_admin_credential,
+            token_check.clone(),
+            ctx.user_email.clone(),
+            ctx.is_admin_credential,
             can_approve_apps,
-            conn.ctx.connection_id.clone(),
+            ctx.connection_id.clone(),
         )
         .await
     } else {
         Box::pin(futures::stream::pending())
     };
+    let conn = Connection::new(handler_map, ctx, token, token_check, tx);
 
     // ── Writer task ─────────────────────────────────────────────────────
     let writer_session_over = conn.session_over.clone();
@@ -181,12 +181,13 @@ async fn handle_ws(
     }
 }
 
+type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>;
+
 /// Per-connection state: what the reader needs to answer a message.
 pub(crate) struct Connection {
     handler_map: Arc<HandlerMap>,
     ctx: Arc<RequestContext>,
     token: String,
-    /// Expiry and revocation of `token`, checked on every request and event.
     token_check: TokenCheck,
     /// Fires when the token stops working. The connection then closes, so the client
     /// authenticates again instead of waiting on a socket that answers nothing.
@@ -204,13 +205,14 @@ impl Connection {
         handler_map: Arc<HandlerMap>,
         ctx: Arc<RequestContext>,
         token: String,
+        token_check: TokenCheck,
         tx: mpsc::UnboundedSender<String>,
     ) -> Self {
         Self {
-            token_check: TokenCheck::new(&token, ctx.is_admin_credential),
             handler_map,
             ctx,
             token,
+            token_check,
             session_over: CancellationToken::new(),
             tx,
             inflight: Default::default(),
@@ -320,9 +322,9 @@ impl Connection {
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
         let token = self.token.clone();
+        let inflight = self.inflight.clone();
         let token_check = self.token_check.clone();
         let session_over = self.session_over.clone();
-        let inflight = self.inflight.clone();
         let tx = tx.clone();
         let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
         while calls.try_join_next().is_some() {}
@@ -393,15 +395,12 @@ impl Connection {
 /// connection's subscriptions end, and calls still in flight finish and reply
 /// to `tx`. `events` ends when the token stops working (see
 /// `build_event_stream`), and that ends the session too.
-pub(crate) async fn serve<S>(
-    conn: Connection,
-    incoming: S,
-    events: std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>,
-) where
+pub(crate) async fn serve<S>(conn: Connection, incoming: S, events: EventStream)
+where
     S: futures::Stream<Item = String>,
 {
     let tx_events = conn.tx.clone();
-    let session_over = conn.session_over.clone();
+    let event_session_over = conn.session_over.clone();
     let event_stream = event_interest::filter_stream(events, conn.interest.clone());
     let event_task = tokio::spawn(async move {
         tokio::pin!(event_stream);
@@ -410,18 +409,17 @@ pub(crate) async fn serve<S>(
                 return;
             }
         }
-        session_over.cancel();
+        // The stream ends when the token stops working.
+        event_session_over.cancel();
     });
 
     tokio::pin!(incoming);
     loop {
         let text = tokio::select! {
             _ = conn.session_over.cancelled() => break,
-            text = incoming.next() => match text {
-                Some(text) => text,
-                None => break,
-            },
+            text = incoming.next() => text,
         };
+        let Some(text) = text else { break };
         conn.handle_text(&text).await;
     }
 
@@ -617,10 +615,10 @@ mod socket_tests {
         let addr = start_server().await;
         let mut admin = connect(addr, ADMIN).await;
         let mut anonymous = connect(addr, "").await;
-        // Both sockets ask for the event, so only the gate can keep it from the anonymous one.
+        // Both sockets watch the event, so only the token gate can keep it from one.
+        let watch = json!({ "model-loading-status": null });
         for ws in [&mut admin, &mut anonymous] {
-            let watch = json!({ "model-loading-status": null });
-            let reply = call_with(ws, "watch", "events.watch", watch).await;
+            let reply = call_with(ws, "watch", "events.watch", watch.clone()).await;
             assert_eq!(reply["result"], true, "{reply}");
         }
 
