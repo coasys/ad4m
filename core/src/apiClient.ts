@@ -85,7 +85,11 @@ interface PendingCall {
     reject: (reason: unknown) => void
 }
 
-const closedError = () => new RpcError(503, 'WebSocket connection closed')
+const closedError = (reason?: string) => new RpcError(503, reason || 'WebSocket connection closed')
+
+/** Close code for "try again later": the executor's wallet is locked, so it cannot check the
+ *  token yet. The token may be good: reconnect as for any close, and pass the reason on. */
+const CLOSE_TRY_AGAIN_LATER = 1013
 
 /** Close code the executor uses when the socket's token opens no session, expired or was revoked. */
 const CLOSE_AUTH_FAILED = 1008
@@ -163,7 +167,7 @@ export class ApiClient {
                 if (event?.code === CLOSE_AUTH_FAILED && this._ws === ws) {
                     this._failAuth(event.reason || 'token expired or revoked')
                 } else {
-                    this._onClose(ws)
+                    this._onClose(ws, event?.code === CLOSE_TRY_AGAIN_LATER ? event.reason : undefined)
                 }
             }
         })
@@ -233,7 +237,8 @@ export class ApiClient {
         this._hasConnectedOnce = true
     }
 
-    private _onClose(ws: WebSocket): void {
+    /** `reason` is set when the executor asked to try again later; calls that fail carry it. */
+    private _onClose(ws: WebSocket, reason?: string): void {
         // A socket closed by _closeWs() can report after a new one exists.
         if (this._ws !== ws) return
         this._stopPing()
@@ -245,7 +250,7 @@ export class ApiClient {
                 pending.sent = false
                 pending.retry = false
             } else {
-                pending.reject(closedError())
+                pending.reject(closedError(reason))
             }
         }
         if (this._handlers.size > 0 || this._pendingCalls.size > 0) this._scheduleReconnect()

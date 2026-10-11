@@ -414,6 +414,20 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(authFailed).not.toHaveBeenCalled()
     })
 
+    // A locked wallet is a state of the node: the token may be good. 1013 is not an auth failure.
+    it('treats close code 1013 (executor locked) as an ordinary close that carries its reason', async () => {
+        const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
+        open()
+        socket(0).open()
+        const write = call('perspective.addLink', { uuid: 'u' })
+        socket(0).drop(1013, LOCKED)
+        await expect(write).rejects.toMatchObject({ name: 'RpcError', status: 503, body: LOCKED })
+        expect(authFailed).not.toHaveBeenCalled()
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(1).url).toBe(socket(0).url)
+    })
+
     it('leaves a new client, with a new token, free to connect', async () => {
         open()
         socket(0).drop(1008, REASON)

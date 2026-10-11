@@ -392,6 +392,19 @@ describe('Ad4mConnect', () => {
       expect(conn.token).toBe('kept-token');
     });
 
+    // While the executor's wallet is locked it closes every socket with 1013 and this reason;
+    // the SDK rejects with it as a 503. The token is still good: keep it and read `locked`.
+    it('keeps the token and reads locked while the executor wallet is locked', async () => {
+      const locked = new RpcError(503, 'Executor is locked: ask the operator to unlock it, then reconnect');
+      mockAgent.status.mockRejectedValueOnce(locked);
+      setLocal('ad4m-token', 'good-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(conn.authState).toBe('locked');
+      expect(conn.token).toBe('good-token');
+      expect(getLocal('ad4m-token')).toBe('good-token');
+    });
+
     it('moves to unauthenticated and drops the token when the client loses auth mid-session', async () => {
       setLocal('ad4m-token', 'live-token');
       const conn = new Ad4mConnect(defaultOptions);

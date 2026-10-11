@@ -49,7 +49,13 @@ pub async fn realtime_ws(auth: Result<AuthContext, ApiError>, ws: WebSocketUpgra
         Ok(auth) => ws.on_upgrade(move |socket| handle_socket(auth, socket)),
         Err(ApiError::Unauthorized(reason)) => ws.on_upgrade(move |mut socket| async move {
             let _ = send_error(&mut socket, "unauthorized", &reason).await;
-            crate::api::ws_rpc::close_refused(socket, reason).await;
+            let code = crate::api::ws_rpc::CLOSE_TOKEN_ENDED;
+            crate::api::ws_rpc::close_refused(socket, code, reason).await;
+        }),
+        Err(ApiError::Unavailable(reason)) => ws.on_upgrade(move |mut socket| async move {
+            let _ = send_error(&mut socket, "unavailable", &reason).await;
+            let code = crate::api::ws_rpc::CLOSE_TRY_AGAIN_LATER;
+            crate::api::ws_rpc::close_refused(socket, code, reason).await;
         }),
         Err(e) => e.into_response(),
     }

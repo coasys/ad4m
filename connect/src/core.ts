@@ -10,6 +10,14 @@ import { fetchUserInfo, requestPayment } from './services/hostIndex';
 const DEFAULT_PORT = 12000;
 /** What the executor says, in words, when a call needs keys a locked wallet cannot open. */
 const LOCKED_WALLET = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+/** How the executor's close reason (code 1013) and 503 begin when its wallet is locked. */
+const EXECUTOR_LOCKED = "Executor is locked";
+
+/** Whether `error` says the node's wallet is locked: a state of the node, so the token stays. */
+const saysLocked = (error: any): boolean => {
+  const text = errorText(error);
+  return text === LOCKED_WALLET || (typeof text === 'string' && text.startsWith(EXECUTOR_LOCKED));
+};
 
 /** The executor's own words for an \`RpcError\` (its \`message\` adds "RPC error <code>: "), else the message. */
 const errorText = (error: any): string | undefined => error?.body ?? error?.message;
@@ -290,14 +298,14 @@ export default class Ad4mConnect extends EventTarget {
       if (!status.isInitialized) return { state: 'locked' };
       return { state: status.isUnlocked ? 'authenticated' : 'locked' };
     } catch (error) {
-      if (errorText(error) === LOCKED_WALLET) return { state: 'locked' };
+      if (saysLocked(error)) return { state: 'locked' };
       statusError = error;
     }
 
     try {
       if (await client.agent.isLocked()) return { state: 'locked' };
     } catch (lockErr) {
-      if (errorText(lockErr) === LOCKED_WALLET) return { state: 'locked' };
+      if (saysLocked(lockErr)) return { state: 'locked' };
       console.warn('[Ad4m Connect] isLocked check failed:', lockErr?.message);
     }
     return { state: 'unauthenticated', error: statusError };

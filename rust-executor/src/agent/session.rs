@@ -55,10 +55,25 @@ pub enum AuthError {
     Revoked,
     /// The token's expiry has passed.
     Expired,
-    /// The token does not decode: a bad signature, garbage, or a locked wallet.
+    /// The token does not decode: a bad signature or garbage.
     Invalid(String),
     /// The token names a user whose DID does not load.
     NoIdentity(String),
+    /// The node's wallet is locked, so no token can be checked yet. A state of the node, not
+    /// of the token: the token may be good, and the caller should try again after the unlock.
+    Locked,
+}
+
+impl AuthError {
+    /// The close code a socket gets when its token opens no session: 1008 ("policy
+    /// violation", clients log in again) for a token that does not hold, 1013 ("try again
+    /// later", clients keep the token and reconnect) for a locked wallet.
+    pub fn close_code(&self) -> u16 {
+        match self {
+            AuthError::Locked => 1013,
+            _ => 1008,
+        }
+    }
 }
 
 impl std::fmt::Display for AuthError {
@@ -70,6 +85,10 @@ impl std::fmt::Display for AuthError {
             AuthError::NoIdentity(e) => write!(
                 f,
                 "Could not load the identity of this user session; reconnect: {e}"
+            ),
+            AuthError::Locked => write!(
+                f,
+                "Executor is locked: ask the operator to unlock it, then reconnect"
             ),
         }
     }
@@ -119,6 +138,11 @@ impl Session {
             return Ok(session(Principal::Anonymous { caps }, None));
         }
 
+        // Checking a token needs the wallet's signing key. A locked wallet says nothing about
+        // the token, so it gets its own outcome: the client keeps the token and retries.
+        if !crate::wallet::wallet_backend().is_unlocked() {
+            return Err(AuthError::Locked);
+        }
         check_token_revoked(token).map_err(|_| AuthError::Revoked)?;
         let claims = decode_jwt(token.to_string()).map_err(|e| {
             if e.downcast_ref::<jsonwebtoken::errors::Error>()
@@ -484,16 +508,24 @@ mod resolution_tests {
         let token = app_token(None);
         let backend = crate::wallet::wallet_backend();
         backend.lock("session-locked-test");
-        let result = Session::open(&token, &admin(), ListenerReach::Network);
+        let locked = Session::open(&token, &admin(), ListenerReach::Network);
+        let admin_while_locked = Session::open(ADMIN, &admin(), ListenerReach::Network);
         // Unlock before asserting, so a failure cannot leave the shared wallet locked.
         backend
             .unlock("session-locked-test")
             .expect("restore the shared wallet");
 
-        match result {
-            Err(AuthError::Invalid(e)) => assert!(e.contains("Executor is locked"), "{e}"),
-            other => panic!("expected Invalid, got {other:?}"),
-        }
+        // A locked wallet is a state of the node, not of the token: its own outcome, with a
+        // close code that clients do not read as "log in again".
+        let err = locked.unwrap_err();
+        assert_eq!(err, AuthError::Locked);
+        assert_eq!(err.close_code(), 1013);
+        assert!(err.to_string().contains("Executor is locked"), "{err}");
+        assert_eq!(AuthError::Expired.close_code(), 1008);
+        // The operator needs no wallet to be recognised, so it can unlock it.
+        assert!(admin_while_locked.unwrap().is_operator());
+        // The same token works once the wallet is unlocked again.
+        assert!(Session::open(&token, &admin(), ListenerReach::Network).is_ok());
     }
 
     #[test]
