@@ -281,12 +281,19 @@ impl Session {
         }
     }
 
-    /// Whether this session's event stream delivers `event`. Reads the audience only: the
-    /// stream itself ends once [`Session::check`] fails.
+    /// Whether this session's event stream delivers `event`: the session is in the event's
+    /// audience and holds the capability that reads the topic's data (#1284). An app acts as
+    /// the main agent, so the audience alone let it read every perspective the main agent
+    /// owns. The stream itself ends once [`Session::check`] fails.
     pub(crate) fn may_receive(&self, event: &Event) -> bool {
-        match &event.audience {
+        self.in_audience(&event.audience)
+            && self.may(&event.topic.capability(event.perspective.as_deref()))
+    }
+
+    /// Whether this session is one of `audience`, whatever its capabilities.
+    pub(crate) fn in_audience(&self, audience: &Audience) -> bool {
+        match audience {
             Audience::Everyone => true,
-            Audience::Authenticated => self.is_authenticated(),
             Audience::Operator => self.is_operator(),
             Audience::Approvers => self.may(&AGENT_PERMIT_CAPABILITY),
             Audience::Dids(dids) => self.acts_as_one_of(dids),

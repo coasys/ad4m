@@ -8,12 +8,16 @@
 //! asked for with `events.watch` (nothing until it does).
 //!
 //! Typed [`Event`](crate::events::Event)s from `PubSub::publish_event` reach a
-//! socket when `Session::may_receive` and `event_interest::wants` hold, as
-//! [`wire_message`]. One string topic remains: live query updates, which wait
-//! for the perspective's owners (`matches_perspective_owner`) until live
-//! queries belong to a connection (#1207).
+//! socket when `Session::may_receive` (the audience and the topic's capability,
+//! `Topic::capability`) and `event_interest::wants` hold, as [`wire_message`].
+//! One string topic remains: live query updates, which need the capability to
+//! query the perspective and wait for its owners (`matches_perspective_owner`)
+//! until live queries belong to a connection (#1207).
 //!
 //! ## Event types
+//!
+//! "Owners" is `perspectives::event_recipients`: the owners, or the main agent
+//! for an unowned perspective.
 //!
 //! | Type                          | Payload key   | Filtering              | Description                          |
 //! |-------------------------------|---------------|------------------------|--------------------------------------|
@@ -28,8 +32,8 @@
 //! | `link-added`                  | (inline)      | typed: `owner` only    | Link added to perspective            |
 //! | `link-removed`                | (inline)      | typed: `owner` only    | Link removed from perspective        |
 //! | `link-updated`                | (inline)      | typed: `owner` only    | Link updated in perspective          |
-//! | `signal`                      | (inline)      | typed: `recipient`, else everyone | Neighbourhood signal received |
-//! | `message-received`            | `message`     | typed: authenticated (no publisher yet) | Runtime message received |
+//! | `signal`                      | (inline)      | typed: `recipient`, else each owner | Neighbourhood signal received |
+//! | `message-received`            | `message`     | typed: the agent it is for (no publisher yet) | Runtime message received |
 //! | `notification-triggered`      | `notification` + `perspectiveUuid` | typed: notification owner DID | Notification triggered |
 //! | `exception-occurred`          | `exception`   | typed: per type, see `Audience::for_exception` | Exception occurred |
 //! | `transcription-text`          | (inline)      | typed: the stream owner's DID | AI transcription text         |
@@ -246,6 +250,7 @@ pub(crate) async fn build_event_stream_for(
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
         resolved_did,
+        session.clone(),
     );
     // The session decides who, the socket's interest what.
     let typed = {
@@ -267,25 +272,28 @@ pub(crate) async fn build_event_stream_for(
     )
 }
 
-/// The live query updates of the perspectives `did` owns (all of them for `None`), as the
-/// stream builder's items: `Some(message)`, or `None` for an update that is not JSON. They pass
-/// `events.watch` untouched.
+/// The live query updates of the perspectives `did` owns (all of them for `None`) that
+/// `session` may query, as the stream builder's items: `Some(message)`, or `None` for an
+/// update that is not JSON. They pass `events.watch` untouched.
 fn query_updates(
     updates: tokio::sync::broadcast::Receiver<String>,
     did: Option<String>,
+    session: Arc<Session>,
 ) -> impl futures::stream::Stream<Item = Option<String>> + Send {
     BroadcastStream::new(updates)
         .filter_map(received)
         .filter_map(move |msg| {
             let did = did.clone();
+            let session = session.clone();
             async move {
-                matches_perspective_owner(&msg, did.as_deref())
-                    .await
-                    .then(|| {
-                        serde_json::from_str(&msg)
-                            .ok()
-                            .map(|payload| wire(Topic::PerspectiveQuerySubscription, &payload))
-                    })
+                let topic = Topic::PerspectiveQuerySubscription;
+                let readable =
+                    session.may(&topic.capability(event_perspective_uuid(&msg).as_deref()));
+                (readable && matches_perspective_owner(&msg, did.as_deref()).await).then(|| {
+                    serde_json::from_str(&msg)
+                        .ok()
+                        .map(|payload| wire(topic, &payload))
+                })
             }
         })
 }
@@ -499,11 +507,44 @@ mod perspective_is_owned_by_tests {
     //! a write holds instead of failing: a failed `try_lock` here used to drop
     //! live-query updates published during writes.
     use super::{matches_perspective_owner, perspective_is_owned_by, query_updates};
+    use crate::agent::capabilities::{perspective_query_capability, ListenerReach};
+    use crate::agent::session::{Principal, Session, TokenId};
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::perspectives::{register_perspective, unregister_perspective};
     use crate::types::PerspectiveHandle;
     use futures::StreamExt;
+    use std::sync::Arc;
     use std::time::Duration;
+
+    fn operator() -> Arc<Session> {
+        Arc::new(Session::for_test(
+            Principal::Operator,
+            ListenerReach::Loopback,
+        ))
+    }
+
+    // #1284: a live query update reaches a socket only if its session may query the
+    // perspective, as `perspective.subscribeQuery` requires. An app acts as the main agent,
+    // so the owner check alone let an app read the updates of every perspective.
+    #[tokio::test]
+    async fn a_live_query_update_needs_the_capability_to_query_its_perspective() {
+        let app = Arc::new(Session::for_test(
+            Principal::App {
+                token_id: TokenId("live-query-app".into()),
+                caps: vec![perspective_query_capability(vec!["readable".into()])],
+            },
+            ListenerReach::Network,
+        ));
+        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
+        let mut stream = Box::pin(query_updates(rx, None, app));
+        for uuid in ["other", "readable"] {
+            let update = serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" });
+            tx.send(update.to_string()).unwrap();
+        }
+        let sent = stream.next().await.unwrap().expect("the readable update");
+        let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(sent["perspectiveUuid"], "readable");
+    }
 
     #[tokio::test]
     async fn missing_perspective_returns_false_for_any_did() {
@@ -550,7 +591,7 @@ mod perspective_is_owned_by_tests {
         let persisted = instance.persisted.clone();
         register_perspective(uuid.clone(), instance);
         let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        let mut stream = Box::pin(query_updates(rx, Some("did:key:bob".into())));
+        let mut stream = Box::pin(query_updates(rx, Some("did:key:bob".into()), operator()));
         let write = persisted.lock().await;
         let update = serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" });
         tx.send(update.to_string()).unwrap();
@@ -572,7 +613,7 @@ mod perspective_is_owned_by_tests {
     #[tokio::test]
     async fn a_live_query_update_goes_out_as_its_fields_beside_its_type() {
         let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        let mut stream = Box::pin(query_updates(rx, None));
+        let mut stream = Box::pin(query_updates(rx, None, operator()));
         let update = r#"{"perspectiveUuid":"p","uuid":"p","subscriptionId":"s","result":"[]"}"#;
         tx.send(update.into()).unwrap();
         tx.send("not json".into()).unwrap();
@@ -679,7 +720,13 @@ mod app_approval_event_tests {
             did: "did:key:approval-user".into(),
             caps: crate::agent::capabilities::get_user_default_capabilities(),
         };
-        let anonymous = Principal::Anonymous { caps: vec![] };
+        // A socket that never authenticated gets no stream and is no approver.
+        let anonymous = Session::for_test(
+            Principal::Anonymous { caps: vec![] },
+            ListenerReach::Network,
+        );
+        assert!(!anonymous.is_authenticated());
+        assert!(!anonymous.in_audience(&Audience::Approvers));
         let sessions = [
             ("operator", operator, true),
             (
@@ -695,11 +742,6 @@ mod app_approval_event_tests {
             (
                 "user",
                 Arc::new(Session::for_test(user, ListenerReach::Network)),
-                false,
-            ),
-            (
-                "anonymous",
-                Arc::new(Session::for_test(anonymous, ListenerReach::Network)),
                 false,
             ),
         ];
@@ -727,8 +769,9 @@ mod app_approval_event_tests {
         generate_capability_token(request_id.clone(), code)
             .await
             .unwrap();
+        // Every session here may read agents (AGENT_READ), so each gets the fence.
         get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
+            Topic::AgentUpdated,
             Audience::Everyone,
             serde_json::json!({ "fence": request_id }),
         ));
@@ -871,33 +914,56 @@ mod audience_matrix_tests {
 
     const A: &str = "did:key:matrix-user-a";
     const B: &str = "did:key:matrix-user-b";
+    /// The perspective the "P reader" app may query.
+    const P: &str = "matrix-perspective-p";
+    /// A perspective the "P reader" app may not query.
+    const Q: &str = "matrix-perspective-q";
 
     fn user(name: &str, did: &str) -> Principal {
         Principal::User {
             token_id: TokenId(format!("matrix-{name}")),
             email: format!("matrix.{name}@example.org"),
             did: did.to_string(),
-            caps: vec![],
+            caps: get_user_default_capabilities(),
         }
     }
 
-    /// The sessions of the matrix, by name.
+    fn app(name: &str, caps: Vec<Capability>) -> Principal {
+        let token_id = TokenId(format!("matrix-{name}"));
+        Principal::App { token_id, caps }
+    }
+
+    /// The sessions of the matrix, by name. Users hold what a user token holds; "app" holds
+    /// the same set, so the audience alone decides what it gets. The AI app and the P reader
+    /// act as the main agent too, but their capabilities narrow what they receive (#1284).
     fn sessions() -> Vec<(&'static str, Arc<Session>)> {
-        let app = Principal::App {
-            token_id: TokenId("matrix-app".into()),
-            caps: vec![],
-        };
-        // An app whose token may approve apps (`AGENT_PERMIT`, here through `ALL`).
-        let permit_app = Principal::App {
-            token_id: TokenId("matrix-permit-app".into()),
-            caps: vec![ALL_CAPABILITY.clone()],
-        };
+        let ai = vec![
+            AI_READ_CAPABILITY.clone(),
+            AI_PROMPT_CAPABILITY.clone(),
+            AI_TRANSCRIBE_CAPABILITY.clone(),
+        ];
+        let p_reader = vec![perspective_query_capability(vec![P.to_string()])];
         [
             ("operator", Principal::Operator, ListenerReach::Loopback),
-            ("app", app, ListenerReach::Network),
-            ("permit app", permit_app, ListenerReach::Network),
+            (
+                "app",
+                app("app", get_user_default_capabilities()),
+                ListenerReach::Network,
+            ),
+            // An app whose token may approve apps (`AGENT_PERMIT`, here through `ALL`).
+            (
+                "permit app",
+                app("permit-app", vec![ALL_CAPABILITY.clone()]),
+                ListenerReach::Network,
+            ),
             ("user A", user("a", A), ListenerReach::Network),
             ("user B", user("b", B), ListenerReach::Network),
+            ("AI app", app("ai-app", ai), ListenerReach::Network),
+            (
+                "P reader",
+                app("p-reader", p_reader),
+                ListenerReach::Network,
+            ),
             (
                 "anonymous",
                 Principal::Anonymous { caps: vec![] },
@@ -911,9 +977,37 @@ mod audience_matrix_tests {
 
     type Stream = Pin<Box<dyn futures::stream::Stream<Item = String> + Send>>;
 
+    /// A matrix case: its name, topic, audience, the perspective it is about and the sessions
+    /// that receive it.
+    type Case<'a> = (String, Topic, Audience, Option<&'a str>, Vec<&'a str>);
+
     /// A stream that watches every event, as a socket that asked for all of them.
     async fn open(session: Arc<Session>) -> Stream {
         build_event_stream_for(session, event_interest::watching_all(), None).await
+    }
+
+    /// The streams of `sessions`, by name. An anonymous session gets no stream on a real
+    /// socket and holds no capability, so no event reaches it and no fence could end a read:
+    /// `may_receive` pins it in [`each_audience_reaches_exactly_its_sessions`].
+    async fn open_all(sessions: &[(&'static str, Arc<Session>)]) -> Vec<(&'static str, Stream)> {
+        let mut streams = Vec::new();
+        for (name, session) in sessions {
+            if session.is_authenticated() {
+                streams.push((*name, open(session.clone()).await));
+            }
+        }
+        streams
+    }
+
+    /// Publishes `payload` as a fence that reaches every stream of [`open_all`]: as
+    /// `model-loading-status` (AI_READ) and as `link-added` on P (the P reader's only
+    /// capability). A stream stops reading at the first one it gets.
+    async fn publish_fence(payload: serde_json::Value) {
+        let pubsub = get_global_pubsub().await;
+        let model = Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &payload);
+        pubsub.publish_event(model);
+        let link = Event::new(Topic::LinkAdded, Audience::Everyone, &payload).for_perspective(P);
+        pubsub.publish_event(link);
     }
 
     /// The tags of this run's events that `stream` delivers before `fence`. Events reach a
@@ -950,29 +1044,32 @@ mod audience_matrix_tests {
         let main = main.to_string();
         assert_eq!(sessions[1].1.acts_as_did(), Some(main.as_str()), "app");
 
-        let all = [
-            "operator",
-            "app",
-            "permit app",
-            "user A",
-            "user B",
-            "anonymous",
-        ];
-        // The operator and apps act as the main agent.
+        // The sessions that hold a user token's capabilities, or every capability.
+        let readers = ["operator", "app", "permit app", "user A", "user B"];
+        // The operator and apps act as the main agent; these hold the topics' capabilities.
         let main_agent = ["operator", "app", "permit app"];
         let approvers = ["operator", "permit app"];
         let mut cases: Vec<(String, Topic, Audience, Vec<&str>)> = vec![
+            // The AI app holds AI_READ; the P reader and anonymous callers do not.
             (
                 "everyone".into(),
                 Topic::AiModelLoadingStatus,
                 Audience::Everyone,
-                all.to_vec(),
+                vec![
+                    "operator",
+                    "app",
+                    "permit app",
+                    "user A",
+                    "user B",
+                    "AI app",
+                ],
             ),
+            // A message names the agent it is for; the AI app may not read messages.
             (
-                "authenticated".into(),
+                "message-to-main".into(),
                 Topic::RuntimeMessageReceived,
-                Audience::Authenticated,
-                vec!["operator", "app", "permit app", "user A", "user B"],
+                Audience::Dids(vec![main.clone()]),
+                main_agent.to_vec(),
             ),
             (
                 "operator".into(),
@@ -1012,12 +1109,13 @@ mod audience_matrix_tests {
             ),
         ];
         // Agent topics go to the agent the payload names (`matches_agent_did` before), or to
-        // every session while the status names no agent (before `agent.generate()`).
+        // every session that may read agents while the status names no agent (before
+        // `agent.generate()`).
         for topic in [Topic::AgentStatusChanged, Topic::AgentUpdated] {
             for (name, did, to) in [
                 ("user-a", Some(A), vec!["user A"]),
                 ("main-agent", Some(main.as_str()), main_agent.to_vec()),
-                ("no-agent-yet", None, all.to_vec()),
+                ("no-agent-yet", None, readers.to_vec()),
             ] {
                 cases.push((format!("{topic}-{name}"), topic, Audience::agent(did), to));
             }
@@ -1032,12 +1130,11 @@ mod audience_matrix_tests {
             let topic = Topic::RuntimeNotificationTriggered;
             cases.push((format!("notification-of-{name}"), topic, audience, to));
         }
-        // A signal goes to its recipient, or to every session without one
-        // (`matches_signal_recipient` before).
+        // A signal goes to the recipient it names. One without a recipient goes to each
+        // owner (`telepresence_signals_reach_their_recipients`), never to every session.
         for (name, recipient, to) in [
-            ("to-a", Some(A.to_string()), vec!["user A"]),
-            ("to-main", Some(main.clone()), main_agent.to_vec()),
-            ("to-nobody-named", None, all.to_vec()),
+            ("to-a", A.to_string(), vec!["user A"]),
+            ("to-main", main.clone(), main_agent.to_vec()),
         ] {
             let signal = crate::perspectives::signal_event(
                 Default::default(),
@@ -1048,10 +1145,10 @@ mod audience_matrix_tests {
             cases.push((format!("signal-{name}"), topic, signal.audience, to));
         }
         // Transcription text goes to the stream's owner (`matches_transcription_user` before).
-        for (name, did, to) in [
-            ("a", A, vec!["user A"]),
-            ("main", &main, main_agent.to_vec()),
-        ] {
+        // The AI app acts as the main agent and may transcribe.
+        let mut main_and_ai = main_agent.to_vec();
+        main_and_ai.push("AI app");
+        for (name, did, to) in [("a", A, vec!["user A"]), ("main", &main, main_and_ai)] {
             let audience = Audience::agent(Some(did));
             cases.push((
                 format!("transcription-of-{name}"),
@@ -1087,8 +1184,14 @@ mod audience_matrix_tests {
                 (
                     "pass-of-main",
                     pass,
-                    pass_audience(Readers::Anyone, Some(&main)),
+                    pass_audience(owners(&[&main]), Some(&main)),
                     main_agent.to_vec(),
+                ),
+                (
+                    "pass-of-a-unowned",
+                    pass,
+                    pass_audience(owners(&[&main]), Some(A)),
+                    vec!["operator"],
                 ),
                 (
                     "pass-unknown",
@@ -1099,7 +1202,7 @@ mod audience_matrix_tests {
                 (
                     "pass-no-owner",
                     pass,
-                    pass_audience(Readers::Anyone, None),
+                    pass_audience(owners(&[&main]), None),
                     vec!["operator"],
                 ),
                 (
@@ -1108,11 +1211,13 @@ mod audience_matrix_tests {
                     neighbourhood_state_audience(owners(&[A, B])),
                     vec!["operator", "user A", "user B"],
                 ),
+                // An unowned perspective's reader is the main agent (it reached every
+                // authenticated session, users included, before one helper chose them).
                 (
                     "state-unowned",
                     state,
-                    neighbourhood_state_audience(Readers::Anyone),
-                    vec!["operator", "app", "permit app", "user A", "user B"],
+                    neighbourhood_state_audience(owners(&[&main])),
+                    main_agent.to_vec(),
                 ),
                 (
                     "state-unknown",
@@ -1125,7 +1230,8 @@ mod audience_matrix_tests {
             }
         }
         // Exceptions go per type (`exception_visible` before): approval requests to the
-        // sessions that may approve apps, the others to every session.
+        // sessions that may approve apps, the others to every session that may subscribe to
+        // exceptions.
         {
             use crate::types::{ExceptionInfo, ExceptionType::*};
             for kind in [
@@ -1137,7 +1243,7 @@ mod audience_matrix_tests {
             ] {
                 let to = match kind {
                     CapabilityRequested | InstallNotificationRequest => approvers.to_vec(),
-                    _ => all.to_vec(),
+                    _ => readers.to_vec(),
                 };
                 let name = format!("exception-{kind:?}");
                 let info = ExceptionInfo {
@@ -1156,8 +1262,7 @@ mod audience_matrix_tests {
             ..Default::default()
         };
         // Sync-state goes out once, to all owners. The other perspective and link topics go
-        // out once per owner, each to that owner (`publish_to_each_owner`); an unowned
-        // perspective's removal goes to nobody.
+        // out once per owner, each to that owner (`publish_to_each_owner`).
         let recipients = crate::perspectives::event_recipients;
         let owned_by_a = handle(Some(vec![A]));
         let owned_by_a_b = handle(Some(vec![A, B]));
@@ -1170,11 +1275,11 @@ mod audience_matrix_tests {
             Topic::LinkRemoved,
             Topic::LinkUpdated,
         ] {
-            let mut perspectives = vec![("owned-by-a", owned_by_a.clone(), vec!["user A"])];
-            if topic != Topic::PerspectiveRemoved {
-                perspectives.push(("unowned", handle(None), main_agent.to_vec()));
-                perspectives.push(("no-owners", handle(Some(vec![])), main_agent.to_vec()));
-            }
+            let mut perspectives = vec![
+                ("owned-by-a", owned_by_a.clone(), vec!["user A"]),
+                ("unowned", handle(None), main_agent.to_vec()),
+                ("no-owners", handle(Some(vec![])), main_agent.to_vec()),
+            ];
             if topic == Topic::PerspectiveSyncStateChange {
                 perspectives.push((
                     "owned-by-a-b",
@@ -1194,17 +1299,58 @@ mod audience_matrix_tests {
                 }
             }
         }
-
-        let mut streams = Vec::new();
-        for (name, session) in &sessions {
-            streams.push((*name, open(session.clone()).await));
+        // #1284: an app acts as the main agent, so the audience alone gave it every event of
+        // every perspective the main agent owns. A per-perspective topic also needs the
+        // capability that reads it on that perspective: the P reader gets the main agent's
+        // events on P only, the AI app none. The rows above carry no perspective, so they
+        // need the capability on every perspective (`*`), which the P reader lacks.
+        let mut cases: Vec<Case> = cases
+            .into_iter()
+            .map(|(case, topic, audience, to)| (case, topic, audience, None, to))
+            .collect();
+        let mut main_and_p_reader = main_agent.to_vec();
+        main_and_p_reader.push("P reader");
+        let to_main = || Audience::Dids(vec![main.clone()]);
+        for topic in [
+            Topic::PerspectiveAdded,
+            Topic::PerspectiveRemoved,
+            Topic::PerspectiveUpdated,
+            Topic::PerspectiveSyncStateChange,
+            Topic::LinkAdded,
+            Topic::LinkRemoved,
+            Topic::LinkUpdated,
+            Topic::PerspectiveQuerySubscription,
+            Topic::AutoProcessorEvent,
+            Topic::AutoProcessorNeighbourhoodState,
+        ] {
+            for (name, audience, on, to) in [
+                ("main-on-p", to_main(), P, main_and_p_reader.clone()),
+                ("main-on-q", to_main(), Q, main_agent.to_vec()),
+                ("a-on-p", Audience::Dids(vec![A.into()]), P, vec!["user A"]),
+            ] {
+                cases.push((format!("{topic}-{name}"), topic, audience, Some(on), to));
+            }
         }
+        // A signal needs the neighbourhood capability: the P reader may query P, not read
+        // its neighbourhood.
+        cases.push((
+            "signal-main-on-p".into(),
+            Topic::NeighbourhoodSignal,
+            to_main(),
+            Some(P),
+            main_agent.to_vec(),
+        ));
+
+        let mut streams = open_all(&sessions).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
         let pubsub = get_global_pubsub().await;
-        for (case, topic, audience, to) in &cases {
-            let event = Event::new(*topic, audience.clone(), json_case(&tag(case)));
+        for (case, topic, audience, perspective, to) in &cases {
+            let mut event = Event::new(*topic, audience.clone(), json_case(&tag(case)));
+            if let Some(perspective) = perspective {
+                event = event.for_perspective(*perspective);
+            }
             for (name, session) in &sessions {
                 let expected = to.contains(name);
                 assert_eq!(session.may_receive(&event), expected, "{case} → {name}");
@@ -1212,18 +1358,13 @@ mod audience_matrix_tests {
             pubsub.publish_event(event);
         }
         let fence = tag("fence");
-        let fence_event = Event::new(
-            Topic::AiModelLoadingStatus,
-            Audience::Everyone,
-            json_case(&fence),
-        );
-        pubsub.publish_event(fence_event);
+        publish_fence(json_case(&fence)).await;
 
         for (name, stream) in &mut streams {
             let got = delivered(stream, &run, &fence).await;
             let expected: BTreeSet<String> = cases
                 .iter()
-                .filter(|(_, _, _, to)| to.contains(name))
+                .filter(|(.., to)| to.contains(name))
                 .map(|(case, ..)| tag(case))
                 .collect();
             assert_eq!(got, expected, "{name}");
@@ -1286,8 +1427,8 @@ mod audience_matrix_tests {
     }
 
     // The real publishers: creating, renaming, syncing and removing a user's perspective
-    // reaches that user's stream only. An unowned perspective's events reach the operator
-    // and apps, except its removal, which reaches nobody (as before typed events).
+    // reaches that user's stream only. An unowned perspective's events, its removal too,
+    // reach the operator and the apps that may query it (its removal used to reach nobody).
     #[tokio::test]
     async fn perspective_lifecycle_events_reach_exactly_the_owners_streams() {
         use crate::perspectives::{
@@ -1298,10 +1439,7 @@ mod audience_matrix_tests {
         crate::test_utils::setup_agent();
         database();
         let sessions = sessions();
-        let mut streams = Vec::new();
-        for (name, session) in &sessions {
-            streams.push((*name, open(session.clone()).await));
-        }
+        let mut streams = open_all(&sessions).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let owned = PerspectiveHandle {
@@ -1329,22 +1467,16 @@ mod audience_matrix_tests {
             assert!(remove_perspective(&handle.uuid).await.is_some());
         }
         let fence = format!("{run}-fence");
-        get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
-            Audience::Everyone,
-            serde_json::json!({ "perspectiveUuid": fence }),
-        ));
+        publish_fence(serde_json::json!({ "perspectiveUuid": fence })).await;
 
         // Sync-state carries no `owner`; the others name the receiving owner.
-        let lifecycle = |uuid: &str, owner: &str, removed: bool| {
-            let mut owned = vec![
+        let lifecycle = |uuid: &str, owner: &str| {
+            let owned = [
                 events::PERSPECTIVE_ADDED,
                 events::PERSPECTIVE_UPDATED,
                 events::PERSPECTIVE_UPDATED,
+                events::PERSPECTIVE_REMOVED,
             ];
-            if removed {
-                owned.push(events::PERSPECTIVE_REMOVED);
-            }
             let mut list = expect(&owned, uuid, owner);
             list.extend(expect(&[events::SYNC_STATE_CHANGE], uuid, ""));
             list.sort();
@@ -1354,8 +1486,8 @@ mod audience_matrix_tests {
         for (name, stream) in &mut streams {
             let got = perspective_events(stream, &run, &fence).await;
             let expected = match *name {
-                "user A" => lifecycle(&owned.uuid, A, true),
-                "operator" | "app" | "permit app" => lifecycle(&unowned.uuid, &main, false),
+                "user A" => lifecycle(&owned.uuid, A),
+                "operator" | "app" | "permit app" => lifecycle(&unowned.uuid, &main),
                 _ => vec![],
             };
             assert_eq!(got, expected, "{name}");
@@ -1375,10 +1507,7 @@ mod audience_matrix_tests {
         database();
         crate::prolog_service::init_prolog_service().await;
         let sessions = sessions();
-        let mut streams = Vec::new();
-        for (name, session) in &sessions {
-            streams.push((*name, open(session.clone()).await));
-        }
+        let mut streams = open_all(&sessions).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let perspective = |name: &str, owners: Option<Vec<String>>| {
@@ -1411,11 +1540,7 @@ mod audience_matrix_tests {
                 .unwrap();
         }
         let fence = format!("{run}-fence");
-        get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
-            Audience::Everyone,
-            serde_json::json!({ "perspectiveUuid": fence }),
-        ));
+        publish_fence(serde_json::json!({ "perspectiveUuid": fence })).await;
 
         let changes = [
             events::LINK_ADDED,
@@ -1438,18 +1563,23 @@ mod audience_matrix_tests {
     }
 
     // The link language's signal publisher: a signal without a recipient goes once to each
-    // owner, each copy naming that owner as `recipient`; on a perspective without owners it
-    // goes to every session (the rule of `matches_signal_recipient`, which let a signal
-    // without a recipient through to every socket).
+    // of the perspective's `event_recipients`, each copy naming that DID as `recipient`. An
+    // unowned perspective's recipient is the main agent. A signal without a recipient on a
+    // perspective without owners used to reach every session (every user in multi-user mode)
+    // through the link language's slow path, and nobody through its cached-handle path.
     #[tokio::test]
     async fn telepresence_signals_reach_their_recipients() {
+        use crate::perspectives::perspective_instance::PerspectiveInstance;
+        use crate::perspectives::{
+            handle_telepresence_signal_from_link_language,
+            handle_telepresence_signal_from_link_language_impl, register_link_language_perspective,
+            register_perspective, unregister_perspective,
+        };
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
+        let main = crate::agent::did();
         let sessions = sessions();
-        let mut streams = Vec::new();
-        for (name, session) in &sessions {
-            streams.push((*name, open(session.clone()).await));
-        }
+        let mut streams = open_all(&sessions).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let handle = |name: &str, owners: Option<Vec<String>>| crate::types::PerspectiveHandle {
@@ -1463,12 +1593,35 @@ mod audience_matrix_tests {
         publish(shared.clone(), Default::default(), None);
         publish(shared.clone(), Default::default(), Some(B.into()));
         publish(unowned.clone(), Default::default(), None);
+
+        // Both link-language paths, for a perspective whose owner list is empty: the cached
+        // handle (published at once) and the lookup of the registered perspective.
+        let in_neighbourhood = |name: &str| {
+            let mut handle = handle(name, Some(vec![]));
+            let mut neighbourhood = crate::types::DecoratedNeighbourhoodExpression::default();
+            neighbourhood.data.link_language = format!("{run}-{name}-language");
+            handle.neighbourhood = Some(neighbourhood);
+            handle
+        };
+        let cached = in_neighbourhood("no-owners-cached");
+        let cached_language = format!("{run}-no-owners-cached-language");
+        register_link_language_perspective(cached_language.clone(), cached.clone());
+        handle_telepresence_signal_from_link_language(Default::default(), cached_language, None);
+        let looked_up = in_neighbourhood("no-owners-looked-up");
+        register_perspective(
+            looked_up.uuid.clone(),
+            PerspectiveInstance::new(looked_up.clone(), None),
+        );
+        let looked_up_language = format!("{run}-no-owners-looked-up-language");
+        handle_telepresence_signal_from_link_language_impl(
+            Default::default(),
+            looked_up_language,
+            None,
+        )
+        .await;
+        unregister_perspective(&looked_up.uuid);
         let fence = format!("{run}-fence");
-        get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
-            Audience::Everyone,
-            serde_json::json!({ "perspectiveUuid": fence }),
-        ));
+        publish_fence(serde_json::json!({ "perspectiveUuid": fence })).await;
 
         // `(type, perspectiveUuid, recipient)` triples.
         let signal = |p: &crate::types::PerspectiveHandle, to: &str| {
@@ -1500,12 +1653,17 @@ mod audience_matrix_tests {
             .await
             .unwrap_or_else(|_| panic!("{name}: the fence never arrived; got {got:?}"));
             got.sort();
-            let mut expected = vec![signal(&unowned, "")];
-            match *name {
-                "user A" => expected.push(signal(&shared, A)),
-                "user B" => expected.extend([signal(&shared, B), signal(&shared, B)]),
-                _ => {}
-            }
+            let mut expected = match *name {
+                "user A" => vec![signal(&shared, A)],
+                "user B" => vec![signal(&shared, B), signal(&shared, B)],
+                // The AI app and the P reader may not read neighbourhoods.
+                "operator" | "app" | "permit app" => vec![
+                    signal(&unowned, &main),
+                    signal(&cached, &main),
+                    signal(&looked_up, &main),
+                ],
+                _ => vec![],
+            };
             expected.sort();
             assert_eq!(got, expected, "{name}");
         }
@@ -1526,7 +1684,7 @@ mod audience_matrix_tests {
             token_id: TokenId("matrix-hosted".into()),
             email: email.clone(),
             did,
-            caps: vec![],
+            caps: get_user_default_capabilities(),
         };
         let mut sessions = sessions();
         sessions.push((
@@ -1564,10 +1722,7 @@ mod audience_matrix_tests {
         crate::test_utils::setup_agent();
         let main = crate::agent::did();
         let sessions = sessions();
-        let mut streams = Vec::new();
-        for (name, session) in &sessions {
-            streams.push((*name, open(session.clone()).await));
-        }
+        let mut streams = open_all(&sessions).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let uuid = |name: &str| format!("{run}-{name}");
@@ -1595,6 +1750,7 @@ mod audience_matrix_tests {
         emit(pass("owned-by-a", "pass-of-a", Some(A))).await;
         emit(pass("owned-by-a", "pass-of-b", Some(B))).await;
         emit(pass("unowned", "pass-of-main", Some(&main))).await;
+        emit(pass("unowned", "pass-of-a-on-unowned", Some(A))).await;
         emit(pass("not-registered", "pass-unknown", Some(A))).await;
         emit(pass("owned-by-a", "pass-no-owner", None)).await;
         let state = |perspective: &str, case: &str| {
@@ -1605,11 +1761,7 @@ mod audience_matrix_tests {
         emit_neighbourhood_state(state("unowned", "state-unowned")).await;
         emit_neighbourhood_state(state("not-registered", "state-unknown")).await;
         let fence = uuid("fence");
-        get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
-            Audience::Everyone,
-            serde_json::json!({ "perspectiveUuid": fence }),
-        ));
+        publish_fence(serde_json::json!({ "perspectiveUuid": fence })).await;
         for name in ["owned-by-a", "owned-by-a-b", "unowned"] {
             unregister_perspective(&uuid(name));
         }
@@ -1639,6 +1791,7 @@ mod audience_matrix_tests {
                     "pass-of-a",
                     "pass-of-b",
                     "pass-of-main",
+                    "pass-of-a-on-unowned",
                     "pass-unknown",
                     "pass-no-owner",
                     "state-of-a-b",
@@ -1646,8 +1799,9 @@ mod audience_matrix_tests {
                     "state-unknown",
                 ],
                 "app" | "permit app" => &["pass-of-main", "state-unowned"],
-                "user A" => &["pass-of-a", "state-of-a-b", "state-unowned"],
-                "user B" => &["state-of-a-b", "state-unowned"],
+                // Users may not read an unowned perspective, so they get none of its events.
+                "user A" => &["pass-of-a", "state-of-a-b"],
+                "user B" => &["state-of-a-b"],
                 _ => &[],
             };
             let expected: BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
@@ -1705,9 +1859,10 @@ mod audience_matrix_tests {
             .unwrap()
             .as_secs()
             - 3600;
+        // It may read the event: one it may not read never reaches the stream's end check.
         let app = Principal::App {
             token_id: TokenId("matrix-expired".into()),
-            caps: vec![],
+            caps: vec![AI_READ_CAPABILITY.clone()],
         };
         let expired = Arc::new(Session::for_test_expiring(app, an_hour_ago));
         let mut stream = open(expired).await;
@@ -1758,7 +1913,7 @@ mod token_expiry_tests {
             token_id: TokenId("user-jwt".into()),
             email: USER.into(),
             did: "did:key:events-user".into(),
-            caps: vec![],
+            caps: get_user_default_capabilities(),
         };
         let expired = Session::for_test_expiring(user, an_hour_ago);
         assert!(next_event(expired).await.is_none());

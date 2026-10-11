@@ -611,18 +611,6 @@ mod event_gate_tests {
             .is_authenticated()
     }
 
-    /// `Audience::Authenticated` reaches exactly the sessions that get an event stream.
-    fn authenticated_audience(session: &Session) -> bool {
-        use crate::events::{Audience, Event, Topic};
-        let event = Event::new(
-            Topic::RuntimeMessageReceived,
-            Audience::Authenticated,
-            serde_json::json!({}),
-        );
-        assert_eq!(session.may_receive(&event), session.is_authenticated());
-        session.is_authenticated()
-    }
-
     // On a node with an admin credential, a socket with no token gets only the anonymous
     // capabilities. It used to receive the main agent's event stream all the same.
     #[test]
@@ -633,18 +621,26 @@ mod event_gate_tests {
             caps: vec![AGENT_AUTH_CAPABILITY.clone()],
         };
         let anonymous = Session::for_test(anonymous, ListenerReach::Network);
-        assert!(!authenticated_audience(&anonymous));
+        assert!(!anonymous.is_authenticated());
     }
 
-    // Apps with narrow capabilities still need their query-subscription and link events.
+    // Apps with narrow capabilities still get an event stream: their capabilities choose the
+    // topics and perspectives it delivers (`Session::may_receive`).
     #[test]
-    fn authenticated_sessions_receive_events_whatever_their_capabilities() {
+    fn authenticated_sessions_get_events_whatever_their_capabilities() {
+        use crate::events::{Audience, Event, Topic};
         let narrow_app = RequestContext::app_for_test(vec![perspective_query_capability(vec![
             "some-uuid".to_string(),
         ])]);
-        assert!(authenticated_audience(&narrow_app.session));
+        assert!(narrow_app.session.is_authenticated());
+        let link = |uuid: &str| {
+            Event::new(Topic::LinkAdded, Audience::Everyone, serde_json::json!({}))
+                .for_perspective(uuid)
+        };
+        assert!(narrow_app.session.may_receive(&link("some-uuid")));
+        assert!(!narrow_app.session.may_receive(&link("other-uuid")));
         let user = RequestContext::user_for_test("u@example.org", "did:key:u", vec![]);
-        assert!(authenticated_audience(&user.session));
+        assert!(user.session.is_authenticated());
         assert!(gets_events(ADMIN, Some(ADMIN), ListenerReach::Network));
         // No token on a loopback listener of a node without an admin credential (#1059).
         assert!(gets_events("", None, ListenerReach::Loopback));

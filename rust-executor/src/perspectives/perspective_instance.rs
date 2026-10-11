@@ -4565,11 +4565,9 @@ impl PerspectiveInstance {
                                  mut signal: PerspectiveExpression,
                                  recipient: String| async move {
                 signal.verify_signatures();
-                get_global_pubsub().await.publish_event(super::signal_event(
-                    handle,
-                    signal,
-                    Some(recipient),
-                ));
+                get_global_pubsub()
+                    .await
+                    .publish_event(super::signal_event(handle, signal, recipient));
             };
 
             // Check if any managed email user is the recipient
@@ -4662,11 +4660,9 @@ impl PerspectiveInstance {
                                 let mut signal = payload.clone();
                                 signal.verify_signatures();
 
-                                get_global_pubsub().await.publish_event(super::signal_event(
-                                    handle,
-                                    signal,
-                                    Some(user_did),
-                                ));
+                                get_global_pubsub()
+                                    .await
+                                    .publish_event(super::signal_event(handle, signal, user_did));
                             }
                         }
                     }
@@ -4697,7 +4693,7 @@ impl PerspectiveInstance {
                     get_global_pubsub().await.publish_event(super::signal_event(
                         handle,
                         signal,
-                        Some(main_agent_did),
+                        main_agent_did,
                     ));
                 }
             }
