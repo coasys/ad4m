@@ -165,7 +165,7 @@ export class ApiClient {
             ws.onclose = (event?: CloseEvent) => {
                 reject(closedError())
                 if (event?.code === CLOSE_AUTH_FAILED && this._ws === ws) {
-                    this._failAuth(event.reason || 'token expired or revoked')
+                    this._failAuth(event.reason || 'Unauthorized access: the token expired or was revoked')
                 } else {
                     this._onClose(ws, event?.code === CLOSE_TRY_AGAIN_LATER ? event.reason : undefined)
                 }
