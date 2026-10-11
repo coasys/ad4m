@@ -855,6 +855,39 @@ fn decode_consensus_rule(target: &str) -> Result<ConsensusRule, String> {
     serde_json::from_str(&s).map_err(|e| e.to_string())
 }
 
+/// The predicate a flow definition's `consensusRule` is written on, at the
+/// flow URI and at each state URI (`parse_flow_to_links`, `SHACLFlow.toLinks`).
+pub const CONSENSUS_RULE_PREDICATE: &str = "ad4m://consensusRule";
+
+/// Refuse, before anything is written, a `consensusRule` link this replica
+/// could not read back (#1144): a key the reader does not know, a key written
+/// twice, or a literal that does not decode. The reader fails closed on such
+/// a rule ([`read_consensus_rule`]), so storing it would leave a gate that
+/// refuses every edge it governs and names the key only in the executor log.
+/// Every local write path (`add_link`, `add_links`, `link_mutations`,
+/// `update_link`) runs this on its additions, so `addFlow` gets the error
+/// instead, naming the state or flow URI and the key. Sync is not checked: a
+/// definition arriving from a peer is stored as written and still refused
+/// when it is read.
+pub fn check_consensus_rule_links<'a>(
+    links: impl IntoIterator<Item = &'a Link>,
+) -> Result<(), AnyError> {
+    for link in links {
+        if link.predicate.as_deref() != Some(CONSENSUS_RULE_PREDICATE) {
+            continue;
+        }
+        if let Err(e) = decode_consensus_rule(&link.target) {
+            return Err(anyhow::anyhow!(
+                "flow definition refused: the `consensusRule` on `{}` cannot be read ({e}). \
+                 Nothing was stored. A stored rule with an unknown or duplicate key would \
+                 refuse every edge it governs (#1144).",
+                link.source
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Read the `consensusRule` at ONE scope — a flow URI, or one state URI —
 /// into the `(rule, unreadable)` pair the parser stores. Both scopes go
 /// through here so that one place decides what an unreadable rule is.
