@@ -2,7 +2,7 @@ use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::parse_shacl_to_links;
+use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::{create_signed_expression, did_for_context};
@@ -1913,6 +1913,9 @@ impl PerspectiveInstance {
         }
 
         link_expression.data.validate()?;
+        // A flow definition's rule this replica could not read back is
+        // refused here, not stored and refused at every edge (#1144).
+        check_consensus_rule_links([&link_expression.data])?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
@@ -1967,6 +1970,7 @@ impl PerspectiveInstance {
         for link in &links {
             link.validate()?;
         }
+        check_consensus_rule_links(&links)?;
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
@@ -2055,6 +2059,7 @@ impl PerspectiveInstance {
         for link in &addition_links {
             link.validate()?;
         }
+        check_consensus_rule_links(&addition_links)?;
         let additions = addition_links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context))
@@ -2174,6 +2179,7 @@ impl PerspectiveInstance {
             }
         };
 
+        check_consensus_rule_links([&new_link])?;
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
