@@ -286,7 +286,7 @@ pub(crate) fn event_recipients(handle: &PerspectiveHandle) -> Vec<String> {
 
 /// Publishes one `topic` event per DID in `owners`, each for that DID only, with the DID
 /// as the payload's `owner`.
-fn publish_to_each_owner<T: Serialize>(
+pub(crate) fn publish_to_each_owner<T: Serialize>(
     topic: Topic,
     owners: Vec<String>,
     payload: impl Fn(String) -> T,

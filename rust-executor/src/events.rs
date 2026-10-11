@@ -10,8 +10,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// One event topic. Each string topic in `pubsub` has one variant
-/// (`PERSPECTIVE_LINK_ADDED_TOPIC` → [`Topic::LinkAdded`]); [`Topic::as_str`] gives the
-/// event type the socket sends (`link-added`).
+/// (`AGENT_UPDATED_TOPIC` → [`Topic::AgentUpdated`]); [`Topic::as_str`] gives the
+/// event type the socket sends (`agent-updated`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Topic {
     AgentStatusChanged,

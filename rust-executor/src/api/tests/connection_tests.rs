@@ -15,17 +15,22 @@ use crate::api::events_ws::build_event_stream_for;
 use crate::api::tests::support::{admin_ctx, registered_perspective};
 use crate::api::ws_handler::build_handler_map;
 use crate::api::ws_rpc::{serve, Connection};
-use crate::pubsub::{
-    get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 use crate::types::RequestContext;
 
 const DID: &str = "did:key:alice";
 
-/// A session whose check never fails: no token, nothing to revoke or expire.
-fn unending() -> Arc<Session> {
-    let anonymous = Principal::Anonymous { caps: vec![] };
-    Arc::new(Session::for_test(anonymous, ListenerReach::Network))
+/// The event stream's session: the user `did`, whose token nobody revokes and which never
+/// expires.
+fn listener(did: &str) -> Arc<Session> {
+    let user = Principal::User {
+        token_id: TokenId(format!("listener-{did}")),
+        email: format!("{did}@example.org"),
+        did: did.to_string(),
+        caps: vec![],
+    };
+    Arc::new(Session::for_test(user, ListenerReach::Network))
 }
 
 struct Socket {
@@ -51,7 +56,7 @@ impl Socket {
         let conn = Connection::new(Arc::new(build_handler_map()), ctx, tx);
         // The socket holds every capability, so it can approve apps.
         let events = build_event_stream_for(
-            unending(),
+            listener(did),
             conn.interest(),
             Some(did.into()),
             None,
@@ -120,17 +125,16 @@ impl Socket {
     }
 }
 
+/// `DID`'s copy of a link-added event of `perspective`, which `DID` owns.
 async fn publish_link(perspective: &str, run: &str) {
-    let event = json!({
+    let payload = json!({
         "perspectiveUuid": perspective,
         "owner": DID,
         "link": { "author": DID, "timestamp": run,
                   "data": { "source": run, "predicate": null, "target": "t" } }
     });
-    get_global_pubsub()
-        .await
-        .publish(&PERSPECTIVE_LINK_ADDED_TOPIC, &event.to_string())
-        .await;
+    let event = Event::new(Topic::LinkAdded, Audience::Dids(vec![DID.into()]), payload);
+    get_global_pubsub().await.publish_event(event);
 }
 
 async fn publish_both(a: &str, b: &str, run: &str) {
