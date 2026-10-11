@@ -45,6 +45,16 @@ pub enum Guard {
         /// so a caller cannot learn that it exists. The handler does not run.
         hides_existence: bool,
     },
+    /// Acts on the AI task whose id `task_id` reads from the params. A user session reaches
+    /// only the tasks it created (`tasks.user_email`): another user's task, an operator task
+    /// and a missing one are all 404, so a user cannot learn which task ids exist. The
+    /// operator and apps reach every task, and the handler answers for a missing one. An
+    /// anonymous caller gets 403, as for [`Guard::SelfAgent`].
+    Task {
+        capability: Capability,
+        /// The task's id in the params.
+        task_id: fn(&Value) -> Option<String>,
+    },
 }
 
 /// What a guard lets the dispatcher do.
@@ -86,6 +96,7 @@ impl Guard {
     pub fn capability(&self, uuid: &str) -> Capability {
         match self {
             Guard::Anonymous(cap) | Guard::Node(cap) | Guard::SelfAgent(cap) => cap.clone(),
+            Guard::Task { capability, .. } => capability.clone(),
             Guard::Perspective { capability, .. } => capability(vec![uuid.to_string()]),
         }
     }
@@ -103,6 +114,13 @@ impl Guard {
             })?),
             _ => None,
         };
+        let task_id =
+            match self {
+                Guard::Task { task_id, .. } => Some(task_id(params).ok_or_else(|| {
+                    WsRpcError::bad_request(format!("{method} needs the task's id"))
+                })?),
+                _ => None,
+            };
         let capability = self.capability(uuid.as_deref().unwrap_or_default());
         check_capability(&ctx.capabilities, &capability).map_err(WsRpcError::forbidden)?;
 
@@ -120,6 +138,22 @@ impl Guard {
                     return Err(WsRpcError::forbidden(format!(
                         "{method} acts on the caller's own agent, so it needs a token"
                     )));
+                }
+            }
+            Guard::Task { .. } => {
+                if !ctx.session.is_authenticated() {
+                    return Err(WsRpcError::forbidden(format!(
+                        "{method} acts on the caller's own AI task, so it needs a token"
+                    )));
+                }
+                if let Some(email) = ctx.user_email() {
+                    let id = task_id.expect("a task guard reads a task id");
+                    let owner =
+                        crate::db::Ad4mDb::with_global_instance(|db| db.get_task_owner(&id))
+                            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+                    if owner.flatten().as_deref() != Some(email) {
+                        return Err(WsRpcError::not_found(format!("Task {id} not found")));
+                    }
                 }
             }
             Guard::Perspective {

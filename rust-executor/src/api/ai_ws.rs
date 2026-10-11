@@ -253,12 +253,37 @@ async fn get_model_loading_status(
 
 // ── Tasks ──
 
-async fn list_tasks(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let tasks = AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?;
+/// The id of the task `ai.prompt` runs: its `taskId` param.
+fn prompt_task_id(params: &Value) -> Option<String> {
+    params.get("taskId")?.as_str().map(str::to_string)
+}
+
+/// The id of the task `ai.removeTask` deletes: its `id` param.
+fn removed_task_id(params: &Value) -> Option<String> {
+    params.get("id")?.as_str().map(str::to_string)
+}
+
+/// The id of the task `ai.updateTask` rewrites: `task.taskId`, the row the update writes.
+fn updated_task_id(params: &Value) -> Option<String> {
+    params
+        .get("task")?
+        .get("taskId")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// A user session lists its own tasks; the operator and apps list every task.
+async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let tasks = match ctx.user_email() {
+        Some(email) => Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(Some(email)))
+            .map_err(|e| WsRpcError::internal(e.to_string()))?,
+        None => AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?,
+    };
     Ok(serde_json::to_value(tasks)?)
 }
 
-async fn add_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+/// The new task belongs to the caller's user; the operator's and apps' tasks to no user.
+async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let task: AITaskInput =
         serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
@@ -268,7 +293,7 @@ async fn add_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .add_task(task)
+        .add_task(task, ctx.user_email())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -431,22 +456,32 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
-    // Tasks have no owner yet: every caller with the capability reaches every task.
+    // Tasks belong to the user who created them (`tasks.user_email`); the operator and apps
+    // reach every task. The list and the new task follow the caller's user.
     map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
         .read()
         .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
     map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task)
         .guard(Guard::SelfAgent(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task)
-        .guard(Guard::SelfAgent(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Task {
+            capability: AI_CREATE_CAPABILITY.clone(),
+            task_id: updated_task_id,
+        });
     map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
-        .guard(Guard::SelfAgent(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Task {
+            capability: AI_CREATE_CAPABILITY.clone(),
+            task_id: removed_task_id,
+        });
     // Prompts, embeddings and transcription bill the caller's user; the handlers check its
     // compute credits after the guard.
     // The completion text.
     map.method::<PromptRequest, String>("ai.prompt", ai_prompt)
         .long()
-        .guard(Guard::SelfAgent(AI_PROMPT_CAPABILITY.clone()));
+        .guard(Guard::Task {
+            capability: AI_PROMPT_CAPABILITY.clone(),
+            task_id: prompt_task_id,
+        });
     // The embedding vector as JSON, zlib-deflated, base64-encoded.
     map.method::<EmbedRequest, String>("ai.embed", ai_embed)
         .long()

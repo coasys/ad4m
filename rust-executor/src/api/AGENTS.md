@@ -66,6 +66,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Node(cap)` | no user session: 403 naming the method, whatever the user's capabilities; the operator, apps and anonymous callers pass |
 | `SelfAgent(cap)` | an authenticated session; the handler acts on `ctx.acts_as()` |
 | `Perspective { .. }` | `get_perspective_with_access`: the operator reaches all; a user its own; an app the unowned and the main agent's; 404 when missing |
+| `Task { .. }` | an authenticated session; a user reaches only its own AI tasks (`tasks.user_email`), and gets 404 for any other id, its own missing or not; the operator and apps reach every task |
 
 Capabilities stay: every guard checks one first, and the rule adds whose data the call may touch.
 A method takes at most one guard (a second panics). A method without one still dispatches,
@@ -82,23 +83,28 @@ Guarded today: every method that checks a capability first.
   publish/remove/settings, export/import, friends and outbox, link-language template writes,
   `runtime.addHcAgentInfos`, `runtime.setFreeHostingEnabled`, `runtime.quit`, `user.list`,
   `user.wallet`, `user.emailTest`). `runtime.importData` keeps its handler's
-  `ctx.is_operator()` check: the guard admits apps.
+  `ctx.is_operator()` check: the guard admits apps. `runtime.exportData` of one perspective
+  checks `get_perspective_with_access` in its handler (a `db` export names none), so an app
+  exports only the unowned and the main agent's perspectives.
 - `Anonymous`: `agent.requestCapability`, `agent.generateJwt`, `user.create`, `user.login`,
   `user.verifyEmail`, `user.requestVerification`, `user.multiUserEnabled`.
 - `SelfAgent`: the methods any authenticated caller with the capability may call, users
-  included. Most act as the caller (profile, sign, notifications, prompts, expressions,
-  neighbourhood calls, `hosting.setHotWallet`, which also refuses a session without a user).
+  included. Most act as the caller (profile, sign, notifications, embeddings, expressions,
+  `neighbourhood.join`, `ai.addTask`, which records the caller's user as the task's owner,
+  `hosting.setHotWallet`, which also refuses a session without a user).
   `runtime.grantNotification` keeps its handler's `ctx.is_operator()` check, so a user gets
   the handler's message.
+  `ai.tasks` lists a user's own tasks, and every task to the operator and apps.
   Some read node-wide data that users read today: `agent.getApps`,
-  `agent.getTrustedAgents`, `ai.models`, AI tasks, `language.*` reads, link-language templates,
+  `agent.getTrustedAgents`, `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Node` would refuse
   users there, a behaviour change.
-- `Perspective`: every `perspective.*` method that names one perspective. The neighbourhood
-  calls that name one (`sendBroadcast`, `sendSignal`, `setOnlineStatus`, `hasTelepresence`,
-  `onlineAgents`, `otherAgents`) are `SelfAgent` on the neighbourhood capability: they check
-  only that the perspective exists (`otherAgents` also the owner), and a perspective guard
-  would add the owner rule.
+- `Perspective`: every `perspective.*` method that names one perspective, and every
+  `neighbourhood.*` method that names one (`publish` by `perspectiveUuid`, the others by
+  `uuid`), on the neighbourhood capability: the perspective that holds a neighbourhood decides
+  who may use it.
+- `Task`: `ai.updateTask` (`task.taskId`, the row it rewrites), `ai.removeTask` (`id`) and
+  `ai.prompt` (`taskId`).
 
 Without a guard, because every guard checks a capability first:
 
@@ -115,9 +121,10 @@ Without a guard, because every guard checks a capability first:
 
 `tests/method_matrix_tests.rs` walks every guarded method in `build_handler_map()` and calls
 `admit` as each kind of caller (operator, app with and without the capability, user, another
-user, anonymous) on its own, others', unowned, the main agent's and missing perspectives. A new
-guard is covered without a new test; a method whose params need more than `uuid` adds an entry
-to `EXTRA_PARAMS`.
+user, anonymous) on its own, others', unowned, the main agent's and missing perspectives, and
+on the user's own, an operator's and a missing AI task. A new guard is covered without a new
+test; a method whose params need more than `uuid` adds an entry to `EXTRA_PARAMS`, with
+`TARGET` where it names the row's perspective or task in another param.
 
 ## Protocol
 
@@ -203,5 +210,7 @@ grammar, used by `perspectives/interpretation/run.rs`. They move to `agentic/`
 ## Tests
 
 `tests/` (`types_tests.rs`, `shacl_ws_tests.rs`) and `openai_compat/tests.rs`.
-Behaviour changes to any handler also need the JS integration suite (`pnpm run
+`tests/multi_user.rs` starts a multi-user node and opens sessions from tokens the node signs,
+as the WS upgrade does; the `*_access_tests.rs` files drive `build_handler_map().dispatch` as
+different users with it. Behaviour changes to any handler also need the JS integration suite (`pnpm run
 test-main` at repo root).

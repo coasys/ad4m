@@ -114,7 +114,7 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::Bool(true))
 }
 
-async fn export_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ExportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -131,8 +131,10 @@ async fn export_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
                 WsRpcError::bad_request("perspective_uuid required for perspective export")
             })?;
-            let perspective = crate::perspectives::get_perspective(uuid)
-                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?;
+            // The guard admits apps, which reach only the unowned and the main agent's
+            // perspectives: the rule `Guard::Perspective` applies (a "db" export names none).
+            let perspective =
+                super::perspectives_ws::get_perspective_with_access(uuid, &ctx).await?;
             let links = perspective
                 .get_links(&crate::types::LinkQuery {
                     source: None,
@@ -733,7 +735,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // `ALL` with the capability's message instead.
     // Opens a browser on the node's host.
     map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
-    // Read or write any path on the host and the whole node database.
+    // Read or write any path on the host and the whole node database. A perspective export
+    // also checks the perspective's owner in the handler.
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
         .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)

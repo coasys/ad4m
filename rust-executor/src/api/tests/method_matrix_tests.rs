@@ -2,7 +2,8 @@
 //! resources of its own and of others, gets the answer its guard names.
 //!
 //! The walk reads the guards from the handler map, so a method that gets a guard is covered
-//! without a new test. The rows are per guard kind ([`resource_rows`], [`perspective_rows`]).
+//! without a new test. The rows are per guard kind ([`resource_rows`], [`perspective_rows`],
+//! [`task_rows`]).
 //! A method whose params need more than the perspective's uuid adds an entry to
 //! [`EXTRA_PARAMS`]; without it the walk reports the method's 400. The walk calls
 //! [`HandlerMap::admit`], the dispatcher's steps before the handler, so no handler runs.
@@ -16,7 +17,7 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::{
     anonymous_capabilities_when, perspective_query_capability, Capability, AGENT_AUTH_CAPABILITY,
-    AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY,
+    AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY, AI_PROMPT_CAPABILITY,
 };
 use crate::agent::AgentService;
 use crate::api::guards::{uuid_param, Admission, Guard};
@@ -24,6 +25,7 @@ use crate::api::perspectives_ws::PerspectiveUuidParams;
 use crate::api::ws_handler::{build_handler_map, HandlerMap, NoParams, WsRpcError};
 use crate::types::{PerspectiveHandle, RequestContext};
 
+const USER_EMAIL: &str = "user@example.org";
 const USER_DID: &str = "did:key:matrix-user";
 const OTHER_USER_DID: &str = "did:key:matrix-other-user";
 
@@ -65,7 +67,8 @@ enum Expect {
     NotFound,
 }
 
-/// Guards that name no resource: who passes each.
+/// Guards that name no resource: who passes each. A guard that names one has its own rows
+/// ([`perspective_rows`], [`task_rows`]).
 fn resource_rows(guard: &Guard) -> &'static [(Caller, Expect)] {
     use Caller::*;
     use Expect::*;
@@ -91,8 +94,32 @@ fn resource_rows(guard: &Guard) -> &'static [(Caller, Expect)] {
             (User, Granted),
             (Anonymous, Forbidden),
         ],
-        Guard::Perspective { .. } => &[],
+        Guard::Perspective { .. } | Guard::Task { .. } => &[],
     }
+}
+
+/// `Guard::Task`: who reaches which AI task. For tasks, [`Target::UsersOwn`] is a task of
+/// [`Caller::User`] and [`Target::MainAgents`] an operator task (no user). A user's refusal
+/// is 404, so it cannot learn which task ids exist; the operator and apps reach every task,
+/// and the handler answers for a missing one.
+fn task_rows() -> &'static [(Caller, Target, Expect)] {
+    use Caller::*;
+    use Expect::*;
+    use Target::*;
+    &[
+        (Operator, UsersOwn, Granted),
+        (Operator, MainAgents, Granted),
+        (Operator, Missing, Granted),
+        (AppWithout, UsersOwn, Forbidden),
+        (AppWith, UsersOwn, Granted),
+        (AppWith, MainAgents, Granted),
+        (AppWith, Missing, Granted),
+        (User, UsersOwn, Granted),
+        (User, MainAgents, NotFound),
+        (User, Missing, NotFound),
+        (OtherUser, UsersOwn, NotFound),
+        (Anonymous, UsersOwn, Forbidden),
+    ]
 }
 
 /// `Guard::Perspective`: who reaches which perspective.
@@ -120,8 +147,13 @@ fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
 /// A method and the params it needs beyond the perspective's uuid.
 type ExtraParams = (&'static str, fn() -> Value);
 
+/// Stands for the row's perspective or task in [`EXTRA_PARAMS`], where a method names it in a
+/// param other than `uuid`. [`params`] replaces it with the row's id.
+const TARGET: &str = "@target";
+
 const EXTRA_PARAMS: &[ExtraParams] = &[
     ("test.perspective.hidden", || json!({ "note": "fixture" })),
+    ("test.task", || json!({ "taskId": TARGET })),
     // Guard::Node. `admit` runs no handler, so no path, key or proof here is used.
     ("agent.generate", || json!({ "passphrase": "p" })),
     ("agent.lock", || json!({ "passphrase": "p" })),
@@ -177,13 +209,13 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("ai.addTask", || json!({ "task": ai_task() })),
     ("ai.updateTask", || {
         let mut task = ai_task();
-        task["taskId"] = json!("t1");
+        task["taskId"] = json!(TARGET);
         task["createdAt"] = json!("2026-01-01T00:00:00Z");
         task["updatedAt"] = json!("2026-01-01T00:00:00Z");
         json!({ "task": task })
     }),
-    ("ai.removeTask", || json!({ "id": "t1" })),
-    ("ai.prompt", || json!({ "taskId": "t1", "prompt": "p" })),
+    ("ai.removeTask", || json!({ "id": TARGET })),
+    ("ai.prompt", || json!({ "taskId": TARGET, "prompt": "p" })),
     ("ai.embed", || json!({ "modelId": "m1", "text": "t" })),
     ("ai.transcriptionOpen", || json!({ "modelId": "m1" })),
     ("ai.transcriptionClose", || json!({ "streamId": "s1" })),
@@ -277,7 +309,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "neighbourhood.publish",
-        || json!({ "perspectiveUuid": "p", "linkLanguage": "QmLang", "meta": { "links": [] } }),
+        || json!({ "perspectiveUuid": TARGET, "linkLanguage": "QmLang", "meta": { "links": [] } }),
     ),
     (
         "neighbourhood.sendBroadcast",
@@ -488,13 +520,26 @@ fn entanglement_proof() -> Value {
     })
 }
 
-fn params(method: &str, uuid: Option<&str>) -> Value {
+/// The params of `method` naming `target` (a perspective or a task): as the `uuid` param of a
+/// perspective method, and wherever its [`EXTRA_PARAMS`] put [`TARGET`].
+fn params(method: &str, target: Option<&str>, uuid_param: bool) -> Value {
+    fn replace(value: &mut Value, target: &str) {
+        match value {
+            Value::String(s) if s == TARGET => *s = target.to_string(),
+            Value::Array(items) => items.iter_mut().for_each(|v| replace(v, target)),
+            Value::Object(fields) => fields.values_mut().for_each(|v| replace(v, target)),
+            _ => {}
+        }
+    }
     let mut params = EXTRA_PARAMS
         .iter()
         .find(|(name, _)| *name == method)
         .map_or_else(|| json!({}), |(_, extra)| extra());
-    if let Some(uuid) = uuid {
-        params["uuid"] = json!(uuid);
+    if let Some(target) = target {
+        replace(&mut params, target);
+        if uuid_param {
+            params["uuid"] = json!(target);
+        }
     }
     params
 }
@@ -504,9 +549,7 @@ fn context(caller: Caller, capability: Capability) -> RequestContext {
         Caller::Operator => RequestContext::operator_for_test(),
         Caller::AppWithout => RequestContext::app_for_test(vec![]),
         Caller::AppWith => RequestContext::app_for_test(vec![capability]),
-        Caller::User => {
-            RequestContext::user_for_test("user@example.org", USER_DID, vec![capability])
-        }
+        Caller::User => RequestContext::user_for_test(USER_EMAIL, USER_DID, vec![capability]),
         Caller::OtherUser => {
             RequestContext::user_for_test("other@example.org", OTHER_USER_DID, vec![capability])
         }
@@ -524,11 +567,13 @@ fn outcome(result: Result<Admission, WsRpcError>) -> Result<Admission, u16> {
     result.map_err(|e| e.code)
 }
 
-/// The perspectives the rows name; removed when dropped.
+/// The perspectives and AI tasks the rows name; [`World::remove`] removes them.
 struct World {
     users_own: String,
     main_agents: String,
     unowned: String,
+    users_task: String,
+    operators_task: String,
 }
 
 impl World {
@@ -544,10 +589,25 @@ impl World {
         }
         let main_did = AgentService::with_global_instance(|a| a.did.clone()).expect("main DID");
         let run = uuid::Uuid::new_v4();
+        let task = |owner: Option<&str>| {
+            crate::db::Ad4mDb::with_global_instance(|db| {
+                db.add_task(
+                    format!("{run}-task"),
+                    "m1".to_string(),
+                    "s".to_string(),
+                    vec![],
+                    None,
+                    owner,
+                )
+            })
+            .expect("a task")
+        };
         let world = World {
             users_own: format!("{run}-users-own"),
             main_agents: format!("{run}-main-agents"),
             unowned: format!("{run}-unowned"),
+            users_task: task(Some(USER_EMAIL)),
+            operators_task: task(None),
         };
         for (uuid, owners) in [
             (&world.users_own, Some(vec![USER_DID.to_string()])),
@@ -575,9 +635,22 @@ impl World {
         }
     }
 
+    /// The task a task row names: the user's own, or an operator task for
+    /// [`Target::MainAgents`].
+    fn task(&self, target: Target) -> String {
+        match target {
+            Target::UsersOwn => self.users_task.clone(),
+            Target::MainAgents => self.operators_task.clone(),
+            Target::Unowned | Target::Missing => format!("{}-missing", uuid::Uuid::new_v4()),
+        }
+    }
+
     async fn remove(self) {
         for uuid in [&self.users_own, &self.main_agents, &self.unowned] {
             crate::perspectives::remove_perspective(uuid).await;
+        }
+        for task in [self.users_task, self.operators_task] {
+            crate::db::Ad4mDb::with_global_instance(|db| db.remove_task(task)).unwrap();
         }
     }
 }
@@ -600,19 +673,25 @@ async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
             .iter()
             .map(|&(caller, expect)| (caller, None, expect))
             .collect();
-        if matches!(guard, Guard::Perspective { .. }) {
+        let names_perspective = matches!(guard, Guard::Perspective { .. });
+        if names_perspective {
             cases.extend(
                 perspective_rows()
                     .iter()
                     .map(|&(caller, target, expect)| (caller, Some(world.uuid(target)), expect)),
             );
         }
-        for (caller, uuid, expect) in cases {
-            let ctx = context(caller, guard.capability("*"));
-            let got = outcome(
-                map.admit(method, &params(method, uuid.as_deref()), &ctx)
-                    .await,
+        if matches!(guard, Guard::Task { .. }) {
+            cases.extend(
+                task_rows()
+                    .iter()
+                    .map(|&(caller, target, expect)| (caller, Some(world.task(target)), expect)),
             );
+        }
+        for (caller, target, expect) in cases {
+            let ctx = context(caller, guard.capability("*"));
+            let params = params(method, target.as_deref(), names_perspective);
+            let got = outcome(map.admit(method, &params, &ctx).await);
             let want = match expect {
                 Expect::Granted => Ok(Admission::Granted),
                 Expect::Forbidden => Err(403),
@@ -624,7 +703,7 @@ async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
             checked += 1;
             if got != want {
                 failures.push(format!(
-                    "{method} as {caller:?} on {uuid:?}: expected {want:?}, got {got:?}"
+                    "{method} as {caller:?} on {target:?}: expected {want:?}, got {got:?}"
                 ));
             }
         }
@@ -638,6 +717,14 @@ async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
 struct UuidAndNote {
     uuid: String,
     note: String,
+}
+
+/// The params of the test method on one AI task.
+#[allow(dead_code)]
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+struct TaskIdParams {
+    task_id: String,
 }
 
 /// One test-only method per guard kind; each handler counts its calls in `calls`.
@@ -672,6 +759,11 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
             uuid: uuid_param,
             hides_existence: true,
         });
+    map.method::<TaskIdParams, bool>("test.task", handler())
+        .guard(Guard::Task {
+            capability: AI_PROMPT_CAPABILITY.clone(),
+            task_id: |params| params.get("taskId")?.as_str().map(str::to_string),
+        });
     map.method::<NoParams, bool>("test.unguarded", handler());
 }
 
@@ -684,8 +776,12 @@ async fn every_guarded_method_admits_exactly_the_callers_its_guard_names() {
     let (failures, checked) = walk(&map, &world).await;
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // 3 resource guards × 5 rows, 2 perspective guards × 13 rows: the walk reached them all.
-    assert!(checked >= 3 * 5 + 2 * 13, "only {checked} rows checked");
+    // 3 resource guards × 5 rows, 2 perspective guards × 13 rows, 1 task guard × 12 rows:
+    // the walk reached them all.
+    assert!(
+        checked >= 3 * 5 + 2 * 13 + 12,
+        "only {checked} rows checked"
+    );
 }
 
 #[tokio::test]
