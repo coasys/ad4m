@@ -60,7 +60,8 @@ impl std::fmt::Display for RedeemError {
     }
 }
 
-/// Pending requests by request id. Each access first deletes the expired ones.
+/// Pending requests by request id. Every request, approval and redemption also deletes the
+/// expired ones, so no separate sweeper runs.
 #[derive(Default)]
 pub struct PendingApprovals(Mutex<HashMap<String, PendingApproval>>);
 
