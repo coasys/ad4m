@@ -856,10 +856,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
         .read()
         .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
-    // No guard: every caller may ask, with or without capabilities, and every guard checks a
-    // capability.
+    // Every caller may ask, with or without capabilities.
     map.method::<NoParams, bool>("agent.isLocked", is_locked)
-        .read();
+        .read()
+        .guard(Guard::Open);
     // The node's trust list, which users read too.
     map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
         .read()

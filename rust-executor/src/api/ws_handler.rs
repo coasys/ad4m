@@ -360,7 +360,8 @@ impl HandlerMap {
         }
     }
 
-    /// Every dispatched method's guard (`None`: the method has none yet), sorted by name.
+    /// Every dispatched method's guard (`None`: the method has none, which
+    /// [`HandlerMap::require_guards`] refuses), sorted by name.
     pub fn guards(&self) -> Vec<(&str, Option<&Guard>)> {
         let mut guards: Vec<(&str, Option<&Guard>)> = self
             .handlers
@@ -427,13 +428,36 @@ impl HandlerMap {
         })?;
         match &entry.guard {
             Some(guard) => guard.admit(msg_type, params, ctx).await,
-            None => Ok(Admission::Granted),
+            // `require_guards` stops a map with such a method at start-up; a map built
+            // without it still refuses the call.
+            None => Err(WsRpcError::internal(format!(
+                "{msg_type} has no guard, so no caller may call it"
+            ))),
         }
     }
 
     /// Number of registered handlers (useful for logging at startup).
     pub fn len(&self) -> usize {
         self.handlers.len()
+    }
+
+    /// Panics, naming them, if any dispatched method has no guard. The API thread builds the
+    /// map before it serves a request, so a method without a guard ends that thread at start
+    /// and the executor binary exits (`exit_when_api_fails`).
+    pub fn require_guards(self) -> Self {
+        let unguarded: Vec<&str> = self
+            .guards()
+            .into_iter()
+            .filter_map(|(name, guard)| guard.is_none().then_some(name))
+            .collect();
+        if !unguarded.is_empty() {
+            panic!(
+                "WS RPC methods without a guard: {}. Every method declares who may call it \
+                 (`.guard(..)`, see api/guards.rs).",
+                unguarded.join(", ")
+            );
+        }
+        self
     }
 }
 
@@ -457,19 +481,7 @@ pub fn build_handler_map() -> HandlerMap {
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);
     log::info!("WS RPC: registered {} handlers", map.len());
-    let unguarded: Vec<&str> = map
-        .guards()
-        .into_iter()
-        .filter_map(|(name, guard)| guard.is_none().then_some(name))
-        .collect();
-    if !unguarded.is_empty() {
-        log::warn!(
-            "WS RPC: {} methods have no guard, so only their handlers check the caller: {}",
-            unguarded.len(),
-            unguarded.join(", ")
-        );
-    }
-    map
+    map.require_guards()
 }
 
 // ── Param extraction helpers ────────────────────────────────────────────────

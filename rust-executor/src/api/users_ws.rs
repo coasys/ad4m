@@ -24,12 +24,8 @@ async fn get_multi_user_enabled(
 
 async fn set_multi_user_enabled(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-
     let body: SetMultiUserRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -61,12 +57,8 @@ async fn get_user_wallet(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
 
 async fn set_user_free_access(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-
     let body: SetUserFreeAccessRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -370,13 +362,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Anonymous(
             RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
         ));
-    // No guard on these two: they check no capability, since a user acts on their own
-    // sessions whatever their capabilities, and every guard checks one. Only the operator may
-    // name another user. The handlers check the session's principal.
+    // Open: a user acts on their own sessions whatever their capabilities. Only the operator
+    // may name another user. The handlers check the session's principal.
     // Revokes the caller's user token; 400 for any other session. Answers `true`.
-    map.method::<NoParams, bool>("user.logout", logout);
+    map.method::<NoParams, bool>("user.logout", logout)
+        .guard(Guard::Open);
     // Revokes every token of a user issued up to now. Answers `true`.
-    map.method::<UsersRevokeAllSessionsParams, bool>("user.revokeAllSessions", revoke_all_sessions);
+    map.method::<UsersRevokeAllSessionsParams, bool>("user.revokeAllSessions", revoke_all_sessions)
+        .guard(Guard::Open);
     // Every user's record: the default user capabilities leave this capability out.
     map.method::<NoParams, Vec<UserStatistics>>("user.list", list_users)
         .read()
@@ -386,14 +379,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Anonymous(
             RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
         ));
-    // Operator only, with no guard: the handlers answer every other caller "Admin credential
-    // required" (403). A guard checks a capability first, so it would answer a caller without
-    // `ALL` with the capability's message instead.
-    map.method::<SetMultiUserRequest, bool>("user.setMultiUserEnabled", set_multi_user_enabled);
-    map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access);
-    // Always answers 501; the contract is the SDK's call. No guard: it checks no capability,
-    // and every guard checks one.
-    map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits);
+    map.method::<SetMultiUserRequest, bool>("user.setMultiUserEnabled", set_multi_user_enabled)
+        .guard(Guard::Operator);
+    map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access)
+        .guard(Guard::Operator);
+    // Always answers 501, to every caller; the contract is the SDK's call.
+    map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits)
+        .guard(Guard::Open);
     // Any user's hot-wallet address, named by email (404 when none).
     map.method::<UsersEmailParams, String>("user.wallet", get_user_wallet)
         .read()

@@ -8,8 +8,11 @@
 //! check.
 //!
 //! A method declares its [`Guard`] where it registers (`map.method(..).guard(..)`), and the
-//! dispatcher runs it before the handler. Every guard is a capability check first, then an
-//! ownership rule: capabilities stay, the guard adds whose data the call may touch.
+//! dispatcher runs it before the handler. Every method has one: `build_handler_map` panics on
+//! a method without a guard, so the executor does not start. A guard is a capability check
+//! first, then an ownership rule: capabilities stay, the guard adds whose data the call may
+//! touch. Two guards check no capability: [`Guard::Open`] (the handler decides) and
+//! [`Guard::Operator`] (the operator holds every capability).
 
 use crate::agent::capabilities::{check_capability, Capability};
 use crate::agent::AgentContext;
@@ -21,6 +24,15 @@ use serde_json::Value;
 /// variant (403, or `null` for a perspective method that hides existence).
 #[derive(Clone, Debug)]
 pub enum Guard {
+    /// No check: every caller reaches the handler, anonymous ones included, and the handler
+    /// decides. For the methods that check no capability: public node facts
+    /// (`runtime.info`), calls on the caller's own session (`user.logout`), stubs that answer
+    /// every caller alike.
+    Open,
+    /// The node's operator only ([`RequestContext::is_operator`]: the admin credential, or no
+    /// token on a loopback listener of a node without one). Every other caller gets 403
+    /// "Admin credential required", whatever its capabilities: no app token is the operator.
+    Operator,
     /// Callers without a token too: requesting a capability, signing up, logging in. The
     /// capability must be one that anonymous callers hold (`anonymous_capabilities`).
     Anonymous(Capability),
@@ -57,6 +69,10 @@ pub enum Guard {
     },
 }
 
+/// What [`Guard::Operator`] answers every other caller, as the handlers did before it
+/// (`anonymous_access_tests` pins it).
+pub const OPERATOR_ONLY: &str = "Admin credential required";
+
 /// What a guard lets the dispatcher do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Admission {
@@ -91,13 +107,14 @@ impl Guard {
         }
     }
 
-    /// The capability the guard checks first. For a perspective guard, it names the
-    /// perspective `uuid`.
-    pub fn capability(&self, uuid: &str) -> Capability {
+    /// The capability the guard checks first, `None` for [`Guard::Open`] and
+    /// [`Guard::Operator`]. For a perspective guard, it names the perspective `uuid`.
+    pub fn capability(&self, uuid: &str) -> Option<Capability> {
         match self {
-            Guard::Anonymous(cap) | Guard::Node(cap) | Guard::SelfAgent(cap) => cap.clone(),
-            Guard::Task { capability, .. } => capability.clone(),
-            Guard::Perspective { capability, .. } => capability(vec![uuid.to_string()]),
+            Guard::Open | Guard::Operator => None,
+            Guard::Anonymous(cap) | Guard::Node(cap) | Guard::SelfAgent(cap) => Some(cap.clone()),
+            Guard::Task { capability, .. } => Some(capability.clone()),
+            Guard::Perspective { capability, .. } => Some(capability(vec![uuid.to_string()])),
         }
     }
 
@@ -121,11 +138,17 @@ impl Guard {
                 })?),
                 _ => None,
             };
-        let capability = self.capability(uuid.as_deref().unwrap_or_default());
-        check_capability(&ctx.capabilities, &capability).map_err(WsRpcError::forbidden)?;
+        if let Some(capability) = self.capability(uuid.as_deref().unwrap_or_default()) {
+            check_capability(&ctx.capabilities, &capability).map_err(WsRpcError::forbidden)?;
+        }
 
         match self {
-            Guard::Anonymous(_) => {}
+            Guard::Open | Guard::Anonymous(_) => {}
+            Guard::Operator => {
+                if !ctx.is_operator() {
+                    return Err(WsRpcError::forbidden(OPERATOR_ONLY));
+                }
+            }
             Guard::Node(_) => {
                 if ctx.user_email().is_some() {
                     return Err(WsRpcError::forbidden(format!(

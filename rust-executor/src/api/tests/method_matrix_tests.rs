@@ -1,5 +1,6 @@
-//! The method matrix: every method that has a guard, called by each kind of caller on
-//! resources of its own and of others, gets the answer its guard names.
+//! The method matrix: every method, called by each kind of caller on resources of its own and
+//! of others, gets the answer its guard names. Every method has a guard: the walk fails on
+//! one without.
 //!
 //! The walk reads the guards from the handler map, so a method that gets a guard is covered
 //! without a new test. The rows are per guard kind ([`resource_rows`], [`perspective_rows`],
@@ -73,6 +74,20 @@ fn resource_rows(guard: &Guard) -> &'static [(Caller, Expect)] {
     use Caller::*;
     use Expect::*;
     match guard {
+        Guard::Open => &[
+            (Operator, Granted),
+            (AppWithout, Granted),
+            (AppWith, Granted),
+            (User, Granted),
+            (Anonymous, Granted),
+        ],
+        Guard::Operator => &[
+            (Operator, Granted),
+            (AppWithout, Forbidden),
+            (AppWith, Forbidden),
+            (User, Forbidden),
+            (Anonymous, Forbidden),
+        ],
         Guard::Anonymous(_) => &[
             (Operator, Granted),
             (AppWithout, Forbidden),
@@ -348,6 +363,27 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     }),
     ("hosting.requestPayment", || json!({ "amountHOT": "1" })),
     ("hosting.setHotWallet", || json!({ "address": "a" })),
+    // Guard::Operator and Guard::Open.
+    (
+        "runtime.openLink",
+        || json!({ "url": "https://example.org" }),
+    ),
+    ("runtime.setHostRates", || json!({ "rates": [] })),
+    ("runtime.setUnytMembraneProof", || json!({ "proof": "p" })),
+    (
+        "runtime.unytSendHot",
+        || json!({ "recipient": "r", "amount": "1" }),
+    ),
+    ("user.setMultiUserEnabled", || json!({ "enabled": true })),
+    (
+        "user.freeAccess",
+        || json!({ "email": "new@example.org", "enabled": true }),
+    ),
+    (
+        "user.credits",
+        || json!({ "email": "new@example.org", "amount": 1.0 }),
+    ),
+    ("perspective.create", || json!({ "name": "n" })),
     // Guard::Perspective: the params beside `uuid`.
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
@@ -544,14 +580,17 @@ fn params(method: &str, target: Option<&str>, uuid_param: bool) -> Value {
     params
 }
 
-fn context(caller: Caller, capability: Capability) -> RequestContext {
+/// The context of `caller`. "With the capability" holds `capability` (none for a guard that
+/// checks none).
+fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
+    let caps = || capability.clone().into_iter().collect::<Vec<_>>();
     match caller {
         Caller::Operator => RequestContext::operator_for_test(),
         Caller::AppWithout => RequestContext::app_for_test(vec![]),
-        Caller::AppWith => RequestContext::app_for_test(vec![capability]),
-        Caller::User => RequestContext::user_for_test(USER_EMAIL, USER_DID, vec![capability]),
+        Caller::AppWith => RequestContext::app_for_test(caps()),
+        Caller::User => RequestContext::user_for_test(USER_EMAIL, USER_DID, caps()),
         Caller::OtherUser => {
-            RequestContext::user_for_test("other@example.org", OTHER_USER_DID, vec![capability])
+            RequestContext::user_for_test("other@example.org", OTHER_USER_DID, caps())
         }
         // The most a caller without a token holds: multi-user mode on adds signing up,
         // logging in and verifying an email.
@@ -655,13 +694,16 @@ impl World {
     }
 }
 
-/// Every row of every guarded method in `map` whose answer differs from the row's, and the
-/// number of rows checked.
+/// Every row of every method in `map` whose answer differs from the row's (and every method
+/// without a guard), and the number of rows checked.
 async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
     let mut failures = Vec::new();
     let mut checked = 0;
     for (method, guard) in map.guards() {
-        let Some(guard) = guard else { continue };
+        let Some(guard) = guard else {
+            failures.push(format!("{method} has no guard"));
+            continue;
+        };
         let hides = matches!(
             guard,
             Guard::Perspective {
@@ -764,11 +806,14 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
             capability: AI_PROMPT_CAPABILITY.clone(),
             task_id: |params| params.get("taskId")?.as_str().map(str::to_string),
         });
-    map.method::<NoParams, bool>("test.unguarded", handler());
+    map.method::<NoParams, bool>("test.open", handler())
+        .guard(Guard::Open);
+    map.method::<NoParams, bool>("test.operator", handler())
+        .guard(Guard::Operator);
 }
 
 #[tokio::test]
-async fn every_guarded_method_admits_exactly_the_callers_its_guard_names() {
+async fn every_method_admits_exactly_the_callers_its_guard_names() {
     let world = World::new().await;
     let mut map = build_handler_map();
     register_test_methods(&mut map, &Arc::new(AtomicUsize::new(0)));
@@ -776,12 +821,58 @@ async fn every_guarded_method_admits_exactly_the_callers_its_guard_names() {
     let (failures, checked) = walk(&map, &world).await;
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // 3 resource guards × 5 rows, 2 perspective guards × 13 rows, 1 task guard × 12 rows:
+    // 5 resource guards × 5 rows, 2 perspective guards × 13 rows, 1 task guard × 12 rows:
     // the walk reached them all.
     assert!(
-        checked >= 3 * 5 + 2 * 13 + 12,
+        checked >= 5 * 5 + 2 * 13 + 12,
         "only {checked} rows checked"
     );
+}
+
+/// `Guard::Operator` answers every other caller as the handlers did before it: 403 "Admin
+/// credential required", whatever the caller's capabilities.
+#[tokio::test]
+async fn operator_methods_answer_everyone_else_admin_credential_required() {
+    let map = build_handler_map();
+    let operator_methods: Vec<&str> = map
+        .guards()
+        .into_iter()
+        .filter_map(|(name, guard)| matches!(guard, Some(Guard::Operator)).then_some(name))
+        .collect();
+    assert_eq!(
+        operator_methods,
+        vec![
+            "runtime.openLink",
+            "runtime.restartHolochain",
+            "runtime.setHostRates",
+            "runtime.setUnytMembraneProof",
+            "user.freeAccess",
+            "user.setMultiUserEnabled",
+        ]
+    );
+    let all = Some(crate::agent::capabilities::ALL_CAPABILITY.clone());
+    for method in operator_methods {
+        for caller in [
+            Caller::AppWithout,
+            Caller::AppWith,
+            Caller::User,
+            Caller::Anonymous,
+        ] {
+            let err = map
+                .admit(
+                    method,
+                    &params(method, None, false),
+                    &context(caller, all.clone()),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (err.code, err.message.as_str()),
+                (403, "Admin credential required"),
+                "{method} as {caller:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -791,7 +882,7 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     let mut map = HandlerMap::new();
     register_test_methods(&mut map, &calls);
     let call = |method: &'static str, params: Value, caller: Caller, capability: &Capability| {
-        let ctx = Arc::new(context(caller, capability.clone()));
+        let ctx = Arc::new(context(caller, Some(capability.clone())));
         let map = &map;
         async move { map.dispatch(method, params, ctx).await.map_err(|e| e.code) }
     };
@@ -891,43 +982,32 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
 }
 
 #[test]
-fn every_method_on_one_perspective_has_a_guard() {
-    let map = build_handler_map();
-    let unguarded: Vec<&str> = map
-        .guards()
-        .into_iter()
-        .filter(|(name, guard)| name.starts_with("perspective.") && guard.is_none())
-        .map(|(name, _)| name)
-        .collect();
-    // Neither names one perspective: `all` lists the caller's, `create` makes a new one.
-    assert_eq!(unguarded, vec!["perspective.all", "perspective.create"]);
-}
-
-/// Every guard checks a capability first. A method that checks none keeps no guard: a guard
-/// would refuse the callers that reach it today without a capability. Nor does a method that
-/// answers every caller but the operator "Admin credential required": a guard would answer
-/// with the capability's message. `perspective.all` and `perspective.create` name no
-/// perspective.
-#[test]
-fn only_methods_a_guard_cannot_express_lack_one() {
+fn every_registered_method_has_a_guard() {
     let map = build_handler_map();
     let unguarded: Vec<&str> = map
         .guards()
         .into_iter()
         .filter_map(|(name, guard)| guard.is_none().then_some(name))
         .collect();
+    assert_eq!(unguarded, Vec::<&str>::new());
+}
+
+/// The methods that check no capability: any caller, anonymous included, reaches the
+/// handler.
+#[test]
+fn only_methods_that_check_no_capability_are_open() {
+    let map = build_handler_map();
+    let open: Vec<&str> = map
+        .guards()
+        .into_iter()
+        .filter_map(|(name, guard)| matches!(guard, Some(Guard::Open)).then_some(name))
+        .collect();
     assert_eq!(
-        unguarded,
+        open,
         vec![
             "agent.isLocked",
-            "perspective.all",
-            "perspective.create",
             "runtime.freeHostingEnabled",
             "runtime.info",
-            "runtime.openLink",
-            "runtime.restartHolochain",
-            "runtime.setHostRates",
-            "runtime.setUnytMembraneProof",
             "runtime.tlsDomain",
             "runtime.unytAgentKey",
             "runtime.unytHotAgentPubkey",
@@ -936,36 +1016,83 @@ fn only_methods_a_guard_cannot_express_lack_one() {
             "runtime.unytWalletBalance",
             "runtime.unytWalletHistory",
             "user.credits",
-            "user.freeAccess",
             "user.logout",
             "user.revokeAllSessions",
-            "user.setMultiUserEnabled",
         ]
     );
 }
 
+/// The executor builds its map with `require_guards`, so a method without a guard stops it
+/// at start, naming the method.
+#[test]
+#[should_panic(expected = "WS RPC methods without a guard: test.unguarded.")]
+fn a_map_with_a_method_without_a_guard_does_not_build() {
+    let mut map = HandlerMap::new();
+    register_test_methods(&mut map, &Arc::new(AtomicUsize::new(0)));
+    map.method::<NoParams, bool>("test.unguarded", |_: Value, _: Arc<RequestContext>| async {
+        Ok::<_, WsRpcError>(json!(true))
+    });
+    map.require_guards();
+}
+
+/// A map built without `require_guards` still refuses a method without a guard: its handler
+/// never runs.
 #[tokio::test]
-async fn a_method_without_a_guard_leaves_every_check_to_its_handler() {
+async fn dispatch_refuses_a_method_without_a_guard() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut map = HandlerMap::new();
+    let counted = calls.clone();
+    map.method::<NoParams, bool>("test.unguarded", move |_: Value, _: Arc<RequestContext>| {
+        let calls = counted.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, WsRpcError>(json!(true))
+        }
+    });
+    let err = map
+        .dispatch(
+            "test.unguarded",
+            json!({}),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, 500, "{}", err.message);
+    assert!(err.message.contains("no guard"), "{}", err.message);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// `Guard::Open` runs the handler for every caller, one without any capability too;
+/// `Guard::Operator` only for the operator.
+#[tokio::test]
+async fn open_and_operator_guards_run_the_handler_for_the_callers_they_name() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut map = HandlerMap::new();
     register_test_methods(&mut map, &calls);
     let anonymous = Arc::new(RequestContext::for_test(
         crate::agent::session::Principal::Anonymous { caps: vec![] },
     ));
+    let operator = Arc::new(RequestContext::operator_for_test());
     assert_eq!(
-        map.dispatch("test.unguarded", json!({}), anonymous)
+        map.dispatch("test.open", json!({}), anonymous.clone())
             .await
             .unwrap(),
         json!(true)
     );
+    assert_eq!(
+        map.dispatch("test.operator", json!({}), anonymous)
+            .await
+            .map_err(|e| (e.code, e.message)),
+        Err((403, "Admin credential required".to_string()))
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    let guards = map.guards();
-    let unguarded: Vec<&str> = guards
-        .iter()
-        .filter_map(|(name, guard)| guard.is_none().then_some(*name))
-        .collect();
-    assert_eq!(unguarded, vec!["test.unguarded"]);
+    assert_eq!(
+        map.dispatch("test.operator", json!({}), operator)
+            .await
+            .unwrap(),
+        json!(true)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[test]
