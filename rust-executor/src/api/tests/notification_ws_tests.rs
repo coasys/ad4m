@@ -64,6 +64,7 @@ fn context(
         user_email: user_email.map(str::to_string),
         user_did: user_email.map(|email| AgentService::get_user_did_by_email(email).unwrap()),
         cancel_token: None,
+        session: None,
     }
 }
 

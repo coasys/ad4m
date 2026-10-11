@@ -64,11 +64,6 @@ impl AgentContext {
         }
     }
 
-    /// The agent a request acts as. See [`Self::for_session`].
-    pub fn from_request(ctx: &crate::types::RequestContext) -> Self {
-        Self::for_session(ctx.user_email.clone())
-    }
-
     /// Create AgentContext for main agent
     pub fn main_agent() -> Self {
         Self {

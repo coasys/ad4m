@@ -61,6 +61,7 @@ impl AuthContext {
             user_email,
             user_did,
             cancel_token: None,
+            session: None,
         }
     }
 }

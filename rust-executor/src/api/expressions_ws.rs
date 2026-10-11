@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
-use crate::agent::AgentContext;
 use crate::helpers::build_expression_rendered;
 use crate::languages::LanguageController;
 use crate::types::*;
@@ -121,7 +120,7 @@ async fn create_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let controller = LanguageController::global_instance();
     let content_json: serde_json::Value =
         serde_json::from_str(&body.content).unwrap_or(Value::String(body.content));
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
 
     let url = controller
         .expression_create(&body.language_address, content_json, &agent_context)

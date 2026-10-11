@@ -29,7 +29,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);           // the session's user, or the main agent
+    let agent_context = ctx.acts_as();                              // the session's user, or the main agent
     ...
     Ok(serde_json::to_value(result)?)
 }
@@ -38,7 +38,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 Spec item 6 replaces the first block with `register_with(name, CapSpec, typed_handler)`.
 Until then: **every new handler must check a capability** (or be registered with an
 explicit comment saying why not) and take `AgentContext` from the session
-(`AgentContext::from_request(&ctx)`) for anything that signs, bills or writes. Never
+(`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
 
 ## Protocol

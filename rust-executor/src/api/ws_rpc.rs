@@ -80,7 +80,7 @@ fn connection_context(
     auto_permit_cap_requests: bool,
     reach: ListenerReach,
 ) -> (Arc<RequestContext>, TokenCheck) {
-    let (capabilities, is_admin_credential, user_email, user_did, token_check) =
+    let (capabilities, is_admin_credential, user_email, user_did, token_check, session) =
         match Session::open(token, admin_credential, reach) {
             Ok(session) => {
                 let session = Arc::new(session);
@@ -91,6 +91,7 @@ fn connection_context(
                     user.map(|(email, _)| email.to_string()),
                     user.map(|(_, did)| did.to_string()),
                     TokenCheck::for_session(session.clone()),
+                    Some(session),
                 )
             }
             // The admin credential always opens a session, so this caller is not the operator.
@@ -100,7 +101,7 @@ fn connection_context(
                     capabilities_on(token.to_string(), admin_credential.clone(), reach),
                 );
                 let token_check = TokenCheck::new(token, false);
-                (capabilities, false, user_email, user_did, token_check)
+                (capabilities, false, user_email, user_did, token_check, None)
             }
         };
 
@@ -112,6 +113,7 @@ fn connection_context(
         user_email,
         user_did,
         cancel_token: None,
+        session,
     });
     (ctx, token_check)
 }
@@ -562,6 +564,46 @@ mod connection_context_tests {
         apps_map::revoke_app(&request_id).unwrap();
         assert_eq!(check.check().unwrap_err(), "Unauthorized access");
     }
+
+    #[test]
+    fn a_session_connection_acts_as_the_agent_its_email_names() {
+        setup_wallet();
+        setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let user = "context.actsas@example.org";
+        AgentService::ensure_user_key_exists(user).unwrap();
+        let tokens = [
+            ADMIN.to_string(),
+            jwt(None),
+            crate::user_management::generate_user_jwt(user, "test").unwrap(),
+        ];
+
+        for token in &tokens {
+            let (ctx, _) = connection_context(
+                token,
+                &Some(ADMIN.to_string()),
+                false,
+                ListenerReach::Network,
+            );
+            assert!(ctx.session.is_some(), "token {token:.20}… opens a session");
+            assert_eq!(
+                ctx.acts_as(),
+                crate::agent::AgentContext::for_session(ctx.user_email.clone()),
+                "token {token:.20}…"
+            );
+        }
+
+        let (ctx, _) = connection_context(
+            &tokens[2],
+            &Some(ADMIN.to_string()),
+            false,
+            ListenerReach::Network,
+        );
+        assert_eq!(
+            ctx.acts_as(),
+            crate::agent::AgentContext::for_user_email(user.to_string())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -577,6 +619,7 @@ mod event_gate_tests {
             user_email: None,
             user_did: None,
             cancel_token: None,
+            session: None,
         }
     }
 

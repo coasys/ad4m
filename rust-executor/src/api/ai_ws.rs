@@ -725,6 +725,7 @@ mod model_key_tests {
             user_email: user_email.map(String::from),
             user_did: None,
             cancel_token: None,
+            session: None,
         }
     }
 

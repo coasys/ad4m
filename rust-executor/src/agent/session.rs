@@ -186,6 +186,15 @@ impl Session {
             _ => None,
         }
     }
+
+    /// The agent the session acts as: a user acts as that user, every other caller as the
+    /// node's main agent.
+    pub fn acts_as(&self) -> super::AgentContext {
+        match &self.principal {
+            Principal::User { email, .. } => super::AgentContext::for_user_email(email.clone()),
+            _ => super::AgentContext::main_agent(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -402,5 +411,39 @@ mod resolution_tests {
         };
         assert!(session(now - 10).check().is_ok(), "inside the leeway");
         assert_eq!(session(now - 3600).check().unwrap_err(), AuthError::Expired);
+    }
+
+    #[test]
+    fn a_user_acts_as_the_user_and_every_other_caller_as_the_main_agent() {
+        let session = |principal| Session {
+            principal,
+            reach: ListenerReach::Network,
+            expires_at: None,
+            token: String::new(),
+        };
+        let user = session(Principal::User {
+            token_id: TokenId("t".into()),
+            email: "acts.as@example.org".into(),
+            did: "did:key:user".into(),
+            caps: vec![],
+        });
+        assert_eq!(
+            user.acts_as(),
+            crate::agent::AgentContext::for_user_email("acts.as@example.org".into())
+        );
+
+        for principal in [
+            Principal::Operator,
+            Principal::App {
+                token_id: TokenId("t".into()),
+                caps: vec![],
+            },
+            Principal::Anonymous { caps: vec![] },
+        ] {
+            assert_eq!(
+                session(principal).acts_as(),
+                crate::agent::AgentContext::main_agent()
+            );
+        }
     }
 }

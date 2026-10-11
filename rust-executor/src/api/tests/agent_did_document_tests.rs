@@ -349,6 +349,7 @@ async fn agent_status_for_a_managed_user_carries_no_private_key() {
         user_email: Some(email.to_string()),
         user_did: Some(user_did.clone()),
         cancel_token: None,
+        session: None,
     });
     let reply = handlers()
         .dispatch("agent.status", json!({}), ctx)

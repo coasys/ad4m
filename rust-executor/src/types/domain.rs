@@ -32,6 +32,19 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// The connection's session, when it opened one. Handlers take their identity from it.
+    pub session: Option<std::sync::Arc<crate::agent::session::Session>>,
+}
+
+impl RequestContext {
+    /// The agent a request acts as: the session's, or for a context without one (REST, MCP,
+    /// tests) the user its email names, else the main agent.
+    pub fn acts_as(&self) -> crate::agent::AgentContext {
+        self.session
+            .as_ref()
+            .map(|session| session.acts_as())
+            .unwrap_or_else(|| crate::agent::AgentContext::for_session(self.user_email.clone()))
+    }
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
