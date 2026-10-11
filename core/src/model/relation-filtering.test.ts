@@ -642,6 +642,111 @@ describe("where clause validation", () => {
   });
 });
 
+describe("relation datatype vs target (#908)", () => {
+  const DATATYPE_TARGET = /datatype.*target.*mutually exclusive/i;
+
+  it("throws when an options object sets both datatype and target", () => {
+    expect(() => {
+      @Model({ name: "InvalidDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          through: "test://pred",
+          target: () => FlaggedTarget,
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws when the target-thunk shorthand is given a datatype", () => {
+    expect(() => {
+      @Model({ name: "InvalidDatatypeTargetShorthand" })
+      class _Invalid extends Ad4mModel {
+        @HasMany(() => FlaggedTarget, {
+          through: "test://pred",
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws on a getter relation that sets both", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+          target: () => FlaggedTarget,
+          datatype: "xsd://string",
+        })
+        items: string[] = [];
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("throws on a to-one relation that sets both", () => {
+    expect(() => {
+      @Model({ name: "InvalidHasOneDatatypeTarget" })
+      class _Invalid extends Ad4mModel {
+        @HasOne(() => FlaggedTarget, {
+          through: "test://pred",
+          datatype: "xsd://string",
+        })
+        item: string = "";
+      }
+    }).toThrow(DATATYPE_TARGET);
+  });
+
+  it("keeps datatype with through as a literal relation", () => {
+    @Model({ name: "ValidDatatypeThrough" })
+    class ValidDatatypeThrough extends Ad4mModel {
+      @HasMany({ through: "test://pred", datatype: "xsd://string" })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidDatatypeThrough as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBe("xsd://string");
+    expect(rel.nodeKind).toBe("Literal");
+    expect(rel.class).toBeUndefined();
+  });
+
+  it("keeps datatype with getter as a literal relation", () => {
+    @Model({ name: "ValidDatatypeGetter" })
+    class ValidDatatypeGetter extends Ad4mModel {
+      @HasMany({
+        getter: "SELECT ?target WHERE { <Base> <test://pred> ?target . }",
+        datatype: "xsd://string",
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidDatatypeGetter as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBe("xsd://string");
+    expect(rel.nodeKind).toBe("Literal");
+  });
+
+  it("keeps target without datatype as an instance relation", () => {
+    @Model({ name: "ValidTargetOnly" })
+    class ValidTargetOnly extends Ad4mModel {
+      @HasMany(() => FlaggedTarget, { through: "test://pred" })
+      items: string[] = [];
+    }
+
+    const { shape } = (ValidTargetOnly as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.datatype).toBeUndefined();
+    expect(rel.nodeKind).toBe("IRI");
+    expect(rel.targetClassName).toBe("FlaggedTarget");
+  });
+});
+
 describe("where clause compilation", () => {
   // Under the source-of-truth refactor the SHACL writer no longer inlines
   // `where` conditions into the relation's SPARQL getter.  Instead it emits

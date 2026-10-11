@@ -4154,6 +4154,35 @@ mod tests {
             internal_result
         );
     }
+
+    // ── Source literal round-trip (no normalization) ─────────────────────
+
+    #[test]
+    fn test_literal_string_source_remove_round_trip() {
+        let signer = TestSigner::generate();
+        let store = new_service();
+        let link = make_link(&signer, "literal:string:hello", "test://pred", "test://obj");
+        store.add_link(&link).expect("add");
+
+        // Verify it was added
+        let all = store.get_all_links().expect("get_all");
+        assert!(
+            all.iter().any(|l| l.data.source == "literal:string:hello"),
+            "link should appear in get_all_links"
+        );
+
+        // Remove it
+        store.remove_link(&link).expect("remove");
+
+        // Verify removal
+        let all_after = store.get_all_links().expect("get_all_after");
+        assert!(
+            !all_after
+                .iter()
+                .any(|l| l.data.source == "literal:string:hello"),
+            "link should no longer appear after removal"
+        );
+    }
 }
 
 #[cfg(test)]

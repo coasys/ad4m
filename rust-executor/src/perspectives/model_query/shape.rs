@@ -234,6 +234,17 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         // multi-valued cardinality, not link-typed semantics.
         let is_relation =
             relation_kind.is_some() || target_class_uri.is_some() || target_class_name.is_some();
+        // `parse_shacl_to_links` refuses this pair at registration (#908),
+        // but a shape can also arrive by sync, raw link writes or import.
+        // Such a stored shape still loads (kept as a relation with its
+        // `datatype`, as before), so legacy classes keep working; this only
+        // makes it visible.
+        if datatype.is_some() && (target_class_uri.is_some() || target_class_name.is_some()) {
+            log::warn!(
+                "SHACL shape for class '{class_name}': property '{prop_uri}' sets both \
+                 `datatype` and a target class; treating it as a relation (#908)"
+            );
+        }
         // All relations are marked `is_collection` so the query pipeline
         // hydrates them as arrays during link grouping; the
         // `is_scalar_relation` flag then tells the renderer to unwrap
