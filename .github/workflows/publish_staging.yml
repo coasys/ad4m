@@ -6,7 +6,65 @@ on:
       - staging
 
 jobs:
+  # A staging merge publishes the version that is in package.json, and that version is set by hand.
+  # A version can be published once: npm refuses to overwrite one, and the launcher release is
+  # tagged `v<version>`. So a merge that did not bump the version would ship launcher binaries
+  # under a tag that already names other code, while npm kept the old packages. This job refuses
+  # that before anything is tagged or published. A re-run of the same commit passes: the tag and
+  # the packages' `gitHead` name this commit.
+  version-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse a version already released from another commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          UI_VERSION="$(node -p "require('./ui/package.json').version")"
+          if [ "$VERSION" != "$UI_VERSION" ]; then
+            echo "::error::package.json is at $VERSION but ui/package.json is at $UI_VERSION. Set both with setVersion.js."
+            exit 1
+          fi
+
+          FAIL=0
+          # matching-refs answers [] for no tag, so an API failure fails the job rather than reading
+          # as "no tag". An annotated tag is followed to its commit.
+          REF="$(gh api "repos/$REPO/git/matching-refs/tags/v$VERSION" \
+            --jq "map(select(.ref == \"refs/tags/v$VERSION\")) | .[0].object | if . == null then \"\" else .type + \" \" + .sha end")"
+          if [ -n "$REF" ]; then
+            read -r TYPE TAGGED <<< "$REF"
+            if [ "$TYPE" = "tag" ]; then
+              TAGGED="$(gh api "repos/$REPO/git/tags/$TAGGED" --jq .object.sha)"
+            fi
+            if [ "$TAGGED" != "$COMMIT" ]; then
+              echo "::error::Tag v$VERSION already names commit $TAGGED, not this one ($COMMIT). Bump the version before merging to staging."
+              FAIL=1
+            fi
+          fi
+
+          for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
+            NAME="$(node -p "require('./$dir/package.json').name")"
+            if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
+              PUBLISHED_FROM="$(npm view "$NAME@$VERSION" gitHead 2>/dev/null)"
+              if [ "$PUBLISHED_FROM" != "$COMMIT" ]; then
+                echo "::error::$NAME@$VERSION is already on npm, published from ${PUBLISHED_FROM:-an unrecorded commit}, not this one ($COMMIT). Bump the version before merging to staging."
+                FAIL=1
+              fi
+            fi
+          done
+          exit $FAIL
+
   create-release:
+    needs:
+      - version-check
     runs-on: ubuntu-latest
     outputs:
       upload_url: ${{ steps.create-release.outputs.upload_url }}
@@ -25,6 +83,8 @@ jobs:
         with:
           deno-version: v1.32.4
 
+      # version-check has passed, so a tag of this version can only name this commit: this is a
+      # re-run, and the tag is recreated on the same commit.
       - name: Delete existing tag (idempotent re-runs)
         run: |
           VERSION=$(node -p "require('./package.json').version")
@@ -632,6 +692,8 @@ jobs:
   # NPM Publish - Plain ubuntu runner (no Docker needed, just TS build + publish)
   # ============================================================================
   npm-publish:
+    needs:
+      - version-check
     runs-on: ubuntu-latest
     # Publishing uses npm trusted publishing: `id-token: write` lets npm get an OIDC token from
     # GitHub, and the GITHUB_TOKEN can only read.
@@ -713,16 +775,23 @@ jobs:
       # on one (#1217). `--no-git-checks` because the job publishes from `staging`, not main, and
       # the install and the steps above change tracked files.
       #
-      # Dependencies before dependents. A version that is already on npm is skipped, so a re-run of
-      # the same commit completes instead of failing.
+      # Dependencies before dependents. A version already on npm from this commit is skipped, so a
+      # re-run completes instead of failing. One published from another commit fails the job;
+      # version-check refuses that first, and this repeats it at the publish.
       - name: Publish
         env:
           VERSION: ${{ steps.extract_version.outputs.version }}
         run: |
+          COMMIT="$(git rev-parse HEAD)"
           for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
             NAME="$(node -p "require('./$dir/package.json').name")"
-            if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
-              echo "$NAME@$VERSION is already published"
+            if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
+              PUBLISHED_FROM="$(npm view "$NAME@$VERSION" gitHead 2>/dev/null)"
+              if [ "$PUBLISHED_FROM" != "$COMMIT" ]; then
+                echo "::error::$NAME@$VERSION is already on npm, published from ${PUBLISHED_FROM:-an unrecorded commit}, not $COMMIT"
+                exit 1
+              fi
+              echo "$NAME@$VERSION is already published from this commit"
               continue
             fi
             (cd "$dir" && pnpm publish --access public --tag "$NPM_TAG" --no-git-checks)
@@ -733,6 +802,8 @@ jobs:
   # Crates Publish - Uses Docker container
   # ============================================================================
   crates-publish:
+    needs:
+      - version-check
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
