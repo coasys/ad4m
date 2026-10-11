@@ -104,42 +104,30 @@ pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
     expected: &Capability,
 ) -> Result<(), String> {
-    let capabilities = capabilities.clone()?;
-    let custom_cap_match = |cap: &Capability, expected: &Capability| -> bool {
-        if cap.with.domain != WILD_CARD && cap.with.domain != expected.with.domain {
-            return false;
-        }
-
-        if !cap.with.pointers.contains(&WILD_CARD.to_string())
-            && expected
-                .with
-                .pointers
-                .iter()
-                .any(|p| !cap.with.pointers.contains(p))
-        {
-            return false;
-        }
-
-        if !cap.can.contains(&WILD_CARD.to_string())
-            && expected.can.iter().any(|c| !cap.can.contains(c))
-        {
-            return false;
-        }
-
-        true
-    };
-
-    if !capabilities
-        .iter()
-        .any(|cap| custom_cap_match(cap, expected))
-    {
+    let capabilities = capabilities.as_ref().map_err(|e| e.clone())?;
+    if !capability_matches(capabilities, expected) {
         return Err(format!(
             "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
             capabilities, expected
         ));
     }
-
     Ok(())
+}
+
+/// Whether any of `capabilities` covers `expected`: the same domain, every pointer and every
+/// action, each of which `*` matches.
+pub fn capability_matches(capabilities: &[Capability], expected: &Capability) -> bool {
+    capabilities.iter().any(|cap| {
+        (cap.with.domain == WILD_CARD || cap.with.domain == expected.with.domain)
+            && (cap.with.pointers.contains(&WILD_CARD.to_string())
+                || expected
+                    .with
+                    .pointers
+                    .iter()
+                    .all(|p| cap.with.pointers.contains(p)))
+            && (cap.can.contains(&WILD_CARD.to_string())
+                || expected.can.iter().all(|c| cap.can.contains(c)))
+    })
 }
 
 pub fn check_token_revoked(token: &str) -> Result<(), String> {
@@ -150,7 +138,7 @@ pub fn check_token_revoked(token: &str) -> Result<(), String> {
 }
 
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
-const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
+pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 
 /// Checks a connection's token again on every request and event, without the wallet.
 ///
@@ -364,6 +352,29 @@ pub fn capabilities_from_token(
     capabilities_on(token, admin_credential, ListenerReach::Loopback)
 }
 
+/// What a caller without a token may do: request a capability and read whether multi-user
+/// mode is on, plus sign up, log in and verify an email when it is. Reading users is left out,
+/// so anonymous callers cannot list them.
+pub fn anonymous_capabilities() -> Vec<Capability> {
+    use crate::db::Ad4mDb;
+    let multi_user_enabled =
+        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    if multi_user_enabled {
+        vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]
+    } else {
+        vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]
+    }
+}
+
 /// The capabilities of a caller that presents `token` on a listener with this reach.
 pub fn capabilities_on(
     token: String,
@@ -377,27 +388,8 @@ pub fn capabilities_on(
 
     if token.is_empty() {
         // An anonymous caller: the node has an admin credential, or the listener is on the
-        // network. For empty tokens, check if multi-user mode is enabled
-        // If so, allow user creation (registration), login, and checking enabled status
-        // READ capability is intentionally excluded to prevent unauthenticated user enumeration
-        use crate::db::Ad4mDb;
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-        if multi_user_enabled {
-            return Ok(vec![
-                AGENT_AUTH_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-            ]);
-        }
-
-        return Ok(vec![
-            AGENT_AUTH_CAPABILITY.clone(),
-            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-        ]);
+        // network.
+        return Ok(anonymous_capabilities());
     }
 
     check_token_revoked(&token)?;
