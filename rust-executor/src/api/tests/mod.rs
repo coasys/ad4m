@@ -15,6 +15,8 @@ pub mod handler_table_tests;
 #[cfg(test)]
 pub mod node_operation_tests;
 #[cfg(test)]
+pub mod notification_ws_tests;
+#[cfg(test)]
 pub mod protocol_tests;
 #[cfg(test)]
 pub mod runtime_ws_tests;
