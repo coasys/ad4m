@@ -13,7 +13,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/coasys/ad4m.git"
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "core"
   },
   "author": {
     "name": "Nicolas Luck",

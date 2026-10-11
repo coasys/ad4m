@@ -18,11 +18,10 @@
   "peerDependencies": {
     "vue": "^3.2.47"
   },
-  "publishConfig": {
-    "dependencies": {
-      "@coasys/ad4m": "*",
-      "@coasys/hooks-helpers": "*"
-    }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "ad4m-hooks/vue"
   },
   "version": "0.13.0-test-interpretation-2"
 }
