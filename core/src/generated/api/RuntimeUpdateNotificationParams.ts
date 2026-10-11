@@ -2,7 +2,8 @@
 
 export type RuntimeUpdateNotificationParams = { id: string, description: string, appName: string, appUrl: string, appIconPath?: string, trigger: string, perspectiveIds: Array<string>, webhookUrl: string, 
 /**
- * Sent as the bearer credential to `webhookUrl`. Results and events say only
- * whether one is set (`hasWebhookAuth`).
+ * Without it the update keeps the stored credential, and fails if `webhookUrl`
+ * changes too, because a credential goes only to the webhook it was set for. An empty
+ * string clears it.
  */
-webhookAuth: string, };
+webhookAuth?: string, };

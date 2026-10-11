@@ -1,6 +1,6 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
-import { RuntimeInfo, SentMessage, NotificationInput, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
+import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type { HostRate, UnytVersionInfo } from "../generated/api"
 
 export class RuntimeClient {
@@ -127,7 +127,7 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.notifications', {})
     }
 
-    async updateNotification(id: string, notification: NotificationInput): Promise<boolean> {
+    async updateNotification(id: string, notification: NotificationUpdate): Promise<boolean> {
         return this.#apiClient.call('runtime.updateNotification', { ...notification, id })
     }
 

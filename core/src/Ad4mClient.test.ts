@@ -1113,6 +1113,22 @@ describe('RuntimeClient', () => {
         expect(notifications).toEqual([]);
     });
 
+    test('updateNotification() without webhookAuth sends none, so the stored one stays', async () => {
+        const result = await ad4m.runtime.updateNotification('notif-1', {
+            description: 'd',
+            appName: 'a',
+            appUrl: 'https://app.test',
+            appIconPath: '',
+            trigger: 'SELECT ?s WHERE { ?s ?p ?o }',
+            perspectiveIds: ['p1'],
+            webhookUrl: 'https://webhook.test',
+        });
+        expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.updateNotification');
+        expect(lastRpcCall!.params.id).toBe('notif-1');
+        expect('webhookAuth' in lastRpcCall!.params).toBe(false);
+    });
+
     test('grantNotification() grants a notification', async () => {
         const result = await ad4m.runtime.grantNotification('notif-1');
         expect(result).toBe(true);
