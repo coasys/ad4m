@@ -1203,7 +1203,8 @@ impl AIService {
         Ok(tasks)
     }
 
-    pub async fn add_task(&self, task: AITaskInput) -> Result<AITask> {
+    /// `user_email` is the owning managed user; `None` makes an operator task.
+    pub async fn add_task(&self, task: AITaskInput, user_email: Option<&str>) -> Result<AITask> {
         let task_id = Ad4mDb::with_global_instance(|db| {
             db.add_task(
                 task.name.clone(),
@@ -1214,6 +1215,7 @@ impl AIService {
                     .map(|p| p.clone().into())
                     .collect(),
                 task.meta_data.clone(),
+                user_email,
             )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -2768,7 +2770,7 @@ mod tests {
                     output: "Yes, I'm working!".into()
                 }],
                 meta_data: None
-            }).await.expect("add_task to work without error");
+            }, None).await.expect("add_task to work without error");
 
         let response = service
             .prompt(task.task_id, "Test string".into(), None)
@@ -2809,7 +2811,7 @@ mod tests {
                     input: "Test string super loong".into(),
                     output: "Yes, I'm working! This is an extremely long response to thoroughly test the system's capacity for handling extensive outputs. In real-world scenarios, AI models often need to generate lengthy and detailed responses to complex queries. This test string is designed to push the limits of our system, ensuring it can process and store large amounts of text without issues. It's crucial to verify that our AI service can maintain coherence and relevance even in prolonged responses. By including various sentence structures, punctuation, and a mix of short and long phrases, we're also testing the linguistic versatility of our model. Furthermore, this extended output allows us to assess the performance impact of processing large text blocks, which is essential for optimizing our system's efficiency. It's worth noting that in practical applications, responses of this length might be common in scenarios such as content generation, detailed explanations, or comprehensive analyses. Therefore, ensuring our system can handle such verbose outputs is paramount for its real-world applicability and robustness.".into()
                 }],
-        }).await.expect("add_task to work without error");
+        }, None).await.expect("add_task to work without error");
 
         let futures = (0..10)
             .map(|_| service.prompt(task.task_id.clone(), "Test string".into(), None))
@@ -2907,13 +2909,16 @@ mod tests {
 
         // Create a task using this model
         let task = service
-            .add_task(AITaskInput {
-                name: "Test task".into(),
-                model_id: model_id.clone(),
-                system_prompt: "Test prompt".into(),
-                prompt_examples: vec![],
-                meta_data: None,
-            })
+            .add_task(
+                AITaskInput {
+                    name: "Test task".into(),
+                    model_id: model_id.clone(),
+                    system_prompt: "Test prompt".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
             .await
             .expect("task to be created");
 

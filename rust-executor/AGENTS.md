@@ -37,7 +37,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed users by email), `capabilities/` (auth tokens, capability defs) | — |
-| `db.rs` | All SQLite access (`rusqlite`), single `impl Ad4mDb`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | — |
+| `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event, plus one string topic for live query updates until #1207; feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
 | `types/` | `core.rs` = domain types (Link, Expression, Perspective…), `domain.rs` = wire/input types; some duplicates, see spec item 5 | — |
@@ -59,8 +59,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   language runtime, so third-party language code reaches every op: an op that signs must sign as
   `get_runtime_agent_context()`, never as the node directly.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
-- **Capabilities**: every WS handler checks `check_capability(&ctx.capabilities, &X_CAPABILITY)`
-  itself (`agent/capabilities/defs.rs`). MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
+- **Capabilities**: every WS method declares a guard where it registers (`api/guards.rs`); the
+  dispatcher checks its capability (`agent/capabilities/defs.rs`) and ownership rule before the
+  handler runs. MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
 - **App approval**: `agent.requestCapability` records a `PendingApproval` by request id
   (`agent/capabilities/pending.rs`); `agent.permitCapability` sets its code; `agent.generateJwt`
   redeems it once. A request expires 10 minutes after the request or the approval; five wrong
@@ -72,6 +73,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   event; a new read method needing parameters gets them in its `params` table.
 - **Multi-user**: `AgentContext` (`agent/mod.rs`) carries main-agent vs managed-user (by email).
   Any signing/DID/billing path takes it explicitly.
+- **Per-user objects**: a user session reaches only its own. Perspectives are owned by DID
+  (`owners`), AI tasks by email (`tasks.user_email`). A WS method that names one declares
+  `Guard::Perspective` or `Guard::Task` (`api/AGENTS.md`). The capability check alone does not
+  separate users: user tokens hold wildcard perspective, neighbourhood and AI capabilities.
 - **Notifications** post perspective data to any webhook URL. Their grant, update and delivery
   rules live in `runtime_service/notification_access.rs`: a notification fires only when granted
   and its owner may read the perspective. The owner is a DID (`owner_did`: a managed user's, or the

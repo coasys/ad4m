@@ -61,11 +61,7 @@ async fn set_status(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
     ))
 }
 
-async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-
+async fn open_link(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: OpenLinkRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -114,7 +110,7 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::Bool(true))
 }
 
-async fn export_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ExportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -131,8 +127,10 @@ async fn export_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
                 WsRpcError::bad_request("perspective_uuid required for perspective export")
             })?;
-            let perspective = crate::perspectives::get_perspective(uuid)
-                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?;
+            // The guard admits apps, which reach only the unowned and the main agent's
+            // perspectives: the rule `Guard::Perspective` applies (a "db" export names none).
+            let perspective =
+                super::perspectives_ws::get_perspective_with_access(uuid, &ctx).await?;
             let links = perspective
                 .get_links(&crate::types::LinkQuery {
                     source: None,
@@ -202,10 +200,7 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     }
 }
 
-async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
+async fn restart_holochain(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
         return Err(WsRpcError::bad_request(
@@ -611,10 +606,7 @@ fn compute_log_email(
     }
 }
 
-async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
+async fn set_host_rates(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: SetHostRatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let rates = validate_host_rates(body.rates)?;
@@ -667,11 +659,8 @@ async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
 /// `runtime.unytVersionInfo` reports the outcome.
 async fn set_unyt_membrane_proof(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
     let body: SetUnytMembraneProofRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     if body.proof.is_empty() {
@@ -715,10 +704,10 @@ async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    // No guard: every caller may read it, with or without capabilities, and every guard
-    // checks a capability.
+    // Every caller may read it, with or without capabilities.
     map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
-        .read();
+        .read()
+        .guard(Guard::Open);
     map.method::<NoParams, bool>("runtime.quit", quit_runtime)
         .guard(Guard::Node(RUNTIME_QUIT_CAPABILITY.clone()));
     // Always errors: status updates have no implementation yet. The contract
@@ -727,25 +716,25 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::SelfAgent(
             RUNTIME_MY_STATUS_UPDATE_CAPABILITY.clone(),
         ));
-    // Operator only, with no guard: `openLink`, `restartHolochain`, `setHostRates` and
-    // `setUnytMembraneProof`. The handler answers every other caller "Admin credential
-    // required" (403). A guard checks a capability first, so it would answer a caller without
-    // `ALL` with the capability's message instead.
     // Opens a browser on the node's host.
-    map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
-    // Read or write any path on the host and the whole node database.
+    map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link)
+        .guard(Guard::Operator);
+    // Read or write any path on the host and the whole node database. A perspective export
+    // also checks the perspective's owner in the handler.
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
         .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
         .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
-        .long();
+        .long()
+        .guard(Guard::Operator);
     map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
         .read()
         .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
-    // No guard: always `null`, open to every caller.
+    // Always `null`, open to every caller.
     map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
-        .read();
+        .read()
+        .guard(Guard::Open);
     // A user reads only its own log; the handler checks a named `userEmail`.
     map.method::<RuntimeComputeLogParams, Vec<ComputeLogEntry>>(
         "runtime.computeLog",
@@ -845,10 +834,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::SelfAgent(
             RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone(),
         ));
-    // Hosting flags. No guard on the read: every caller may read it, with or without
-    // capabilities, and every guard checks a capability.
+    // Hosting flags. Every caller may read it, with or without capabilities.
     map.method::<NoParams, bool>("runtime.freeHostingEnabled", get_free_hosting_enabled)
-        .read();
+        .read()
+        .guard(Guard::Open);
     map.method::<RuntimeSetFreeHostingEnabledParams, bool>(
         "runtime.setFreeHostingEnabled",
         set_free_hosting_enabled,
@@ -860,27 +849,34 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
         .read()
         .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
-    // Operator only, with no guard (see `runtime.openLink`).
-    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates);
+    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates)
+        .guard(Guard::Operator);
     map.method::<SetUnytMembraneProofRequest, bool>(
         "runtime.setUnytMembraneProof",
         set_unyt_membrane_proof,
-    );
+    )
+    .guard(Guard::Operator);
     map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
         .read()
         .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
-    // Always error: the remaining unyt endpoints have no implementation yet. No guard: every
-    // caller gets the 501, and every guard checks a capability.
+    // Always error: the remaining unyt endpoints have no implementation yet. Every caller
+    // gets the 501.
     map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
-        .read();
-    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl);
+        .read()
+        .guard(Guard::Open);
+    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl)
+        .guard(Guard::Open);
     map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
-        .read();
+        .read()
+        .guard(Guard::Open);
     map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
-        .read();
+        .read()
+        .guard(Guard::Open);
     map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
-        .read();
-    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl);
+        .read()
+        .guard(Guard::Open);
+    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl)
+        .guard(Guard::Open);
 }
 
 // ── Contracts ──

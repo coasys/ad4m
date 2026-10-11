@@ -718,7 +718,9 @@ pub(crate) fn register_interpretation_task_for_model(
     model_id: Option<&str>,
 ) -> anyhow::Result<(AITask, bool)> {
     let name = interpretation_task_name_for_model(model_id);
-    if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
+    // Operator tasks only: any user may create a task with this name, and every user's
+    // interpretation runs would then prompt with that user's system prompt.
+    if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(None))?
         .into_iter()
         .find(|t| t.name == name)
     {
@@ -731,6 +733,7 @@ pub(crate) fn register_interpretation_task_for_model(
             db_model_id,
             INTERPRETATION_SYSTEM_PROMPT.to_string(),
             interpretation_examples(),
+            None,
             None,
         )
     })?;

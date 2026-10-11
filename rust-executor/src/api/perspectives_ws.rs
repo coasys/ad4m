@@ -215,12 +215,6 @@ fn parse_link_status(s: Option<&str>) -> LinkStatus {
 // ── Handlers ──
 
 async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![WILD_CARD.to_string()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
     // In shared mode, rehydrate any backend perspectives not yet loaded
     // locally. Both `DbBackend::list` (network) and
     // `rehydrate_perspective_from_backend` (network + DB writes) are
@@ -351,9 +345,6 @@ async fn query_links(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn create_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: CreatePerspectiveRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -2293,8 +2284,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     let query = || Guard::perspective(perspective_query_capability);
     let update = || Guard::perspective(perspective_update_capability);
 
+    // Neither names one perspective: `all` lists the caller's own, `create` makes one that the
+    // caller's user owns (no owner for the operator and apps).
     map.method::<NoParams, Vec<PerspectiveHandle>>("perspective.all", list_perspectives)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(perspective_query_capability(vec![
+            WILD_CARD.to_string(),
+        ])));
     map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>(
         "perspective.get",
         get_perspective_handler,
@@ -2304,7 +2300,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<CreatePerspectiveRequest, PerspectiveHandle>(
         "perspective.create",
         create_perspective,
-    );
+    )
+    .guard(Guard::SelfAgent(PERSPECTIVE_CREATE_CAPABILITY.clone()));
     map.method::<PerspectiveUpdateParams, PerspectiveHandle>(
         "perspective.update",
         update_perspective_handler,
