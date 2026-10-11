@@ -52,40 +52,53 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   the perspective owner gets them, and the SDK routes them by `subscriptionId`.
 - One event path. A publisher calls `pubsub.publish_event(Event::new(Topic, Audience, payload))`
   (`src/events.rs`); there is no default audience. A socket's stream
-  (`events_ws::build_event_stream_for`) delivers it when `Session::may_receive` (the audience) and
-  `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`. No
+  (`events_ws::build_event_stream_for`) delivers it when `Session::may_receive` and
+  `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`.
+  `may_receive` needs both: the session is in the audience (`Session::in_audience`), and it holds
+  `Topic::capability(perspective)`, the capability of the RPC method that reads the same data
+  (#1284). Per-perspective topics name the event's perspective (`perspective.queryLinks`'
+  `perspective_query_capability([uuid])`; a signal: neighbourhood READ on it); an event without a
+  perspective needs the grant on `*`. An app acts as the main agent, so without the capability an
+  app approved for AI or one perspective got every perspective's events. A user token holds every
+  topic's capability (`get_user_default_capabilities`) and the operator may do anything, so only
+  narrower tokens lose events. A new topic picks its capability in the same exhaustive `match`. No
   check takes a lock or parses the payload. The stream builder takes the socket's interest, so
   callers pass it (`Connection::interest()` on the RPC socket). Only authenticated sessions
   (`Session::is_authenticated`: not anonymous) get a stream on the RPC socket. The stream ends at
   the first event after `Session::check()` fails. `audience_matrix_tests` in `events_ws.rs` pins
   who receives each audience; a new topic or audience adds its cases there.
 - One string topic remains: live query updates (`PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC`, sent as
-  `query-subscription-update`). `events_ws::query_updates` waits for the perspective handle to
-  check that the session owns the perspective (`matches_perspective_owner`, spawned so a parked
-  stream cannot hold the handle). It stays until live queries belong to a connection (#1207); it
-  then becomes a typed event to `Audience::Connection`. Language code cannot publish anything
-  (`js_core/pubsub_extension.rs`). `notification-triggered` goes to the notification's `ownerDid`, never to
-  co-owners. `signal` goes to its `recipient` (`perspectives::signal_event`), or to every
-  session when it names none. `hosting-user-info-changed` goes to the user's DID (looked up by
-  email at publish) and the main agent's (the operator and apps see every user's).
-  `message-received` has no publisher; a new one uses `Audience::Authenticated`.
-  `model-loading-status` goes to everyone; `transcription-text` to the stream owner's DID.
-  `auto-processor-event` goes to `Audience::OperatorAndDids([pass owner])` when the owner may
-  read the perspective, else to the operator; `auto-processor-neighbourhood-state` to the
-  operator and the perspective's owners (every authenticated session for an unowned
-  perspective). `auto_processor::events::emit` reads the owners from the handle when it
+  `query-subscription-update`). `events_ws::query_updates` checks the session may query the
+  perspective (the topic's capability), then waits for the perspective handle to check that the
+  session owns it (`matches_perspective_owner`, spawned so a parked stream cannot hold the
+  handle). It stays until live queries belong to a connection (#1207); it then becomes a typed
+  event to `Audience::Connection`. Language code cannot publish anything
+  (`js_core/pubsub_extension.rs`).
+- Audiences. Every per-perspective topic reads its recipients from one helper,
+  `perspectives::event_recipients`: the owners, or the main agent for an unowned perspective
+  (or one whose owner list is empty), read when the event is published. No per-perspective event
+  goes to `Everyone`. `sync-state-change` goes out once, to all recipients.
+  `perspective-added/-updated/-removed` and `link-added/-removed/-updated` go out once per
+  recipient (`perspectives::publish_to_each_owner`), each to that DID, with the DID in the
+  payload's `owner`. `signal` goes to its `recipient` (`perspectives::signal_event`); one without
+  a recipient goes once to each of `event_recipients`, each copy naming that DID as `recipient`
+  (`perspectives::publish_telepresence_signal`, used by both link-language paths).
+  `notification-triggered` goes to the notification's `ownerDid`, never to co-owners.
+  `auto-processor-event` goes to `Audience::OperatorAndDids([pass owner])` when the owner is one
+  of `event_recipients`, else to the operator; `auto-processor-neighbourhood-state` to the
+  operator and `event_recipients`. `auto_processor::events::emit` reads the handle when it
   publishes, so no emitter may hold the perspective's handle lock while it emits.
+  `hosting-user-info-changed` goes to the user's DID (looked up by email at publish) and the main
+  agent's (the operator and apps see every user's). `message-received` has no publisher; a new
+  one names the receiving agent (`Audience::Dids`), never the operator or every session.
+  `model-loading-status` goes to everyone; `transcription-text` to the stream owner's DID.
   `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` and the approval exceptions (`CapabilityRequested`,
   `InstallNotificationRequest`) go to `Audience::Approvers`: the sessions whose capabilities
   cover `AGENT_PERMIT` (the operator, and apps whose token holds it), not only the operator.
-  Other exceptions go to everyone (`Audience::for_exception`). The perspective and link topics' audience is
-  `perspectives::event_recipients` (the owners, or the main agent for an unowned perspective),
-  read when the event is published. `sync-state-change` goes out once, to all owners.
-  `perspective-added/-updated/-removed` and `link-added/-removed/-updated` go out once per owner
-  (`perspectives::publish_to_each_owner`), each to that owner, with the owner's DID in the
-  payload's `owner`.
+  Other exceptions go to everyone (`Audience::for_exception`). "Everyone" still means every
+  session that holds the topic's capability.
 - Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
   an open connection. Tests build sessions with `Session::for_test` / `for_test_expiring`.

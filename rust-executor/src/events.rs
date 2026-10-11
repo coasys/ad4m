@@ -2,9 +2,12 @@
 //!
 //! A publisher builds an [`Event`] with [`Event::new`] and hands it to
 //! `PubSub::publish_event`. Each socket's event stream delivers it when
-//! `Session::may_receive` (who) and `event_interest::wants` (what the socket asked for)
-//! both hold. The payload is serialized once, here, not once per socket.
+//! `Session::may_receive` (who: the audience and the topic's capability) and
+//! `event_interest::wants` (what the socket asked for) both hold. The payload is serialized
+//! once, here, not once per socket.
 
+use crate::agent::capabilities::types::{Capability, Resource};
+use crate::agent::capabilities::{self as caps};
 use crate::agent::{did_for_context, AgentContext, AgentService};
 use crate::api::events_ws::events as names;
 use crate::types::{Agent, AgentStatus, ExceptionInfo, ExceptionType, HostingUserInfo};
@@ -93,6 +96,55 @@ impl Topic {
     pub fn from_wire(name: &str) -> Option<Topic> {
         Topic::ALL.into_iter().find(|t| t.as_str() == name)
     }
+
+    /// The capability a session needs to receive this topic's events: the one the RPC method
+    /// that reads the same data checks. Per-perspective topics name `perspective`; an event
+    /// without one needs the capability on every perspective (`*`).
+    pub fn capability(self, perspective: Option<&str>) -> Capability {
+        let on_perspective = || vec![perspective.unwrap_or(caps::WILD_CARD).to_string()];
+        // No `_` arm: a new topic does not compile until someone chooses its capability.
+        match self {
+            // `agent.status`, `agent.get`, `agent.getApps`. Approvers also hold AGENT_PERMIT.
+            Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::AppsChanged => {
+                caps::AGENT_READ_CAPABILITY.clone()
+            }
+            // `hosting.info`.
+            Topic::HostingUserInfoChanged => caps::RUNTIME_HOSTING_READ_CAPABILITY.clone(),
+            // `perspective.get`, `perspective.queryLinks`, `perspective.subscribeQuery`.
+            Topic::PerspectiveAdded
+            | Topic::PerspectiveRemoved
+            | Topic::PerspectiveUpdated
+            | Topic::PerspectiveSyncStateChange
+            | Topic::LinkAdded
+            | Topic::LinkRemoved
+            | Topic::LinkUpdated
+            | Topic::PerspectiveQuerySubscription
+            | Topic::AutoProcessorEvent
+            | Topic::AutoProcessorNeighbourhoodState => {
+                caps::perspective_query_capability(on_perspective())
+            }
+            // `neighbourhood.onlineAgents` / `otherAgents` check NEIGHBOURHOOD_READ; a signal
+            // names it for its perspective, which a `*` grant covers.
+            Topic::NeighbourhoodSignal => Capability {
+                with: Resource {
+                    domain: caps::NEIGHBOURHOOD.to_string(),
+                    pointers: on_perspective(),
+                },
+                can: vec![caps::READ.to_string()],
+            },
+            // `runtime.inbox`.
+            Topic::RuntimeMessageReceived => caps::RUNTIME_MESSAGES_READ_CAPABILITY.clone(),
+            // `runtime.notifications`.
+            Topic::RuntimeNotificationTriggered => caps::AGENT_UPDATE_CAPABILITY.clone(),
+            // The exception subscription's capability; approval exceptions also need
+            // AGENT_PERMIT (`Audience::Approvers`).
+            Topic::ExceptionOccurred => caps::RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
+            // `ai.transcriptionOpen`.
+            Topic::AiTranscriptionText => caps::AI_TRANSCRIBE_CAPABILITY.clone(),
+            // `ai.modelLoadingStatus`.
+            Topic::AiModelLoadingStatus => caps::AI_READ_CAPABILITY.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for Topic {
@@ -102,17 +154,15 @@ impl std::fmt::Display for Topic {
 }
 
 /// Who may receive an event. The publisher names it: it holds the data, so it needs no
-/// lookup at delivery.
+/// lookup at delivery. Each session in the audience also needs the topic's capability
+/// ([`Topic::capability`]).
 ///
 /// When live queries belong to a connection (#1207), `Connection(id)` joins these for
 /// `perspective-query-subscription`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Audience {
-    /// Every session that has an event stream: nothing in the payload is private.
+    /// Every session: the payload names no agent.
     Everyone,
-    /// Every session that is the operator or holds a token: the sessions that received
-    /// every broadcast topic before topics named their audience.
-    Authenticated,
     /// The node's operator only.
     Operator,
     /// The sessions that may approve apps: the operator, and any app or user whose token
@@ -276,6 +326,55 @@ mod tests {
             Audience::Dids(vec!["did:x".into()])
         );
         assert_eq!(Audience::agent(None), Audience::Everyone);
+    }
+
+    // A user token holds every topic's capability on every perspective, so the capability
+    // check takes no event from a user session. The operator may do anything.
+    #[test]
+    fn a_user_token_holds_the_capability_of_every_topic() {
+        let user = caps::get_user_default_capabilities();
+        for topic in Topic::ALL {
+            for perspective in [None, Some("p")] {
+                let cap = topic.capability(perspective);
+                assert!(caps::capability_matches(&user, &cap), "{topic}: {cap:?}");
+            }
+        }
+    }
+
+    // A per-perspective topic needs its capability on the event's perspective: a grant on that
+    // perspective covers it, a grant on another does not, and an event without a perspective
+    // needs a grant on every perspective. A notification needs `runtime.notifications`'
+    // capability, which names no perspective.
+    #[test]
+    fn a_per_perspective_topic_needs_its_capability_on_that_perspective() {
+        let grant_on = |cap: &Capability, uuid: &str| Capability {
+            with: Resource {
+                domain: cap.with.domain.clone(),
+                pointers: vec![uuid.to_string()],
+            },
+            can: cap.can.clone(),
+        };
+        for spec in crate::api::events_ws::event_specs() {
+            let topic = Topic::from_wire(spec.name).unwrap();
+            let on_p = topic.capability(Some("p"));
+            if !spec.scoped || topic == Topic::RuntimeNotificationTriggered {
+                assert_eq!(on_p.with.pointers, vec![caps::WILD_CARD], "{topic}");
+                continue;
+            }
+            assert!(
+                caps::capability_matches(&[grant_on(&on_p, "p")], &on_p),
+                "{topic}"
+            );
+            assert!(
+                !caps::capability_matches(&[grant_on(&on_p, "q")], &on_p),
+                "{topic}"
+            );
+            let anywhere = topic.capability(None);
+            assert!(
+                !caps::capability_matches(&[grant_on(&on_p, "p")], &anywhere),
+                "{topic}"
+            );
+        }
     }
 
     #[test]

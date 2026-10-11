@@ -453,12 +453,13 @@ export class ApiClient {
         const key = JSON.stringify(events)
         if (key === this._watching) return
         this._watching = key
-        this._watchSent = this._request('events.watch', events).then(() => { this._watchRetries = 0 }, (e) => {
+        const sent = this._request('events.watch', events).then(() => { this._watchRetries = 0 }, (e) => {
             if (this._watching !== key) return
             this._watching = null
+            // A refused token (401) gets no next socket: watchApplied() must not resolve.
+            if (e instanceof RpcError && e.status === 401) throw e
             // A closed socket (503) gets the watch again when the next one opens.
-            // A refused token (401) gets no next socket.
-            if (e instanceof RpcError && (e.status === 503 || e.status === 401)) return
+            if (e instanceof RpcError && e.status === 503) return
             console.error('events.watch failed:', e)
             if (!this._watchRetryTimer && this._watchRetries++ < MAX_WATCH_RETRIES) {
                 this._watchRetryTimer = setTimeout(() => {
@@ -467,6 +468,9 @@ export class ApiClient {
                 }, WATCH_RETRY_DELAY_MS)
             }
         })
+        // Only watchApplied() awaits this; a refused watch is not an unhandled rejection otherwise.
+        sent.catch(() => {})
+        this._watchSent = sent
     }
 
     private _closeWs(): void {
