@@ -75,8 +75,19 @@ impl std::fmt::Display for AuthError {
     }
 }
 
+/// Leaves out the token: a formatted session must never carry a credential.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("principal", &self.principal)
+            .field("reach", &self.reach)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A connection's identity, checked again on every request and every delivered event.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Session {
     pub principal: Principal,
     pub reach: ListenerReach,
@@ -232,8 +243,9 @@ mod resolution_tests {
     //! One test per way a token resolves.
     use super::*;
     use crate::agent::capabilities::{
-        apps_map, get_user_default_capabilities, AuthInfo, AuthInfoExtended,
+        apps_map, get_user_default_capabilities, AuthInfo, AuthInfoExtended, ALL_CAPABILITY,
         PERSPECTIVE_CREATE_CAPABILITY, RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
+        RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
     };
     use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
 
@@ -322,6 +334,10 @@ mod resolution_tests {
         let _multi_user = MultiUserMode::on();
         let multi = Session::open("", &admin(), ListenerReach::Network).unwrap();
         assert!(multi.may(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY));
+        assert!(
+            !multi.may(&RUNTIME_USER_MANAGEMENT_READ_CAPABILITY),
+            "anonymous callers cannot list users"
+        );
     }
 
     /// Every combination of credential, listener and multi-user setting for an empty token.
@@ -415,6 +431,10 @@ mod resolution_tests {
             }
             assert_eq!(caps(&session), caps_of(get_user_default_capabilities()));
             assert!(!session.is_operator());
+            assert!(
+                !session.may(&ALL_CAPABILITY),
+                "a user never holds every capability"
+            );
             assert!(session.expires_at.is_some(), "a user token expires");
             assert!(session.check().is_ok());
         }
@@ -502,21 +522,37 @@ mod resolution_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let session = |expires_at| {
-            let app = Principal::App {
-                token_id: TokenId("t".into()),
-                caps: vec![],
-            };
-            Session::for_test_expiring(app, expires_at)
+        let app = || Principal::App {
+            token_id: TokenId("t".into()),
+            caps: vec![],
         };
-        assert!(session(now + 3600).check().is_ok());
-        assert!(session(now - 10).check().is_ok(), "inside the leeway");
-        let err = session(now - 3600).check().unwrap_err();
-        assert_eq!(err, AuthError::Expired);
-        assert_eq!(
-            err.to_string(),
-            "Unauthorized access: the token has expired"
-        );
+        let user = || Principal::User {
+            token_id: TokenId("t".into()),
+            email: "expiring@example.org".into(),
+            did: "did:key:expiring".into(),
+            caps: vec![],
+        };
+        // Both principals that carry a token stop working at its expiry, apps and users alike.
+        for principal in [app, user] {
+            let session = |expires_at| Session::for_test_expiring(principal(), expires_at);
+            assert!(session(now + 3600).check().is_ok());
+            assert!(session(now - 10).check().is_ok(), "inside the leeway");
+            let err = session(now - 3600).check().unwrap_err();
+            assert_eq!(err, AuthError::Expired);
+            assert_eq!(
+                err.to_string(),
+                "Unauthorized access: the token has expired"
+            );
+        }
+    }
+
+    #[test]
+    fn a_formatted_session_never_carries_its_token() {
+        let token = app_token(None);
+        let session = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
+        let formatted = format!("{session:?}");
+        assert!(!formatted.contains(&token), "{formatted}");
+        assert!(formatted.contains("App"), "{formatted}");
     }
 
     #[test]
