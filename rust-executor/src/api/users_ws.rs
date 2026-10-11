@@ -555,7 +555,7 @@ mod operator_tests {
 #[cfg(test)]
 mod session_revocation_tests {
     //! #1370: user tokens could not be revoked: no logout, no "log out everywhere".
-    use crate::agent::capabilities::{check_not_revoked, decode_jwt, ListenerReach};
+    use crate::agent::capabilities::{decode_jwt, ListenerReach};
     use crate::agent::revoked::SessionCutoffs;
     use crate::agent::session::{AuthError, Session};
     use crate::api::auth::AuthContext;
@@ -656,15 +656,13 @@ mod session_revocation_tests {
                 Err(AuthError::Revoked),
                 "the current one too"
             );
+            // MCP opens its sessions with `Session::open` too, so it refuses them as well.
             assert_eq!(open(token).unwrap_err(), AuthError::Revoked);
-            // MCP resolves tokens without a session; it refuses them as well.
-            assert!(check_not_revoked(&decode_jwt(token.clone()).unwrap()).is_err());
         }
 
         // Issued within the same second as the cutoff, yet after it.
         let later = generate_user_jwt(&email, "test").unwrap();
         assert!(open(&later).unwrap().check().is_ok());
-        assert!(check_not_revoked(&decode_jwt(later).unwrap()).is_ok());
         assert!(open(&others).is_ok(), "another user's token works");
     }
 

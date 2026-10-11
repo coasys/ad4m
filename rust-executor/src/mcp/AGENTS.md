@@ -22,8 +22,47 @@ Model Context Protocol server exposing AD4M to LLM agents (`rmcp`). Transport in
   `Session::check` again, so a revoked, expired or logged-out token is refused
   mid-session. The in-process harness (`harness_bridge.rs`) skips `call_tool`, so
   these helpers are the check there.
-- Never resolve tokens in a tool (`decode_jwt`, `capabilities_on`,
-  `AgentContext::from_auth_token`): ask the `Session`.
+- Never resolve tokens in a tool (`decode_jwt`): ask the `Session`.
+
+## Tools that wrap an RPC method dispatch through the handler map
+
+A tool that does the job of an RPC method calls it with `call_method(method, params)`
+(`tools/mod.rs`): the shared handler map (`api::ws_handler::shared_handler_map`) runs the
+method's contract check, its guard and its handler with a `RequestContext` built from the
+caller's `Session` (`request_context`). The tool has no capability or ownership check of its
+own. A tool that does its own work before the call (cloning a link language, resolving a flow
+name, loading the file-storage language) runs `admit_method` first, so a refused caller
+causes no side effect.
+
+| Tool | RPC method |
+|---|---|
+| `list_perspectives`, `add_perspective` | `perspective.all`, `perspective.create` |
+| `add_link`, `add_child` | `perspective.addLink` |
+| `query_links`, `get_children`, `get_flows` | `perspective.queryLinks` |
+| `add_model`, `add_flow` | `perspective.addSdna` |
+| `execute_commands` | `perspective.executeCommands` |
+| `flow_proposal_accept`, `flow_proposal_reject`, `flow_valid_outputs` | `perspective.acceptFlowProposal`, `.rejectFlowProposal`, `.flowValidOutputs` |
+| `language_meta` | `language.meta` |
+| `list_link_language_templates` | `runtime.linkLanguageTemplates` |
+| `neighbourhood_publish_from_perspective`, `neighbourhood_join_from_url` | `neighbourhood.publish`, `neighbourhood.join` |
+| `get_my_did`, `get_agent_profile` | `agent.get` |
+| `get_agent_public_perspective` | `agent.byDid` (a DID), `agent.get` (none) |
+| `set_agent_profile`, `set_agent_public_perspective` | `agent.get` + `agent.updateProfile` |
+| `set_agent_profile_picture` | `expression.create` + `agent.get` + `agent.updateProfile` |
+| `login_email`, `signup`, `request_login_verification`, `verify_email_code` | `user.login`, `user.create`, `user.requestVerification`, `user.verifyEmail` |
+| `request_capability`, `generate_jwt` | `agent.requestCapability` + `agent.permitCapability`, `agent.generateJwt` |
+
+- The login tools and the capability request run as a caller without a token
+  (`call_without_token` in `auth.rs`): they obtain the session that replaces the MCP
+  session's one. `agent.permitCapability` (the inline mint code) runs as the caller.
+- Refusals and failures answer `{"error": .., "status": <code>}` (`method_error`). On a
+  perspective (`perspective_error`), a missing perspective and one that is not the caller's
+  both answer `Perspective not found: <uuid>` with status 404.
+- Tools with no RPC method keep their own logic and take their checks from the `Session`
+  (`get_readable_perspective`, `get_writable_perspective`, `require`): `describe_perspective`,
+  the `instance_*` tools, `instance_transcript`, `flow_state`, `flow_actions`,
+  `generate_waker_query`, `get_mention_waker_config`, `get_documentation`, `auth_status`, and
+  the dynamic per-class tools.
 - `auth_status` reports the same resolved session (principal, did, capabilities,
   or the `AuthError`), so `authenticated` is true exactly when a tool call passes.
 
@@ -48,10 +87,11 @@ is a second, raw-link parser slated for deletion.
 
 ## Rules
 
-- MCP does **not** go through `api/` handlers; it calls `PerspectiveInstance` directly.
-  Keep semantics aligned with the WS handlers (same capability, same `Session::acts_as`).
-- Permission denial returns a 404-shaped JSON string (not 403) by design: don't leak
-  perspective existence.
+- A tool that does the job of an RPC method calls it (`call_method`), never the code behind
+  it. The other tools call `PerspectiveInstance` directly; keep their semantics aligned with
+  the WS handlers (same capability, same `Session::acts_as`).
+- Permission denial on a perspective returns a 404-shaped JSON string (not 403) by design:
+  don't leak perspective existence.
 - Multi-step writes must use `create_batch` … `commit_batch` so partial state is never
   visible.
 - **New instance-level behaviour goes in `instances/` — `dynamic.rs` depends on it,

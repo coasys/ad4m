@@ -230,7 +230,12 @@ pub fn get_apps() -> Vec<crate::types::Apps> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::capabilities::{capabilities_from_token, generate_jwt, AuthInfo};
+    use crate::agent::capabilities::{generate_jwt, AuthInfo, ListenerReach};
+
+    /// Whether `token` opens a session.
+    fn opens(token: &str) -> bool {
+        crate::agent::session::Session::open(token, &None, ListenerReach::Loopback).is_ok()
+    }
 
     fn info(request_id: &str) -> AuthInfoExtended {
         AuthInfoExtended {
@@ -294,13 +299,13 @@ mod tests {
         // knew the revoked app.
         APPS.lock().unwrap().extend(apps);
         crate::agent::revoked::load_at_start().unwrap();
-        assert!(capabilities_from_token(live_token.clone(), &None).is_ok());
-        assert!(capabilities_from_token(revoked_token, &None).is_err());
+        assert!(opens(&live_token));
+        assert!(!opens(&revoked_token));
 
         // Revoking by JWT finds the migrated app by the token's id.
         revoke_app(&live_token).unwrap();
         assert!(get_app(&live).unwrap().unwrap().revoked);
-        assert!(capabilities_from_token(live_token, &None).is_err());
+        assert!(!opens(&live_token));
         remove_app(&live).unwrap();
         remove_app(&revoked).unwrap();
     }
@@ -322,8 +327,8 @@ mod tests {
         assert!(!get_app(&request_id).unwrap().unwrap().revoked);
         revoke_app(&token).unwrap();
         assert!(get_app(&request_id).unwrap().unwrap().revoked);
-        assert!(capabilities_from_token(token, &None).is_err());
-        assert!(capabilities_from_token(other_token, &None).is_ok());
+        assert!(!opens(&token));
+        assert!(opens(&other_token));
         remove_app(&request_id).unwrap();
     }
 }
