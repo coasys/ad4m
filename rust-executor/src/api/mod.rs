@@ -80,6 +80,7 @@ pub fn api_router(state: AppState) -> Router {
                 Json(json!({
                     "name": "AD4M Executor",
                     "version": *crate::globals::AD4M_VERSION,
+                    "commit": crate::globals::AD4M_GIT_COMMIT,
                     "api": "/api/v1",
                     "transport": "websocket",
                     "ws": "/api/v1/ws"

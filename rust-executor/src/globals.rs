@@ -7,6 +7,14 @@ lazy_static! {
     pub static ref AD4M_VERSION: String = String::from("0.13.0-test-interpretation-2");
 }
 
+/// The commit this executor was built from, recorded by `build.rs`: the full
+/// hash, `-dirty` appended when the tree had uncommitted changes, or `unknown`
+/// for a build without git. Reported next to [`AD4M_VERSION`], never compared.
+pub const AD4M_GIT_COMMIT: &str = env!("AD4M_GIT_COMMIT");
+
+/// The first eight hex digits of [`AD4M_GIT_COMMIT`], with its suffix.
+pub const AD4M_GIT_COMMIT_SHORT: &str = env!("AD4M_GIT_COMMIT_SHORT");
+
 /// Global shutdown signal sender. Used by the `runtime_quit` WS-RPC method and signal handlers
 /// to trigger a graceful shutdown of the executor.
 /// Wrapped in Mutex<Option<...>> so we can take() the sender from a shared static reference.

@@ -332,6 +332,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(config.log_config.as_ref());
+    info!(
+        "AD4M executor {} ({})",
+        *crate::globals::AD4M_VERSION,
+        crate::globals::AD4M_GIT_COMMIT
+    );
     config.prepare();
 
     if let Err(message) = config.check_admin_credential() {
