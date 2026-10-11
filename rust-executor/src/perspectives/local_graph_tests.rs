@@ -884,10 +884,9 @@ async fn children_of_a_local_instance_stay_local() {
     assert_eq!(child.status, Some(LinkStatus::Local));
 }
 
-/// A notification trigger reads as the agent the notification belongs to.
-#[tokio::test]
-async fn a_notification_trigger_does_not_read_another_agents_local_graph() {
-    let (p, _, bob_did) = two_users_and_shared_links().await;
+/// A granted notification of `owner_did` in perspective `uuid`, triggered by
+/// every `ad4m://p` link.
+fn add_granted_notification(uuid: &str, owner_did: &str) {
     Ad4mDb::with_global_instance(|db| {
         db.add_notification(
             crate::types::NotificationInput {
@@ -896,21 +895,62 @@ async fn a_notification_trigger_does_not_read_another_agents_local_graph() {
                 app_url: "t".to_string(),
                 app_icon_path: "t".to_string(),
                 trigger: "SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string(),
-                perspective_ids: vec![p.uuid.clone()],
+                perspective_ids: vec![uuid.to_string()],
                 webhook_url: String::new(),
                 webhook_auth: String::new(),
             },
-            &bob_did,
+            owner_did,
             true,
         )
     })
     .unwrap();
-    let matches = p.calc_notification_trigger_matches().await.unwrap();
-    let (_, rows) = matches.into_iter().next().unwrap();
-    let mut seen: Vec<&str> = rows.iter().filter_map(|r| r["s"].as_str()).collect();
-    seen.sort();
+}
+
+/// The subjects each notification owner's trigger matched, sorted.
+async fn trigger_subjects_by_owner(
+    p: &PerspectiveInstance,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    p.calc_notification_trigger_matches()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(n, rows)| {
+            let mut seen: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r["s"].as_str().map(str::to_string))
+                .collect();
+            seen.sort();
+            (n.owner_did, seen)
+        })
+        .collect()
+}
+
+/// A notification trigger reads as the agent the notification belongs to.
+#[tokio::test]
+async fn a_notification_trigger_does_not_read_another_agents_local_graph() {
+    let (p, _, bob_did) = two_users_and_shared_links().await;
+    add_granted_notification(&p.uuid, &bob_did);
     assert_eq!(
-        seen,
+        trigger_subjects_by_owner(&p).await[&bob_did],
+        vec!["ad4m://s/bob", "ad4m://s/default", "ad4m://s/shared"]
+    );
+}
+
+/// Two owners' notifications with the same trigger read different Local
+/// graphs, so they must not share one cached result: whichever ran second
+/// would get the first owner's Local rows.
+#[tokio::test]
+async fn notifications_with_one_trigger_read_as_each_owner() {
+    let (p, alice_did, bob_did) = two_users_and_shared_links().await;
+    add_granted_notification(&p.uuid, &alice_did);
+    add_granted_notification(&p.uuid, &bob_did);
+    let by_owner = trigger_subjects_by_owner(&p).await;
+    assert_eq!(
+        by_owner[&alice_did],
+        vec!["ad4m://s/alice", "ad4m://s/default", "ad4m://s/shared"]
+    );
+    assert_eq!(
+        by_owner[&bob_did],
         vec!["ad4m://s/bob", "ad4m://s/default", "ad4m://s/shared"]
     );
 }
