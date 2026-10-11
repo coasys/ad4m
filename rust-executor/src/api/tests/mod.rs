@@ -3,6 +3,8 @@
 #[cfg(test)]
 pub mod agent_did_document_tests;
 #[cfg(test)]
+pub mod anonymous_access_tests;
+#[cfg(test)]
 pub mod connection_tests;
 #[cfg(test)]
 pub mod error_tests;
@@ -11,9 +13,13 @@ pub mod flow_ws_tests;
 #[cfg(test)]
 pub mod handler_table_tests;
 #[cfg(test)]
+pub mod node_operation_tests;
+#[cfg(test)]
 pub mod runtime_ws_tests;
 #[cfg(test)]
 pub mod shacl_ws_tests;
+#[cfg(test)]
+pub mod start_server_tests;
 #[cfg(test)]
 pub mod support;
 #[cfg(test)]

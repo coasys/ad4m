@@ -41,13 +41,52 @@ const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
 /// ([`crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S`], #1070).
 pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
 
+/// Who can connect to the listener a request arrived on.
+///
+/// Without an admin credential the executor runs the single-user local trust model: a caller
+/// with no token is the operator. That premise holds on a loopback listener and nowhere else,
+/// so it is checked per listener instead of assumed (#1059). The API server attaches each
+/// listener's reach where it binds it (`api::listener_router`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenerReach {
+    /// Bound to a loopback address: only processes on this machine connect, including any
+    /// proxy or tunnel running here. The API reads a request that carries a `Forwarded`,
+    /// `X-Forwarded-For` or `X-Real-IP` header as `Network` (`api::auth::listener_reach`). A
+    /// proxy that sets none of them (a raw TCP forward, `ssh -R`) still reads as `Loopback`,
+    /// so its remote clients are the operator: a node behind a proxy needs an admin credential.
+    Loopback,
+    /// Bound to any other address: whoever can route to it connects.
+    Network,
+}
+
+impl ListenerReach {
+    pub fn of(addr: &std::net::SocketAddr) -> Self {
+        if addr.ip().is_loopback() {
+            ListenerReach::Loopback
+        } else {
+            ListenerReach::Network
+        }
+    }
+}
+
+/// [`is_admin_credential_token_on`] for a caller on a loopback listener: for the MCP server,
+/// where [`capabilities_from_token`] explains why loopback holds.
+pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+    is_admin_credential_token_on(token, admin_credential, ListenerReach::Loopback)
+}
+
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
 /// When admin_credential is Some, the token must match it exactly (constant-time).
-/// When admin_credential is None (legacy single-user mode), an empty token is treated as admin.
-pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+/// When admin_credential is None (legacy single-user mode), an empty token is treated as admin,
+/// but only on a loopback listener. On a network listener it is an anonymous caller (#1059).
+pub fn is_admin_credential_token_on(
+    token: &str,
+    admin_credential: &Option<String>,
+    reach: ListenerReach,
+) -> bool {
     match admin_credential {
         Some(cred) => constant_time_eq(token, cred),
-        None => token.is_empty(),
+        None => token.is_empty() && reach == ListenerReach::Loopback,
     }
 }
 
@@ -93,40 +132,79 @@ pub fn check_capability(
     Ok(())
 }
 
-pub fn check_token_revoked(token: &String) -> Result<(), String> {
-    // Use constant-time comparison to prevent timing attacks
-    if let Some(app) = apps_map::get_apps()
-        .iter()
-        .find(|app| constant_time_eq(&app.token, token))
-    {
-        if app.revoked.unwrap_or(false) {
-            return Err("Unauthorized access".to_string());
-        }
-    };
-
+pub fn check_token_revoked(token: &str) -> Result<(), String> {
+    if apps_map::is_revoked(token) {
+        return Err("Unauthorized access".to_string());
+    }
     Ok(())
 }
 
+/// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
+const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
+
+/// Checks a connection's token again on every request and event, without the wallet.
+///
+/// The token's signature gets checked once, when the connection opens: its capabilities come
+/// from that check. After that, revocation and the expiry read at connect decide, so a token
+/// that expires or gets revoked during a connection stops working at once, and a locked
+/// wallet does not look like a bad token.
+#[derive(Clone)]
+pub struct TokenCheck {
+    token: String,
+    expires_at: Option<u64>,
+}
+
+impl TokenCheck {
+    /// `expires_at` stays `None` in two different cases. The admin credential and the empty
+    /// token never expire. A token that does not decode got no capabilities when the
+    /// connection opened, so every capability check refuses it; `None` there does not mean
+    /// "never expires", and a caller that skips the capability check must not read it so.
+    /// (Failing it here instead would turn a wallet that was locked at connect time into a
+    /// 401 on every request, even on calls that check no capability.)
+    pub fn new(token: &str, is_admin_credential: bool) -> Self {
+        let expires_at = if is_admin_credential || token.is_empty() {
+            None
+        } else {
+            decode_jwt(token.to_string())
+                .ok()
+                .map(|claims| claims.expires_at())
+        };
+        Self {
+            token: token.to_string(),
+            expires_at,
+        }
+    }
+
+    pub fn check(&self) -> Result<(), String> {
+        check_token_revoked(&self.token)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX);
+        match self.expires_at {
+            Some(expires_at) if now > expires_at + TOKEN_EXPIRY_LEEWAY_SECONDS => {
+                Err("Unauthorized access: the token has expired".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_expiry(token: &str, expires_at: u64) -> Self {
+        Self {
+            token: token.to_string(),
+            expires_at: Some(expires_at),
+        }
+    }
+}
+
+/// The user a token names, if any. Only the login flows set `sub`, and a token keeps naming
+/// that user whatever the multi-user setting says, so a user token never acts as the node.
 pub fn user_email_from_token(token: String) -> Option<String> {
     if token.is_empty() {
         return None;
     }
-
-    // Check if multi-user mode is enabled - if not, never return a user context
-    use crate::db::Ad4mDb;
-    let multi_user_enabled =
-        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-    if !multi_user_enabled {
-        return None;
-    }
-
-    // Try to decode JWT and extract user email from sub field
-    if let Ok(claims) = decode_jwt(token) {
-        claims.sub
-    } else {
-        None
-    }
+    decode_jwt(token).ok().and_then(|claims| claims.sub)
 }
 
 /// Update last_seen timestamp for the user from the auth token
@@ -264,26 +342,32 @@ pub async fn track_last_seen_from_token(token: String) {
     }
 }
 
+/// [`capabilities_on`] for a caller on a loopback listener.
+///
+/// For the MCP server. Loopback holds there because `mcp::server::resolve_host`
+/// binds an MCP server with no admin credential to loopback, and its HTTPS listener does not
+/// start without one. The exception is an explicit `MCP_HOST`, which it warns about.
 pub fn capabilities_from_token(
     token: String,
     admin_credential: Option<String>,
 ) -> Result<Vec<Capability>, String> {
-    match admin_credential {
-        Some(admin_credential) => {
-            // Use constant-time comparison to prevent timing attacks
-            if constant_time_eq(&token, &admin_credential) {
-                return Ok(vec![ALL_CAPABILITY.clone()]);
-            }
-        }
-        None => {
-            if token.is_empty() {
-                return Ok(vec![ALL_CAPABILITY.clone()]);
-            }
-        }
+    capabilities_on(token, admin_credential, ListenerReach::Loopback)
+}
+
+/// The capabilities of a caller that presents `token` on a listener with this reach.
+pub fn capabilities_on(
+    token: String,
+    admin_credential: Option<String>,
+    reach: ListenerReach,
+) -> Result<Vec<Capability>, String> {
+    // The same test that decides `is_admin_credential`, so the two cannot disagree.
+    if is_admin_credential_token_on(&token, &admin_credential, reach) {
+        return Ok(vec![ALL_CAPABILITY.clone()]);
     }
 
     if token.is_empty() {
-        // For empty tokens, check if multi-user mode is enabled
+        // An anonymous caller: the node has an admin credential, or the listener is on the
+        // network. For empty tokens, check if multi-user mode is enabled
         // If so, allow user creation (registration), login, and checking enabled status
         // READ capability is intentionally excluded to prevent unauthenticated user enumeration
         use crate::db::Ad4mDb;
@@ -543,6 +627,60 @@ mod tests {
     }
 
     #[test]
+    fn a_listener_is_loopback_only_on_a_loopback_address() {
+        let reach = |addr: &str| ListenerReach::of(&addr.parse().unwrap());
+        assert_eq!(reach("127.0.0.1:12000"), ListenerReach::Loopback);
+        assert_eq!(reach("[::1]:12000"), ListenerReach::Loopback);
+        assert_eq!(reach("0.0.0.0:12000"), ListenerReach::Network);
+        assert_eq!(reach("[::]:12000"), ListenerReach::Network);
+        assert_eq!(reach("192.168.1.5:12000"), ListenerReach::Network);
+    }
+
+    // #1059: without an admin credential, an empty token is the operator only on loopback.
+    // On the network it gets what an anonymous caller gets on a node with a credential:
+    // enough to request a capability, nothing to read with.
+    #[test]
+    fn without_a_credential_an_empty_token_is_the_operator_only_on_loopback() {
+        let empty = String::new();
+        assert!(is_admin_credential_token_on(
+            &empty,
+            &None,
+            ListenerReach::Loopback
+        ));
+        assert!(!is_admin_credential_token_on(
+            &empty,
+            &None,
+            ListenerReach::Network
+        ));
+
+        let local = Ok(capabilities_on(empty.clone(), None, ListenerReach::Loopback).unwrap());
+        assert!(check_capability(&local, &AGENT_READ_CAPABILITY).is_ok());
+
+        // The anonymous set reads the multi-user setting.
+        let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
+        let remote = Ok(capabilities_on(empty, None, ListenerReach::Network).unwrap());
+        assert!(check_capability(&remote, &AGENT_READ_CAPABILITY).is_err());
+        assert!(check_capability(&remote, &AGENT_AUTH_CAPABILITY).is_ok());
+    }
+
+    // The admin credential works on any listener: it is what makes a network listener safe.
+    #[test]
+    fn the_admin_credential_is_the_operator_on_the_network() {
+        let credential = Some("the-admin-credential".to_string());
+        assert!(is_admin_credential_token_on(
+            "the-admin-credential",
+            &credential,
+            ListenerReach::Network
+        ));
+        let capabilities = capabilities_on(
+            "the-admin-credential".to_string(),
+            credential,
+            ListenerReach::Network,
+        );
+        assert!(check_capability(&capabilities, &AGENT_READ_CAPABILITY).is_ok());
+    }
+
+    #[test]
     fn unauthenticated_users_can_check_multi_user_enabled() {
         // Empty token (unauthenticated) should have capability to check if multi-user is enabled
         let capabilities = capabilities_from_token(String::new(), None).unwrap();
@@ -579,5 +717,73 @@ mod tests {
 
         // Note: We can't easily test the multi-user mode grant of LOGIN and CREATE capabilities
         // without setting up the database, but the logic is tested by integration tests
+    }
+}
+
+#[cfg(test)]
+mod token_validity_tests {
+    use super::*;
+    use crate::test_utils::{setup_agent, setup_wallet};
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    // A connection used to check its token only when it opened, so a token that expired
+    // during a connection kept its capabilities.
+    #[test]
+    fn a_token_past_its_expiry_stops_working() {
+        let expired = TokenCheck::with_expiry("some-token", unix_now() - 3600);
+        let err = expired.check().unwrap_err();
+        assert!(err.contains("expired"), "{err}");
+    }
+
+    #[test]
+    fn expiry_allows_the_same_leeway_as_jwt_validation() {
+        let just_expired = TokenCheck::with_expiry("some-token", unix_now() - 10);
+        assert!(just_expired.check().is_ok());
+    }
+
+    #[test]
+    fn a_valid_token_keeps_working_and_carries_its_expiry() {
+        setup_wallet();
+        setup_agent();
+        let token = crate::user_management::generate_user_jwt("valid@example.org", "test").unwrap();
+        let check = TokenCheck::new(&token, false);
+        assert!(check.expires_at.is_some());
+        assert!(check.check().is_ok());
+    }
+
+    #[test]
+    fn the_admin_credential_the_empty_token_and_garbage_carry_no_expiry() {
+        setup_wallet();
+        setup_agent();
+        assert!(TokenCheck::new("the-admin-credential", true)
+            .check()
+            .is_ok());
+        assert!(TokenCheck::new("", false).check().is_ok());
+        // Garbage gets no capabilities at connect; the check adds nothing on top.
+        assert!(TokenCheck::new("not-a-jwt", false).expires_at.is_none());
+    }
+
+    // revokeToken() must end existing connections, not only new ones.
+    #[test]
+    fn a_revoked_app_token_stops_working() {
+        crate::test_utils::use_test_apps_file();
+        let token = format!("revoked-app-token-{}", uuid::Uuid::new_v4());
+        let request_key = format!("key-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_key.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
+        let check = TokenCheck::with_expiry(&token, unix_now() + 3600);
+        assert!(check.check().is_ok());
+        apps_map::revoke_app(&request_key).unwrap();
+        assert!(check.check().is_err());
+        apps_map::remove_app(&request_key).unwrap();
     }
 }

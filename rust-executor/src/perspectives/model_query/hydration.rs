@@ -283,10 +283,11 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             // Collapse duplicate targets.
             //
             // A link is stored as a direct triple plus a reifier keyed on
-            // `sha256(source, predicate, target, timestamp)`, so two links
-            // carrying the same triple at different timestamps — two peers
-            // asserting the same membership, or a re-add racing a remote write —
-            // share one triple but produce two reifiers. The instance query joins
+            // `sha256(author, source, predicate, target, timestamp)`, so two
+            // links carrying the same triple from different authors or at
+            // different timestamps — two peers asserting the same membership,
+            // or a re-add racing a remote write — share one triple but produce
+            // two reifiers. The instance query joins
             // through the reifier to recover author and timestamp, so it returns a
             // row per reifier and the target lands here twice.
             //
@@ -662,8 +663,8 @@ mod tests {
     // ---- duplicate collapsing --------------------------------------------
     //
     // A link is a direct triple plus a reifier keyed on
-    // `sha256(source, predicate, target, timestamp)`. Two peers asserting the
-    // same membership share the triple but mint two reifiers, and the instance
+    // `sha256(author, source, predicate, target, timestamp)`. Two peers
+    // asserting the same membership share the triple but mint two reifiers, and the instance
     // query joins through the reifier to recover author/timestamp — so the same
     // target arrives twice. These fixtures reproduce that by repeating a
     // `(predicate, target)` pair at two timestamps.

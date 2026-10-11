@@ -59,16 +59,17 @@ pub(crate) async fn ensure_flow_model_classes(
         context,
     )
     .await?;
-    // `nonce` is the newest path (#1108; `outputs_hash` was #1104's). A
-    // perspective that registered the shape before it would silently drop
-    // the nonce every proposal now writes — and without a nonce no proposal
-    // is an atom — so its presence forces a re-register.
+    // `resolved_as` is the newest path (with `acceptedBy`, read through a
+    // getter); `nonce` was #1108's and `outputs_hash` #1104's. A perspective
+    // that registered the shape before them reads proposals without their
+    // votes and marks, and before `nonce` would silently drop the nonce every
+    // proposal now writes — so the newest path's presence forces a re-register.
     ensure_subject_class(
         perspective,
         FLOW_TRANSITION_PROPOSAL_CLASS,
         FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
         FLOW_TRANSITION_PROPOSAL_SDNA,
-        Some(crate::perspectives::flow_instance::atom::PROPOSAL_NONCE_PREDICATE),
+        Some(crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE),
         context,
     )
     .await
@@ -706,6 +707,38 @@ mod tests {
         // Same drift guard for the nonce (#1108): the writer stores it via
         // the SDNA, the atom re-reads it raw to recompute the URI.
         assert_eq!(path_of("nonce").as_deref(), Some(PROPOSAL_NONCE_PREDICATE));
+    }
+
+    #[test]
+    fn votes_and_marks_are_read_through_the_predicates_the_engine_writes() {
+        // `acceptedBy` and `resolvedAs` are the engine's, not a client's: a
+        // vote goes through `acceptProposal` and a mark through the pass. The
+        // shape reads them and must never offer to write them.
+        use crate::perspectives::flow_instance::atom::{
+            ACCEPTED_BY_PREDICATE, RESOLVED_AS_PREDICATE,
+        };
+        let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
+        let property = |name: &str| {
+            v["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{name} property must exist"))
+                .clone()
+        };
+        for (name, predicate) in [
+            ("acceptedBy", ACCEPTED_BY_PREDICATE),
+            ("resolvedAs", RESOLVED_AS_PREDICATE),
+        ] {
+            let p = property(name);
+            assert_eq!(p["path"].as_str(), Some(predicate), "{name} path");
+            assert_eq!(p["writable"].as_bool(), Some(false), "{name} is read-only");
+            assert!(p["setter"].is_null(), "{name} declares no setter");
+        }
+        // A plain read of `acceptedBy` would list votes the fold ignores; the
+        // getter is what applies `signed_by`.
+        assert!(property("acceptedBy")["getter"].is_string());
     }
 
     #[test]

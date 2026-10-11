@@ -162,11 +162,14 @@ This is particularly useful for:
 - System services
 - Management interfaces (the AD4M Launcher uses this internally)
 
-To enable this on the executor:
+The executor requires one: `ad4m-executor run` exits with an error when no admin credential (or an empty one) is set. Pass it through the environment, not the command line:
 
 ```bash
-ad4m-executor run --admin-credential your-secret-here
+export AD4M_ADMIN_CREDENTIAL="your-secret-here"
+ad4m-executor run
 ```
+
+For tests and local development, `--insecure-no-admin-credential` (or `AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true`) starts the executor without a credential; an empty token then has full admin access on a loopback-bound API, and is anonymous on a network-bound one (`--localhost false`, or TLS).
 
 ⚠️ **Security Note**: The admin credential grants full access to the executor. Use it carefully and never expose it in client-side code or public repositories.
 

@@ -253,7 +253,11 @@ async fn main() -> Result<()> {
         pid_file,
     } = args.domain
     {
-        let _ = tokio::spawn(async move {
+        // Not compiled: cli/Cargo.toml's [[bin]] "ad4m" is src/ad4m.rs, which
+        // replaces this auto-discovered main.rs (and its `mod eve` no longer
+        // exists). Kept in line with ad4m_executor.rs so a revival does not
+        // bring back a process that runs on with no API.
+        let startup = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
@@ -284,6 +288,9 @@ async fn main() -> Result<()> {
                 ..Default::default()
             }).await
         }).await;
+        if let Ok(api_thread) = startup {
+            rust_executor::exit_when_api_fails(api_thread);
+        }
         
         let _ = ctrlc::set_handler(move || {
             println!("Received CTRL-C! Exiting...");
