@@ -10,8 +10,8 @@ use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSA
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::types::{
-    AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, RequestContext,
-    VoiceActivityParamsInput,
+    AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, ModelView,
+    RequestContext, VoiceActivityParamsInput,
 };
 use base64::Engine;
 
@@ -51,23 +51,12 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let models: Vec<Model> = Ad4mDb::with_global_instance(|db| db.get_models())
+    let models: Vec<ModelView> = Ad4mDb::with_global_instance(|db| db.get_models())
         .map_err(|e| WsRpcError::internal(e.to_string()))?
-        .into_iter()
-        .map(|model| model_for_session(model, &ctx))
+        .iter()
+        .map(Model::view)
         .collect();
     Ok(serde_json::to_value(models)?)
-}
-
-/// A model as a session may see it. A user session sees the model but not its provider
-/// key: the key belongs to the node's operator, and anyone holding it can spend on it.
-fn model_for_session(mut model: Model, ctx: &RequestContext) -> Model {
-    if ctx.user_email().is_some() {
-        if let Some(api) = model.api.as_mut() {
-            api.api_key = String::new();
-        }
-    }
-    model
 }
 
 /// `ai.discoverModels` — what does this endpoint serve, and does this key work?
@@ -147,7 +136,8 @@ pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRp
     let Some(api) = &model.api else {
         return Ok(());
     };
-    if api.api_key.is_empty() {
+    // No key sent: an update keeps the stored key only for the URL it was set for.
+    if api.api_key.as_ref().is_none_or(|key| key.is_empty()) {
         return Ok(());
     }
     match url::Url::parse(&api.base_url) {
@@ -194,10 +184,13 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    service
-        .update_model(id, model)
-        .await
-        .map_err(|e| WsRpcError::internal(format!("Failed to update model: {}", e)))?;
+    service.update_model(id, model).await.map_err(|e| {
+        if let Some(refusal) = e.downcast_ref::<crate::db::ApiKeyNotResent>() {
+            WsRpcError::bad_request(refusal.to_string())
+        } else {
+            WsRpcError::internal(format!("Failed to update model: {:#}", e))
+        }
+    })?;
 
     Ok(Value::Bool(true))
 }
@@ -267,9 +260,7 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         None
     };
 
-    Ok(serde_json::to_value(
-        model.map(|model| model_for_session(model, &ctx)),
-    )?)
+    Ok(serde_json::to_value(model.as_ref().map(Model::view))?)
 }
 
 async fn get_model_loading_status(
@@ -461,7 +452,7 @@ async fn close_transcription_stream(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.method::<NoParams, Vec<Model>>("ai.models", list_models)
+    map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
         .read();
     // The provider's own model ids.
     map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
@@ -472,8 +463,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model);
     map.method::<AiIdParams, bool>("ai.removeModel", remove_model);
     map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model);
-    map.method::<AiGetDefaultModelParams, Option<Model>>("ai.getDefaultModel", get_default_model)
-        .read();
+    map.method::<AiGetDefaultModelParams, Option<ModelView>>(
+        "ai.getDefaultModel",
+        get_default_model,
+    )
+    .read();
     map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
         "ai.modelLoadingStatus",
         get_model_loading_status,
@@ -703,15 +697,17 @@ pub struct AiTranscriptionCloseParams {
 #[cfg(test)]
 mod model_key_tests {
     use super::*;
-    use crate::types::{ModelApi, ModelApiType};
+    use crate::types::{ModelApi, ModelApiInput, ModelApiType};
 
-    fn remote_model() -> Model {
+    const KEY: &str = "sk-provider-secret";
+
+    fn remote_model(api_key: &str) -> Model {
         Model {
             id: "m1".to_string(),
             name: "Remote".to_string(),
             api: Some(ModelApi {
                 base_url: url::Url::parse("https://api.example.org/v1").unwrap(),
-                api_key: "sk-provider-secret".to_string(),
+                api_key: api_key.into(),
                 model: "gpt".to_string(),
                 api_type: ModelApiType::OpenAi,
                 max_num_ctx: None,
@@ -721,37 +717,29 @@ mod model_key_tests {
         }
     }
 
-    /// A user session for `user_email`, else an app token, holding `caps`.
-    fn ctx_with(user_email: Option<&str>, caps: Vec<Capability>) -> RequestContext {
-        match user_email {
-            Some(email) => RequestContext::user_for_test(email, "did:key:ai-user", caps),
-            None => RequestContext::app_for_test(caps),
-        }
-    }
-
-    fn ctx(user_email: Option<&str>) -> RequestContext {
-        ctx_with(user_email, vec![])
-    }
-
     #[test]
-    fn user_sessions_see_models_without_provider_keys() {
-        let model = model_for_session(remote_model(), &ctx(Some("a@example.org")));
-        assert_eq!(model.api.as_ref().unwrap().api_key, "");
-        assert_eq!(model.api.as_ref().unwrap().model, "gpt");
+    fn the_view_says_whether_a_key_is_set_and_never_carries_it() {
+        let json = serde_json::to_value(remote_model(KEY).view()).unwrap();
+        assert!(!json.to_string().contains(KEY), "{json}");
+        assert!(json["api"].get("apiKey").is_none(), "{json}");
+        assert_eq!(json["api"]["hasApiKey"], true);
+        assert_eq!(json["api"]["model"], "gpt");
+
+        let keyless = serde_json::to_value(remote_model("").view()).unwrap();
+        assert_eq!(keyless["api"]["hasApiKey"], false);
     }
 
-    // Goes through the `ai.getDefaultModel` handler, which returned the stored model
-    // unfiltered.
+    // #1167 stripped the key for user sessions by hand and let the operator and apps read
+    // it. The view now leaves it out for every caller.
     #[tokio::test]
-    async fn user_sessions_get_the_default_model_without_its_provider_key() {
-        use crate::types::ModelApiInput;
+    async fn no_session_gets_the_default_models_key() {
         Ad4mDb::init_global_instance(":memory:").unwrap();
         let id = Ad4mDb::with_global_instance(|db| {
             db.add_model(&ModelInput {
                 name: "Remote".to_string(),
                 api: Some(ModelApiInput {
                     base_url: "https://api.example.org/v1".to_string(),
-                    api_key: "sk-provider-secret".to_string(),
+                    api_key: Some(KEY.into()),
                     model: "gpt".to_string(),
                     api_type: "OPEN_AI".to_string(),
                     max_num_ctx: None,
@@ -762,25 +750,115 @@ mod model_key_tests {
         })
         .unwrap();
         Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
-        let session = |user_email: Option<&str>| {
-            Arc::new(ctx_with(user_email, vec![AI_READ_CAPABILITY.clone()]))
-        };
         let params = serde_json::json!({ "modelType": "LLM" });
+        let read = vec![AI_READ_CAPABILITY.clone()];
 
-        let user = get_default_model(params.clone(), session(Some("a@example.org")))
-            .await
-            .unwrap();
-        assert_eq!(user["id"], id.as_str());
-        assert_eq!(user["api"]["apiKey"], "");
+        for (who, ctx) in [
+            ("operator", RequestContext::operator_for_test()),
+            ("app", RequestContext::app_for_test(read.clone())),
+            (
+                "user",
+                RequestContext::user_for_test("a@example.org", "did:key:ai-user", read.clone()),
+            ),
+        ] {
+            let model = get_default_model(params.clone(), Arc::new(ctx))
+                .await
+                .unwrap();
+            assert_eq!(model["id"], id.as_str(), "{who}");
+            assert!(!model.to_string().contains(KEY), "{who}: {model}");
+            assert_eq!(model["api"]["hasApiKey"], true, "{who}");
+        }
+    }
 
-        let operator = get_default_model(params, session(None)).await.unwrap();
-        assert_eq!(operator["api"]["apiKey"], "sk-provider-secret");
+    /// The stored model's key, read in place for the assertion.
+    fn stored_key(id: &str) -> String {
+        Ad4mDb::with_global_instance(|db| db.get_model(id.to_string()))
+            .unwrap()
+            .unwrap()
+            .api
+            .unwrap()
+            .api_key
+            .expose()
+            .to_string()
+    }
+
+    fn input(base_url: &str, api_key: Option<&str>) -> ModelInput {
+        ModelInput {
+            name: "Remote".to_string(),
+            api: Some(ModelApiInput {
+                base_url: base_url.to_string(),
+                api_key: api_key.map(Into::into),
+                model: "gpt".to_string(),
+                api_type: "OPEN_AI".to_string(),
+                max_num_ctx: None,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        }
+    }
+
+    // A client never reads the key back, so an update that leaves it out keeps it. It
+    // goes only to the endpoint it was set for: moving the model needs the key again.
+    #[test]
+    fn an_update_without_a_key_keeps_the_stored_key_for_the_same_endpoint() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let url = "https://api.example.org/v1";
+        let id = Ad4mDb::with_global_instance(|db| db.add_model(&input(url, Some(KEY)))).unwrap();
+        let update =
+            |model: ModelInput| Ad4mDb::with_global_instance(|db| db.update_model(&id, &model));
+
+        update(input(url, None)).unwrap();
+        assert_eq!(stored_key(&id), KEY);
+
+        let moved = update(input("https://elsewhere.example.org/v1", None)).unwrap_err();
+        assert!(moved.downcast_ref::<crate::db::ApiKeyNotResent>().is_some());
+        assert_eq!(stored_key(&id), KEY, "a refused update changes nothing");
+
+        update(input("https://elsewhere.example.org/v1", Some("sk-new"))).unwrap();
+        assert_eq!(stored_key(&id), "sk-new");
+
+        // An empty key clears it, as before; a keyless model then moves freely.
+        update(input(url, Some(""))).unwrap();
+        assert_eq!(stored_key(&id), "");
+        update(input("https://elsewhere.example.org/v1", None)).unwrap();
+        assert_eq!(stored_key(&id), "");
+    }
+
+    // The refusal reaches the caller as a bad request, through the service's error.
+    #[tokio::test]
+    async fn moving_a_keyed_model_without_its_key_is_a_bad_request() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AIService::init_global_instance().await.unwrap();
+        let url = "https://api.example.org/v1";
+        let id = Ad4mDb::with_global_instance(|db| db.add_model(&input(url, Some(KEY)))).unwrap();
+
+        let moved = serde_json::to_value(input("https://elsewhere.example.org/v1", None)).unwrap();
+        let err = update_model(
+            serde_json::json!({ "id": id, "model": moved }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, 400, "{}", err.message);
+        assert!(err.message.contains("send apiKey again"), "{}", err.message);
+        assert_eq!(stored_key(&id), KEY);
     }
 
     #[test]
-    fn operator_sessions_see_the_keys() {
-        let model = model_for_session(remote_model(), &ctx(None));
-        assert_eq!(model.api.as_ref().unwrap().api_key, "sk-provider-secret");
+    fn a_model_added_without_a_key_has_none() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&input("https://api.example.org/v1", None))
+        })
+        .unwrap();
+        assert_eq!(stored_key(&id), "");
+    }
+
+    #[test]
+    fn a_sent_key_never_reaches_a_log_line() {
+        let model = input("https://api.example.org/v1", Some(KEY));
+        assert!(!format!("{model:?}").contains(KEY));
+        assert!(!format!("{:?}", remote_model(KEY)).contains(KEY));
     }
 }
 

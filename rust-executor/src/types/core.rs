@@ -7,6 +7,7 @@ use url::Url;
 
 use super::domain::{LinkExpressionInput, LinkInput, LinkStatus, PerspectiveInput};
 use crate::agent::signatures::verify_or_false;
+use crate::secret::Secret;
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
@@ -554,11 +555,28 @@ impl ToString for ModelApiType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
+/// A remote model's endpoint as the executor stores and uses it. Not serialisable: the
+/// provider key leaves the executor only towards the provider. Clients see
+/// [`ModelApiView`].
+#[derive(Debug, Clone)]
 pub struct ModelApi {
     pub base_url: Url,
-    pub api_key: String,
+    /// Empty for an endpoint that takes no key.
+    pub api_key: Secret,
+    pub model: String,
+    pub api_type: ModelApiType,
+    /// See [`ModelApiView::max_num_ctx`].
+    pub max_num_ctx: Option<u32>,
+}
+
+/// A remote model's endpoint as RPC results show it: whether a provider key is set,
+/// never the key.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "ModelApi")]
+pub struct ModelApiView {
+    pub base_url: Url,
+    pub has_api_key: bool,
     pub model: String,
     pub api_type: ModelApiType,
     /// Ceiling for the context window requested from the provider, in tokens.
@@ -570,6 +588,18 @@ pub struct ModelApi {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_ctx: Option<u32>,
+}
+
+impl From<&ModelApi> for ModelApiView {
+    fn from(api: &ModelApi) -> Self {
+        ModelApiView {
+            base_url: api.base_url.clone(),
+            has_api_key: !api.api_key.is_empty(),
+            model: api.model.clone(),
+            api_type: api.api_type.clone(),
+            max_num_ctx: api.max_num_ctx,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
@@ -612,12 +642,41 @@ impl Display for ModelType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
+/// A model as the executor stores and uses it. Not serialisable, because its
+/// [`ModelApi`] holds the provider key: every RPC result and event carries
+/// [`ModelView`] instead.
+#[derive(Debug, Clone)]
 pub struct Model {
     pub id: String,
     pub name: String,
     pub api: Option<ModelApi>,
+    pub local: Option<LocalModel>,
+    pub model_type: ModelType,
+}
+
+impl Model {
+    /// The model as a client sees it, for every caller: the operator set the key and has
+    /// no need to read it back, and anyone else holding it could spend on it.
+    pub fn view(&self) -> ModelView {
+        ModelView {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            api: self.api.as_ref().map(ModelApiView::from),
+            local: self.local.clone(),
+            model_type: self.model_type.clone(),
+        }
+    }
+}
+
+/// A model as RPC results show it. Its provider key never leaves the executor:
+/// `api.hasApiKey` says whether one is set.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "Model")]
+pub struct ModelView {
+    pub id: String,
+    pub name: String,
+    pub api: Option<ModelApiView>,
     pub local: Option<LocalModel>,
     #[serde(rename = "modelType")]
     pub model_type: ModelType,

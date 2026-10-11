@@ -6,7 +6,7 @@ use crate::types::RequestContext;
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use candle_core::Device;
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
@@ -791,17 +791,18 @@ impl AIService {
         }
 
         publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
+        // The provider client is the key's one receiver: it sends the key to the provider.
+        let api_key = api.api_key.expose_once();
         let client: Box<dyn RemoteChat> = match api.api_type {
-            ModelApiType::OpenAi => Box::new(providers::openai::OpenAiChat::new(
-                &api.api_key,
-                api.base_url,
-            )),
+            ModelApiType::OpenAi => {
+                Box::new(providers::openai::OpenAiChat::new(&api_key, api.base_url))
+            }
             ModelApiType::Anthropic => Box::new(providers::anthropic::AnthropicChat::new(
-                &api.api_key,
+                &api_key,
                 api.base_url,
             )),
             ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
-                &api.api_key,
+                &api_key,
                 api.base_url,
                 api.max_num_ctx,
             )),
@@ -2448,8 +2449,9 @@ impl AIService {
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
 
         // Update the model in the database
+        // `context`, not a new error, so the API can still tell an `ApiKeyNotResent`.
         Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
-            .map_err(|e| anyhow!("Failed to update model in database: {}", e))?;
+            .context("Failed to update model in database")?;
 
         // Get the updated model from the database
         let updated_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
@@ -2650,7 +2652,7 @@ mod tests {
     fn remote_at(base_url: &str, api_key: &str) -> ModelApi {
         ModelApi {
             base_url: url::Url::parse(base_url).expect("test URL parses"),
-            api_key: api_key.to_string(),
+            api_key: api_key.into(),
             model: "claude-test".to_string(),
             api_type: ModelApiType::Anthropic,
             max_num_ctx: None,

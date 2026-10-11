@@ -53,7 +53,8 @@ pub async fn synthesize(
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{base}/v1/audio/speech"))
-        .bearer_auth(&upstream.api_key)
+        // The upstream provider is the key's one receiver.
+        .bearer_auth(upstream.api_key.expose_once())
         .json(&body)
         .send()
         .await
@@ -76,7 +77,7 @@ pub async fn synthesize(
 
 struct TtsUpstream {
     base_url: String,
-    api_key: String,
+    api_key: crate::secret::Secret,
     upstream_model: String,
 }
 
