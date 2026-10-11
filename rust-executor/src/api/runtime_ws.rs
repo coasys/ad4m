@@ -16,7 +16,7 @@ use crate::runtime_service::notification_access::{
 };
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
-use crate::types::Notification;
+use crate::types::{Notification, NotificationView};
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::guards::refuse_user_session;
@@ -404,9 +404,12 @@ async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let dids = notification_dids(&ctx)?;
-    let notifications =
+    let notifications: Vec<NotificationView> =
         Ad4mDb::with_global_instance(|db| db.get_notifications_for_owner(&dids.caller))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
+            .iter()
+            .map(Notification::view)
+            .collect();
 
     Ok(serde_json::to_value(notifications)?)
 }
@@ -849,7 +852,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
         .read();
     // Notifications
-    map.method::<NoParams, Vec<Notification>>("runtime.notifications", list_notifications)
+    map.method::<NoParams, Vec<NotificationView>>("runtime.notifications", list_notifications)
         .read();
     map.method::<NotificationInput, String>("runtime.createNotification", create_notification);
     map.method::<RuntimeUpdateNotificationParams, bool>(

@@ -410,7 +410,10 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
+    /// Sent as the bearer credential to `webhookUrl`. Results and events say only
+    /// whether one is set (`hasWebhookAuth`).
+    #[ts(type = "string")]
+    pub webhook_auth: crate::secret::Secret,
 }
 
 /// Grant/revoke a notification (partial update for grant status only)

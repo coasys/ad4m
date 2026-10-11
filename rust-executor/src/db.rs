@@ -829,7 +829,8 @@ impl Ad4mDb {
                 notification.trigger,
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
-                notification.webhook_auth,
+                // The database is where the executor keeps the credential.
+                notification.webhook_auth.expose(),
                 owner_did,
             ],
         )?;
@@ -848,7 +849,7 @@ impl Ad4mDb {
             trigger: row.get(6)?,
             perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
             webhook_url: row.get(8)?,
-            webhook_auth: row.get(9)?,
+            webhook_auth: Secret::new(row.get::<_, String>(9)?),
             owner_did: row.get(10)?,
         })
     }
@@ -965,7 +966,8 @@ impl Ad4mDb {
                 updated_notification.trigger,
                 serde_json::to_string(&updated_notification.perspective_ids).unwrap(),
                 updated_notification.webhook_url,
-                updated_notification.webhook_auth,
+                // The database is where the executor keeps the credential.
+                updated_notification.webhook_auth.expose(),
                 updated_notification.granted,
                 updated_notification.owner_did,
             ],
@@ -4239,7 +4241,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec![perspective1.uuid.clone()],
             webhook_url: "http://test.webhook".to_string(),
-            webhook_auth: "test-auth".to_string(),
+            webhook_auth: "test-auth".into(),
         };
         let notification_id = db
             .add_notification(notification, "did:key:main", false)
@@ -4769,7 +4771,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
-            webhook_auth: "Test Webhook Auth".to_string(),
+            webhook_auth: "Test Webhook Auth".into(),
         };
 
         // Add the test notification
@@ -4800,7 +4802,9 @@ mod tests {
             vec!["Test Perspective ID".to_string()]
         );
         assert_eq!(test_notification.webhook_url, "Test Webhook URL");
-        assert_eq!(test_notification.webhook_auth, "Test Webhook Auth");
+        assert!(test_notification
+            .webhook_auth
+            .expose_for_compare("Test Webhook Auth"));
 
         // Modify the test notification
         let updated_notification = Notification {
@@ -4813,7 +4817,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE predicate = 'test://updated'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
-            webhook_auth: "Test Webhook Auth".to_string(),
+            webhook_auth: "Test Webhook Auth".into(),
             owner_did: "did:key:main".to_string(),
         };
 
@@ -4856,7 +4860,7 @@ mod tests {
             trigger: "SELECT * FROM link WHERE data = 'DELETE this'".to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result1 = db.add_notification(notification1, "did:key:main", false);
@@ -4871,7 +4875,7 @@ mod tests {
             trigger: "DELETE FROM link WHERE id = 123".to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result2 = db.add_notification(notification2, "did:key:main", false);
@@ -4887,7 +4891,7 @@ mod tests {
             trigger: r#"SELECT * FROM link WHERE data = "Don\'t DELETE this""#.to_string(),
             perspective_ids: vec!["test".to_string()],
             webhook_url: "".to_string(),
-            webhook_auth: "".to_string(),
+            webhook_auth: "".into(),
         };
 
         let result3 = db.add_notification(notification3, "did:key:main", false);

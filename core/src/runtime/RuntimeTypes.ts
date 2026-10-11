@@ -51,7 +51,9 @@ export class Notification {
     trigger: string;
     perspectiveIds: string[];
     webhookUrl: string;
-    webhookAuth: string;
+    // Whether a webhook credential is set. The executor never returns the credential.
+    hasWebhookAuth: boolean;
+    ownerDid: string;
 }
 
 export class TriggeredNotification {

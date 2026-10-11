@@ -200,7 +200,8 @@ impl RuntimeService {
                     notification.app_name
                 ),
                 r#type: ExceptionType::InstallNotificationRequest,
-                addon: Some(serde_json::to_string(&notification).unwrap()),
+                // The redacted view: the request goes to every approver's session.
+                addon: Some(serde_json::to_string(&notification.view()).unwrap()),
             };
 
             get_global_pubsub()

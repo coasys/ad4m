@@ -1421,7 +1421,7 @@ describe('Ad4mClient', () => {
         const notification = {
             notification: {
                 id: 'n-1', granted: true, description: 'd', appName: 'a', appUrl: 'u', appIconPath: 'i',
-                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', webhookAuth: '', ownerDid: 'did:key:owner',
+                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', hasWebhookAuth: false, ownerDid: 'did:key:owner',
             },
             perspectiveId: 'uuid-a', triggerMatch: '[]',
         };

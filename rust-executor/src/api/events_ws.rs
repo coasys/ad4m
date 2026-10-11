@@ -1854,7 +1854,7 @@ mod event_spec_tests {
                     notification: serde_json::from_value(serde_json::json!({
                         "id": "n", "granted": true, "description": "", "appName": "",
                         "appUrl": "", "appIconPath": "", "trigger": "", "perspectiveIds": [],
-                        "webhookUrl": "", "webhookAuth": "", "ownerDid": "did:x",
+                        "webhookUrl": "", "hasWebhookAuth": false, "ownerDid": "did:x",
                     }))
                     .unwrap(),
                     perspective_id: p(),

@@ -690,8 +690,9 @@ pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
+/// A notification to store. Built from the RPC's `NotificationInput`; never serialised,
+/// because it holds the webhook credential.
+#[derive(Debug, Clone)]
 pub struct NotificationInput {
     pub description: String,
     pub app_name: String,
@@ -700,7 +701,7 @@ pub struct NotificationInput {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
+    pub webhook_auth: Secret,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]

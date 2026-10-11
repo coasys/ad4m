@@ -37,6 +37,9 @@ use crate::types::{
 const TRIGGER: &str = "SELECT ?source ?target WHERE { ?source <test://notify> ?target }";
 const ALICE: &str = "alice@notifications.test";
 const BOB: &str = "bob@notifications.test";
+/// The webhook credential every test notification carries: distinct enough that a
+/// response or event containing it can only have copied it.
+const WEBHOOK_AUTH: &str = "wh-credential-never-sent-out";
 
 fn setup() {
     setup_wallet();
@@ -118,7 +121,7 @@ fn input(perspective_ids: &[&str]) -> Value {
         "trigger": TRIGGER,
         "perspectiveIds": perspective_ids,
         "webhookUrl": "https://webhook.test",
-        "webhookAuth": "secret",
+        "webhookAuth": WEBHOOK_AUTH,
     })
 }
 
@@ -165,7 +168,7 @@ fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> S
                 trigger: TRIGGER.to_string(),
                 perspective_ids: perspective_ids.iter().map(|id| id.to_string()).collect(),
                 webhook_url: "https://webhook.test".to_string(),
-                webhook_auth: "secret".to_string(),
+                webhook_auth: WEBHOOK_AUTH.into(),
             },
             &owner(user_email),
             granted,
@@ -688,6 +691,11 @@ async fn only_the_admin_credential_imports_data() {
 /// Fires a notification of `owner` through the delivery's publisher. The webhook URL does
 /// not parse, so nothing is posted.
 async fn fire(owner: &str) {
+    fire_to(owner, "not a url").await;
+}
+
+/// Fires a notification of `owner` whose webhook is `webhook_url`.
+async fn fire_to(owner: &str, webhook_url: &str) {
     let notification = Notification {
         id: Uuid::new_v4().to_string(),
         granted: true,
@@ -697,8 +705,8 @@ async fn fire(owner: &str) {
         app_icon_path: String::new(),
         trigger: TRIGGER.to_string(),
         perspective_ids: vec!["perspective".to_string()],
-        webhook_url: "not a url".to_string(),
-        webhook_auth: "secret".to_string(),
+        webhook_url: webhook_url.to_string(),
+        webhook_auth: WEBHOOK_AUTH.into(),
         owner_did: owner.to_string(),
     };
     let matches = std::collections::BTreeMap::from([(notification, vec![json!({ "m": 1 })])]);
@@ -718,9 +726,17 @@ fn user_session(email: &str, did: &str) -> Arc<Session> {
 
 /// The next `notification-triggered` message on `stream`, if one arrives in time.
 async fn next<S: futures::Stream<Item = String> + Unpin>(stream: &mut S) -> Option<String> {
+    next_containing(stream, "notification-triggered").await
+}
+
+/// The next message on `stream` that contains `needle`, if one arrives in time.
+async fn next_containing<S: futures::Stream<Item = String> + Unpin>(
+    stream: &mut S,
+    needle: &str,
+) -> Option<String> {
     let notification = async {
         while let Some(msg) = stream.next().await {
-            if msg.contains("notification-triggered") {
+            if msg.contains(needle) {
                 return Some(msg);
             }
         }
@@ -758,6 +774,12 @@ async fn triggered_event_reaches_only_the_owners_stream() {
             .is_some_and(|e| e.contains("notification-triggered")),
         "owner stream got {a:?}"
     );
+    let a = a.unwrap();
+    assert!(
+        !a.contains(WEBHOOK_AUTH),
+        "the event carried the credential: {a}"
+    );
+    assert!(a.contains("hasWebhookAuth"), "{a}");
     assert_eq!(next(&mut bob).await, None, "Bob's stream got Alice's event");
     assert_eq!(next(&mut main).await, None, "main stream got Alice's event");
 
@@ -773,4 +795,81 @@ async fn triggered_event_reaches_only_the_owners_stream() {
         None,
         "Alice's stream got the main agent's event"
     );
+}
+
+// The install request reaches every approver's session, and the list reaches the owner.
+// Both say whether a webhook credential is set; neither carries it.
+#[tokio::test]
+async fn the_install_request_and_the_list_never_carry_the_webhook_credential() {
+    setup();
+    let mut perspectives = Perspectives::default();
+    let main = perspectives.add(None);
+    let operator = Arc::new(Session::for_test(
+        Principal::Operator,
+        ListenerReach::Loopback,
+    ));
+    let all = crate::api::event_interest::watching_all;
+    let mut stream = build_event_stream(operator, all(), None).await;
+
+    let id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
+    let request = next_containing(&mut stream, "INSTALL_NOTIFICATION_REQUEST")
+        .await
+        .expect("the operator gets the install request");
+    assert!(request.contains(&id), "{request}");
+    assert!(request.contains("hasWebhookAuth"), "{request}");
+    assert!(!request.contains(WEBHOOK_AUTH), "{request}");
+
+    let listed = call("runtime.notifications", json!({}), admin_ctx())
+        .await
+        .unwrap();
+    let mine = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id.as_str())
+        .expect("listed");
+    assert_eq!(mine["hasWebhookAuth"], true);
+    assert!(mine.get("webhookAuth").is_none(), "{mine}");
+    assert!(!listed.to_string().contains(WEBHOOK_AUTH), "{listed}");
+
+    // The executor still holds it, for the webhook.
+    assert!(stored(&id)
+        .unwrap()
+        .webhook_auth
+        .expose_for_compare(WEBHOOK_AUTH));
+}
+
+// Redaction stops at the executor's own outputs: the webhook still gets the credential as
+// its bearer token. The body is the triggered event, so it shows only `hasWebhookAuth`.
+#[tokio::test]
+async fn a_firing_notification_still_sends_the_credential_to_its_webhook() {
+    setup();
+    let (posted, mut received) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    let app = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, body: String| async move {
+                let auth = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = posted.send((auth, body));
+                "ok"
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    fire_to(&main_agent_did(), &format!("http://{addr}/hook")).await;
+
+    let (auth, body) = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+        .await
+        .expect("the webhook was called")
+        .unwrap();
+    assert_eq!(auth, format!("Bearer {WEBHOOK_AUTH}"));
+    assert!(!body.contains(WEBHOOK_AUTH), "{body}");
+    assert!(body.contains("hasWebhookAuth"), "{body}");
 }

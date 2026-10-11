@@ -461,8 +461,9 @@ impl PerspectiveDiff {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
-#[serde(rename_all = "camelCase")]
+/// A notification as the executor stores and fires it. Not serialisable: its webhook
+/// credential goes only to the webhook. Results and events carry [`NotificationView`].
+#[derive(Debug, Clone)]
 pub struct Notification {
     pub id: String,
     pub granted: bool,
@@ -473,7 +474,87 @@ pub struct Notification {
     pub trigger: String,
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
-    pub webhook_auth: String,
+    pub webhook_auth: Secret,
+    /// The owner's DID: a managed user's, or the main agent's.
+    pub owner_did: String,
+}
+
+impl Notification {
+    /// The notification as its owner and the operator see it.
+    pub fn view(&self) -> NotificationView {
+        NotificationView {
+            id: self.id.clone(),
+            granted: self.granted,
+            description: self.description.clone(),
+            app_name: self.app_name.clone(),
+            app_url: self.app_url.clone(),
+            app_icon_path: self.app_icon_path.clone(),
+            trigger: self.trigger.clone(),
+            perspective_ids: self.perspective_ids.clone(),
+            webhook_url: self.webhook_url.clone(),
+            has_webhook_auth: !self.webhook_auth.is_empty(),
+            owner_did: self.owner_did.clone(),
+        }
+    }
+
+    /// Every field, the credential included, for equality and ordering: the fire path
+    /// keys its trigger matches by notification, and an edited credential is another
+    /// notification there, as it was before the credential became a [`Secret`]. The
+    /// value is read in place and leaves nothing.
+    #[allow(clippy::type_complexity)]
+    fn ordering_key(
+        &self,
+    ) -> (
+        (&str, bool, &str, &str),
+        (&str, &str, &str),
+        (&[String], &str),
+        (&str, &str),
+    ) {
+        (
+            (&self.id, self.granted, &self.description, &self.app_name),
+            (&self.app_url, &self.app_icon_path, &self.trigger),
+            (&self.perspective_ids, &self.webhook_url),
+            (self.webhook_auth.expose(), &self.owner_did),
+        )
+    }
+}
+
+impl PartialEq for Notification {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for Notification {}
+
+impl PartialOrd for Notification {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Notification {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ordering_key().cmp(&other.ordering_key())
+    }
+}
+
+/// A notification as RPC results and events show it: whether a webhook credential is
+/// set, never the credential.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename = "Notification")]
+pub struct NotificationView {
+    pub id: String,
+    pub granted: bool,
+    pub description: String,
+    pub app_name: String,
+    pub app_url: String,
+    pub app_icon_path: String,
+    pub trigger: String,
+    pub perspective_ids: Vec<String>,
+    pub webhook_url: String,
+    pub has_webhook_auth: bool,
     /// The owner's DID: a managed user's, or the main agent's.
     pub owner_did: String,
 }
@@ -501,7 +582,7 @@ pub struct AITask {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggeredNotification {
-    pub notification: Notification,
+    pub notification: NotificationView,
     pub perspective_id: String,
     pub trigger_match: String,
 }
@@ -714,4 +795,44 @@ pub struct UserInfo {
     pub username: String,
     pub did: String,
     pub last_seen: Option<i64>,
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    fn notification(webhook_auth: &str) -> Notification {
+        Notification {
+            id: "n".into(),
+            granted: true,
+            description: String::new(),
+            app_name: String::new(),
+            app_url: String::new(),
+            app_icon_path: String::new(),
+            trigger: String::new(),
+            perspective_ids: vec![],
+            webhook_url: "https://hook.test".into(),
+            webhook_auth: webhook_auth.into(),
+            owner_did: "did:x".into(),
+        }
+    }
+
+    // The fire path keys trigger matches by notification, so equality and order still
+    // include the credential, as the derived impls did.
+    #[test]
+    fn equality_and_order_include_the_credential() {
+        assert_eq!(notification("a"), notification("a"));
+        assert_ne!(notification("a"), notification("b"));
+        assert!(notification("a") < notification("b"));
+    }
+
+    #[test]
+    fn the_view_and_debug_never_carry_the_credential() {
+        let n = notification("wh-cred");
+        let json = serde_json::to_string(&n.view()).unwrap();
+        assert!(!json.contains("wh-cred"), "{json}");
+        assert!(json.contains(r#""hasWebhookAuth":true"#), "{json}");
+        assert!(!format!("{n:?}").contains("wh-cred"));
+        assert!(!notification("").view().has_webhook_auth);
+    }
 }
