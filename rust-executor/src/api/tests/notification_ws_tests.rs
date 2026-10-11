@@ -187,6 +187,8 @@ fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> S
     .expect("add notification")
 }
 
+/// Shared, so every owner's trigger reads it: a Local link would live in
+/// its writer's Local graph, which no other agent's trigger reads.
 async fn add_matching_link(perspective: &mut PerspectiveInstance) {
     perspective
         .add_link_expression(
@@ -202,10 +204,10 @@ async fn add_matching_link(perspective: &mut PerspectiveInstance) {
                     key: "test-key".to_string(),
                     signature: "test-signature".to_string(),
                 },
-                status: Some(LinkStatus::Local),
+                status: Some(LinkStatus::Shared),
                 graph: None,
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
         )
         .await

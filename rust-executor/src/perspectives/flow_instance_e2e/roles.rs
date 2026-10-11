@@ -518,8 +518,14 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
             .collect(),
         removals: vec![],
     };
-    async fn stored(perspective: &PerspectiveInstance, namespace: &str) -> usize {
-        perspective
+    // Read as the writer: a Local link lives in its writer's Local graph,
+    // which a read without a viewer leaves out, so a count of 0 would prove
+    // nothing.
+    let reader = perspective
+        .clone()
+        .for_viewer(crate::agent::did_for_context(&ctx).unwrap());
+    async fn stored(reader: &PerspectiveInstance, namespace: &str) -> usize {
+        reader
             .get_links(&LinkQuery::default())
             .await
             .expect("get_links")
@@ -559,7 +565,7 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
             );
         }
         assert_eq!(
-            stored(&perspective, NAMESPACE).await,
+            stored(&reader, NAMESPACE).await,
             0,
             "{what}: nothing of the definition is stored"
         );
@@ -570,5 +576,5 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
         .link_mutations(as_mutations(&links), LinkStatus::Local, &ctx, None)
         .await
         .expect("a definition whose rule reads adds");
-    assert_eq!(stored(&perspective, NAMESPACE).await, links.len());
+    assert_eq!(stored(&reader, NAMESPACE).await, links.len());
 }
