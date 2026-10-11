@@ -90,13 +90,6 @@ fn connection_context(
     Ok(Arc::new(auth.to_request_context()))
 }
 
-/// Whether a connection receives the event stream: the admin credential or any token. A
-/// socket with no token (for example on a node that has an admin credential) gets none. The
-/// stream's own filters then decide which events reach the session.
-pub(crate) fn may_receive_events(ctx: &RequestContext) -> bool {
-    ctx.is_operator() || !ctx.auth_token.is_empty()
-}
-
 /// Close code for a connection whose token opens no session or stopped working (RFC 6455
 /// "policy violation"). Clients read it as "log in again".
 pub(crate) const CLOSE_TOKEN_ENDED: u16 = 1008;
@@ -164,8 +157,9 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
     let conn = Connection::new(handler_map, ctx.clone(), tx);
-    // A socket without a token gets no events: a stream that never yields.
-    let events: EventStream = if may_receive_events(&ctx) {
+    // An anonymous socket (no token, for example on a node that has an admin credential) gets
+    // no events: a stream that never yields.
+    let events: EventStream = if ctx.session.is_authenticated() {
         super::events_ws::build_event_stream(
             ctx.session.clone(),
             conn.interest(),
@@ -603,60 +597,55 @@ mod connection_context_tests {
 #[cfg(test)]
 mod event_gate_tests {
     use super::*;
-    use crate::agent::session::Principal;
+    use crate::agent::session::{Principal, Session};
 
-    /// `base` with `token` as the token it arrived with.
-    fn with_token(token: &str, base: RequestContext) -> RequestContext {
-        RequestContext {
-            auth_token: token.to_string(),
-            ..base
-        }
+    const ADMIN: &str = "the-admin-credential";
+
+    /// Whether a socket that presents `token` on a listener with `reach` gets an event stream.
+    fn gets_events(token: &str, admin: Option<&str>, reach: ListenerReach) -> bool {
+        let admin = admin.map(str::to_string);
+        Session::open(token, &admin, reach)
+            .unwrap()
+            .is_authenticated()
     }
 
-    /// `Audience::Authenticated` reaches exactly the sockets that get an event stream.
-    fn gets_events(ctx: &RequestContext) -> bool {
+    /// `Audience::Authenticated` reaches exactly the sessions that get an event stream.
+    fn authenticated_audience(session: &Session) -> bool {
         use crate::events::{Audience, Event, Topic};
         let event = Event::new(
             Topic::RuntimeMessageReceived,
             Audience::Authenticated,
             serde_json::json!({}),
         );
-        let gated = may_receive_events(ctx);
-        assert_eq!(ctx.session.may_receive(&event), gated);
-        gated
+        assert_eq!(session.may_receive(&event), session.is_authenticated());
+        session.is_authenticated()
     }
 
-    // On a node with an admin credential, a socket with no token gets only these
+    // On a node with an admin credential, a socket with no token gets only the anonymous
     // capabilities. It used to receive the main agent's event stream all the same.
     #[test]
     fn an_unauthenticated_socket_receives_no_events() {
-        let unauthenticated = RequestContext::for_test(Principal::Anonymous {
-            caps: vec![
-                AGENT_AUTH_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-            ],
-        });
-        assert!(!gets_events(&unauthenticated));
+        assert!(!gets_events("", Some(ADMIN), ListenerReach::Loopback));
+        assert!(!gets_events("", Some(ADMIN), ListenerReach::Network));
+        let anonymous = Principal::Anonymous {
+            caps: vec![AGENT_AUTH_CAPABILITY.clone()],
+        };
+        let anonymous = Session::for_test(anonymous, ListenerReach::Network);
+        assert!(!authenticated_audience(&anonymous));
     }
 
     // Apps with narrow capabilities still need their query-subscription and link events.
     #[test]
     fn authenticated_sessions_receive_events_whatever_their_capabilities() {
-        let narrow_app = with_token(
-            "app-jwt",
-            RequestContext::app_for_test(vec![perspective_query_capability(vec![
-                "some-uuid".to_string()
-            ])]),
-        );
-        assert!(gets_events(&narrow_app));
-        assert!(gets_events(&with_token(
-            "user-jwt",
-            RequestContext::app_for_test(get_user_default_capabilities())
-        )));
-        let admin = with_token("the-admin-credential", RequestContext::operator_for_test());
-        assert!(gets_events(&admin));
+        let narrow_app = RequestContext::app_for_test(vec![perspective_query_capability(vec![
+            "some-uuid".to_string(),
+        ])]);
+        assert!(authenticated_audience(&narrow_app.session));
+        let user = RequestContext::user_for_test("u@example.org", "did:key:u", vec![]);
+        assert!(authenticated_audience(&user.session));
+        assert!(gets_events(ADMIN, Some(ADMIN), ListenerReach::Network));
         // No token on a loopback listener of a node without an admin credential (#1059).
-        assert!(gets_events(&RequestContext::operator_for_test()));
+        assert!(gets_events("", None, ListenerReach::Loopback));
     }
 }
 

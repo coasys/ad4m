@@ -1,23 +1,16 @@
 use crate::events::Event;
-use crate::types::domain::GetFilter;
-use crate::types::domain::GetValue;
-use futures::Stream;
-use futures::StreamExt;
-use log::error;
-use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
-use tokio_stream::wrappers::BroadcastStream;
 
 type Topic = String;
 type Message = String;
 
 pub struct PubSub {
+    /// String topics. One is left: [`PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC`].
     subscribers: Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
     /// Typed events, every topic on one channel: each socket decides per event.
     events: broadcast::Sender<Arc<Event>>,
@@ -58,63 +51,12 @@ impl PubSub {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) async fn subscribe_and_process<
-    T: DeserializeOwned + Send + 'static + std::fmt::Debug + GetValue + GetFilter,
->(
-    pubsub: Arc<PubSub>,
-    topic: Topic,
-    filter: Option<String>,
-) -> Pin<Box<dyn Stream<Item = Result<T::Value, Box<dyn std::error::Error + Send>>> + Send>> {
-    let receiver = pubsub.subscribe(&topic).await;
-    let receiver_stream = BroadcastStream::new(receiver);
-
-    let mapped_stream = receiver_stream.filter_map(move |result| {
-        match result {
-            Ok(msg) => match serde_json::from_str::<T>(&msg) {
-                Ok(data) => {
-                    if let Some(filter) = &filter {
-                        let data_filter = data
-                            .get_filter()
-                            .expect("Could not get filter on T where we expected to filter");
-                        if &data_filter != filter {
-                            log::debug!(
-                                "PubSub filter mismatch on topic {}: data_filter and subscription_filter differ",
-                                topic
-                            );
-                            return futures::future::ready(None);
-                        }
-                    }
-                    let value = data.get_value();
-                    futures::future::ready(Some(Ok(value)))
-                }
-                Err(e) => {
-                    let type_name = std::any::type_name::<T>();
-                    error!("Failed to deserialize pubsub message: {:?}", e);
-                    error!("Type: {}", type_name);
-                    error!("Message: {:?}", msg);
-
-                    let field_error: Box<dyn std::error::Error + Send> = Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to deserialize: {}", e),
-                    ));
-                    futures::future::ready(Some(Err(field_error)))
-                }
-            },
-            Err(e) => {
-                error!("Broadcast stream error: {:?}", e);
-                // Skip lagged messages
-                futures::future::ready(None)
-            }
-        }
-    });
-
-    Box::pin(mapped_stream)
-}
-
 lazy_static::lazy_static! {
     static ref GLOBAL_PUB_SUB: Arc<PubSub> = Arc::new(PubSub::new());
 
+    /// The one string topic: live query updates. They go out to the perspective's owners
+    /// (`events_ws::matches_perspective_owner`) until live queries belong to a connection
+    /// (#1207), and then become a typed event to `Audience::Connection`.
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
 }
 

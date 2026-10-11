@@ -1658,7 +1658,7 @@ impl PerspectiveInstance {
         // and scoped; a no-op for diffs outside the flow vocabulary.
         self.schedule_flow_consensus_pass(&decorated_diff);
 
-        self.pubsub_publish_diff(decorated_diff).await;
+        self.pubsub_publish_diff(&decorated_diff).await;
 
         Ok(())
     }
@@ -1765,7 +1765,7 @@ impl PerspectiveInstance {
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
-                self.pubsub_publish_diff(decorated_diff.clone()).await;
+                self.pubsub_publish_diff(&decorated_diff).await;
 
                 if status == LinkStatus::Shared {
                     self.spawn_commit_and_handle_error(&diff);
@@ -1778,20 +1778,16 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+    async fn pubsub_publish_diff(&self, decorated_diff: &DecoratedPerspectiveDiff) {
         // Every write reaches here, local or synced, so this is where a local
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
-        self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        self.schedule_flow_pass_on_definition_change(decorated_diff);
 
-        // Get handle without holding lock during pubsub operations
-        let handle = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.clone()
-        };
+        // Only the recipients come from the handle; the lock is released before publishing.
+        let owners = super::event_recipients(&*self.persisted.lock().await);
 
         // One event per link and owner, each to that owner.
-        let owners = super::event_recipients(&handle);
         let changes = [
             (Topic::LinkAdded, &decorated_diff.additions),
             (Topic::LinkRemoved, &decorated_diff.removals),
@@ -1800,7 +1796,7 @@ impl PerspectiveInstance {
             for link in links {
                 super::publish_to_each_owner(topic, owners.clone(), |owner| {
                     PerspectiveLinkWithOwner {
-                        perspective_uuid: handle.uuid.clone(),
+                        perspective_uuid: self.uuid.clone(),
                         link: link.clone(),
                         owner,
                     }
@@ -1870,7 +1866,7 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
 
-        self.pubsub_publish_diff(decorated_perspective_diff).await;
+        self.pubsub_publish_diff(&decorated_perspective_diff).await;
         Ok(decorated_link_expression)
     }
 
@@ -1932,7 +1928,7 @@ impl PerspectiveInstance {
             self.persist_link_diff(&perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
-            self.pubsub_publish_diff(decorated_perspective_diff).await;
+            self.pubsub_publish_diff(&decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
@@ -2020,7 +2016,7 @@ impl PerspectiveInstance {
         self.persist_link_diff(&store_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-        self.pubsub_publish_diff(decorated_diff.clone()).await;
+        self.pubsub_publish_diff(&decorated_diff).await;
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&store_diff);
@@ -2231,7 +2227,7 @@ impl PerspectiveInstance {
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
-            self.pubsub_publish_diff(decorated_diff).await;
+            self.pubsub_publish_diff(&decorated_diff).await;
 
             // Only commit shared links by filtering decorated_links
             let shared_links: Vec<LinkExpression> = decorated_links
@@ -6801,7 +6797,7 @@ impl PerspectiveInstance {
             // paths. commit_batch never went through that publish step, so
             // batched diffs were never reaching WS subscribers — that's what
             // this call restores.
-            self.pubsub_publish_diff(combined_diff.clone()).await;
+            self.pubsub_publish_diff(&combined_diff).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }

@@ -7,11 +7,11 @@
 //! Events are filtered per-user in multi-user mode, then to what the socket
 //! asked for with `events.watch` (nothing until it does).
 //!
-//! Two paths deliver events while topics move to typed events (Plan 20, PR 3):
-//! string topics through the per-topic filters below, and typed
-//! [`Event`](crate::events::Event)s from `PubSub::publish_event`, which reach a
-//! socket when `Session::may_receive` and `event_interest::wants` hold. Both
-//! send the same wire message ([`wire_message`]).
+//! Typed [`Event`](crate::events::Event)s from `PubSub::publish_event` reach a
+//! socket when `Session::may_receive` and `event_interest::wants` hold, as
+//! [`wire_message`]. One string topic remains: live query updates, which wait
+//! for the perspective's owners (`matches_perspective_owner`) until live
+//! queries belong to a connection (#1207).
 //!
 //! ## Event types
 //!
@@ -57,6 +57,7 @@ use axum::{
 use futures::stream::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
 use super::event_interest::{self, SharedInterest};
 use crate::agent::capabilities::*;
@@ -78,7 +79,7 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// The name of every event this socket emits. The stream builder and
+/// The name of every event this socket emits. `Topic::as_str` and
 /// [`event_specs`] both use these, so an event cannot go out untyped.
 pub mod events {
     pub const AGENT_STATUS_CHANGED: &str = "agent-status-changed";
@@ -101,30 +102,6 @@ pub mod events {
     pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
     pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
     pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
-
-    /// Every name above, in stream-builder order.
-    pub const ALL: [&str; 20] = [
-        AGENT_STATUS_CHANGED,
-        AGENT_UPDATED,
-        APPS_CHANGED_EVENT,
-        HOSTING_USER_INFO_CHANGED,
-        PERSPECTIVE_ADDED,
-        PERSPECTIVE_REMOVED,
-        PERSPECTIVE_UPDATED,
-        SYNC_STATE_CHANGE,
-        LINK_ADDED,
-        LINK_REMOVED,
-        LINK_UPDATED,
-        SIGNAL,
-        MESSAGE_RECEIVED,
-        NOTIFICATION_TRIGGERED,
-        EXCEPTION_OCCURRED,
-        TRANSCRIPTION_TEXT,
-        MODEL_LOADING_STATUS,
-        QUERY_SUBSCRIPTION_UPDATE,
-        AUTO_PROCESSOR_EVENT,
-        AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
-    ];
 }
 
 /// One emitted event: its name, the TypeScript type of its payload (the
@@ -261,78 +238,72 @@ pub(crate) async fn build_event_stream_for(
     interest: SharedInterest,
     resolved_did: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
-    use futures::stream;
-    use tokio_stream::wrappers::BroadcastStream;
+    use futures::future::ready;
 
     let pubsub = get_global_pubsub().await;
-
-    // ── Query subscriptions ──
-    // The last string topic: it waits for the perspective handle to check the owner (see
-    // `perspective_is_owned_by`) until live queries belong to a connection (#1207).
-    let s_query_sub = BroadcastStream::new(
+    let query_updates = query_updates(
         pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
-    )
-    .filter_map(|r| async { handle_broadcast_result(r) })
-    .filter_map(move |result| {
-        let current_did = resolved_did.clone();
-        async move {
-            let msg = result.ok()?;
-            matches_perspective_owner(&msg, current_did.as_deref())
-                .await
-                .then(|| wrap_event(events::QUERY_SUBSCRIPTION_UPDATE, &msg))
-        }
-    });
-
-    // ── Typed events: the session decides who ──
+        resolved_did,
+    );
+    // The session decides who, the socket's interest what.
     let typed = {
         let session = session.clone();
         BroadcastStream::new(pubsub.subscribe_events())
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| {
-                futures::future::ready(match result {
-                    Ok(event) if session.may_receive(&event) => Some(Outgoing::Typed(event)),
-                    _ => None,
-                })
+            .filter_map(received)
+            .filter_map(move |event| {
+                ready(session.may_receive(&event).then(|| {
+                    event_interest::wants(&interest, &event).then(|| wire_message(&event))
+                }))
             })
     };
 
     // Events end with the token: expiry and revokeToken() stop them as they stop requests.
-    // Then the socket's interest decides what it gets.
     Box::pin(
-        stream::select(s_query_sub.map(Outgoing::Wire), typed)
-            .take_while(move |_| futures::future::ready(session.check().is_ok()))
-            .filter_map(move |out| {
-                futures::future::ready(match out {
-                    Outgoing::Wire(msg) => {
-                        event_interest::wants_json(&interest, &msg).then_some(msg)
-                    }
-                    Outgoing::Typed(event) => {
-                        event_interest::wants(&interest, &event).then(|| wire_message(&event))
-                    }
-                })
-            }),
+        futures::stream::select(query_updates, typed)
+            .take_while(move |_| ready(session.check().is_ok()))
+            .filter_map(ready),
     )
 }
 
-/// An event a session may receive, before the socket's interest is applied.
-enum Outgoing {
-    /// From a string topic: already the wire message.
-    Wire(String),
-    Typed(Arc<Event>),
+/// The live query updates of the perspectives `did` owns (all of them for `None`), as the
+/// stream builder's items: `Some(message)`, or `None` for an update that is not JSON. They pass
+/// `events.watch` untouched.
+fn query_updates(
+    updates: tokio::sync::broadcast::Receiver<String>,
+    did: Option<String>,
+) -> impl futures::stream::Stream<Item = Option<String>> + Send {
+    BroadcastStream::new(updates)
+        .filter_map(received)
+        .filter_map(move |msg| {
+            let did = did.clone();
+            async move {
+                matches_perspective_owner(&msg, did.as_deref())
+                    .await
+                    .then(|| {
+                        serde_json::from_str(&msg)
+                            .ok()
+                            .map(|payload| wire(Topic::PerspectiveQuerySubscription, &payload))
+                    })
+            }
+        })
 }
 
-/// The socket message for `event`: the same message a string topic's stream sends for
-/// that topic, built without parsing the payload again.
+/// The socket message for `event`, built without parsing the payload again.
 pub(crate) fn wire_message(event: &Event) -> String {
-    let event_type = event.topic.as_str();
-    if let Some(key) = payload_key(event.topic) {
-        return wrap_event_nested(event_type, key, &event.payload.to_string());
+    wire(event.topic, &event.payload)
+}
+
+/// The socket message for a `topic` event with `payload`.
+fn wire(topic: Topic, payload: &serde_json::Value) -> String {
+    let event_type = topic.as_str();
+    if let Some(key) = payload_key(topic) {
+        return wrap_event_nested(event_type, key, &payload.to_string());
     }
-    match &event.payload {
+    match payload {
         serde_json::Value::Object(map) => wrap_object(event_type, map.clone())
-            .unwrap_or_else(|| wrap_data(event_type, &event.payload.to_string())),
+            .unwrap_or_else(|| wrap_data(event_type, &payload.to_string())),
         other => wrap_data(event_type, &other.to_string()),
     }
 }
@@ -440,29 +411,18 @@ fn client_message_reply(text: &str, interest: &SharedInterest) -> Option<String>
 
 // ── Event helper functions ──────────────────────────────────────────────────
 
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-
-pub(crate) fn handle_broadcast_result<T>(
-    r: Result<T, BroadcastStreamRecvError>,
-) -> Option<Result<T, u64>> {
-    match r {
-        Ok(msg) => Some(Ok(msg)),
+/// The message a socket's receiver got, or `None` when it lagged.
+fn received<T>(r: Result<T, BroadcastStreamRecvError>) -> futures::future::Ready<Option<T>> {
+    futures::future::ready(match r {
+        Ok(msg) => Some(msg),
         Err(BroadcastStreamRecvError::Lagged(n)) => {
             // The socket's receiver fell more than the channel's capacity behind (a slow
             // client, or an ownership filter waiting on a perspective lock), so these events
             // are gone for this socket. Say so: the client cannot know it missed them.
             log::warn!("events_ws: a socket's event stream lagged and dropped {n} event(s)");
-            Some(Err(n))
+            None
         }
-    }
-}
-
-pub(crate) fn wrap_event(event_type: &str, raw_json: &str) -> String {
-    match serde_json::from_str(raw_json) {
-        Ok(serde_json::Value::Object(map)) => wrap_object(event_type, map),
-        _ => None,
-    }
-    .unwrap_or_else(|| wrap_data(event_type, raw_json))
+    })
 }
 
 /// An object payload's fields with `type` beside them.
@@ -482,17 +442,18 @@ fn wrap_data(event_type: &str, raw_json: &str) -> String {
     format!(r#"{{"type":"{}","data":{}}}"#, event_type, raw_json)
 }
 
-pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> String {
+/// A payload under `payload_key` (`{"type":"agent-updated","agent":{…}}`).
+fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> String {
     format!(
         r#"{{"type":"{}","{}":{}}}"#,
         event_type, payload_key, raw_json
     )
 }
 
-/// Multi-user: only events about a perspective the session owns. An event
-/// without `perspectiveUuid`, or one that does not parse, reaches nobody: every
-/// publisher of these topics sets the field.
-pub(crate) async fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
+/// Multi-user: only live query updates about a perspective the session owns. An
+/// update without `perspectiveUuid`, or one that does not parse, reaches nobody:
+/// the publisher sets the field.
+async fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
     let Some(did) = current_did else {
         return true;
     };
@@ -537,15 +498,12 @@ mod perspective_is_owned_by_tests {
     //! registered (CodeRabbit #903), and waits for a perspective whose handle
     //! a write holds instead of failing: a failed `try_lock` here used to drop
     //! live-query updates published during writes.
-    use super::{
-        handle_broadcast_result, matches_perspective_owner, perspective_is_owned_by, wrap_event,
-    };
+    use super::{matches_perspective_owner, perspective_is_owned_by, query_updates};
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::perspectives::{register_perspective, unregister_perspective};
     use crate::types::PerspectiveHandle;
     use futures::StreamExt;
     use std::time::Duration;
-    use tokio_stream::wrappers::BroadcastStream;
 
     #[tokio::test]
     async fn missing_perspective_returns_false_for_any_did() {
@@ -592,17 +550,7 @@ mod perspective_is_owned_by_tests {
         let persisted = instance.persisted.clone();
         register_perspective(uuid.clone(), instance);
         let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        // The same chain as the live-query stream in `build_event_stream_for`.
-        let mut stream = Box::pin(
-            BroadcastStream::new(rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| async move {
-                    let msg = result.ok()?;
-                    matches_perspective_owner(&msg, Some("did:key:bob"))
-                        .await
-                        .then(|| wrap_event("query-subscription-update", &msg))
-                }),
-        );
+        let mut stream = Box::pin(query_updates(rx, Some("did:key:bob".into())));
         let write = persisted.lock().await;
         let update = serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" });
         tx.send(update.to_string()).unwrap();
@@ -617,6 +565,29 @@ mod perspective_is_owned_by_tests {
             !parked,
             "a parked ownership check holds the handle after the write released it"
         );
+    }
+
+    // An update goes out as its fields beside `type`; one that is not JSON still reaches the
+    // stream, which ends there if the token stopped working, but sends nothing.
+    #[tokio::test]
+    async fn a_live_query_update_goes_out_as_its_fields_beside_its_type() {
+        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
+        let mut stream = Box::pin(query_updates(rx, None));
+        let update = r#"{"perspectiveUuid":"p","uuid":"p","subscriptionId":"s","result":"[]"}"#;
+        tx.send(update.into()).unwrap();
+        tx.send("not json".into()).unwrap();
+        let sent = stream.next().await.unwrap().expect("a JSON update is sent");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sent).unwrap(),
+            serde_json::json!({
+                "type": "query-subscription-update",
+                "perspectiveUuid": "p",
+                "uuid": "p",
+                "subscriptionId": "s",
+                "result": "[]",
+            })
+        );
+        assert_eq!(stream.next().await, Some(None));
     }
 }
 
@@ -837,7 +808,8 @@ mod typed_wire_tests {
     use crate::events::Audience;
     use serde_json::{json, Value};
 
-    /// The message today's string stream sends for `topic`, built by its macro's helper.
+    /// The message the string topics sent for `topic`, before every topic was typed: the
+    /// clients' wire format.
     fn string_path(topic: Topic, raw_json: &str) -> String {
         let nested = [
             (events::AGENT_STATUS_CHANGED, "agent"),
@@ -845,13 +817,20 @@ mod typed_wire_tests {
             (events::MESSAGE_RECEIVED, "message"),
             (events::EXCEPTION_OCCURRED, "exception"),
         ];
-        match nested.iter().find(|(name, _)| *name == topic.as_str()) {
-            Some((name, key)) => wrap_event_nested(name, key, raw_json),
-            None => wrap_event(topic.as_str(), raw_json),
+        let name = topic.as_str();
+        if let Some((_, key)) = nested.iter().find(|(n, _)| *n == name) {
+            return format!(r#"{{"type":"{name}","{key}":{raw_json}}}"#);
+        }
+        match serde_json::from_str(raw_json) {
+            Ok(Value::Object(mut map)) => {
+                map.insert("type".into(), Value::String(name.into()));
+                serde_json::to_string(&map).unwrap()
+            }
+            _ => format!(r#"{{"type":"{name}","data":{raw_json}}}"#),
         }
     }
 
-    // A typed event goes out as the message its string topic sends: the same JSON for every
+    // A typed event goes out as the message its string topic sent: the same JSON for every
     // topic, and the same bytes where the payload's fields sit beside `type`.
     #[test]
     fn a_typed_event_sends_the_message_of_its_string_topic() {
@@ -883,7 +862,7 @@ mod typed_wire_tests {
 mod audience_matrix_tests {
     //! Plan 20 §8.2: for each (topic, audience) case, which sessions' event streams deliver
     //! the event. Each case goes through `Session::may_receive` and through a real stream
-    //! from `build_event_stream_for`. Later commits add a case per topic they move.
+    //! from `build_event_stream_for`. A new topic or audience adds its cases here.
     use super::*;
     use crate::agent::session::{Principal, TokenId};
     use crate::events::Audience;
@@ -1676,7 +1655,7 @@ mod audience_matrix_tests {
         }
     }
 
-    // The socket's `events.watch` narrows typed events as it narrows string ones.
+    // The socket's `events.watch` narrows typed events by topic and perspective.
     #[tokio::test]
     async fn a_socket_gets_only_the_typed_events_it_watches() {
         let session = Arc::new(Session::for_test(
@@ -1800,6 +1779,7 @@ mod token_expiry_tests {
 #[cfg(test)]
 mod event_spec_tests {
     use super::{event_specs, events};
+    use crate::events::Topic;
     use crate::types::*;
     use std::collections::BTreeSet;
 
@@ -1808,7 +1788,8 @@ mod event_spec_tests {
         let specs: Vec<&str> = event_specs().iter().map(|s| s.name).collect();
         let unique: BTreeSet<&str> = specs.iter().copied().collect();
         assert_eq!(unique.len(), specs.len(), "duplicate spec: {specs:?}");
-        assert_eq!(unique, events::ALL.into_iter().collect::<BTreeSet<_>>());
+        let topics = Topic::ALL.map(Topic::as_str);
+        assert_eq!(unique, topics.into_iter().collect::<BTreeSet<_>>());
     }
 
     #[test]

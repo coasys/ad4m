@@ -50,15 +50,21 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   inline on both sockets (per-connection state, like `request.cancel`).
 - Live query updates (`query-subscription-update`) pass `events.watch` untouched: every socket of
   the perspective owner gets them, and the SDK routes them by `subscriptionId`.
-- Two event paths until every topic moves (Plan 20, PR 3). String topics: `pubsub.publish(TOPIC,
-  json)`, filtered per topic in `events_ws::build_event_stream_for`. Typed events:
-  `pubsub.publish_event(Event::new(Topic, Audience, payload))` (`src/events.rs`), delivered when
-  `Session::may_receive` (the audience) and `event_interest::wants` (the watch) hold, as
-  `events_ws::wire_message` — the same message the string topic sends. The stream builder takes
-  the socket's interest, so callers pass it (`Connection::interest()` on the RPC socket).
-  `audience_matrix_tests` in `events_ws.rs` pins who receives each audience; add a case per moved
-  topic. Moved so far: the agent, app, exception and runtime topics, and the perspective and
-  link topics. `notification-triggered` goes to the notification's `ownerDid`, never to
+- One event path. A publisher calls `pubsub.publish_event(Event::new(Topic, Audience, payload))`
+  (`src/events.rs`); there is no default audience. A socket's stream
+  (`events_ws::build_event_stream_for`) delivers it when `Session::may_receive` (the audience) and
+  `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`. No
+  check takes a lock or parses the payload. The stream builder takes the socket's interest, so
+  callers pass it (`Connection::interest()` on the RPC socket). Only authenticated sessions
+  (`Session::is_authenticated`: not anonymous) get a stream on the RPC socket. The stream ends at
+  the first event after `Session::check()` fails. `audience_matrix_tests` in `events_ws.rs` pins
+  who receives each audience; a new topic or audience adds its cases there.
+- One string topic remains: live query updates (`PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC`, sent as
+  `query-subscription-update`). `events_ws::query_updates` waits for the perspective handle to
+  check that the session owns the perspective (`matches_perspective_owner`, spawned so a parked
+  stream cannot hold the handle). It stays until live queries belong to a connection (#1207); it
+  then becomes a typed event to `Audience::Connection`. Language code cannot publish anything
+  (`js_core/pubsub_extension.rs`). `notification-triggered` goes to the notification's `ownerDid`, never to
   co-owners. `signal` goes to its `recipient` (`perspectives::signal_event`), or to every
   session when it names none. `hosting-user-info-changed` goes to the user's DID (looked up by
   email at publish) and the main agent's (the operator and apps see every user's).
@@ -68,9 +74,7 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   read the perspective, else to the operator; `auto-processor-neighbourhood-state` to the
   operator and the perspective's owners (every authenticated session for an unowned
   perspective). `auto_processor::events::emit` reads the owners from the handle when it
-  publishes, so no emitter may hold the perspective's handle lock while it emits. Only
-  `query-subscription-update` stays on the string path, until live queries belong to a
-  connection (#1207).
+  publishes, so no emitter may hold the perspective's handle lock while it emits.
   `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` and the approval exceptions (`CapabilityRequested`,

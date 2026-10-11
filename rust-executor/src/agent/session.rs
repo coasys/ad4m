@@ -217,6 +217,12 @@ impl Session {
         matches!(self.principal, Principal::Operator)
     }
 
+    /// Whether the caller is the operator or presented a token: every session but an
+    /// anonymous one. Only these sessions get an event stream.
+    pub fn is_authenticated(&self) -> bool {
+        !matches!(self.principal, Principal::Anonymous { .. })
+    }
+
     /// The capabilities that checks run against: every capability for the operator.
     pub fn capabilities(&self) -> Vec<Capability> {
         match &self.principal {
@@ -280,7 +286,7 @@ impl Session {
     pub(crate) fn may_receive(&self, event: &Event) -> bool {
         match &event.audience {
             Audience::Everyone => true,
-            Audience::Authenticated => !matches!(self.principal, Principal::Anonymous { .. }),
+            Audience::Authenticated => self.is_authenticated(),
             Audience::Operator => self.is_operator(),
             Audience::Approvers => self.may(&AGENT_PERMIT_CAPABILITY),
             Audience::Dids(dids) => self.acts_as_one_of(dids),

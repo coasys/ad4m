@@ -11,9 +11,8 @@ use crate::types::{Agent, AgentStatus, ExceptionInfo, ExceptionType, HostingUser
 use serde::Serialize;
 use serde_json::Value;
 
-/// One event topic. Each string topic in `pubsub` has one variant
-/// (`AGENT_UPDATED_TOPIC` → [`Topic::AgentUpdated`]); [`Topic::as_str`] gives the
-/// event type the socket sends (`agent-updated`).
+/// One event topic. [`Topic::as_str`] gives the event type the socket sends
+/// (`agent-updated`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Topic {
     AgentStatusChanged,
@@ -39,7 +38,7 @@ pub enum Topic {
 }
 
 impl Topic {
-    /// Every topic, in the order of `events_ws::events::ALL`.
+    /// Every topic, in the order of `events_ws::event_specs`.
     pub const ALL: [Topic; 20] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
@@ -91,7 +90,6 @@ impl Topic {
     }
 
     /// The topic whose wire name is `name`.
-    #[allow(dead_code, reason = "event_interest keys interest by Topic in 20-3h")]
     pub fn from_wire(name: &str) -> Option<Topic> {
         Topic::ALL.into_iter().find(|t| t.as_str() == name)
     }
@@ -238,7 +236,8 @@ mod tests {
     #[test]
     fn each_topic_has_the_wire_name_of_one_emitted_event() {
         let wire: Vec<&str> = Topic::ALL.iter().map(|t| t.as_str()).collect();
-        assert_eq!(wire, names::ALL);
+        let specs = crate::api::events_ws::event_specs();
+        assert_eq!(wire, specs.iter().map(|s| s.name).collect::<Vec<_>>());
         for topic in Topic::ALL {
             assert_eq!(Topic::from_wire(topic.as_str()), Some(topic));
             assert_eq!(topic.to_string(), topic.as_str());
