@@ -165,8 +165,9 @@ impl PendingApprovals {
         result
     }
 
-    /// Puts back a redeemed request whose token could not be issued (a locked wallet), so
-    /// the app can retry with the same code.
+    /// Puts back a redeemed request whose token could not be issued (a locked wallet) or
+    /// registered (the registry file did not take it), so the app can retry with the same
+    /// code.
     pub fn restore(&self, request_id: String, approval: PendingApproval) {
         let mut pending = self
             .0
