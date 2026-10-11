@@ -127,6 +127,11 @@ on the user's own, an operator's and a missing AI task. A new guard is covered w
 test; a method whose params need more than `uuid` adds an entry to `EXTRA_PARAMS`, with
 `TARGET` where it names the row's perspective or task in another param.
 
+The MCP tools that wrap an RPC method dispatch through the same map
+(`ws_handler::shared_handler_map`, `mcp::tools::call_method`), so the guards hold on MCP too.
+`tests/method_matrix_mcp_tests.rs` runs each of them as every matrix caller and checks it
+against `admit` of its methods (see `mcp/AGENTS.md`).
+
 ## Protocol
 
 - Clients (core SDK, rust-client) ship with the executor from the same revision: no feature

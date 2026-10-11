@@ -58,6 +58,9 @@ causes no side effect.
 - Refusals and failures answer `{"error": .., "status": <code>}` (`method_error`). On a
   perspective (`perspective_error`), a missing perspective and one that is not the caller's
   both answer `Perspective not found: <uuid>` with status 404.
+- `api/tests/method_matrix_mcp_tests.rs` runs every wrapping tool as each method-matrix
+  caller and checks that it allows and refuses as its methods' guards do. A new tool goes into
+  its `tools()` list or its `NOT_WRAPPED` list; `every_tool_is_classified` fails otherwise.
 - Tools with no RPC method keep their own logic and take their checks from the `Session`
   (`get_readable_perspective`, `get_writable_perspective`, `require`): `describe_perspective`,
   the `instance_*` tools, `instance_transcript`, `flow_state`, `flow_actions`,

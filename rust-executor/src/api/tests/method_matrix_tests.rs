@@ -26,13 +26,13 @@ use crate::api::perspectives_ws::PerspectiveUuidParams;
 use crate::api::ws_handler::{build_handler_map, HandlerMap, NoParams, WsRpcError};
 use crate::types::{PerspectiveHandle, RequestContext};
 
-const USER_EMAIL: &str = "user@example.org";
-const USER_DID: &str = "did:key:matrix-user";
-const OTHER_USER_DID: &str = "did:key:matrix-other-user";
+pub(super) const USER_EMAIL: &str = "user@example.org";
+pub(super) const USER_DID: &str = "did:key:matrix-user";
+pub(super) const OTHER_USER_DID: &str = "did:key:matrix-other-user";
 
 /// Who calls.
 #[derive(Clone, Copy, Debug)]
-enum Caller {
+pub(super) enum Caller {
     Operator,
     /// An app token without the guard's capability.
     AppWithout,
@@ -48,7 +48,7 @@ enum Caller {
 
 /// The perspective a call names.
 #[derive(Clone, Copy, Debug)]
-enum Target {
+pub(super) enum Target {
     /// Owned by [`Caller::User`].
     UsersOwn,
     /// Owned by the node's main agent.
@@ -59,7 +59,7 @@ enum Target {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Expect {
+pub(super) enum Expect {
     Granted,
     Forbidden,
     /// 403 from the owner rule: `null` for a method that hides existence.
@@ -70,7 +70,7 @@ enum Expect {
 
 /// Guards that name no resource: who passes each. A guard that names one has its own rows
 /// ([`perspective_rows`], [`task_rows`]).
-fn resource_rows(guard: &Guard) -> &'static [(Caller, Expect)] {
+pub(super) fn resource_rows(guard: &Guard) -> &'static [(Caller, Expect)] {
     use Caller::*;
     use Expect::*;
     match guard {
@@ -138,7 +138,7 @@ fn task_rows() -> &'static [(Caller, Target, Expect)] {
 }
 
 /// `Guard::Perspective`: who reaches which perspective.
-fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
+pub(super) fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
     use Caller::*;
     use Expect::*;
     use Target::*;
@@ -607,7 +607,7 @@ fn outcome(result: Result<Admission, WsRpcError>) -> Result<Admission, u16> {
 }
 
 /// The perspectives and AI tasks the rows name; [`World::remove`] removes them.
-struct World {
+pub(super) struct World {
     users_own: String,
     main_agents: String,
     unowned: String,
@@ -616,7 +616,7 @@ struct World {
 }
 
 impl World {
-    async fn new() -> World {
+    pub(super) async fn new() -> World {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         if crate::db::Ad4mDb::global_instance()
@@ -665,7 +665,7 @@ impl World {
         world
     }
 
-    fn uuid(&self, target: Target) -> String {
+    pub(super) fn uuid(&self, target: Target) -> String {
         match target {
             Target::UsersOwn => self.users_own.clone(),
             Target::MainAgents => self.main_agents.clone(),
@@ -684,7 +684,7 @@ impl World {
         }
     }
 
-    async fn remove(self) {
+    pub(super) async fn remove(self) {
         for uuid in [&self.users_own, &self.main_agents, &self.unowned] {
             crate::perspectives::remove_perspective(uuid).await;
         }
