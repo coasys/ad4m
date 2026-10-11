@@ -1,7 +1,7 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import path from "path";
 import fs from "fs";
-import { sleep } from '../utils/utils';
+import { pollUntil } from '../utils/utils';
 import { Ad4mClient, LanguageMetaInput, LanguageRef } from '@coasys/ad4m';
 import { expect } from "chai";
 import { fileURLToPath } from 'url';
@@ -54,13 +54,18 @@ export default function languageTests(testContext: TestContext) {
 
             it('Alice can install her own non HC published language', async () => {
                 let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published perspective-language", "..here for you template");
-                let socialContextData = fs.readFileSync("./tst-tmp/languages/perspective-language/build/bundle.js").toString();
+                // The perspective-language from bootstrap-languages/, not the
+                // seed's (which in the local suite is local/perspective-language.js,
+                // without icons): this test checks the icons of an installed language.
+                // A copy with a comment appended, so the address is new.
+                const perspectiveLanguageCopy = path.join(__dirname, "../tst-tmp/perspective-language-with-icons.js");
+                let socialContextData = fs.readFileSync(path.join(__dirname, "../../../bootstrap-languages/perspective-language/build/bundle.js")).toString();
                 socialContextData = socialContextData + "\n//Test";
-                fs.writeFileSync("./tst-tmp/languages/perspective-language/build/bundle.js", socialContextData);
+                fs.writeFileSync(perspectiveLanguageCopy, socialContextData);
 
                 //Publish a source language to start working from
                 nonHCSourceLanguage = await ad4mClient.languages.publish(
-                    path.join(__dirname, "../tst-tmp/languages/perspective-language/build/bundle.js").replace(/\\/g, "/"),
+                    perspectiveLanguageCopy.replace(/\\/g, "/"),
                     sourceLanguageMeta
                 )
                 expect(nonHCSourceLanguage.name).to.be.equal(nonHCSourceLanguage.name);
@@ -99,7 +104,7 @@ export default function languageTests(testContext: TestContext) {
                 );
                 expect(canPublishNonHolochainLang.name).to.be.equal(noteMetaInfo.name);
                 //TODO/NOTE: this will break if the note language version is changed
-                expect(canPublishNonHolochainLang.address).to.be.equal("QmzSYwdiTHLZtzCPBq384QqeyKT4P2JvqqXH8So4MB4axfftLHA");
+                expect(canPublishNonHolochainLang.address).to.be.equal("QmzSYwdnt6h77iqTuxs9Febh3cAAr6GMfRH8VwH3NHbTiYgUWmS");
             
                 //Get meta for source language above and make sure it is correct
                 const sourceLanguageMetaNonHC = await ad4mClient.expression.get(`lang://${canPublishNonHolochainLang.address}`);
@@ -107,7 +112,7 @@ export default function languageTests(testContext: TestContext) {
                 const sourceLanguageMetaNonHCData = JSON.parse(sourceLanguageMetaNonHC.data);
                 expect(sourceLanguageMetaNonHCData.name).to.be.equal(noteMetaInfo.name)
                 expect(sourceLanguageMetaNonHCData.description).to.be.equal(noteMetaInfo.description)
-                expect(sourceLanguageMetaNonHCData.address).to.be.equal("QmzSYwdiTHLZtzCPBq384QqeyKT4P2JvqqXH8So4MB4axfftLHA")
+                expect(sourceLanguageMetaNonHCData.address).to.be.equal("QmzSYwdnt6h77iqTuxs9Febh3cAAr6GMfRH8VwH3NHbTiYgUWmS")
             })
 
 
@@ -116,7 +121,12 @@ export default function languageTests(testContext: TestContext) {
                 await testContext.makeAllNodesKnown()
                 // .. and have time to gossip inside the Language Language, 
                 // so Bob sees the languages created above by Alice
-                await sleep(1000);
+                await pollUntil(async () => {
+                    try {
+                        const meta = await bobAd4mClient.expression.get(`lang://${sourceLanguage.address}`);
+                        return meta !== null;
+                    } catch { return false; }
+                }, { timeoutMs: 10000, intervalMs: 500, label: "gossip propagates Alice's language metadata to Bob" });
                 
 
                 //Test that bob cannot install source language which alice created since she is not in his trusted agents
@@ -133,7 +143,10 @@ export default function languageTests(testContext: TestContext) {
                 sourceLanguageMeta.sourceCodeLink = null;
 
                 //@ts-ignore
-                expect(error.toString()).to.contain(`ApolloError: Language not created by trusted agent: ${(await ad4mClient.agent.me()).did} and is not templated... aborting language install. Language metadata: ${stringify(sourceLanguageMeta)}`)
+                const errorMsg = (() => {
+                    try { return JSON.parse(error.message).error; } catch { return error.toString(); }
+                })();
+                expect(errorMsg).to.contain(`Language not created by trusted agent: ${(await ad4mClient.agent.me()).did} and is not templated... aborting language install.`)
             })
 
             describe('with Bob having added Alice to list of trusted agents', () => {

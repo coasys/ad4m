@@ -8,8 +8,6 @@
  */
 import { SHACLShape } from "../shacl/SHACLShape";
 import type { SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
-import { escapeSurrealString } from "../utils";
-import { compileWhereClause } from "./surreal-utils";
 import { propertyNameToSetterName } from "./util";
 import type { PropertyMetadataEntry, RelationMetadataEntry, Ad4mModelLike } from "./decorators";
 
@@ -36,14 +34,29 @@ export function buildSHACL(
     properties: Record<string, PropertyMetadataEntry>,
     allRelationsMeta: Record<string, RelationMetadataEntry>,
     conformanceFilterFn: ConformanceFilterFn,
+    /**
+     * Optional early-cache seeding callback. When invoked with a
+     * partial `{ shape, name }`, any re-entrant `generateSHACL()`
+     * call on the same target — which happens when a relation's
+     * `target: () => SameClass` points at us, directly or
+     * transitively — observes the in-progress shape rather than
+     * re-entering this function infinitely. Provided by `@Model` via
+     * `getMemoizedSHACL`; safe to omit when calling `buildSHACL`
+     * directly (e.g. from a one-off SDNA build tool).
+     */
+    seedCache?: (partial: { shape: SHACLShape; name: string }) => void,
+    /**
+     * Natural-language hint declared on the `@Model` decorator that
+     * steers the generic LLM extractor when producing instances of
+     * this class.  Attached to the SHACL shape node and re-emitted as
+     * an `ad4m://interpretation_hint` link by `SHACLShape.toLinks()`.
+     */
+    interpretationHint?: string,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
     // ── Determine namespace from first property or relation ─────────────
     let namespace = "ad4m://";
-    const relations = Object.fromEntries(
-        Object.entries(allRelationsMeta).filter(([, r]) => r.kind === 'hasMany' || r.kind === 'belongsToMany')
-    );
 
     // Try properties first
     if (Object.keys(properties).length > 0) {
@@ -56,8 +69,8 @@ export function buildSHACL(
         }
     }
     // Fall back to relations if no properties
-    else if (Object.keys(relations).length > 0) {
-        const firstRel = relations[Object.keys(relations)[0]];
+    else if (Object.keys(allRelationsMeta).length > 0) {
+        const firstRel = allRelationsMeta[Object.keys(allRelationsMeta)[0]];
         if (firstRel.predicate) {
             const match = firstRel.predicate.match(/^([^:]+:\/\/)/);
             if (match) {
@@ -70,6 +83,21 @@ export function buildSHACL(
     const shapeUri = `${namespace}${subjectName}Shape`;
     const targetClass = `${namespace}${subjectName}`;
     const shape = new SHACLShape(shapeUri, targetClass);
+    if (interpretationHint) {
+        shape.interpretationHint = interpretationHint;
+    }
+
+    // ── Seed the memoisation cache while we keep building ──────────────
+    // Any subsequent `target.generateSHACL()` call from inside this
+    // function (typically when walking a self-referential or
+    // mutually-recursive relation target) will now observe the
+    // already-allocated `shape` rather than re-entering `buildSHACL`
+    // and overflowing the stack. The shape is mutated in place as we
+    // populate it below, so the eventual cached value and the value
+    // recursive callers see are the same object.
+    if (seedCache) {
+        seedCache({ shape, name: subjectName });
+    }
 
     // Detect @Model inheritance — if the parent class also has
     // generateSHACL it is itself a @Model and we reference its shape
@@ -90,28 +118,68 @@ export function buildSHACL(
 
     let destructorActions: any[] = [];
 
+    // Class-field initialisers (`count = 0`) run in the constructor, not on the
+    // prototype, so read them from one instance built without a perspective.
+    let instance: any;
+    try { instance = new target(); } catch {}
+    const fieldValue = (propName: string): unknown => {
+        try { return obj[propName] ?? instance?.[propName]; } catch { return undefined; }
+    };
+
     // ── Convert properties to SHACL property shapes ────────────────────
     for (const propName in properties) {
         const propMeta = properties[propName];
 
         if (!propMeta.through) continue; // Skip properties without predicates
 
+        // `@BelongsToOne`/`@BelongsToMany` register in both maps: the relation
+        // registry describes the edge, and `applyPropertyMetadata` marks the
+        // accessor read-only so the non-owning side gets no setter. Both loops
+        // then emitted a shape for it, so an inverse relation appeared twice in
+        // the generated SHACL — once thinly, from here, and once with its target
+        // class, polymorphism and ordering, from the relation loop below.
+        //
+        // The relation loop is the complete description, so this one stands
+        // aside. Skipping by presence in the relation map rather than by kind
+        // keeps it right for any future decorator that registers in both.
+        if (allRelationsMeta[propName]) continue;
+
         const propShape: SHACLPropertyShape = {
             name: propName,
             path: propMeta.through,
         };
 
-        // Determine datatype from initial value or resolveLanguage
-        if (propMeta.resolveLanguage === "literal") {
-            propShape.datatype = "xsd://string";
-        } else if (propMeta.initial) {
-            const initialType = typeof obj[propName];
-            if (initialType === "number") {
-                propShape.datatype = "xsd://integer";
-            } else if (initialType === "boolean") {
-                propShape.datatype = "xsd://boolean";
-            } else if (initialType === "string") {
-                propShape.datatype = "xsd://string";
+        // Determine datatype from JS field value type; the resolve* options
+        // control storage mode (deterministic vs envelope), not scalar type.
+        // A value stored on the literal language (deterministic or envelope,
+        // i.e. resolveLanguage unset or "literal") gets a string datatype when
+        // no initial value pins a more specific type. A custom resolveLanguage
+        // yields an expression URI, not a literal.
+        //
+        // Skip auto-datatype for properties with a custom `getter` — those
+        // typically return URIs (e.g. `@Optional({ getter: "SELECT ?target ..." })`
+        // that hops through a link to another instance's URI). Autosetting
+        // `sh:datatype xsd:string` there would trip the hydration decode gate
+        // and silently transform `literal:string:<hex>` URIs into their inner
+        // plain-string form on read. Users who want a getter to return literal
+        // values can opt in explicitly by setting `datatype` on the property
+        // options (handled below).
+        if (propMeta.datatype) {
+            // Explicit opt-in from PropertyOptions always wins over inference.
+            propShape.datatype = propMeta.datatype;
+        } else {
+            const isLiteral =
+                propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
+            if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
+                const initialType = typeof fieldValue(propName);
+                if (initialType === "number") {
+                    // decimal, not integer: a `= 0` default must not make 0.5 invalid.
+                    propShape.datatype = "xsd://decimal";
+                } else if (initialType === "boolean") {
+                    propShape.datatype = "xsd://boolean";
+                } else if (initialType === "string" || isLiteral) {
+                    propShape.datatype = "xsd://string";
+                }
             }
         }
 
@@ -128,6 +196,11 @@ export function buildSHACL(
             propShape.hasValue = propMeta.initial;
         }
 
+        // sh:in — allowed values (enum constraint)
+        if (propMeta.options && propMeta.options.length > 0) {
+            propShape.in = propMeta.options;
+        }
+
         // AD4M-specific metadata
         if (propMeta.local !== undefined) {
             propShape.local = propMeta.local;
@@ -137,8 +210,32 @@ export function buildSHACL(
             propShape.writable = propMeta.writable;
         }
 
-        if (propMeta.resolveLanguage) {
+        if (propMeta.resolveLanguage != null) {
             propShape.resolveLanguage = propMeta.resolveLanguage;
+        }
+
+        // Explicit getter SPARQL — the executor evaluates this when
+        // hydrating the property, in addition to (or instead of)
+        // reading raw links via `propMeta.through`.
+        if (propMeta.getter) {
+            propShape.getter = propMeta.getter;
+        }
+
+        // Serializable transform expression (SHACL-AF Node Expression)
+        if (propMeta.transform) {
+            propShape.transform = propMeta.transform;
+        }
+
+        // Natural-language interpretation hint (read by the generic LLM
+        // extractor via ShapeProperty.interpretation_hint).
+        if (propMeta.interpretationHint) {
+            propShape.interpretationHint = propMeta.interpretationHint;
+        }
+
+        // Declared-identity dedup key for the generic LLM interpreter
+        // (emitted as `ad4m://identity` by SHACLShape.toLinks()).
+        if (propMeta.identity) {
+            propShape.identity = true;
         }
 
         // ── Setter actions ──────────────────────────────────────────────
@@ -163,7 +260,7 @@ export function buildSHACL(
         // ── Constructor / Destructor entries ────────────────────────────
         const effectiveInitial = propMeta.initial
             ?? (propMeta.required && propMeta.writable && !propMeta.flag && propMeta.through
-                ? "literal://string:" : undefined);
+                ? "literal:string:" : undefined);
 
         if (effectiveInitial) {
             constructorActions.push({
@@ -185,83 +282,160 @@ export function buildSHACL(
     }
 
     // ── Convert relations to SHACL property shapes ─────────────────────
-    for (const relName in relations) {
-        const relMeta = relations[relName];
+    for (const relName in allRelationsMeta) {
+        const relMeta = allRelationsMeta[relName];
 
-        if (!relMeta.predicate) continue;
+        // Getter-only relations (no `through`) have no real link predicate
+        // but still need a SHACL property entry so the executor can find
+        // the getter expression.  Synthesize a deterministic IRI so the
+        // SHACL graph is well-formed; the predicate is never used to match
+        // links because the getter is the sole source of values.  Use
+        // slash separators so the result is a valid IRI (colons in the
+        // authority confuse strict SPARQL IRI parsers).
+        if (!relMeta.predicate && !relMeta.getter) continue;
+        const synthesizedPath = relMeta.predicate
+            || `ad4m://getter/${subjectName}/${relName}`;
 
         const relShape: SHACLPropertyShape = {
             name: relName,
-            path: relMeta.predicate,
+            path: synthesizedPath,
         };
 
-        // Relations typically contain IRIs
-        relShape.nodeKind = 'IRI';
+        // A relation with a declared `datatype` holds encoded literal
+        // values (e.g. `HasMany<string>` with `datatype: "xsd:string"`).
+        // Everything else is a URI relation pointing at another
+        // instance. The executor uses `sh:datatype` on hydration to
+        // decide whether to decode `literal:<type>:<value>` wire form
+        // (yes for literals, no for URIs).
+        if (relMeta.datatype) {
+            relShape.datatype = relMeta.datatype;
+            relShape.nodeKind = 'Literal';
+        } else {
+            relShape.nodeKind = 'IRI';
+        }
+
+        // Encode relation kind so the executor can derive direction and
+        // scalar-vs-collection rendering without consulting the JS class.
+        relShape.relationKind = relMeta.kind;
+
+        // Scalar relations cap at 1.
+        if (relMeta.kind === 'hasOne' || relMeta.kind === 'belongsToOne') {
+            relShape.maxCount = 1;
+        } else if (relMeta.maxCount !== undefined) {
+            relShape.maxCount = relMeta.maxCount;
+        }
+
+        // Encode opt-out of type filtering (default true; only emit when false).
+        if (relMeta.filter === false) {
+            relShape.filter = false;
+        }
+
+        // Ordering is declared in the type system so the executor can act on it
+        // for every writer, not just this client.
+        if (relMeta.ordering) {
+            relShape.ordering = relMeta.ordering.strategy;
+        }
 
         // AD4M-specific metadata
         if (relMeta.local !== undefined) {
             relShape.local = relMeta.local;
         }
 
-        // Adder action
-        relShape.adder = [{
-            action: "addLink",
-            source: "this",
-            predicate: relMeta.predicate,
-            target: "value",
-            ...(relMeta.local && { local: true })
-        }];
+        // Per-relation interpretation hint — sentence-level meaning that
+        // steers the harness LLM's `_propose_link_child` `predicate` field
+        // description. Read back on the Rust side by
+        // `ShaclProperty.interpretation_hint` and rendered into the tool
+        // schema alongside the predicate URI enum (so `basedOn` reads
+        // "prior beliefs this intention derives from", not just "some link").
+        if (relMeta.interpretationHint) {
+            relShape.interpretationHint = relMeta.interpretationHint;
+        }
 
-        // Remover action
-        relShape.remover = [{
-            action: "removeLink",
-            source: "this",
-            predicate: relMeta.predicate,
-            target: "value",
-            ...(relMeta.local && { local: true })
-        }];
+        // Adder / Remover actions — only meaningful for relations backed
+        // by a real link predicate.  Getter-only relations are read-only,
+        // and so is one declared `readOnly`, which keeps its predicate as
+        // the shape's path but must offer no way to write it.
+        if (relMeta.readOnly) {
+            relShape.writable = false;
+        } else if (relMeta.predicate) {
+            relShape.adder = [{
+                action: "addLink",
+                source: "this",
+                predicate: relMeta.predicate,
+                target: "value",
+                ...(relMeta.local && { local: true })
+            }];
+
+            relShape.remover = [{
+                action: "removeLink",
+                source: "this",
+                predicate: relMeta.predicate,
+                target: "value",
+                ...(relMeta.local && { local: true })
+            }];
+        }
 
         // ── Build Getter (conformance filter) ───────────────────────────
         // Priority chain:
         // 1. Explicit getter string → use verbatim
-        // 2. `where` clause → compile DSL to SurrealQL getter
-        // 3. target + filter !== false → auto-derive from shape
+        // 2. target + filter !== false → auto-derive conformance getter
+        //    from the shape.  Where-clause filtering is applied as a
+        //    post-getter pass via `whereFilter` / `wherePredicates`, which
+        //    use `parse_literal_value` and so transparently handle
+        //    `literal:json:` envelopes that simple FILTER(STR(?x) = ...)
+        //    comparisons can't.
         if (relMeta.getter) {
             relShape.getter = relMeta.getter;
-        } else if (relMeta.where) {
-            try {
-                const TargetClass = relMeta.target?.();
-                const targetMetadata = TargetClass
-                    ? (TargetClass as any).getModelMetadata?.() ?? null
-                    : null;
-
-                const conditions = compileWhereClause(
-                    relMeta.where,
-                    targetMetadata,
-                );
-
-                if (conditions.length > 0) {
-                    const escapedPredicate = escapeSurrealString(relMeta.predicate);
-                    relShape.getter = `(->link[WHERE predicate = '${escapedPredicate}'].out[WHERE ${conditions.join(' AND ')}].uri)`;
+        } else if (
+            relMeta.target
+            && relMeta.filter !== false
+            && relMeta.kind !== 'belongsToOne'
+            && relMeta.kind !== 'belongsToMany'
+        ) {
+            // Lazy conformance filter: store deferred reference,
+            // resolve on first access via a getter on relShape.
+            // Skipped for reverse relations (belongsTo*) because the
+            // auto-derived getter assumes forward direction; the executor's
+            // `resolve_reverse_relations` already populates these correctly.
+            const targetThunk = relMeta.target;
+            const predicate = relMeta.predicate;
+            let resolved = false;
+            let cachedGetter: string | undefined;
+            let cachedConditions: ConformanceCondition[] | undefined;
+            
+            const resolveFilter = () => {
+                if (resolved) return;
+                resolved = true;
+                try {
+                    const TargetClass = targetThunk();
+                    const filter = conformanceFilterFn(predicate, TargetClass);
+                    if (filter) {
+                        cachedGetter = filter.getter;
+                        cachedConditions = filter.conformanceConditions;
+                    }
+                } catch (e) {
+                    // Target class may not be available yet
                 }
-            } catch (e) {
-                // Target metadata may not be available yet
-            }
-        } else if (relMeta.target && relMeta.filter !== false) {
-            try {
-                const TargetClass = relMeta.target();
-                const filter = conformanceFilterFn(relMeta.predicate, TargetClass);
-                if (filter) {
-                    relShape.getter = filter.getter;
-                    relShape.conformanceConditions = filter.conformanceConditions;
-                }
-            } catch (e) {
-                // Target class may not be available yet — getter will be
-                // absent and runtime will fall back to unfiltered get_links
-            }
+            };
+
+            // Define lazy getters that resolve on first access
+            Object.defineProperty(relShape, 'getter', {
+                get() { resolveFilter(); return cachedGetter; },
+                set(v: string) { resolved = true; cachedGetter = v; },
+                enumerable: true,
+                configurable: true,
+            });
+            Object.defineProperty(relShape, 'conformanceConditions', {
+                get() { resolveFilter(); return cachedConditions; },
+                set(v: ConformanceCondition[]) { resolved = true; cachedConditions = v; },
+                enumerable: true,
+                configurable: true,
+            });
         }
 
         // ── sh:class — target shape reference ───────────────────────────
+        // Also emit ad4m:targetClassName so the executor can look up the
+        // target class shape through its in-memory cache by bare name.
         if (relMeta.target) {
             try {
                 const TargetClass = relMeta.target();
@@ -269,19 +443,81 @@ export function buildSHACL(
                 if (targetSHACL?.shape?.nodeShapeUri) {
                     relShape.class = targetSHACL.shape.nodeShapeUri;
                 }
+                if (targetSHACL?.name) {
+                    relShape.targetClassName = targetSHACL.name;
+                } else {
+                    const targetProto = (TargetClass as any).prototype;
+                    if (targetProto?.className) {
+                        relShape.targetClassName = targetProto.className;
+                    }
+                }
             } catch (e) {
-                // Target class may not be available yet
+                // Target class resolution failed (typically a circular
+                // decorator dependency).  Since the executor no longer
+                // receives target metadata over the wire, dropping the
+                // reference here would turn a transient build-time issue
+                // into a permanent broken-include at query time.  Log
+                // loudly so the failure is discoverable.
+                console.warn(
+                    `[shacl-gen] Failed to resolve target class for relation `
+                    + `"${subjectName}.${relName}": ${e instanceof Error ? e.message : String(e)}`
+                );
+            }
+        }
+
+        // ── Where-clause metadata for post-getter filtering ─────────────
+        // The executor uses these to apply where conditions against the
+        // target class without needing the target's ModelMetadata at query time.
+        if (relMeta.where) {
+            relShape.whereFilter = relMeta.where;
+            try {
+                const TargetClass = relMeta.target?.();
+                const targetMetadata = TargetClass
+                    ? (TargetClass as any).getModelMetadata?.() ?? null
+                    : null;
+                if (targetMetadata?.properties) {
+                    const predicates: Record<string, string> = {};
+                    for (const propName of Object.keys(relMeta.where)) {
+                        if (['id', 'author', 'timestamp'].includes(propName)) continue;
+                        const propMeta = targetMetadata.properties[propName];
+                        if (propMeta?.predicate) {
+                            predicates[propName] = propMeta.predicate;
+                        }
+                    }
+                    if (Object.keys(predicates).length > 0) {
+                        relShape.wherePredicates = predicates;
+                    }
+                }
+            } catch (e) {
+                // Target metadata may not be available yet
             }
         }
 
         shape.addProperty(relShape);
     }
 
-    // Always set constructor and destructor actions on the shape, even
-    // when empty.  An empty array serialises to `literal://string:[]`
-    // which the Rust executor parses as a valid (no-op) command list,
-    // avoiding "No SHACL constructor found" errors for models whose
-    // properties are all optional and have no @Flag.
+    // ── Ordering links ─────────────────────────────────────────────────
+    // Ordering entries are stored on the *parent*, under one shared predicate,
+    // so that reconstruction needs no extra query: they arrive with the
+    // instance's own links. That only works if the instance query asks for them,
+    // and it builds its predicate filter from the shape's declared paths — so a
+    // class owning any ordered collection has to declare the predicate, or the
+    // very links the ordering depends on are filtered out of the read that needs
+    // them.
+    //
+    // One entry covers every ordered relation on the class; each entry names the
+    // relation it belongs to.
+    const hasOrderedRelation = Object.values(allRelationsMeta).some((m) => m.ordering);
+    if (hasOrderedRelation) {
+        shape.addProperty({
+            name: '_collectionOrder',
+            path: 'ad4m://collection_order',
+            nodeKind: 'IRI',
+        });
+    }
+
+    // Empty lists are valid: the executor stores them as `literal:string:[]`,
+    // so `createSubject` works for all-optional models without a @Flag.
     shape.setConstructorActions(constructorActions);
     shape.setDestructorActions(destructorActions);
 

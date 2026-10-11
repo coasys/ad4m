@@ -11,25 +11,45 @@ export interface McpTool {
   inputSchema?: Record<string, any>;
 }
 
-// WakerSubscription is defined in wakerSubscriptionManager.ts (kept import-free for testability)
+// WakerSubscription comes from core via ./wakerSubscriptionManager (a pure re-export).
 export type { WakerSubscription } from "./wakerSubscriptionManager";
 
 export interface PluginConfig {
   mode?: "managed" | "external";
   mcpEndpoint?: string;
+  /** Opt in to sending credentials to a non-loopback plaintext http:// mcpEndpoint. */
+  allowInsecureHttp?: boolean;
   /** Auth token — JWT in external mode, admin credential in managed mode (internal). */
   token?: string;
   agentPassphrase?: string;
   ad4mBinaryPath?: string;
-  toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
-  executorWsUrl?: string;
+  executorUrl?: string;
   wakeUrl?: string;
   wakeToken?: string;
   debounceMs?: number;
+  /** How long (ms) the executor gets to answer a waker subscribe handshake before the subscription is queued for re-attempt instead of hanging the tool call (default 15000). */
+  subscribeTimeoutMs?: number;
   /** RUST_LOG value for the ad4m-executor process (e.g. "holochain=debug,kitsune=trace"). Only applies when the plugin spawns the executor (managed mode). */
   rustLog?: string;
   /** Where to send executor logs: "file" (default) = ~/.ad4m/ad4m.log only, "openclaw" = openclaw logs only, "both" = both. */
   executorLogTarget?: "file" | "openclaw" | "both";
+  /** Run Holochain in managed mode (default true). Set false to start the executor with `--run-holochain false` — no P2P/bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync. */
+  runHolochain?: boolean;
+  /** External mode: on a multi-user node, provision the assistant's own user identity (signup + login) instead of requesting a capability against the node's base agent. */
+  multiUser?: boolean;
+  /** Multi-user: the assistant's user email/identifier. Persisted by setup for re-authentication. */
+  email?: string;
+  /**
+   * Multi-user: password for signup/login. Resolved in this order:
+   *   1. `AD4M_PASSWORD` env var (recommended for headless/CI)
+   *   2. Interactive stdin prompt (only during `openclaw ad4m-setup`, TTY required)
+   *   3. This field (escape hatch — plaintext-at-rest, discouraged)
+   *
+   * Setup persists only the resulting JWT (`token`) and `email`; the password is
+   * discarded. To let the plugin re-authenticate at runtime when a JWT expires,
+   * export `AD4M_PASSWORD` in the environment that starts OpenClaw.
+   */
+  password?: string;
 }
 

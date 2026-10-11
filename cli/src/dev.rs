@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colour::{self, green_ln};
-use std::{fs, str::FromStr};
+use std::fs;
 
 use crate::bootstrap_publish::*;
 
@@ -40,7 +40,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     network_bootstrap_seed: None,
                     language_language_only: Some(false),
                     run_dapp_server: Some(false),
-                    gql_port: None,
+                    port: None,
                     hc_admin_port: None,
                     hc_app_port: None,
                     hc_use_bootstrap: None,
@@ -48,6 +48,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_use_mdns: None,
                     hc_use_proxy: None,
                     connect_holochain: None,
+                    run_holochain: None,
                     admin_credential: Some(String::from("*")),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
@@ -61,18 +62,22 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()
-                .expect("Error awaiting executor main thread");
+                .expect("Error awaiting executor main thread")
+                .expect("REST API server failed");
             });
 
             let test_res = tokio::task::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-                let client = ad4m_client::Ad4mClient::new(
-                    String::from("http://127.0.0.1:4000/graphql"),
+                let client = ad4m_client::Ad4mClient::connect(
+                    String::from("http://127.0.0.1:4000"),
                     String::from("*"),
-                );
+                )
+                .await
+                .expect("could not connect to executor");
                 let me = client.agent.me().await;
                 println!("Me: {:?}", me);
                 let agent_generate = client.agent.generate(String::from("test")).await;
@@ -81,7 +86,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     .languages
                     .publish(
                         language_path,
-                        String::from("some-test-lang"),
+                        Some(String::from("some-test-lang")),
                         Some(String::from("some-desc")),
                         None,
                         None,
@@ -96,11 +101,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 println!("Language: {:?}", language);
                 let expression = client
                     .expressions
-                    .expression_create(
-                        language_info.address,
-                        serde_json::Value::from_str(&data)
-                            .expect("could not cast input data to serde_json::Value"),
-                    )
+                    .expression_create(data.clone(), language_info.address)
                     .await;
                 println!("Expression create: {:?}", expression);
                 let expression = client.expressions.expression(expression.unwrap()).await;
@@ -189,6 +190,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 temp_publish_bootstrap_path.to_str().unwrap()
             );
 
+            // The publishing executor holds the agent that signs the seed; a
+            // throwaway credential shared only with start_publishing() keeps
+            // its API closed to everyone else on the host.
+            let admin_credential = random_admin_credential();
+            let publish_credential = admin_credential.clone();
+
             tokio::task::spawn(async move {
                 rust_executor::run(rust_executor::Ad4mConfig {
                     app_data_path: Some(data_path.to_str().unwrap().to_string()),
@@ -197,7 +204,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     ),
                     language_language_only: Some(true),
                     run_dapp_server: Some(false),
-                    gql_port: None,
+                    port: None,
                     hc_admin_port: None,
                     hc_app_port: None,
                     hc_use_bootstrap: None,
@@ -205,7 +212,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_use_mdns: None,
                     hc_use_proxy: None,
                     connect_holochain: None,
-                    admin_credential: None,
+                    run_holochain: None,
+                    admin_credential: Some(admin_credential),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
                     hc_relay_url: None,
@@ -218,10 +226,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()
-                .expect("Error awaiting executor main thread");
+                .expect("Error awaiting executor main thread")
+                .expect("REST API server failed");
             });
 
             //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
@@ -230,6 +240,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 green_ln!("AD4M ready for publishing\n");
                 start_publishing(
+                    publish_credential,
                     passphrase.clone(),
                     seed_proto.clone(),
                     lang_lang_source.clone(),
@@ -252,4 +263,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
         }
     };
     Ok(())
+}
+
+/// 32 random bytes, hex-encoded.
+fn random_admin_credential() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

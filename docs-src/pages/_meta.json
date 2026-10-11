@@ -17,6 +17,7 @@
   "perspectives": "Perspectives",
   "neighbourhoods": "Neighbourhoods",
   "social-dna": "Social DNA",
+  "flows": "Flows",
   "multi-user": "Multi-User Mode",
   "--dev": {
     "type": "separator",

@@ -185,4 +185,68 @@ describe("Ad4mModel — Where-Operator Deep Dive", function () {
       expect(r.viewCount).to.be.gte(20).and.to.be.lte(40);
     }
   });
+
+  // ── 10. OR / AND / NOT — logical combinators ───────────────────────────────
+
+  it("where: { OR: [...] } matches records satisfying any branch across different fields", async () => {
+    await seed(perspective);
+    // Alpha matches via title; Beta matches via body — neither would match both.
+    const results = await TestPost.findAll(perspective, {
+      where: {
+        OR: [{ title: "Alpha" }, { body: { contains: "goodbye" } }],
+      },
+    });
+    const titles = results.map((r) => r.title).sort();
+    expect(titles).to.deep.equal(["Alpha", "Beta"]);
+  });
+
+  it("where: { OR: [...] } with no matching branch returns nothing", async () => {
+    await seed(perspective);
+    const results = await TestPost.findAll(perspective, {
+      where: { OR: [{ title: "Zeta" }, { title: "Eta" }] },
+    });
+    expect(results).to.have.length(0);
+  });
+
+  it("where: { AND: [...] } nested inside OR groups a multi-field sub-condition", async () => {
+    await seed(perspective);
+    // Branch 1: body contains 'hello' AND viewCount > 20 -> Gamma (30), Epsilon (50)
+    // Branch 2: title is exactly 'Beta' -> Beta
+    const results = await TestPost.findAll(perspective, {
+      where: {
+        OR: [
+          { AND: [{ body: { contains: "hello" } }, { viewCount: { gt: 20 } }] },
+          { title: "Beta" },
+        ],
+      },
+    });
+    const titles = results.map((r) => r.title).sort();
+    expect(titles).to.deep.equal(["Beta", "Epsilon", "Gamma"]);
+  });
+
+  it("where: { NOT: { OR: [...] } } excludes an entire sub-clause", async () => {
+    await seed(perspective);
+    const results = await TestPost.findAll(perspective, {
+      where: {
+        NOT: { OR: [{ title: "Alpha" }, { title: "Beta" }] },
+      },
+    });
+    const titles = results.map((r) => r.title).sort();
+    expect(titles).to.deep.equal(["Delta", "Epsilon", "Gamma"]);
+  });
+
+  it("OR mixes with a top-level condition via implicit AND", async () => {
+    await seed(perspective);
+    // Implicit AND: viewCount > 10 AND (title is Beta OR title is Gamma)
+    // Alpha (viewCount 10) is excluded by the top-level condition despite
+    // not being named in the OR branches.
+    const results = await TestPost.findAll(perspective, {
+      where: {
+        viewCount: { gt: 10 },
+        OR: [{ title: "Beta" }, { title: "Gamma" }],
+      },
+    });
+    const titles = results.map((r) => r.title).sort();
+    expect(titles).to.deep.equal(["Beta", "Gamma"]);
+  });
 });

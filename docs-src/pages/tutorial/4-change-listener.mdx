@@ -14,11 +14,14 @@ Apps/UIs can simply register a listener function on that
 [PerspectiveProxy](api.md#class-perspectiveproxy) object:
 
 ```js
-myPerspective.addListener("link-added", (addedLink: LinkExpression) => {
-  console.log("Got a new link:", addedLink);
+const stopAdded = myPerspective.on("link-added", ({ link }) => {
+  console.log("Got a new link:", link);
 });
 
-myPerspective.addListener("link-removed", (removedLink: LinkExpression) => {
-  console.log("A link was removed:", removedLink);
+myPerspective.on("link-removed", ({ link }) => {
+  console.log("A link was removed:", link);
 });
 ```
+
+`on()` returns a function that removes that listener. `dispose()` removes every listener this proxy registered.
+To listen on the client instead, pass the perspective: `ad4m.on("link-added", handler, { perspective: uuid })`.

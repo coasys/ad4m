@@ -3,6 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { MapPinIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
+import { wsUrlToHttpBase } from "../../utils";
 import type { RemoteHost } from "../../types";
 
 @customElement("host-browser")
@@ -234,19 +235,24 @@ export class HostBrowser extends LitElement {
       return;
     }
 
-    if (parsedUrl.protocol !== 'ws:' && parsedUrl.protocol !== 'wss:') {
-      this.manualUrlError = "URL must use ws:// or wss:// protocol";
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsedUrl.protocol)) {
+      this.manualUrlError = "URL must use http:// or https:// protocol";
       return;
     }
 
     this.manualUrlError = null;
+
+    // Normalize legacy ws/wss URLs to http/https
+    const normalizedUrl = (parsedUrl.protocol === 'ws:' || parsedUrl.protocol === 'wss:')
+      ? wsUrlToHttpBase(url)
+      : url;
 
     const host: RemoteHost = {
       id: `manual-${Date.now()}`,
       name: parsedUrl.hostname,
       profilePicUrl: "",
       location: "Custom URL",
-      url,
+      url: normalizedUrl,
       rates: [],
       aiModels: [],
     };
@@ -352,7 +358,7 @@ export class HostBrowser extends LitElement {
         <div class="manual-entry">
           <input
             type="text"
-            placeholder="wss://your-host.example/graphql"
+            placeholder="https://your-host.example"
             .value=${this.manualUrl}
             @input=${(e: Event) => { this.manualUrl = (e.target as HTMLInputElement).value; this.manualUrlError = null; }}
             @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter') this.connectManualUrl(); }}

@@ -219,7 +219,7 @@ Here's how a Todo class maps to SHACL:
     # SHACL shapes are stored as links in the perspective:
 
     (ad4m://self) --ad4m://has_sdna--> (ad4m://sdna_Todo)
-    (ad4m://sdna_Todo) --ad4m://sdna_type--> (literal://string:subject_class)
+    (ad4m://sdna_Todo) --ad4m://sdna_type--> (literal:string:subject_class)
 
     # The shape URI and its properties:
     (ad4m://sdna_Todo) --sh:targetClass--> (todo://Todo)
@@ -228,8 +228,8 @@ Here's how a Todo class maps to SHACL:
     # Property shape for "state":
     (ad4m://sdna_Todo_prop_0) --sh:path--> (todo://state)
     (ad4m://sdna_Todo_prop_0) --sh:datatype--> (xsd:string)
-    (ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal://number:1)
-    (ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal://number:1)
+    (ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal:number:1)
+    (ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal:number:1)
     (ad4m://sdna_Todo_prop_0) --ad4m://initial--> (todo://ready)
 
     # ... and so on for each property
@@ -244,7 +244,7 @@ Here's how a Todo class maps to SHACL:
 | `sh:maxCount 1` | Scalar property (single value) | `state`, `title`, `name` |
 | No `sh:maxCount` | Collection (multiple values) | `comments`, `tags`, `members` |
 | `sh:minCount 1` | Required property | Must be set on creation |
-| `sh:datatype xsd:string` | String value | Stored as `literal://string:...` |
+| `sh:datatype xsd:string` | String value | Stored as `literal:string:...` |
 | `sh:class <uri>` | Reference to another Subject Class | Typed relationship |
 | `ad4m://initial` | Default value on creation | Initial state |
 | `ad4m://resolveLanguage` | Expression language for values | `"literal"` for inline values |
@@ -364,130 +364,153 @@ While these methods are available, we recommend using the `Ad4mModel` system for
 
 ## Flows: Defining Actions
 
-Flows define what agents can do in a space and under what conditions. They manage state machines over expressions — defining states, transitions, and the actions that trigger them.
+Flows describe how a group advances an expression through a state machine, with each transition backed by an on-graph `FlowTransitionProposal` and (optionally) a `ConsensusRule` gating when a proposal fires. Each `FlowState` carries an `interpretationHint` — a short English sentence the interpretation engine surfaces to the LLM so agent-authored proposals stay coherent with the flow's intent.
+
+This section introduces flows as social DNA. The [Flows](/flows) page covers the engine: the on-graph objects, how state is derived rather than stored, `proposeTransition` / accept / reject, role gates including `producedByFlow`, and a worked end-to-end example.
 
 <Callout type="info" emoji="ℹ️">
-  Flows still use link-based state tracking internally. The flow state is determined
-  by querying links in the perspective, and actions modify links to change state.
+  Flow state is tracked on-graph via `FlowInstance` (per-subject state) and
+  `FlowTransitionProposal` (per-vote), not by the ad-hoc `todo://state`-style
+  links used in earlier iterations. See
+  [`docs/flow-interpretation-hints-design.md`](https://github.com/coasys/ad4m/blob/dev/docs/flow-interpretation-hints-design.md)
+  for the full v5 design.
 </Callout>
 
-Here's a complete example of a Todo flow:
+Here's a Delivery flow expressed with the `SHACLFlow` class — the shape a group would share as social DNA:
 
 ```typescript
-// Define flow states and transitions
-const todoFlow = {
-  name: "TODO",
-  states: {
-    ready: 0,
-    doing: 0.5,
-    done: 1
-  },
-  // State is determined by todo://state links
-  stateQuery: (base) => `todo://state`,
-  transitions: [
-    {
-      from: "ready",
-      to: "doing",
-      action: "Start",
-      effects: [
-        { action: "addLink", source: "this", predicate: "todo://state", target: "todo://doing" },
-        { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://ready" }
-      ]
-    },
-    {
-      from: "doing",
-      to: "done",
-      action: "Finish",
-      effects: [
-        { action: "addLink", source: "this", predicate: "todo://state", target: "todo://done" },
-        { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://doing" }
-      ]
-    }
-  ]
-};
-```
+import { SHACLFlow } from "@coasys/ad4m";
 
-This flow defines:
-1. A named flow ("TODO") with states (0 = ready, 0.5 = doing, 1 = done)
-2. How states are determined (by checking todo://state links)
-3. Available actions for each state with their transitions and effects
+const deliveryFlow = new SHACLFlow("Delivery", "delivery://");
+
+deliveryFlow.inputTypes = ["Task"];
+deliveryFlow.interpretationHint =
+  "Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.";
+
+deliveryFlow.addState({ name: "Identified", value: 0, interpretationHint: "The Task has been named but not yet scoped." });
+deliveryFlow.addState({ name: "Scoped",     value: 1, interpretationHint: "The Task has an acceptance criterion." });
+deliveryFlow.addState({ name: "InProgress", value: 2, interpretationHint: "Someone is actively working on it." });
+deliveryFlow.addState({ name: "Review",     value: 3, interpretationHint: "The Task is ready for peer review." });
+deliveryFlow.addState({ name: "Done",       value: 4, interpretationHint: "The Task is accepted and complete." });
+
+deliveryFlow.addTransition({ actionName: "Scope",     fromState: "Identified", toState: "Scoped",     actions: [] });
+deliveryFlow.addTransition({ actionName: "Start",     fromState: "Scoped",     toState: "InProgress", actions: [] });
+deliveryFlow.addTransition({ actionName: "Submit",    fromState: "InProgress", toState: "Review",     actions: [] });
+deliveryFlow.addTransition({ actionName: "Accept",    fromState: "Review",     toState: "Done",       actions: [] });
+
+// Optional: require n distinct DIDs to co-sign a proposal before it fires.
+deliveryFlow.consensusRule = { n: 2 };
+```
 
 ### Using Flows in Code
 
 ```typescript
-// Get all flows defined in a perspective
-const flows = await perspective.sdnaFlows();
-// Returns: ["TODO"]
+import { FlowInstance } from "@coasys/ad4m";
 
-// Check what flows are available for an expression
-const availableFlows = await perspective.availableFlows("expression://123");
+// Which flows accept this expression as input? Returns flow names whose
+// `inputTypes` match the expression's registered subject classes, plus any
+// flow declaring no `inputTypes` or the "any" wildcard.
+const availableFlows = await perspective.availableFlows("task://sprint-3/T-42");
+// Returns: ["Delivery"]
 
-// Start a flow on an expression
-await perspective.startFlow("TODO", "expression://123");
+// Mint a fresh FlowInstance in the flow's initial state (states[0] — the
+// lowest-valued state). Takes the flow *name*; the shape is loaded for you.
+const instance = await FlowInstance.start(
+  perspective,
+  "Delivery",
+  "task://sprint-3/T-42",
+);
 
-// Get expressions in a specific flow state
-const readyTodos = await perspective.expressionsInFlowState("TODO", 0);
+// Read every active FlowInstance for a flow. The filter also accepts
+// `{ flowName?, subject? }` — pass `subject` to ask "what is running on
+// this expression?".
+const instances = await FlowInstance.findAll(perspective, "Delivery");
 
-// Get current state of an expression in a flow
-const state = await perspective.flowState("TODO", "expression://123");
-// Returns: 0, 0.5, or 1
+// Where is it now? `currentState` resolves to the FlowState on the shape,
+// so the interpretationHint the LLM sees is right there.
+console.log(instance.currentStateName);            // "Identified"
+console.log(instance.currentState.interpretationHint);
 
-// Get available actions for current state
-const actions = await perspective.flowActions("TODO", "expression://123");
-// Returns: ["Start"] if in ready state
+// Which actions are legal from here? Empty on a terminal state.
+for (const t of instance.availableTransitions) {
+  console.log(t.actionName, "→", t.toState);       // "Scope" → "Scoped"
+}
 
-// Execute an action
-await perspective.runFlowAction("TODO", "expression://123", "Start");
-// Transitions from ready (0) to doing (0.5)
+// Proposals standing against this instance.
+const proposals = await instance.proposals();
 ```
+
+<Callout type="info" emoji="ℹ️">
+  That is the read surface. The write surface is on the same wrapper:
+  `instance.proposeTransition(toState, rationale?)` is the button click
+  (mint or co-sign), `instance.acceptProposal(p)` adds a signature to a
+  listed proposal, `instance.rejectProposal(p)` withdraws the links you
+  signed. Reject is not a cancel — retracting a settling vote moves the
+  flow back. See [Flows](/flows) for `FlowProposeResult`, role gates, and
+  a worked end-to-end example. The executable twin is
+  `tests/js/tests/model/flow-task-handover.test.ts`.
+</Callout>
 
 ### Adding Flows to a Perspective
 
 ```typescript
-await perspective.addSdna("Todo", flowDefinition, "flow");
+// Recommended: type-safe helper takes the SHACLFlow instance directly.
+await perspective.addFlow("Delivery", deliveryFlow);
 
 const flows = await perspective.sdnaFlows();
-console.log(flows); // Should include "TODO"
+console.log(flows); // Should include "Delivery"
 ```
 
-## Query Engines: SurrealDB & Prolog
+## Query Engine: SPARQL
 
-AD4M provides two query engines for working with Social DNA and perspective data:
+AD4M provides a high-performance SPARQL query engine for working with Social DNA and perspective data, powered by Oxigraph and executing entirely server-side in Rust.
 
-### SurrealDB: High-Performance Queries (Recommended)
+### SPARQL: Fast Graph Queries
 
-For most query needs, **SurrealDB provides 10-100x faster performance** than Prolog. It's especially powerful for:
-- Fast filtering and searching
-- Graph traversal queries using indexed `in.uri` and `out.uri` fields
-- Aggregations and analytics
-- Large dataset handling
+SPARQL is the standard query language for RDF data and is the primary query engine in AD4M:
+- Direct queries against the perspective's RDF graph
+- Filtering, sorting, and aggregation
+- Multi-hop graph traversal via pattern matching
+- Server-side execution for optimal performance
 
 ```typescript
-// Fast query - find all todos in "done" state
-const doneTodos = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'todo://done'"
-);
+// Find all todos in "done" state
+const doneTodos = await perspective.querySparql(`
+  SELECT ?todo WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?todo ;
+          rdf:predicate <todo://state> ;
+          rdf:object <todo://done> .
+  }
+`);
 
-// Graph traversal - find all posts by Alice
-const alicePosts = await perspective.querySurrealDB(
-  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
-);
+// Find all posts by Alice
+const alicePosts = await perspective.querySparql(`
+  SELECT ?target WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject <user://alice> ;
+          rdf:predicate <authored> ;
+          rdf:object ?target .
+  }
+`);
 
 // Aggregation - count by type
-const stats = await perspective.querySurrealDB(
-  "SELECT predicate, count() as total FROM link GROUP BY predicate"
-);
+const stats = await perspective.querySparql(`
+  SELECT ?predicate (COUNT(?link) AS ?total) WHERE {
+    ?link a rdf:Statement ;
+          rdf:predicate ?predicate .
+  }
+  GROUP BY ?predicate
+`);
 ```
 
-**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed.
+**Note**: `Ad4mModel` uses the SPARQL engine internally for `findAll()` and query builder operations. See the [SPARQL Queries Guide](/developer-guides/sparql-queries) for comprehensive examples.
 
-**Note**: `Ad4mModel` uses SurrealDB by default for `findAll()` and query builder operations. See the [SurrealDB Queries Guide](/developer-guides/surreal-queries) for comprehensive examples.
-
-### The Prolog Engine (Legacy)
+### The Prolog Engine (Backward Compatibility)
 
 <Callout type="warning" emoji="⚠️">
   The Prolog engine is maintained for backward compatibility. For new development,
-  use SurrealDB queries or the `Ad4mModel` system (which uses SurrealDB by default).
+  use SPARQL queries or the `Ad4mModel` system (which uses SPARQL internally).
 </Callout>
 
 For custom logic programming and backward compatibility, AD4M includes a Prolog engine:
@@ -503,7 +526,7 @@ reachable(A, B).  // True if B can be reached from A through any predicates
 ```
 
 **When to use which?**
-- **Use SurrealDB** for: Fast queries, graph traversal, analytics (most use cases)
+- **Use SPARQL** for: Fast queries, graph traversal, analytics (most use cases)
 - **Use Prolog** for: Complex logic rules, backward compatibility
 
 ## Using Social DNA in Your Space
@@ -526,17 +549,22 @@ await perspective.addSdna("Todo", flowDefinition, "flow");
 Then query your data:
 
 ```typescript
-// Option 1: Use Ad4mModel with SurrealDB (recommended, 10-100x faster)
+// Option 1: Use Ad4mModel (recommended — queries execute server-side via SPARQL)
 const activeTodos = await Todo.findAll(perspective, {
   where: { state: "active" }
 });
 
-// Option 2: Direct SurrealQL query
-const todos = await perspective.querySurrealDB(
-  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'active'"
-);
+// Option 2: Direct SPARQL query
+const todos = await perspective.querySparql(`
+  SELECT ?todo WHERE {
+    ?link a rdf:Statement ;
+          rdf:subject ?todo ;
+          rdf:predicate <todo://state> ;
+          rdf:object <active> .
+  }
+`);
 
-// Option 3: Prolog (legacy, for backward compatibility)
+// Option 3: Prolog (for backward compatibility)
 const todos = await perspective.infer(
   'instance(Todo, "Todo"), property_getter("Todo", Todo, "state", "active")'
 );

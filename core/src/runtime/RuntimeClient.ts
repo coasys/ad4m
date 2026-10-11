@@ -1,689 +1,245 @@
-import { ApolloClient, gql } from "@apollo/client/core"
+import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
-import unwrapApolloResult from "../unwrapApolloResult"
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeResolver"
-
-const PERSPECTIVE_EXPRESSION_FIELDS = `
-author
-timestamp
-data { 
-    links {
-        author
-        timestamp
-        data { source, predicate, target }
-        proof { valid, invalid, signature, key }
-    }  
-}
-proof { valid, invalid, signature, key }
-`
-
-const NOTIFICATION_DEFINITION_FIELDS = `
-description
-appName
-appUrl
-appIconPath
-trigger
-perspectiveIds
-webhookUrl
-webhookAuth
-`
-
-const NOTIFICATION_FIELDS = `
-id
-granted
-${NOTIFICATION_DEFINITION_FIELDS}
-`
-
-const TRIGGERED_NOTIFICATION_FIELDS = `
-notification { ${NOTIFICATION_FIELDS} }
-perspectiveId
-triggerMatch
-`
-
-export type MessageCallback = (message: PerspectiveExpression) => null
-export type ExceptionCallback = (info: ExceptionInfo) => null
-export type NotificationTriggeredCallback = (notification: TriggeredNotification) => null
-export type NotificationRequestedCallback = (notification: Notification) => null
+import { RuntimeInfo, SentMessage, NotificationInput, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
+import type { HostRate, UnytVersionInfo } from "../generated/api"
 
 export class RuntimeClient {
-    #apolloClient: ApolloClient<any>
-    #messageReceivedCallbacks: MessageCallback[]
-    #exceptionOccurredCallbacks: ExceptionCallback[]
-    #notificationTriggeredCallbacks: NotificationTriggeredCallback[]
-    #notificationRequestedCallbacks: NotificationRequestedCallback[]
+    #apiClient: ApiClient
 
-    constructor(client: ApolloClient<any>, subscribe: boolean = true) {
-        this.#apolloClient = client
-        this.#messageReceivedCallbacks = []
-        this.#exceptionOccurredCallbacks = []
-        this.#notificationTriggeredCallbacks = []
-
-        if(subscribe) {
-            this.subscribeMessageReceived()
-            this.subscribeExceptionOccurred()
-            this.subscribeNotificationTriggered()
-        }
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
+        this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
     }
 
     async info(): Promise<RuntimeInfo> {
-        const { runtimeInfo } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeInfo {
-                runtimeInfo {
-                    ad4mExecutorVersion,
-                    isInitialized,
-                    isUnlocked
-                }
-            }`,
-        }));
-        return runtimeInfo
+        return this.#apiClient.call('runtime.info', {})
     }
 
     async tlsDomain(): Promise<string | null> {
-        const { runtimeTlsDomain } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeTlsDomain {
-                runtimeTlsDomain
-            }`,
-        }));
-        return runtimeTlsDomain
+        return this.#apiClient.call('runtime.tlsDomain', {})
     }
 
     async quit(): Promise<Boolean> {
-        const result = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeQuit { runtimeQuit }`
-        }))
-
-        return result.runtimeQuit
+        return this.#apiClient.call('runtime.quit', {})
     }
 
     async openLink(url: string): Promise<Boolean> {
-        const { runtimeOpenLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeOpenLink($url: String!) {
-                runtimeOpenLink(url: $url)
-            }`,
-            variables: { url }
-        }))
-        return runtimeOpenLink
+        return this.#apiClient.call('runtime.openLink', { url })
     }
 
     async addTrustedAgents(agents: string[]): Promise<string[]> {
-        const { addTrustedAgents } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation addTrustedAgents($agents: [String!]!) {
-                addTrustedAgents(agents: $agents)
-            }`,
-            variables: { agents }
-        }))
-        return addTrustedAgents 
+        return this.#apiClient.call('agent.addTrustedAgents', { agents })
     }
 
     async deleteTrustedAgents(agents: string[]): Promise<string[]> {
-        const { deleteTrustedAgents } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation deleteTrustedAgents($agents: [String!]!) {
-                deleteTrustedAgents(agents: $agents)
-            }`,
-            variables: { agents }
-        }))
-        return deleteTrustedAgents 
+        return this.#apiClient.call('agent.deleteTrustedAgents', { agents })
     }
 
     async getTrustedAgents(): Promise<string[]> {
-        const { getTrustedAgents } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query getTrustedAgents {
-                getTrustedAgents
-            }`,
-        }))
-        return getTrustedAgents
+        return this.#apiClient.call('agent.getTrustedAgents', {})
     }
 
     async addKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        const { runtimeAddKnownLinkLanguageTemplates } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeAddKnownLinkLanguageTemplates($addresses: [String!]!) {
-                runtimeAddKnownLinkLanguageTemplates(addresses: $addresses)
-            }`,
-            variables: { addresses }
-        }))
-        return runtimeAddKnownLinkLanguageTemplates 
+        return this.#apiClient.call('runtime.addLinkLanguageTemplates', { addresses })
     }
 
     async removeKnownLinkLanguageTemplates(addresses: string[]): Promise<string[]> {
-        const { runtimeRemoveKnownLinkLanguageTemplates } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeRemoveKnownLinkLanguageTemplates($addresses: [String!]!) {
-                runtimeRemoveKnownLinkLanguageTemplates(addresses: $addresses)
-            }`,
-            variables: { addresses }
-        }))
-        return runtimeRemoveKnownLinkLanguageTemplates 
+        return this.#apiClient.call('runtime.removeLinkLanguageTemplates', { addresses })
     }
 
     async knownLinkLanguageTemplates(): Promise<string[]> {
-        const { runtimeKnownLinkLanguageTemplates } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeKnownLinkLanguageTemplates {
-                runtimeKnownLinkLanguageTemplates
-            }`,
-        }))
-        return runtimeKnownLinkLanguageTemplates
+        return this.#apiClient.call('runtime.linkLanguageTemplates', {})
     }
 
     async addFriends(dids: string[]): Promise<string[]> {
-        const { runtimeAddFriends } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeAddFriends($dids: [String!]!) {
-                runtimeAddFriends(dids: $dids)
-            }`,
-            variables: { dids }
-        }))
-        return runtimeAddFriends 
+        return this.#apiClient.call('runtime.addFriends', { dids })
     }
 
     async removeFriends(dids: string[]): Promise<string[]> {
-        const { runtimeRemoveFriends } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeRemoveFriends($dids: [String!]!) {
-                runtimeRemoveFriends(dids: $dids)
-            }`,
-            variables: { dids }
-        }))
-        return runtimeRemoveFriends 
+        return this.#apiClient.call('runtime.removeFriends', { dids })
     }
 
     async friends(): Promise<string[]> {
-        const { runtimeFriends } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeFriends {
-                runtimeFriends
-            }`,
-        }))
-        return runtimeFriends
+        return this.#apiClient.call('runtime.friends', {})
     }
 
-    async hcAgentInfos(): Promise<string> {
-        const { runtimeHcAgentInfos } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeHcAgentInfos {
-                runtimeHcAgentInfos
-            }`,
-        }))
-        return runtimeHcAgentInfos
+    async hcAgentInfos(): Promise<string[]> {
+        return this.#apiClient.call('runtime.hcAgentInfos', {})
     }
 
     async getNetworkMetrics(): Promise<string> {
-        const { runtimeGetNetworkMetrics } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeGetNetworkMetrics {
-                runtimeGetNetworkMetrics
-            }`,
-        }))
-        return runtimeGetNetworkMetrics
+        return this.#apiClient.call('runtime.networkMetrics', {})
     }
 
-    async restartHolochain(): Promise<boolean> {
-        const { runtimeRestartHolochain } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeRestartHolochain {
-                runtimeRestartHolochain
-            }`,
-        }))
-        return runtimeRestartHolochain
+    async restartHolochain(options?: CallOptions): Promise<boolean> {
+        return this.#apiClient.call('runtime.restartHolochain', {}, options)
     }
 
-    async hcAddAgentInfos(agentInfos: String): Promise<void> {
-        const { runtimeHcAddAgentInfos } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeHcAddAgentInfos($agentInfos: String!) {
-                runtimeHcAddAgentInfos(agentInfos: $agentInfos)
-            }`,
-            variables: { agentInfos }
-        }))
-        return runtimeHcAddAgentInfos
+    async hcAddAgentInfos(agentInfos: string[]): Promise<boolean> {
+        return this.#apiClient.call('runtime.addHcAgentInfos', { agentInfos })
     }
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
-        const { runtimeVerifyStringSignedByDid } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`query runtimeVerifyStringSignedByDid($did: String!, $didSigningKeyId: String!, $data: String!, $signedData: String!) {
-                runtimeVerifyStringSignedByDid(did: $did, didSigningKeyId: $didSigningKeyId, data: $data, signedData: $signedData)
-            }`,
-            variables: { did, didSigningKeyId, data, signedData }
-        }))
-        return runtimeVerifyStringSignedByDid
+        // The executor resolves the key from the DID document; `didSigningKeyId` goes unused.
+        return this.#apiClient.call('runtime.verifySignature', { did, data, signedData })
     }
-    
+
     async setStatus(perspective: Perspective): Promise<boolean> {
-        const { runtimeSetStatus } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetStatus($status: PerspectiveInput!) {
-                runtimeSetStatus(status: $status)
-            }`,
-            variables: { status: perspective }
-        }))
-        return runtimeSetStatus
+        return this.#apiClient.call('runtime.setStatus', { status: Perspective.toWire(perspective) })
     }
 
     async friendStatus(did: string): Promise<PerspectiveExpression> {
-        const { runtimeFriendStatus } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeFriendStatus($did: String!) {
-                runtimeFriendStatus(did: $did) { ${PERSPECTIVE_EXPRESSION_FIELDS} }
-            }`,
-            variables: { did }
-        }))
-        return runtimeFriendStatus
+        const status = await this.#apiClient.call('runtime.friendStatus', { did })
+        return status ? PerspectiveExpression.fromWire(status) : null
     }
 
     async friendSendMessage(did: string, message: Perspective): Promise<boolean> {
-        const { runtimeFriendSendMessage } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeFriendSendMessage($did: String!, $message: PerspectiveInput!) {
-                runtimeFriendSendMessage(did: $did, message: $message)
-            }`,
-            variables: { did,  message }
-        }))
-        return runtimeFriendSendMessage
+        return this.#apiClient.call('runtime.sendFriendMessage', { did, message: Perspective.toWire(message) })
     }
 
-    async messageInbox(filter?: string): Promise<PerspectiveExpression[]> {
-        const { runtimeMessageInbox } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeMessageInbox($filter: String) {
-                runtimeMessageInbox(filter: $filter) { ${PERSPECTIVE_EXPRESSION_FIELDS} }
-            }`,
-            variables: { filter }
-        }))
-        return runtimeMessageInbox
+    async messageInbox(): Promise<PerspectiveExpression[]> {
+        return (await this.#apiClient.call('runtime.inbox', {})).map(PerspectiveExpression.fromWire)
     }
 
-    async messageOutbox(filter?: string): Promise<SentMessage[]> {
-        const { runtimeMessageOutbox } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeMessageOutbox($filter: String) {
-                runtimeMessageOutbox(filter: $filter) { 
-                    recipient,
-                    message {
-                        ${PERSPECTIVE_EXPRESSION_FIELDS} 
-                    }
-                }
-            }`,
-            variables: { filter }
-        }))
-        return runtimeMessageOutbox
+    async messageOutbox(): Promise<SentMessage[]> {
+        const sent = await this.#apiClient.call('runtime.outbox', {})
+        return sent.map(({ recipient, message }) => ({ recipient, message: PerspectiveExpression.fromWire(message) }))
     }
 
     async requestInstallNotification(notification: NotificationInput) {
-        const { runtimeRequestInstallNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeRequestInstallNotification($notification: NotificationInput!) {
-                runtimeRequestInstallNotification(notification: $notification)
-            }`,
-            variables: { notification }
-        }))
-        return runtimeRequestInstallNotification
+        return this.#apiClient.call('runtime.createNotification', { ...notification })
     }
 
     async grantNotification(id: string): Promise<boolean> {
-        const { runtimeGrantNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeGrantNotification($id: String!) {
-                runtimeGrantNotification(id: $id)
-            }`,
-            variables: { id }
-        }))
-        return runtimeGrantNotification
+        return this.#apiClient.call('runtime.grantNotification', { id, granted: true })
     }
 
     async exportDb(filePath: string): Promise<boolean> {
-        const { runtimeExportDb } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeExportDb($filePath: String!) {
-                runtimeExportDb(filePath: $filePath)
-            }`,
-            variables: { filePath }
-        }))
-        return runtimeExportDb
+        return this.#apiClient.call('runtime.exportData', { type: "db", filePath })
     }
 
     async importDb(filePath: string): Promise<ImportResult> {
-        const { runtimeImportDb } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeImportDb($filePath: String!) {
-                runtimeImportDb(filePath: $filePath) {
-                    perspectives { total imported failed omitted errors }
-                    links { total imported failed omitted errors }
-                    expressions { total imported failed omitted errors }
-                    perspectiveDiffs { total imported failed omitted errors }
-                    notifications { total imported failed omitted errors }
-                    models { total imported failed omitted errors }
-                    defaultModels { total imported failed omitted errors }
-                    tasks { total imported failed omitted errors }
-                    friends { total imported failed omitted errors }
-                    trustedAgents { total imported failed omitted errors }
-                    knownLinkLanguages { total imported failed omitted errors }
-                }
-            }`,
-            variables: { filePath }
-        }))
-        return runtimeImportDb
+        const result = await this.#apiClient.call('runtime.importData', { type: "db", filePath })
+        if ('success' in result) throw new Error('runtime.importData answered a perspective import for type "db"')
+        return result
     }
 
     async notifications(): Promise<Notification[]> {
-        const { runtimeNotifications } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeNotifications {
-                runtimeNotifications { ${NOTIFICATION_FIELDS} }
-            }`,
-        }))
-        return runtimeNotifications
+        return this.#apiClient.call('runtime.notifications', {})
     }
 
     async updateNotification(id: string, notification: NotificationInput): Promise<boolean> {
-        const { runtimeUpdateNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeUpdateNotification($id: String!, $notification: NotificationInput!) {
-                runtimeUpdateNotification(id: $id, notification: $notification)
-            }`,
-            variables: { id, notification }
-        }))
-        return runtimeUpdateNotification
+        return this.#apiClient.call('runtime.updateNotification', { ...notification, id })
     }
 
     async removeNotification(id: string): Promise<boolean> {
-        const { runtimeRemoveNotification } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeRemoveNotification($id: String!) {
-                runtimeRemoveNotification(id: $id)
-            }`,
-            variables: { id }
-        }))
-        return runtimeRemoveNotification
+        return this.#apiClient.call('runtime.deleteNotification', { id })
     }
 
     async exportPerspective(uuid: string, filePath: string): Promise<boolean> {
-        const { runtimeExportPerspective } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeExportPerspective($perspectiveUuid: String!, $filePath: String!) {
-                runtimeExportPerspective(perspectiveUuid: $perspectiveUuid, filePath: $filePath)
-            }`,
-            variables: { perspectiveUuid: uuid, filePath }
-        }))
-        return runtimeExportPerspective
+        return this.#apiClient.call('runtime.exportData', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
     async importPerspective(filePath: string): Promise<boolean> {
-        const { runtimeImportPerspective } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeImportPerspective($filePath: String!) {
-                runtimeImportPerspective(filePath: $filePath)
-            }`,
-            variables: { filePath }
-        }))
-        return runtimeImportPerspective
+        const result = await this.#apiClient.call('runtime.importData', { type: "perspective", filePath })
+        return 'success' in result && result.success
     }
 
     async multiUserEnabled(): Promise<boolean> {
-        const { runtimeMultiUserEnabled } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeMultiUserEnabled {
-                runtimeMultiUserEnabled
-            }`,
-        }))
-        return runtimeMultiUserEnabled
+        return this.#apiClient.call('user.multiUserEnabled', {})
     }
 
     async setMultiUserEnabled(enabled: boolean): Promise<boolean> {
-        const { runtimeSetMultiUserEnabled } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetMultiUserEnabled($enabled: Boolean!) {
-                runtimeSetMultiUserEnabled(enabled: $enabled)
-            }`,
-            variables: { enabled }
-        }))
-        return runtimeSetMultiUserEnabled
+        return this.#apiClient.call('user.setMultiUserEnabled', { enabled })
     }
 
     async freeHostingEnabled(): Promise<boolean> {
-        const { runtimeFreeHostingEnabled } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeFreeHostingEnabled {
-                runtimeFreeHostingEnabled
-            }`
-        }))
-        return runtimeFreeHostingEnabled
+        return this.#apiClient.call('runtime.freeHostingEnabled', {})
     }
 
     async setFreeHostingEnabled(enabled: boolean): Promise<boolean> {
-        const { runtimeSetFreeHostingEnabled } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetFreeHostingEnabled($enabled: Boolean!) {
-                runtimeSetFreeHostingEnabled(enabled: $enabled)
-            }`,
-            variables: { enabled }
-        }))
-        return runtimeSetFreeHostingEnabled
+        return this.#apiClient.call('runtime.setFreeHostingEnabled', { enabled })
     }
 
     async listUsers(): Promise<UserStatistics[]> {
-        const { runtimeListUsers } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeListUsers {
-                runtimeListUsers {
-                    email
-                    did
-                    lastSeen
-                    perspectiveCount
-                    remainingCredits
-                    freeAccess
-                    hotWalletAddress
-                }
-            }`
-        }))
-        return runtimeListUsers
+        return this.#apiClient.call('user.list', {})
     }
 
     async userWalletAddress(email: string): Promise<string | null> {
-        const { runtimeUserWalletAddress } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeUserWalletAddress($email: String!) {
-                runtimeUserWalletAddress(email: $email)
-            }`,
-            variables: { email }
-        }))
-        return runtimeUserWalletAddress
+        return this.#apiClient.call('user.wallet', { email })
     }
 
     async emailTestModeEnable(): Promise<boolean> {
-        const { runtimeEmailTestModeEnable } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeEmailTestModeEnable {
-                runtimeEmailTestModeEnable
-            }`
-        }))
-        return runtimeEmailTestModeEnable
+        return (await this.#apiClient.call('user.emailTest', { action: 'enable' })) === true
     }
 
     async emailTestModeDisable(): Promise<boolean> {
-        const { runtimeEmailTestModeDisable } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeEmailTestModeDisable {
-                runtimeEmailTestModeDisable
-            }`
-        }))
-        return runtimeEmailTestModeDisable
+        return (await this.#apiClient.call('user.emailTest', { action: 'disable' })) === true
     }
 
     async emailTestGetCode(email: string): Promise<string | null> {
-        const { runtimeEmailTestGetCode } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeEmailTestGetCode($email: String!) {
-                runtimeEmailTestGetCode(email: $email)
-            }`,
-            variables: { email }
-        }))
-        return runtimeEmailTestGetCode
+        const code = await this.#apiClient.call('user.emailTest', { action: 'get-code', email })
+        return typeof code === 'string' ? code : null
     }
 
     async emailTestClearCodes(): Promise<boolean> {
-        const { runtimeEmailTestClearCodes } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeEmailTestClearCodes {
-                runtimeEmailTestClearCodes
-            }`
-        }))
-        return runtimeEmailTestClearCodes
+        return (await this.#apiClient.call('user.emailTest', { action: 'clear-codes' })) === true
     }
 
     async emailTestSetExpiry(email: string, verificationType: string, expiresAt: number): Promise<boolean> {
-        const { runtimeEmailTestSetExpiry } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeEmailTestSetExpiry($email: String!, $verificationType: String!, $expiresAt: Int!) {
-                runtimeEmailTestSetExpiry(email: $email, verificationType: $verificationType, expiresAt: $expiresAt)
-            }`,
-            variables: { email, verificationType, expiresAt }
-        }))
-        return runtimeEmailTestSetExpiry
+        return (await this.#apiClient.call('user.emailTest', { action: 'set-expiry', email, verificationType, expiresAt })) === true
     }
 
     // ---- Unyt / mHOT methods ----
 
     async unytAgentKey(): Promise<string> {
-        const { runtimeUnytAgentKey } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeUnytAgentKey { runtimeUnytAgentKey }`,
-            fetchPolicy: "network-only",
-        }))
-        return runtimeUnytAgentKey
+        return this.#apiClient.call('runtime.unytAgentKey', {})
     }
 
     async unytHotAgentPubkey(): Promise<string> {
-        const { runtimeHotAgentPubkey } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeHotAgentPubkey { runtimeHotAgentPubkey }`,
-            fetchPolicy: "network-only",
-        }))
-        return runtimeHotAgentPubkey
+        return this.#apiClient.call('runtime.unytHotAgentPubkey', {})
     }
 
     async unytWalletBalance(): Promise<string> {
-        const { runtimeHotWalletBalance } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeHotWalletBalance { runtimeHotWalletBalance }`,
-            fetchPolicy: "network-only",
-        }))
-        return runtimeHotWalletBalance
+        return this.#apiClient.call('runtime.unytWalletBalance', {})
     }
 
     async unytWalletHistory(page?: number, perPage?: number): Promise<string> {
-        const { runtimeHotWalletHistory } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeHotWalletHistory($page: Int, $perPage: Int) {
-                runtimeHotWalletHistory(page: $page, perPage: $perPage)
-            }`,
-            variables: { page, perPage },
-            fetchPolicy: "network-only",
-        }))
-        return runtimeHotWalletHistory
+        return this.#apiClient.call('runtime.unytWalletHistory', { page, perPage })
     }
 
-    async unytVersionInfo(): Promise<string> {
-        const { runtimeUnytVersionInfo } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeUnytVersionInfo { runtimeUnytVersionInfo }`,
-            fetchPolicy: "network-only",
-        }))
-        return runtimeUnytVersionInfo
+    /** Installed and bundled DNA versions, and why the last install failed (`installError`). */
+    async unytVersionInfo(): Promise<UnytVersionInfo> {
+        return this.#apiClient.call('runtime.unytVersionInfo', {})
     }
 
-    async unytSetMembraneProof(proof: string): Promise<{ success: boolean; message: string }> {
-        const { runtimeSetUnytMembraneProof } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetUnytMembraneProof($proof: String!) {
-                runtimeSetUnytMembraneProof(proof: $proof) { success message }
-            }`,
-            variables: { proof },
-        }))
-        return runtimeSetUnytMembraneProof
+    /** Stores the membrane proof (base64); the executor then installs the Unyt DNA in the
+     *  background. Poll {@link unytVersionInfo} for the outcome. */
+    async setUnytMembraneProof(proof: string): Promise<boolean> {
+        return this.#apiClient.call('runtime.setUnytMembraneProof', { proof })
     }
 
     async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
-        const { runtimeReinstallUnytDna } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeReinstallUnytDna {
-                runtimeReinstallUnytDna { success message }
-            }`,
-        }))
-        return runtimeReinstallUnytDna
+        return this.#apiClient.call('runtime.unytReinstallDna', {})
     }
 
     async unytSendHot(recipient: string, amount: string): Promise<{ success: boolean; message: string }> {
-        const { runtimeSendHot } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSendHot($recipient: String!, $amount: String!) {
-                runtimeSendHot(recipient: $recipient, amount: $amount) { success message }
-            }`,
-            variables: { recipient, amount },
-        }))
-        return runtimeSendHot
+        return this.#apiClient.call('runtime.unytSendHot', { recipient, amount })
     }
 
     async setUserCredits(email: string, amount: number): Promise<boolean> {
-        const { runtimeSetUserCredits } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetUserCredits($email: String!, $amount: Float!) {
-                runtimeSetUserCredits(email: $email, amount: $amount)
-            }`,
-            variables: { email, amount },
-        }))
-        return runtimeSetUserCredits
+        return this.#apiClient.call('user.credits', { email, amount })
     }
 
     async setUserFreeAccess(email: string, enabled: boolean): Promise<boolean> {
-        const { runtimeSetUserFreeAccess } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetUserFreeAccess($email: String!, $enabled: Boolean!) {
-                runtimeSetUserFreeAccess(email: $email, enabled: $enabled)
-            }`,
-            variables: { email, enabled },
-        }))
-        return runtimeSetUserFreeAccess
+        return this.#apiClient.call('user.freeAccess', { email, enabled })
     }
 
-    async setHostRates(ratesJson: string): Promise<boolean> {
-        const { runtimeSetHostRates } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation runtimeSetHostRates($ratesJson: String!) {
-                runtimeSetHostRates(ratesJson: $ratesJson)
-            }`,
-            variables: { ratesJson },
-        }))
-        return runtimeSetHostRates
+    async setHostRates(rates: HostRate[]): Promise<boolean> {
+        return this.#apiClient.call('runtime.setHostRates', { rates })
     }
 
-    async getHostRates(): Promise<{ description: string; priceInHOT: number }[]> {
-        const { runtimeHostRates } = unwrapApolloResult(await this.#apolloClient.query({
-            query: gql`query runtimeHostRates {
-                runtimeHostRates
-            }`,
-            fetchPolicy: 'network-only',
-        }))
-        try {
-            return JSON.parse(runtimeHostRates)
-        } catch {
-            return []
-        }
+    async hostRates(): Promise<HostRate[]> {
+        return this.#apiClient.call('runtime.hostRates', {})
     }
 
-    addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
-        this.#notificationTriggeredCallbacks.push(cb)
-    }
-
-    subscribeNotificationTriggered() {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                runtimeNotificationTriggered { ${TRIGGERED_NOTIFICATION_FIELDS} }
-            }   
-        `}).subscribe({
-            next: result => {
-                this.#notificationTriggeredCallbacks.forEach(cb => {
-                    cb(result.data.runtimeNotificationTriggered)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-    }
-
-    addMessageCallback(cb: MessageCallback) {
-        this.#messageReceivedCallbacks.push(cb)
-    }
-
-    subscribeMessageReceived() {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                runtimeMessageReceived { ${PERSPECTIVE_EXPRESSION_FIELDS} }
-            }   
-        `}).subscribe({
-            next: result => {
-                this.#messageReceivedCallbacks.forEach(cb => {
-                    cb(result.data.runtimeMessageReceived)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-    }
-
-    addExceptionCallback(cb: ExceptionCallback) {
-        this.#exceptionOccurredCallbacks.push(cb)
-    }
-
-    subscribeExceptionOccurred() {
-        this.#apolloClient.subscribe({
-            query: gql` subscription {
-                exceptionOccurred {
-                    title
-                    message
-                    type
-                    addon
-                }
-            }`
-        }).subscribe({
-            next: result => {
-                this.#exceptionOccurredCallbacks.forEach(cb => {
-                    cb(result.data.exceptionOccurred)
-                })
-            },
-            error: (e) => console.error(e)
-        })
-    }
 }

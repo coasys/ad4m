@@ -137,7 +137,7 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
         }
     };
 
-    let ad4m_client = Ad4mClient::new(executor_url, cap_token);
+    let ad4m_client = Ad4mClient::connect(executor_url, cap_token).await?;
 
     Ok(ad4m_client)
 }

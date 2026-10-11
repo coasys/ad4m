@@ -8,7 +8,7 @@ AD4M uses Subject DNA (SDNA) to define data schemas and their operational behavi
 
 1. **W3C Conformant** - Schema definitions use standard SHACL predicates
 2. **Extensible** - AD4M-specific actions use a separate `ad4m://` namespace
-3. **Queryable** - All metadata stored as links, queryable via SurrealQL or simple link queries
+3. **Queryable** - All metadata stored as links, queryable via SPARQL or simple link queries
 4. **Consistent** - Same pattern for Classes and Flows
 
 ---
@@ -230,7 +230,7 @@ for link in links {
 - [x] Migrate Flows to same SHACL link pattern (`SHACLFlow` class with `toLinks()`/`fromLinks()`)
 - [x] Keep scryer-prolog dependency (for complex Prolog queries later)
 - [x] Refactor TypeScript to use `SHACLShape.fromLinks()` / `toJSON()` throughout
-- [x] Use batched link operations (`addLinks()`) and single SurrealDB queries
+- [x] Use batched link operations (`addLinks()`) and single SPARQL queries
 
 ---
 
@@ -238,7 +238,7 @@ for link in links {
 
 1. **W3C Standard** - Interoperable with SHACL ecosystem
 2. **Cleaner Runtime** - SHACL as single source for SDNA actions (Prolog still available for complex queries)
-3. **Queryable** - All metadata as links in SurrealDB
+3. **Queryable** - All metadata as links in the SPARQL (Oxigraph) store
 4. **Debuggable** - Inspect schema as regular links
 5. **Extensible** - Add new action types without schema changes
 

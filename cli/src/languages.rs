@@ -76,12 +76,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
             println!("{:#?}", languages);
         }
         LanguageFunctions::ByAddress { address } => {
-            let maybe_language = ad4m_client.languages.by_address(address).await?;
-            if let Some(language) = maybe_language {
-                println!("{:#?}", language);
-            } else {
-                println!("Language not found");
-            }
+            let language = ad4m_client.languages.by_address(address).await?;
+            println!("{:#?}", language);
         }
         LanguageFunctions::WriteSettings { address, settings } => {
             ad4m_client
@@ -168,7 +164,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
                 .languages
                 .publish(
                     path,
-                    name,
+                    Some(name),
                     description,
                     possible_template_params,
                     source_code_link,

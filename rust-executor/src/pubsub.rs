@@ -1,6 +1,5 @@
-use crate::graphql::graphql_types::GetFilter;
-use crate::graphql::graphql_types::GetValue;
-use coasys_juniper::{graphql_value, FieldError, FieldResult};
+use crate::types::domain::GetFilter;
+use crate::types::domain::GetValue;
 use futures::Stream;
 use futures::StreamExt;
 use log::error;
@@ -60,13 +59,14 @@ impl PubSub {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) async fn subscribe_and_process<
     T: DeserializeOwned + Send + 'static + std::fmt::Debug + GetValue + GetFilter,
 >(
     pubsub: Arc<PubSub>,
     topic: Topic,
     filter: Option<String>,
-) -> Pin<Box<dyn Stream<Item = FieldResult<T::Value>> + Send>> {
+) -> Pin<Box<dyn Stream<Item = Result<T::Value, Box<dyn std::error::Error + Send>>> + Send>> {
     let receiver = pubsub.subscribe(&topic).await;
     let receiver_stream = BroadcastStream::new(receiver);
 
@@ -95,10 +95,10 @@ pub(crate) async fn subscribe_and_process<
                     error!("Type: {}", type_name);
                     error!("Message: {:?}", msg);
 
-                    let field_error = FieldError::new(
-                        e,
-                        graphql_value!({ "type": "INTERNAL_ERROR_COULD_NOT_SERIALIZE" }),
-                    );
+                    let field_error: Box<dyn std::error::Error + Send> = Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to deserialize: {}", e),
+                    ));
                     futures::future::ready(Some(Err(field_error)))
                 }
             },
@@ -134,6 +134,17 @@ lazy_static::lazy_static! {
     pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
     pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
+    pub static ref AUTO_PROCESSOR_EVENT_TOPIC: String = "auto-processor-event-topic".to_owned();
+    /// Neighbourhood observation of an auto-processor pass: fires when THIS
+    /// executor claims, finishes, or abandons a batch. Payload is a
+    /// perspective-scoped `AutoProcessorNeighbourhoodState` — no batch
+    /// payload, no LLM I/O — so anyone with perspective read access can see
+    /// "someone is auto-processing" without seeing WHAT they are processing.
+    /// Cross-executor sync (e.g. a peer's claim reaching us via Holochain)
+    /// is not covered here; consumers who need cross-peer visibility can
+    /// subscribe to `link-added` and filter for `has_claim`.
+    pub static ref AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC: String =
+        "auto-processor-neighbourhood-state-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

@@ -4,11 +4,8 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { apolloClient, sleep, startExecutor } from "./utils";
-import fetch from 'node-fetch'
-
-//@ts-ignore
-global.fetch = fetch
+import { baseUrl, pollUntil, startExecutor, runHcLocalServices } from "./utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,28 +16,30 @@ const publishLanguagesPath = path.resolve(TEST_DIR, "languages");
 const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootstrapSeed.json');
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
-// Allow env-var override so concurrent CI jobs can each use a unique port range
-// and avoid stomping on each other during the setup phase.
-// Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
-const gqlPort = parseInt(process.env.AD4M_SETUP_GQL_PORT || '15700', 10);
-const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
-const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
+const serverLinkLanguageHashPath = path.resolve(__dirname, '..', 'scripts', 'server-link-language-hash');
+// Local mode: skip Holochain when preparing local-only test environments.
+// Set LOCAL_MODE=true in the prepare-test-local npm scripts.
+const localMode = process.env.LOCAL_MODE === 'true';
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
-    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
-    "direct-message-language": {name: "direct-message-language", description: "", possibleTemplateParams: ["uid", "recipient_did", "recipient_hc_agent_pubkey"]} as LanguageMetaInput, 
-    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput, 
+    "agent-expression-store": {name: "agent-expression-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
+    "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
+    // SERVER_URL + UID match the //!@ad4m-template-variable declarations in
+    // bootstrap-languages/server-link-language/index.ts. `name` + `description`
+    // aren't code-templated — they get through to the language meta so tests
+    // can assert on `socialContext.name` the same way they do for p-diff-sync.
+    "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "UID", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {
-    "directMessageLanguage": "",
     "agentLanguage": "",
     "perspectiveLanguage": "",
     "neighbourhoodLanguage": "",
-    "perspectiveDiffSync": ""
+    "perspectiveDiffSync": "",
+    "serverLinkLanguage": ""
 }
 
 // Kill the listening process on each port (TCP:LISTEN filter ensures we only
@@ -64,7 +63,7 @@ function createTestingAgent() {
 function injectSystemLanguages() {
     if (fs.existsSync(bootstrapSeedPath)) {
         const bootstrapSeed = JSON.parse(fs.readFileSync(bootstrapSeedPath).toString());
-        bootstrapSeed["directMessageLanguage"] = languageHashes["directMessageLanguage"];
+        bootstrapSeed["directMessageLanguage"] = "";
         bootstrapSeed["agentLanguage"] = languageHashes["agentLanguage"];
         bootstrapSeed["perspectiveLanguage"] = languageHashes["perspectiveLanguage"];
         bootstrapSeed["neighbourhoodLanguage"] = languageHashes["neighbourhoodLanguage"];
@@ -77,24 +76,55 @@ function injectSystemLanguages() {
 
 function injectLangAliasHashes() {
     fs.writeFileSync(perspectiveDiffSyncHashPath, languageHashes["perspectiveDiffSync"]);
+    fs.writeFileSync(serverLinkLanguageHashPath, languageHashes["serverLinkLanguage"]);
 }
 
 async function publish() {
-    const setupPorts = [gqlPort, hcAdminPort, hcAppPort];
+    // Allocate random free ports to avoid collisions with stale executors
+    // from previous CI jobs on the same self-hosted runner.
+    const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+    const setupPorts = [apiPort, hcAdminPort, hcAppPort];
+    console.log(`Setup ports: ${setupPorts.join('/')}`);
 
-    // Pre-clean: kill any orphaned executor from a previous CI job that may be
-    // squatting on our ports. Self-hosted runners reuse workdirs between jobs
-    // and don't clean up automatically.
-    console.log(`Pre-cleaning ports ${setupPorts.join('/')} before starting executor...`);
-    killExecutorPorts(setupPorts);
-    await sleep(500);
+    // Register with the port cleanup registry so cleanup.js can kill the
+    // executor if this process is killed ungracefully (SIGKILL, runner cancel).
+    registerPorts(setupPorts);
 
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, gqlPort, hcAdminPort, hcAppPort, true);
+    const runHolochain = !localMode;
+    console.log(`Publishing executor: runHolochain=${runHolochain}${localMode ? ' (LOCAL_MODE)' : ''}`);
+
+    // When running with Holochain, start a temporary LOCAL kitsune2-bootstrap-srv
+    // so the setup executor never talks to dev-test-bootstrap2 (super old). See
+    // Nico's 2026-08-26 voice note + utils.ts:startExecutor comment.
+    let localServices: { bootstrapUrl?: string; proxyUrl?: string; process?: any } = {};
+    if (runHolochain) {
+        localServices = await runHcLocalServices();
+        if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
+            throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+        }
+    }
+    const executorProcess = await startExecutor(
+        appDataPath,
+        publishingBootstrapSeedPath,
+        apiPort, hcAdminPort, hcAppPort,
+        true,
+        undefined,
+        localServices.proxyUrl,
+        localServices.bootstrapUrl,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        runHolochain,
+    );
+    if (localServices.process) {
+        (executorProcess as any).__localServicesProcess = localServices.process;
+    }
 
     try {
-        const ad4mClient = new Ad4mClient(apolloClient(gqlPort));
+        const ad4mClient = new Ad4mClient(baseUrl(apiPort));
         await ad4mClient.agent.generate("passphrase");
 
         for (const [language, languageMeta] of Object.entries(languagesToPublish)) {
@@ -108,14 +138,14 @@ async function publish() {
             if (language === "neighbourhood-store") {
                 languageHashes["neighbourhoodLanguage"] = publishedLang.address;
             }
-            if (language === "direct-message-language") {
-                languageHashes["directMessageLanguage"] = publishedLang.address;
-            }
             if (language === "perspective-language") {
                 languageHashes["perspectiveLanguage"] = publishedLang.address;
             }
             if (language === "perspective-diff-sync") {
                 languageHashes["perspectiveDiffSync"] = publishedLang.address;
+            }
+            if (language === "server-link-language") {
+                languageHashes["serverLinkLanguage"] = publishedLang.address;
             }
         }
         injectSystemLanguages();
@@ -126,7 +156,10 @@ async function publish() {
         // NOT this node process which has an outbound connection to that port.
         console.log(`Killing executor on ports ${setupPorts.join('/')}...`);
         killExecutorPorts(setupPorts);
-        await sleep(1000);
+        deregisterPorts(setupPorts);
+        await pollUntil(() => {
+            try { execSync(`lsof -ti TCP:${apiPort} -s TCP:LISTEN`, { stdio: 'ignore' }); return false; } catch { return true; }
+        }, { timeoutMs: 5000, intervalMs: 200, label: "executor ports freed after shutdown" });
     }
 
     exit();

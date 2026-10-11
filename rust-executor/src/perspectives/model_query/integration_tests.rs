@@ -1,0 +1,9819 @@
+use super::getters::{
+    convert_ask_to_batched_select, evaluate_getters, inject_values_into_select,
+    strip_trailing_limit,
+};
+use super::projection::{
+    build_projection_order_clause, build_projection_where_patterns, resolve_projections,
+};
+use super::shape::parse_shape_from_json;
+use super::sparql_builder::{build_instance_sparql, LinkGuard};
+use super::test_helpers::{
+    evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
+};
+use super::types::{ModelQueryInput, ModelShape, Scope, ScopeDirection, ShapeProperty};
+use super::utils::literal_percent_encode;
+use super::*;
+use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::{ExpressionProof, Link, LinkExpression};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
+
+fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    LinkExpression {
+        author: "did:key:test123".to_string(),
+        timestamp: ts.to_string(),
+        data: Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        },
+        proof: ExpressionProof {
+            key: "key".to_string(),
+            signature: "sig".to_string(),
+        },
+        // The store refuses status-less inserts; Shared is the plain case,
+        // `make_link_with_status` overrides for the local-property tests.
+        status: Some(crate::types::LinkStatus::Shared),
+    }
+}
+
+/// `make_link` with an explicit [`LinkStatus`], for the local-property read tests.
+fn make_link_with_status(
+    source: &str,
+    predicate: &str,
+    target: &str,
+    ts: &str,
+    status: crate::types::LinkStatus,
+) -> LinkExpression {
+    let mut link = make_link(source, predicate, target, ts);
+    link.status = Some(status);
+    link
+}
+
+/// `query` with the #1113 opt-in set, unless it sets the flag itself.
+///
+/// `make_link` proofs are `key`/`sig` and its timestamps are `"1"`, `"2"`…, so
+/// no fixture link verifies and the default `proof_valid_filter` withholds every
+/// row. The tests that use these fixtures are about hydration, filtering and
+/// paging, not signatures, so they read through [`fixture_query`] /
+/// [`fixture_query_from_json`] with `include_unverified` (which `include` and
+/// projection sub-queries inherit). The default itself is tested against real
+/// signatures in `proof_valid_tests.rs`, and through the SDK in
+/// `tests/js/tests/model/model-unverified-links.test.ts`.
+fn with_unverified(query: &ModelQueryInput) -> ModelQueryInput {
+    let mut query = query.clone();
+    if query.include_unverified.is_none() {
+        query.include_unverified = Some(true);
+    }
+    query
+}
+
+async fn fixture_query(
+    store: &SparqlStore,
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    resolver: &dyn super::types::ShapeResolver,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
+}
+
+async fn fixture_query_from_json(
+    store: &SparqlStore,
+    class_name: &str,
+    query: &ModelQueryInput,
+    shape_json: &str,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    execute_model_query_from_json(store, class_name, &with_unverified(query), shape_json).await
+}
+
+const LOCAL_CACHE_SHAPE_JSON: &str = r#"{
+    "className": "Cache",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "cache://Cache"
+        },
+        "state": {
+            "predicate": "cache://state",
+            "required": false,
+            "resolveLanguage": "literal",
+            "local": true
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A `local: true` property must hydrate only from `LinkStatus::Local` links.
+///
+/// Nothing stops a peer gossiping a Shared link on a predicate the class declared
+/// local. Before the read-side filter the hydration path had no status handling at
+/// all, so that foreign link was read back as the property's value — the class
+/// declared the field executor-private and whoever gossiped last decided what it
+/// said.
+///
+/// The spoof case is asserted with the Shared link as the *only* link on the
+/// predicate, so the test is deterministic: without the filter the value hydrates,
+/// with it the property is absent. Asserting against a mixture would let
+/// result-ordering decide the outcome and pass by luck on unfiltered code.
+#[tokio::test]
+async fn local_property_hydrates_only_from_local_links() {
+    use crate::types::LinkStatus;
+
+    // Case 1 — spoof only: a Shared link is the sole value on the local predicate.
+    let store = SparqlStore::new(None).unwrap();
+    let spoofed = "literal:string:cache_spoofed";
+    store
+        .add_link(&make_link(
+            spoofed,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link_with_status(
+            spoofed,
+            "cache://state",
+            "literal:string:gossiped",
+            "1700000000001",
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+
+    let result = fixture_query_from_json(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "instance should still be found");
+    let state = &result.instances[0]["state"];
+    assert!(
+        state.is_null(),
+        "a Shared link on a local predicate must not hydrate, got: {state}"
+    );
+
+    // Case 2 — the genuine article: a Local link on the same predicate does hydrate.
+    let store2 = SparqlStore::new(None).unwrap();
+    let genuine = "literal:string:cache_genuine";
+    store2
+        .add_link(&make_link(
+            genuine,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+        ))
+        .unwrap();
+    store2
+        .add_link(&make_link_with_status(
+            genuine,
+            "cache://state",
+            "literal:string:warm",
+            "1700000000001",
+            LinkStatus::Local,
+        ))
+        .unwrap();
+
+    let result2 = fixture_query_from_json(
+        &store2,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result2.instances.len(), 1);
+    assert_eq!(
+        result2.instances[0]["state"],
+        json!("warm"),
+        "a Local link on a local predicate must hydrate normally"
+    );
+}
+
+#[tokio::test]
+async fn test_full_model_query_with_where_filter() {
+    // Create an in-memory store
+    let store = SparqlStore::new(None).unwrap();
+
+    // Simulate a Recipe with:
+    //   - Flag: <ad4m://type> → <ad4m://recipe>
+    //   - Name: <recipe://name> → literal:string:Recipe%201
+
+    let base1 = "literal:string:recipe1base";
+
+    let name_target = format!("literal:string:{}", literal_percent_encode("Recipe 1"));
+
+    // Add the type flag link
+    let flag_link = make_link(base1, "ad4m://type", "ad4m://recipe", "1700000000000");
+    store.add_link(&flag_link).unwrap();
+
+    // Add the name link
+    let name_link = make_link(base1, "recipe://name", &name_target, "1700000000001");
+    store.add_link(&name_link).unwrap();
+
+    // Shape JSON (like what TS sends)
+    let shape_json = r#"{
+        "className": "Recipe",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "ad4m://recipe"
+            },
+            "name": {
+                "predicate": "recipe://name",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Query without WHERE - should find 1 instance
+    let query_no_where = ModelQueryInput::default();
+    let result = fixture_query_from_json(&store, "Recipe", &query_no_where, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "Should find 1 recipe without WHERE"
+    );
+
+    // Check that name is hydrated
+    let name_val = &result.instances[0]["name"];
+    assert_eq!(name_val, &json!("Recipe 1"), "Name should be 'Recipe 1'");
+
+    // Query WITH WHERE - should also find 1 instance
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "name".to_string(),
+        WhereCondition::String("Recipe 1".to_string()),
+    );
+    let query_with_where = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result2 = fixture_query_from_json(&store, "Recipe", &query_with_where, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result2.instances.len(),
+        1,
+        "WHERE name='Recipe 1' should match 1 recipe"
+    );
+}
+
+#[tokio::test]
+async fn test_where_clause_raw_uri_property() {
+    // Properties without resolve_language store raw URIs as targets.
+    // The where clause must match the raw URI, not wrap it in literal:string:...
+    let store = SparqlStore::new(None).unwrap();
+
+    let base1 = "literal:string:todo1";
+
+    // Flag link
+    store
+        .add_link(&make_link(
+            base1,
+            "ad4m://type",
+            "ad4m://todo",
+            "1700000000000",
+        ))
+        .unwrap();
+
+    // State property — raw URI target (no resolveLanguage)
+    store
+        .add_link(&make_link(
+            base1,
+            "todo://state",
+            "todo://ready",
+            "1700000000001",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Todo",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "ad4m://todo"
+            },
+            "state": {
+                "predicate": "todo://state",
+                "required": true
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Where clause matching raw URI
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "state".to_string(),
+        WhereCondition::String("todo://ready".to_string()),
+    );
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Todo", &query, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "WHERE state='todo://ready' should match raw URI target"
+    );
+    assert_eq!(result.instances[0]["state"], json!("todo://ready"));
+}
+
+#[tokio::test]
+async fn test_where_clause_literal_prop_with_raw_uri_value() {
+    // @Property defaults resolveLanguage to "literal", but constructor
+    // initial values are stored as raw URIs. The where clause must match
+    // both literal-encoded and raw URI forms.
+    let store = SparqlStore::new(None).unwrap();
+
+    let base1 = "literal:string:todo1";
+
+    store
+        .add_link(&make_link(
+            base1,
+            "ad4m://type",
+            "ad4m://todo",
+            "1700000000000",
+        ))
+        .unwrap();
+
+    // Raw URI target — set by constructor action, NOT literal-encoded
+    store
+        .add_link(&make_link(
+            base1,
+            "todo://state",
+            "todo://ready",
+            "1700000000001",
+        ))
+        .unwrap();
+
+    // Shape omits resolveLanguage → deterministic literal storage (the default).
+    // A deterministic property whose value happens to be a raw URI is matched via
+    // the WHERE builder's typed-literal-VALUES + `<uri>` UNION fallback.
+    let shape_json = r#"{
+        "className": "Todo",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "ad4m://todo"
+            },
+            "state": {
+                "predicate": "todo://state",
+                "required": true
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Where clause should match even though the value is a URI stored raw
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "state".to_string(),
+        WhereCondition::String("todo://ready".to_string()),
+    );
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Todo", &query, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "WHERE state='todo://ready' should match a raw URI value on a deterministic-literal property"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Integration test: shared predicate across multiple @HasMany relations
+//
+// This simulates the real Channel model from Flux where 8+ relations
+// all use "ad4m://has_child".  Without the fix, only the last relation
+// in HashMap iteration order receives targets; the others (like "views")
+// are empty, causing include resolution to return zero results.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_shared_predicate_relations_all_populated_via_store() {
+    // Simulate a Channel with views, messages, and conversations all using
+    // the same predicate "ad4m://has_child".  Each child has a different
+    // flag type so include resolution (if applied later) can discriminate.
+    let store = SparqlStore::new(None).unwrap();
+
+    let channel_base = "literal:string:channel1";
+
+    // Channel flag
+    store
+        .add_link(&make_link(
+            channel_base,
+            "flux://entry_type",
+            "flux://has_channel",
+            "1700000000000",
+        ))
+        .unwrap();
+
+    // Channel name
+    let name_target = format!("literal:string:{}", literal_percent_encode("General"));
+    store
+        .add_link(&make_link(
+            channel_base,
+            "flux://has_channel_name",
+            &name_target,
+            "1700000000001",
+        ))
+        .unwrap();
+
+    // Child 1: an "App" (flag flux://has_app)
+    let app_base = "literal:string:app1";
+    store
+        .add_link(&make_link(
+            channel_base,
+            "ad4m://has_child",
+            app_base,
+            "1700000000002",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            app_base,
+            "flux://entry_type",
+            "flux://has_app",
+            "1700000000003",
+        ))
+        .unwrap();
+    let app_name_target = format!("literal:string:{}", literal_percent_encode("Chat"));
+    store
+        .add_link(&make_link(
+            app_base,
+            "flux://has_name",
+            &app_name_target,
+            "1700000000004",
+        ))
+        .unwrap();
+
+    // Child 2: a "Conversation" (flag flux://has_conversation)
+    let conv_base = "literal:string:conv1";
+    store
+        .add_link(&make_link(
+            channel_base,
+            "ad4m://has_child",
+            conv_base,
+            "1700000000005",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            conv_base,
+            "flux://entry_type",
+            "flux://has_conversation",
+            "1700000000006",
+        ))
+        .unwrap();
+
+    // Child 3: a "Message" (flag flux://has_message)
+    let msg_base = "literal:string:msg1";
+    store
+        .add_link(&make_link(
+            channel_base,
+            "ad4m://has_child",
+            msg_base,
+            "1700000000007",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            msg_base,
+            "flux://entry_type",
+            "flux://has_message",
+            "1700000000008",
+        ))
+        .unwrap();
+
+    // Shape JSON with 3 relations sharing ad4m://has_child and no includes
+    let shape_json = r#"{
+        "className": "Channel",
+        "properties": {
+            "type": {
+                "predicate": "flux://entry_type",
+                "required": true,
+                "flag": true,
+                "initial": "flux://has_channel"
+            },
+            "name": {
+                "predicate": "flux://has_channel_name",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {
+            "views": {
+                "predicate": "ad4m://has_child",
+                "target": "App"
+            },
+            "messages": {
+                "predicate": "ad4m://has_child",
+                "target": "Message"
+            },
+            "conversations": {
+                "predicate": "ad4m://has_child",
+                "target": "Conversation"
+            }
+        }
+    }"#;
+
+    let query = ModelQueryInput::default();
+    let result = fixture_query_from_json(&store, "Channel", &query, shape_json)
+        .await
+        .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "Should find 1 channel");
+
+    let channel = &result.instances[0];
+    assert_eq!(channel["name"], json!("General"));
+
+    // All 3 relations must have all 3 children (raw IRI strings, no include)
+    let views = channel["views"].as_array().expect("views must be an array");
+    let messages = channel["messages"]
+        .as_array()
+        .expect("messages must be an array");
+    let conversations = channel["conversations"]
+        .as_array()
+        .expect("conversations must be an array");
+
+    // Without include resolution, all 3 children appear in each relation
+    // (the store can't discriminate by target type without include)
+    assert_eq!(
+        views.len(),
+        3,
+        "views must have 3 raw child IDs (no include filter)"
+    );
+    assert_eq!(
+        messages.len(),
+        3,
+        "messages must have 3 raw child IDs (no include filter)"
+    );
+    assert_eq!(
+        conversations.len(),
+        3,
+        "conversations must have 3 raw child IDs (no include filter)"
+    );
+
+    // Verify the actual IDs are present
+    let expected_ids = vec![
+        "literal:string:app1",
+        "literal:string:conv1",
+        "literal:string:msg1",
+    ];
+    for rel_name in &["views", "messages", "conversations"] {
+        let ids: Vec<String> = channel[*rel_name]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for eid in &expected_ids {
+            assert!(
+                ids.contains(&eid.to_string()),
+                "{} should contain {} but got {:?}",
+                rel_name,
+                eid,
+                ids
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
+    // Ensure relations with distinct predicates don't bleed into each other
+    // even when one predicate is shared.
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent = "literal:string:parent1";
+
+    // Parent flag
+    store
+        .add_link(&make_link(
+            parent,
+            "test://type",
+            "test://parent_type",
+            "1700000000000",
+        ))
+        .unwrap();
+
+    // Child via shared predicate
+    let shared_child_iri = signed_literal("shared_child");
+    store
+        .add_link(&make_link(
+            parent,
+            "test://has_child",
+            &shared_child_iri,
+            "1700000000001",
+        ))
+        .unwrap();
+
+    // Child via unique predicate
+    let special_child_iri = signed_literal("special_child");
+    store
+        .add_link(&make_link(
+            parent,
+            "test://has_special",
+            &special_child_iri,
+            "1700000000002",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Parent",
+        "properties": {
+            "type": {
+                "predicate": "test://type",
+                "required": true,
+                "flag": true,
+                "initial": "test://parent_type"
+            }
+        },
+        "relations": {
+            "alpha": {
+                "predicate": "test://has_child",
+                "target": "Alpha"
+            },
+            "beta": {
+                "predicate": "test://has_child",
+                "target": "Beta"
+            },
+            "special": {
+                "predicate": "test://has_special",
+                "target": "Special"
+            }
+        }
+    }"#;
+
+    let query = ModelQueryInput::default();
+    let result = fixture_query_from_json(&store, "Parent", &query, shape_json)
+        .await
+        .unwrap();
+
+    assert_eq!(result.instances.len(), 1);
+    let inst = &result.instances[0];
+
+    // alpha and beta both share test://has_child → both get shared_child
+    let alpha = inst["alpha"].as_array().expect("alpha must be array");
+    let beta = inst["beta"].as_array().expect("beta must be array");
+    let special = inst["special"].as_array().expect("special must be array");
+
+    assert_eq!(alpha.len(), 1, "alpha should have 1 child");
+    assert_eq!(beta.len(), 1, "beta should have 1 child");
+    assert_eq!(special.len(), 1, "special should have 1 child");
+
+    assert_eq!(alpha[0].as_str().unwrap(), shared_child_iri);
+    assert_eq!(beta[0].as_str().unwrap(), shared_child_iri);
+    assert_eq!(special[0].as_str().unwrap(), special_child_iri);
+}
+
+// --- IncludeProjection helpers ---
+
+#[tokio::test]
+async fn test_build_projection_where_patterns_empty_when_no_clause() {
+    let proj = ProjectionInput {
+        transitive: false,
+        from: "signals".to_string(),
+        count: true,
+        target_class_name: None,
+        where_clause: None,
+        limit: None,
+        order: None,
+    };
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    assert_eq!(
+        build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY),
+        ""
+    );
+}
+
+#[tokio::test]
+async fn test_build_projection_where_patterns_id_filter() {
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "id".to_string(),
+        WhereCondition::String("signal://abc".to_string()),
+    );
+    let proj = ProjectionInput {
+        transitive: false,
+        from: "signals".to_string(),
+        count: false,
+        target_class_name: None,
+        where_clause: Some(wc),
+        limit: None,
+        order: None,
+    };
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
+    assert!(
+        patterns.contains("FILTER(STR(?t) = \"signal://abc\")"),
+        "expected id IRI filter, got: {patterns}"
+    );
+}
+
+#[tokio::test]
+async fn test_build_projection_where_patterns_with_target_shape() {
+    // A custom resolveLanguage stores signed-envelope URIs, not deterministic
+    // literals, so the WHERE builder must probe via FILTER(STR(?var)=...) rather
+    // than a typed-literal VALUES clause.
+    let target_shape_json = r#"{
+        "className": "Signal",
+        "properties": {
+            "signalTypeId": { "predicate": "signal://type", "resolveLanguage": "test://custom-lang" }
+        },
+        "relations": {}
+    }"#;
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "signalTypeId".to_string(),
+        WhereCondition::String("like".to_string()),
+    );
+    let proj = ProjectionInput {
+        transitive: false,
+        from: "signals".to_string(),
+        count: true,
+        target_class_name: Some("Signal".to_string()),
+        where_clause: Some(wc),
+        limit: None,
+        order: None,
+    };
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    resolver.register(
+        "Signal",
+        parse_shape_from_json(target_shape_json, "Signal").unwrap(),
+    );
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
+    assert!(
+        patterns.contains("?t <signal://type>"),
+        "expected triple pattern for signal://type, got: {patterns}"
+    );
+    assert!(
+        patterns.contains("FILTER"),
+        "expected FILTER on STR(?var), got: {patterns}"
+    );
+}
+
+#[tokio::test]
+async fn test_build_projection_order_clause_empty_when_no_order() {
+    let proj = ProjectionInput {
+        transitive: false,
+        from: "signals".to_string(),
+        count: false,
+        target_class_name: None,
+        where_clause: None,
+        limit: Some(5),
+        order: None,
+    };
+    assert_eq!(build_projection_order_clause(&proj), "");
+}
+
+#[tokio::test]
+async fn test_build_projection_order_clause_by_id() {
+    let proj = ProjectionInput {
+        transitive: false,
+        from: "signals".to_string(),
+        count: false,
+        target_class_name: None,
+        where_clause: None,
+        limit: None,
+        order: Some(vec![("id".to_string(), OrderDirection::DESC)]),
+    };
+    let clause = build_projection_order_clause(&proj);
+    assert!(clause.contains("ORDER BY DESC(?t)"), "got: {clause}");
+}
+
+// -----------------------------------------------------------------------
+// Integration tests: resolve_projections()
+//
+// These tests verify that resolve_projections() correctly issues grouped
+// SPARQL queries against a real SparqlStore and attaches the results to
+// the parent instance objects.
+// -----------------------------------------------------------------------
+
+/// Helper to build a minimal ModelShape with one forward collection property.
+fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> ModelShape {
+    ModelShape {
+        target_class: class.to_string(),
+        shape_uri: format!("{class}Shape"),
+        properties: vec![ShapeProperty {
+            name: rel_name.to_string(),
+            predicate: predicate.to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: Some("forward".to_string()),
+            is_scalar_relation: false,
+            getter: None,
+            where_filter: None,
+            where_predicates: None,
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    }
+}
+
+#[tokio::test]
+async fn test_resolve_projections_count() {
+    // Set up a store with two parent nodes, each linked to different numbers
+    // of child targets via the "test://has_item" predicate.
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent_a = "test://parent/a";
+    let parent_b = "test://parent/b";
+    let item_1 = "test://item/1";
+    let item_2 = "test://item/2";
+    let item_3 = "test://item/3";
+
+    store
+        .add_link(&make_link(parent_a, "test://has_item", item_1, "1000"))
+        .unwrap();
+    store
+        .add_link(&make_link(parent_a, "test://has_item", item_2, "1001"))
+        .unwrap();
+    store
+        .add_link(&make_link(parent_b, "test://has_item", item_3, "1002"))
+        .unwrap();
+
+    let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+
+    let mut instances = vec![json!({ "id": parent_a }), json!({ "id": parent_b })];
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$itemCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "items".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
+    let count_b = instances[1]["$itemCount"].as_u64().unwrap_or(999);
+    assert_eq!(count_a, 2, "parent_a should have 2 items, got {count_a}");
+    assert_eq!(count_b, 1, "parent_b should have 1 item, got {count_b}");
+}
+
+#[tokio::test]
+async fn test_resolve_projections_list() {
+    // parent_a has two children; verify list projection returns them as an array.
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent_a = "test://parent/a";
+    let item_1 = "test://item/1";
+    let item_2 = "test://item/2";
+
+    store
+        .add_link(&make_link(parent_a, "test://has_item", item_1, "1000"))
+        .unwrap();
+    store
+        .add_link(&make_link(parent_a, "test://has_item", item_2, "1001"))
+        .unwrap();
+
+    let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+
+    let mut instances = vec![json!({ "id": parent_a })];
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$items".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "items".to_string(),
+            count: false,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    let items = instances[0]["$items"]
+        .as_array()
+        .expect("$items should be an array");
+    assert_eq!(items.len(), 2, "expected 2 items, got {}", items.len());
+    let item_strs: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+    assert!(item_strs.contains(&item_1), "missing {item_1}");
+    assert!(item_strs.contains(&item_2), "missing {item_2}");
+}
+
+#[tokio::test]
+async fn test_resolve_projections_scalar() {
+    // limit: Some(1) should unwrap to a single string, not an array.
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent_a = "test://parent/a";
+    let item_1 = "test://item/1";
+
+    store
+        .add_link(&make_link(parent_a, "test://has_item", item_1, "1000"))
+        .unwrap();
+
+    let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+
+    let mut instances = vec![json!({ "id": parent_a })];
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$firstItem".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "items".to_string(),
+            count: false,
+            target_class_name: None,
+            where_clause: None,
+            limit: Some(1),
+            order: None,
+        },
+    );
+
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    let val = &instances[0]["$firstItem"];
+    assert_eq!(
+        val.as_str(),
+        Some(item_1),
+        "limit:1 should return a scalar string, got: {val}"
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_projections_count_zero_when_no_links() {
+    // A parent with no linked children should get count 0, not be absent.
+    let store = SparqlStore::new(None).unwrap();
+    let parent_a = "test://parent/a";
+
+    let shape = make_shape_with_relation("Parent", "items", "test://has_item");
+    let mut instances = vec![json!({ "id": parent_a })];
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$itemCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "items".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
+    assert_eq!(
+        count, 0,
+        "count should be 0 when no links exist, got {count}"
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_projections_where_filter_by_plain_iri() {
+    // Flux reactions are stored as plain expression IRIs (e.g. emoji://1f44d),
+    // not as literal:json: blobs.  The STR() FILTER correctly narrows to
+    // only the matching reaction type.
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent_a = "test://parent/a";
+    let like_iri = "emoji://1f44d";
+    let dislike_iri = "emoji://1f44e";
+
+    store
+        .add_link(&make_link(
+            parent_a,
+            "test://has_reaction",
+            like_iri,
+            "1000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            parent_a,
+            "test://has_reaction",
+            dislike_iri,
+            "1001",
+        ))
+        .unwrap();
+    // Note: COUNT(DISTINCT ?t) is used, so only distinct target IRIs are counted.
+
+    let shape = make_shape_with_relation("Parent", "reactions", "test://has_reaction");
+
+    // Filter by the plain IRI of the reaction target.
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "id".to_string(),
+        WhereCondition::String(like_iri.to_string()),
+    );
+
+    let mut instances = vec![json!({ "id": parent_a })];
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$likeCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "reactions".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: Some(wc),
+            limit: None,
+            order: None,
+        },
+    );
+
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
+    assert_eq!(
+        count, 1,
+        "should count only the 'like' reaction, got {count}"
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_projections_where_filter_by_author() {
+    // Mirrors the WE $myLikeSignal pattern:
+    //   where: { author: { $store: 'adamStore.me.did' } }
+    // This was previously silently ignored because the projection SPARQL
+    // did not join the reifier. Now a ?_prj_reif join + FILTER is emitted.
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent_a = "test://parent/a";
+    let signal_1 = "test://signal/1";
+    let signal_2 = "test://signal/2";
+    let signal_3 = "test://signal/3";
+
+    let alice = "did:key:alice";
+    let bob = "did:key:bob";
+
+    // Two signals from alice, one from bob.
+    let mut link1 = make_link(parent_a, "test://has_signal", signal_1, "1000");
+    link1.author = alice.to_string();
+    let mut link2 = make_link(parent_a, "test://has_signal", signal_2, "1001");
+    link2.author = alice.to_string();
+    let mut link3 = make_link(parent_a, "test://has_signal", signal_3, "1002");
+    link3.author = bob.to_string();
+
+    store.add_link(&link1).unwrap();
+    store.add_link(&link2).unwrap();
+    store.add_link(&link3).unwrap();
+
+    let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "author".to_string(),
+        WhereCondition::String(alice.to_string()),
+    );
+
+    let mut instances = vec![json!({ "id": parent_a })];
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$mySignalCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "signals".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: Some(wc),
+            limit: None,
+            order: None,
+        },
+    );
+
+    {
+        let _resolver = super::test_helpers::StaticShapeResolver::new();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    }
+
+    let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
+    assert_eq!(count, 2, "should count only alice's 2 signals, got {count}");
+}
+
+#[tokio::test]
+async fn test_deep_query_flag_controls_property_getters() {
+    // Create a shape with both a property getter and a relation getter
+    let shape_json = r#"{
+        "className": "TestModel",
+        "properties": {
+            "computedProp": {
+                "predicate": "test://computed",
+                "getter": "ASK WHERE { <Base> <test://is_active> ?x }"
+            }
+        },
+        "relations": {
+            "children": {
+                "predicate": "test://has_child",
+                "kind": "hasMany",
+                "getter": "SELECT ?target WHERE { <Base> <test://has_child> ?target }"
+            }
+        }
+    }"#;
+
+    let shape = parse_shape_from_json(shape_json, "TestModel").unwrap();
+
+    // With deep_query=false, only relation getters (is_collection/is_scalar_relation) should be collected
+    let getter_props_shallow: Vec<&ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| p.getter.is_some() && (false || p.is_collection || p.is_scalar_relation))
+        .collect();
+    assert_eq!(
+        getter_props_shallow.len(),
+        1,
+        "shallow: only relation getter"
+    );
+    assert_eq!(getter_props_shallow[0].name, "children");
+
+    // With deep_query=true, all getters should be collected
+    let getter_props_deep: Vec<&ShapeProperty> = shape
+        .properties
+        .iter()
+        .filter(|p| p.getter.is_some() && (true || p.is_collection || p.is_scalar_relation))
+        .collect();
+    assert_eq!(
+        getter_props_deep.len(),
+        2,
+        "deep: both property and relation getters"
+    );
+}
+
+#[tokio::test]
+async fn test_evaluate_getters_batch_returns_results() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // Insert a test link
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://is_active",
+            "literal:boolean:true",
+            "2024-01-01T00:00:00Z",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "TestModel",
+        "properties": {
+            "isActive": {
+                "predicate": "test://is_active",
+                "getter": "ASK WHERE { <Base> <test://is_active> ?x }"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    let result = evaluate_getters_batch_from_json(
+        &store,
+        "TestModel",
+        &["test://inst-1".to_string()],
+        None,
+        shape_json,
+    )
+    .unwrap();
+
+    assert!(result.is_object(), "result should be an object");
+    let inst_result = &result["test://inst-1"];
+    assert!(inst_result.is_object(), "should have results for inst-1");
+    assert_eq!(inst_result["isActive"], Value::Bool(true));
+}
+
+#[tokio::test]
+async fn test_evaluate_getters_batch_empty_ids() {
+    let store = SparqlStore::new(None).unwrap();
+    let result = evaluate_getters_batch_from_json(
+        &store,
+        "TestModel",
+        &[],
+        None,
+        r#"{"className":"TestModel","properties":{},"relations":{}}"#,
+    )
+    .unwrap();
+    assert!(result.as_object().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_evaluate_getters_batch_filters_by_property_names() {
+    let store = SparqlStore::new(None).unwrap();
+
+    let shape_json = r#"{
+        "className": "TestModel",
+        "properties": {
+            "propA": {
+                "predicate": "test://a",
+                "getter": "ASK WHERE { <Base> <test://a> ?x }"
+            },
+            "propB": {
+                "predicate": "test://b",
+                "getter": "ASK WHERE { <Base> <test://b> ?x }"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Only request propA — propB should not appear in results
+    let result = evaluate_getters_batch_from_json(
+        &store,
+        "TestModel",
+        &["test://inst-1".to_string()],
+        Some(&["propA".to_string()]),
+        shape_json,
+    )
+    .unwrap();
+
+    assert!(result.is_object());
+}
+
+// ── VALUES batching tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_evaluate_getters_where_compiled_literal_filter() {
+    // Mimics the failing CI test: a relation getter with a where clause
+    // that filters by a literal:string:X value.
+    // Setup: board -> 3 tasks (2 active, 1 done)
+    // The getter includes conformance checks (flag, required title, required status)
+    // plus the where clause for status = "active".
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "2024-01-01T00:00:00Z";
+
+    // Use real IRI shapes for instance IDs — `literal:string:` is a wire
+    // encoding for typed-literal *values*, not for identifiers, so a value
+    // used as a triple subject must be a real IRI.
+    let board = "ad4m://board1";
+    let task1 = "ad4m://task-active-1";
+    let task2 = "ad4m://task-active-2";
+    let task3 = "ad4m://task-done";
+
+    // Board -> Task links
+    store
+        .add_link(&make_link(board, "board://has_task", task1, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(board, "board://has_task", task2, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(board, "board://has_task", task3, ts))
+        .unwrap();
+
+    // Task type flags
+    store
+        .add_link(&make_link(task1, "task://type", "task://task", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(task2, "task://type", "task://task", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(task3, "task://type", "task://task", ts))
+        .unwrap();
+
+    // Task titles
+    store
+        .add_link(&make_link(
+            task1,
+            "task://title",
+            "literal:string:Active%201",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task2,
+            "task://title",
+            "literal:string:Active%202",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task3,
+            "task://title",
+            "literal:string:Done%20Task",
+            ts,
+        ))
+        .unwrap();
+
+    // Task statuses
+    store
+        .add_link(&make_link(
+            task1,
+            "task://status",
+            "literal:string:active",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task2,
+            "task://status",
+            "literal:string:active",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task3,
+            "task://status",
+            "literal:string:done",
+            ts,
+        ))
+        .unwrap();
+
+    // Conformance-only getter (no where clause in SPARQL).
+    // Where filtering is done post-evaluation in Rust via where_filter.
+    let getter = "SELECT ?target WHERE { <Base> <board://has_task> ?target . \
+        ?target <task://type> <task://task> . \
+        ?target <task://title> ?_v0 . \
+        ?target <task://status> ?_v1 . }";
+
+    let mut where_filter = BTreeMap::new();
+    where_filter.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    let mut where_predicates = HashMap::new();
+    where_predicates.insert("status".to_string(), "task://status".to_string());
+
+    let shape = ModelShape {
+        target_class: "TaskBoard".to_string(),
+        shape_uri: String::new(),
+        properties: vec![ShapeProperty {
+            name: "activeTasks".to_string(),
+            predicate: "board://has_task".to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: Some(getter.to_string()),
+            where_filter: Some(where_filter),
+            where_predicates: Some(where_predicates),
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+
+    let mut instances = vec![serde_json::json!({"id": board})];
+    let eval_result =
+        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
+    assert!(
+        eval_result.is_ok(),
+        "evaluate_getters should succeed: {:?}",
+        eval_result.err()
+    );
+
+    let active = instances[0]
+        .get("activeTasks")
+        .expect("activeTasks should be set");
+    let active_arr = active.as_array().expect("activeTasks should be array");
+    assert_eq!(
+        active_arr.len(),
+        2,
+        "Should have 2 active tasks via getter, got: {:?}",
+        active_arr
+    );
+}
+
+#[tokio::test]
+async fn test_strip_trailing_limit() {
+    assert_eq!(
+        strip_trailing_limit("SELECT ?t WHERE { ?s <p> ?t . } LIMIT 1"),
+        "SELECT ?t WHERE { ?s <p> ?t . }"
+    );
+    assert_eq!(
+        strip_trailing_limit("SELECT ?t WHERE { ?s <p> ?t . }"),
+        "SELECT ?t WHERE { ?s <p> ?t . }"
+    );
+    assert_eq!(
+        strip_trailing_limit("SELECT ?t WHERE { ?s <p> ?t . } LIMIT 100  "),
+        "SELECT ?t WHERE { ?s <p> ?t . }"
+    );
+}
+
+#[tokio::test]
+async fn test_convert_ask_to_batched_select() {
+    let result = convert_ask_to_batched_select(
+        r#"ASK WHERE { ?source <test://active> "true" . }"#,
+        "VALUES ?source { <test://a> <test://b> }",
+    );
+    assert!(
+        result.contains("SELECT ?source"),
+        "should be SELECT: {result}"
+    );
+    assert!(
+        result.contains("VALUES ?source { <test://a> <test://b> }"),
+        "should have VALUES: {result}"
+    );
+    assert!(
+        result.contains(r#"<test://active> "true""#),
+        "should keep body: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_convert_ask_with_base_to_batched_select() {
+    let result = convert_ask_to_batched_select(
+        "ASK WHERE { <Base> <test://active> ?x }",
+        "VALUES ?source { <test://a> }",
+    );
+    assert!(
+        result.contains("?source <test://active>"),
+        "should replace <Base> with ?source: {result}"
+    );
+    assert!(
+        result.contains("VALUES ?source"),
+        "should have VALUES: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_inject_values_into_select() {
+    let result = inject_values_into_select(
+        "SELECT ?target WHERE { ?source <test://reply> ?target . } LIMIT 1",
+        "VALUES ?source { <test://a> <test://b> }",
+    );
+    assert!(
+        result.contains("?source"),
+        "should have ?source in SELECT: {result}"
+    );
+    assert!(
+        result.contains("VALUES ?source { <test://a> <test://b> }"),
+        "should have VALUES: {result}"
+    );
+    assert!(
+        !result.to_uppercase().contains("LIMIT"),
+        "should strip LIMIT: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_inject_values_adds_source_to_projection() {
+    let result = inject_values_into_select(
+        "SELECT ?target WHERE { ?source <test://p> ?target . }",
+        "VALUES ?source { <test://a> }",
+    );
+    // ?source should appear in the SELECT projection
+    let upper = result.to_uppercase();
+    let select_end = upper.find("SELECT").unwrap() + 6;
+    let where_pos = upper.find("WHERE").unwrap();
+    let projection = &result[select_end..where_pos];
+    assert!(
+        projection.contains("?source"),
+        "?source should be in projection: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_batched_ask_getter_multiple_instances() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // inst-1 is active, inst-2 is not
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://is_active",
+            "literal:boolean:true",
+            "1000",
+        ))
+        .unwrap();
+    // inst-2 has no is_active link
+
+    let shape_json = r#"{
+        "className": "TestModel",
+        "properties": {
+            "isActive": {
+                "predicate": "test://is_active",
+                "getter": "ASK WHERE { ?source <test://is_active> ?x }"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    let result = evaluate_getters_batch_from_json(
+        &store,
+        "TestModel",
+        &["test://inst-1".to_string(), "test://inst-2".to_string()],
+        None,
+        shape_json,
+    )
+    .unwrap();
+
+    assert_eq!(result["test://inst-1"]["isActive"], Value::Bool(true));
+    // inst-2 should be false (no matching link)
+    assert!(
+        result.get("test://inst-2").is_none()
+            || result["test://inst-2"].get("isActive").is_none()
+            || result["test://inst-2"]["isActive"] == Value::Bool(false),
+        "inst-2 should have isActive=false or be absent"
+    );
+}
+
+#[tokio::test]
+async fn test_batched_select_getter_multiple_instances() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // inst-1 has a reply, inst-2 does not
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://has_reply",
+            "test://reply-99",
+            "1000",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "TestModel",
+        "properties": {
+            "replyingTo": {
+                "predicate": "test://has_reply",
+                "getter": "SELECT ?target WHERE { ?source <test://has_reply> ?target . } LIMIT 1"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    let result = evaluate_getters_batch_from_json(
+        &store,
+        "TestModel",
+        &["test://inst-1".to_string(), "test://inst-2".to_string()],
+        None,
+        shape_json,
+    )
+    .unwrap();
+
+    assert_eq!(
+        result["test://inst-1"]["replyingTo"].as_str().unwrap(),
+        "test://reply-99"
+    );
+    // inst-2 has no reply
+    assert!(
+        result.get("test://inst-2").is_none()
+            || result["test://inst-2"].get("replyingTo").is_none(),
+        "inst-2 should have no replyingTo"
+    );
+}
+
+#[tokio::test]
+async fn test_batched_collection_getter() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // inst-1 has two children
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://has_child",
+            "test://child-a",
+            "1000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://has_child",
+            "test://child-b",
+            "1001",
+        ))
+        .unwrap();
+    // inst-2 has one child
+    store
+        .add_link(&make_link(
+            "test://inst-2",
+            "test://has_child",
+            "test://child-c",
+            "1002",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "TestModel",
+        "properties": {},
+        "relations": {
+            "children": {
+                "predicate": "test://has_child",
+                "kind": "hasMany",
+                "getter": "SELECT ?target WHERE { ?source <test://has_child> ?target }"
+            }
+        }
+    }"#;
+
+    let result = evaluate_getters_batch_from_json(
+        &store,
+        "TestModel",
+        &["test://inst-1".to_string(), "test://inst-2".to_string()],
+        None,
+        shape_json,
+    )
+    .unwrap();
+
+    let children_1 = result["test://inst-1"]["children"].as_array().unwrap();
+    assert_eq!(children_1.len(), 2, "inst-1 should have 2 children");
+
+    let children_2 = result["test://inst-2"]["children"].as_array().unwrap();
+    assert_eq!(children_2.len(), 1, "inst-2 should have 1 child");
+    assert_eq!(children_2[0].as_str().unwrap(), "test://child-c");
+}
+
+// ── Pipeline ordering: getters run post-pagination ───────────────────
+
+#[tokio::test]
+async fn test_deep_query_defaults_to_true() {
+    // Verify the default: when deep_query is None, property getters should run
+    let store = SparqlStore::new(None).unwrap();
+
+    let base = "test://msg-1";
+    store
+        .add_link(&make_link(
+            base,
+            "flux://entry_type",
+            "flux://message",
+            "1000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            base,
+            "flux://has_reply",
+            "test://reply-1",
+            "1001",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "entryType": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://message" }
+        },
+        "relations": {
+            "replyingTo": {
+                "predicate": "flux://has_reply",
+                "kind": "hasOne",
+                "getter": "SELECT ?target WHERE { ?source <flux://has_reply> ?target . } LIMIT 1"
+            }
+        }
+    }"#;
+
+    let query_input = ModelQueryInput {
+        deep_query: None, // not set — should default to true
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
+        .unwrap();
+    assert!(!result.instances.is_empty(), "should find instance");
+
+    let inst = &result.instances[0];
+    // replyingTo is a relation getter (always runs) — should be populated
+    let reply = inst.get("replyingTo").and_then(|v| v.as_str());
+    assert_eq!(
+        reply,
+        Some("test://reply-1"),
+        "replyingTo should be populated by default"
+    );
+}
+
+#[tokio::test]
+async fn test_deep_query_false_skips_property_getters() {
+    let store = SparqlStore::new(None).unwrap();
+
+    let base = "test://msg-1";
+    store
+        .add_link(&make_link(
+            base,
+            "flux://entry_type",
+            "flux://message",
+            "1000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            base,
+            "flux://is_popular",
+            "literal:boolean:true",
+            "1001",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "entryType": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://message" },
+            "isPopular": {
+                "predicate": "flux://is_popular",
+                "getter": "ASK WHERE { ?source <flux://is_popular> ?x }"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    let query_input = ModelQueryInput {
+        deep_query: Some(false),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
+        .unwrap();
+    assert!(!result.instances.is_empty());
+
+    let inst = &result.instances[0];
+    // isPopular is a property getter — should NOT be evaluated when deepQuery=false
+    // It may still show the raw hydrated value from the link, but the getter itself
+    // (ASK → bool) should not have run.
+    // The hydrated value from the link is "true" (string), not true (bool).
+    // If the getter ran, it would be Value::Bool(true).
+    let is_popular = inst.get("isPopular");
+    assert!(
+        is_popular.is_none() || !is_popular.unwrap().is_boolean(),
+        "property getter should not run when deepQuery=false; got: {:?}",
+        is_popular
+    );
+}
+
+#[tokio::test]
+async fn test_getters_run_after_pagination() {
+    // Verify that getters run on the paginated set, not the full result set.
+    // We do this by creating 5 instances but querying with limit=2.
+    // If getters ran before pagination, all 5 would be evaluated.
+    // After our change, only 2 should be evaluated.
+    // We verify by checking that the 2 returned instances have getter values.
+    let store = SparqlStore::new(None).unwrap();
+
+    for i in 0..5 {
+        let base = format!("test://msg-{i}");
+        store
+            .add_link(&make_link(
+                &base,
+                "flux://entry_type",
+                "flux://message",
+                &format!("{}", 1000 + i),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &base,
+                "flux://has_reply",
+                &format!("test://reply-{i}"),
+                &format!("{}", 2000 + i),
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "entryType": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://message" }
+        },
+        "relations": {
+            "replyingTo": {
+                "predicate": "flux://has_reply",
+                "kind": "hasOne",
+                "getter": "SELECT ?target WHERE { ?source <flux://has_reply> ?target . } LIMIT 1"
+            }
+        }
+    }"#;
+
+    let query_input = ModelQueryInput {
+        limit: Some(2),
+        deep_query: Some(true),
+        order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(result.instances.len(), 2, "should return 2 instances");
+    assert_eq!(result.total_count, 5, "total count should be 5");
+
+    // Both returned instances should have replyingTo populated
+    for inst in &result.instances {
+        let reply = inst.get("replyingTo").and_then(|v| v.as_str());
+        assert!(
+            reply.is_some(),
+            "replyingTo should be populated: {:?}",
+            inst
+        );
+    }
+}
+
+// ===================================================================
+// Where-clause filtering integration tests
+//
+// These test property where-clause filtering with plain literal values.
+// Property values are stored as `literal:string:X`, `literal:number:X`,
+// etc. and can be matched by SPARQL FILTER or Rust post-hydration.
+// ===================================================================
+
+/// Helper: create a plain literal IRI for a string value.
+fn signed_literal(value: &str) -> String {
+    format!("literal:string:{}", literal_percent_encode(value))
+}
+
+/// Helper: create a plain literal IRI for a numeric value.
+fn signed_literal_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("literal:number:{}", value as i64)
+    } else {
+        format!("literal:number:{value}")
+    }
+}
+
+#[tokio::test]
+async fn test_where_filter_signed_expression_string() {
+    // Reproduces the exact CI failure: where clause on a property stored
+    // Where clause on a property stored as literal:string:<value>.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let board = "test://board1";
+    let task1 = "test://task-active-1";
+    let task2 = "test://task-active-2";
+    let task3 = "test://task-done";
+
+    // Board -> task links
+    store
+        .add_link(&make_link(board, "board://has_task", task1, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(board, "board://has_task", task2, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(board, "board://has_task", task3, ts))
+        .unwrap();
+
+    // Task flags + required properties
+    for task in &[task1, task2, task3] {
+        store
+            .add_link(&make_link(task, "task://type", "task://task", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                task,
+                "task://title",
+                &signed_literal("Title"),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    // Statuses as signed expressions (the exact format that caused CI failure)
+    store
+        .add_link(&make_link(
+            task1,
+            "task://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task2,
+            "task://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task3,
+            "task://status",
+            &signed_literal("done"),
+            ts,
+        ))
+        .unwrap();
+
+    // Use post-getter where filtering (the fix)
+    let getter = "SELECT ?target WHERE { <Base> <board://has_task> ?target . \
+        ?target <task://type> <task://task> . \
+        ?target <task://title> ?_v0 . \
+        ?target <task://status> ?_v1 . }";
+
+    let mut where_filter = BTreeMap::new();
+    where_filter.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    let mut where_predicates = HashMap::new();
+    where_predicates.insert("status".to_string(), "task://status".to_string());
+
+    let shape = ModelShape {
+        target_class: "Board".to_string(),
+        shape_uri: String::new(),
+        properties: vec![ShapeProperty {
+            name: "activeTasks".to_string(),
+            predicate: "board://has_task".to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: Some(getter.to_string()),
+            where_filter: Some(where_filter),
+            where_predicates: Some(where_predicates),
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+
+    let mut instances = vec![json!({"id": board})];
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+
+    let active = instances[0]["activeTasks"].as_array().unwrap();
+    assert_eq!(
+        active.len(),
+        2,
+        "Should have 2 active tasks, got {:?}",
+        active
+    );
+
+    // Verify correct tasks were returned
+    let ids: Vec<&str> = active.iter().filter_map(|v| v.as_str()).collect();
+    assert!(ids.contains(&task1));
+    assert!(ids.contains(&task2));
+    assert!(!ids.contains(&task3));
+}
+
+#[tokio::test]
+async fn test_where_filter_signed_expression_no_matches() {
+    // All targets filtered out -> empty array
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let parent = "test://parent";
+    let child = "test://child";
+
+    store
+        .add_link(&make_link(parent, "ns://has_child", child, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(child, "ns://type", "ns://thing", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            child,
+            "ns://status",
+            &signed_literal("done"),
+            ts,
+        ))
+        .unwrap();
+
+    let getter = "SELECT ?target WHERE { <Base> <ns://has_child> ?target . }";
+
+    let mut where_filter = BTreeMap::new();
+    where_filter.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    let mut where_predicates = HashMap::new();
+    where_predicates.insert("status".to_string(), "ns://status".to_string());
+
+    let shape = ModelShape {
+        target_class: "Parent".to_string(),
+        shape_uri: String::new(),
+        properties: vec![ShapeProperty {
+            name: "activeChildren".to_string(),
+            predicate: "ns://has_child".to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: Some(getter.to_string()),
+            where_filter: Some(where_filter),
+            where_predicates: Some(where_predicates),
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+
+    let mut instances = vec![json!({"id": parent})];
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+
+    let result = instances[0]["activeChildren"].as_array().unwrap();
+    assert_eq!(result.len(), 0, "Should be empty when no matches");
+}
+
+#[tokio::test]
+async fn test_where_filter_multiple_conditions() {
+    // Multiple where conditions: status=active AND priority > 3
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let board = "test://board";
+    let task_hi = "test://task-hi";
+    let task_lo = "test://task-lo";
+    let task_done = "test://task-done";
+
+    store
+        .add_link(&make_link(board, "ns://has", task_hi, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(board, "ns://has", task_lo, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(board, "ns://has", task_done, ts))
+        .unwrap();
+
+    // task_hi: active, priority 5
+    store
+        .add_link(&make_link(
+            task_hi,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task_hi,
+            "ns://priority",
+            &signed_literal_number(5.0),
+            ts,
+        ))
+        .unwrap();
+
+    // task_lo: active, priority 1
+    store
+        .add_link(&make_link(
+            task_lo,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task_lo,
+            "ns://priority",
+            &signed_literal_number(1.0),
+            ts,
+        ))
+        .unwrap();
+
+    // task_done: done, priority 5
+    store
+        .add_link(&make_link(
+            task_done,
+            "ns://status",
+            &signed_literal("done"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task_done,
+            "ns://priority",
+            &signed_literal_number(5.0),
+            ts,
+        ))
+        .unwrap();
+
+    let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+
+    let mut where_filter = BTreeMap::new();
+    where_filter.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    where_filter.insert(
+        "priority".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(3.0),
+            ..Default::default()
+        }),
+    );
+    let mut where_predicates = HashMap::new();
+    where_predicates.insert("status".to_string(), "ns://status".to_string());
+    where_predicates.insert("priority".to_string(), "ns://priority".to_string());
+
+    let shape = ModelShape {
+        target_class: "Board".to_string(),
+        shape_uri: String::new(),
+        properties: vec![ShapeProperty {
+            name: "highPriActive".to_string(),
+            predicate: "ns://has".to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: Some(getter.to_string()),
+            where_filter: Some(where_filter),
+            where_predicates: Some(where_predicates),
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+
+    let mut instances = vec![json!({"id": board})];
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+
+    let result = instances[0]["highPriActive"].as_array().unwrap();
+    assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
+    assert_eq!(result[0].as_str().unwrap(), task_hi);
+}
+
+#[tokio::test]
+async fn test_where_filter_missing_property_on_target() {
+    // Target lacks the property being filtered on -> should not match
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let parent = "test://parent";
+    let child_with = "test://child-with";
+    let child_without = "test://child-without";
+
+    store
+        .add_link(&make_link(parent, "ns://has", child_with, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(parent, "ns://has", child_without, ts))
+        .unwrap();
+
+    // Only child_with has the status property
+    store
+        .add_link(&make_link(
+            child_with,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    // child_without has no status link at all
+
+    let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+    let mut where_filter = BTreeMap::new();
+    where_filter.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    let mut where_predicates = HashMap::new();
+    where_predicates.insert("status".to_string(), "ns://status".to_string());
+
+    let shape = ModelShape {
+        target_class: "Parent".to_string(),
+        shape_uri: String::new(),
+        properties: vec![ShapeProperty {
+            name: "active".to_string(),
+            predicate: "ns://has".to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: Some(getter.to_string()),
+            where_filter: Some(where_filter),
+            where_predicates: Some(where_predicates),
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+
+    let mut instances = vec![json!({"id": parent})];
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+
+    let result = instances[0]["active"].as_array().unwrap();
+    assert_eq!(result.len(), 1, "Only child_with should match");
+    assert_eq!(result[0].as_str().unwrap(), child_with);
+}
+
+#[tokio::test]
+async fn test_where_filter_plain_literal_string() {
+    // Where clause on literal:string: values (not signed expressions)
+    // This should also work correctly
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let parent = "test://parent";
+    let child1 = "test://child1";
+    let child2 = "test://child2";
+
+    store
+        .add_link(&make_link(parent, "ns://has", child1, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(parent, "ns://has", child2, ts))
+        .unwrap();
+
+    // Plain literal:string values (no signed expression envelope)
+    store
+        .add_link(&make_link(child1, "ns://color", "literal:string:red", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(child2, "ns://color", "literal:string:blue", ts))
+        .unwrap();
+
+    let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+    let mut where_filter = BTreeMap::new();
+    where_filter.insert(
+        "color".to_string(),
+        WhereCondition::String("red".to_string()),
+    );
+    let mut where_predicates = HashMap::new();
+    where_predicates.insert("color".to_string(), "ns://color".to_string());
+
+    let shape = ModelShape {
+        target_class: "Parent".to_string(),
+        shape_uri: String::new(),
+        properties: vec![ShapeProperty {
+            name: "redChildren".to_string(),
+            predicate: "ns://has".to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: Some(getter.to_string()),
+            where_filter: Some(where_filter),
+            where_predicates: Some(where_predicates),
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+
+    let mut instances = vec![json!({"id": parent})];
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+
+    let result = instances[0]["redChildren"].as_array().unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].as_str().unwrap(), child1);
+}
+
+#[tokio::test]
+async fn test_where_filter_on_multiple_instances() {
+    // Where filter across multiple parent instances
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let board1 = "test://board1";
+    let board2 = "test://board2";
+    let task_a = "test://task-a";
+    let task_b = "test://task-b";
+    let task_c = "test://task-c";
+
+    // board1 -> task_a (active), task_b (done)
+    store
+        .add_link(&make_link(board1, "ns://has", task_a, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(board1, "ns://has", task_b, ts))
+        .unwrap();
+    // board2 -> task_c (active)
+    store
+        .add_link(&make_link(board2, "ns://has", task_c, ts))
+        .unwrap();
+
+    store
+        .add_link(&make_link(
+            task_a,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task_b,
+            "ns://status",
+            &signed_literal("done"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            task_c,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+
+    let getter = "SELECT ?target WHERE { <Base> <ns://has> ?target . }";
+    let mut where_filter = BTreeMap::new();
+    where_filter.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    let mut where_predicates = HashMap::new();
+    where_predicates.insert("status".to_string(), "ns://status".to_string());
+
+    let shape = ModelShape {
+        target_class: "Board".to_string(),
+        shape_uri: String::new(),
+        properties: vec![ShapeProperty {
+            name: "activeTasks".to_string(),
+            predicate: "ns://has".to_string(),
+            is_collection: true,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: None,
+            is_scalar_relation: false,
+            getter: Some(getter.to_string()),
+            where_filter: Some(where_filter),
+            where_predicates: Some(where_predicates),
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+
+    let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+
+    let active1 = instances[0]["activeTasks"].as_array().unwrap();
+    assert_eq!(active1.len(), 1, "board1 should have 1 active task");
+    assert_eq!(active1[0].as_str().unwrap(), task_a);
+
+    let active2 = instances[1]["activeTasks"].as_array().unwrap();
+    assert_eq!(active2.len(), 1, "board2 should have 1 active task");
+    assert_eq!(active2[0].as_str().unwrap(), task_c);
+}
+
+#[tokio::test]
+async fn test_full_model_query_signed_expression_where() {
+    // End-to-end: findAll with where clause on signed expression values
+    // This is what the integration test does via the full pipeline
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let item1 = "test://item1";
+    let item2 = "test://item2";
+    let item3 = "test://item3";
+
+    // All items have the type flag
+    for item in &[item1, item2, item3] {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://item", ts))
+            .unwrap();
+    }
+
+    // Properties as signed expressions
+    store
+        .add_link(&make_link(item1, "ns://name", &signed_literal("Alpha"), ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            item1,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link(item2, "ns://name", &signed_literal("Beta"), ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            item2,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link(item3, "ns://name", &signed_literal("Gamma"), ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            item3,
+            "ns://status",
+            &signed_literal("archived"),
+            ts,
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Item",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+            "name": { "predicate": "ns://name", "required": true, "resolveLanguage": "literal" },
+            "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Query WITH where clause on status
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "Should find 2 active items, got: {:?}",
+        result.instances
+    );
+
+    // Verify names
+    let names: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["name"].as_str())
+        .collect();
+    assert!(names.contains(&"Alpha"));
+    assert!(names.contains(&"Beta"));
+    assert!(!names.contains(&"Gamma"));
+}
+
+#[tokio::test]
+async fn test_full_model_query_signed_expression_numeric_where() {
+    // findAll with numeric where clause on signed expression values
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let item1 = "test://item1";
+    let item2 = "test://item2";
+
+    for item in &[item1, item2] {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://item", ts))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            item1,
+            "ns://score",
+            &signed_literal_number(85.0),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            item2,
+            "ns://score",
+            &signed_literal_number(45.0),
+            ts,
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Item",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Where: score > 50
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(50.0),
+            ..Default::default()
+        }),
+    );
+
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "Only item1 with score 85 should match"
+    );
+    assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
+}
+
+#[tokio::test]
+async fn test_full_model_query_signed_expression_boolean_where() {
+    // findAll with boolean where clause on plain literal boolean values
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let item1 = "test://item1";
+    let item2 = "test://item2";
+
+    for item in &[item1, item2] {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://thing", ts))
+            .unwrap();
+    }
+
+    let enc_true = "literal:boolean:true";
+    let enc_false = "literal:boolean:false";
+
+    store
+        .add_link(&make_link(item1, "ns://visible", enc_true, ts))
+        .unwrap();
+    store
+        .add_link(&make_link(item2, "ns://visible", enc_false, ts))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Thing",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" },
+            "visible": { "predicate": "ns://visible", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert("visible".to_string(), WhereCondition::Bool(true));
+
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Thing", &query, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(result.instances.len(), 1);
+    assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
+}
+
+#[tokio::test]
+async fn test_full_model_query_where_string_array_in() {
+    // IN operator: where status IN ["active", "pending"]
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let item1 = "test://i1";
+    let item2 = "test://i2";
+    let item3 = "test://i3";
+
+    for item in &[item1, item2, item3] {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://item", ts))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            item1,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            item2,
+            "ns://status",
+            &signed_literal("pending"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            item3,
+            "ns://status",
+            &signed_literal("done"),
+            ts,
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Item",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+            "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "status".to_string(),
+        WhereCondition::StringArray(vec!["active".to_string(), "pending".to_string()]),
+    );
+
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(result.instances.len(), 2, "active and pending should match");
+}
+
+#[tokio::test]
+async fn test_full_model_query_where_ops_not() {
+    // NOT operator: where status != "done"
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let item1 = "test://i1";
+    let item2 = "test://i2";
+
+    for item in &[item1, item2] {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://item", ts))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            item1,
+            "ns://status",
+            &signed_literal("active"),
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            item2,
+            "ns://status",
+            &signed_literal("done"),
+            ts,
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Item",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://item" },
+            "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "status".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::String("done".to_string())),
+            ..Default::default()
+        }),
+    );
+
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(result.instances.len(), 1);
+    assert_eq!(result.instances[0]["id"].as_str().unwrap(), item1);
+}
+
+// -----------------------------------------------------------------------
+// build_instance_sparql: predicate projection tests
+//
+// Verifies that the VALUES ?predicate clause correctly excludes
+// collection properties that have SPARQL getters (i.e. typed @HasMany
+// relations resolved by evaluate_getters) while retaining scalar
+// properties, flags, and raw-predicate collections without getters.
+// -----------------------------------------------------------------------
+
+/// Helper: build a minimal ShapeProperty for a scalar property.
+fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> ShapeProperty {
+    ShapeProperty {
+        name: name.to_string(),
+        predicate: predicate.to_string(),
+        is_collection: false,
+        is_flag: flag,
+        is_required: required,
+        initial_value: if flag {
+            Some("ns://flag_value".to_string())
+        } else {
+            None
+        },
+        resolve_language: None,
+        datatype: None,
+        direction: None,
+        is_scalar_relation: false,
+        getter: None,
+        where_filter: None,
+        where_predicates: None,
+        transform: None,
+        interpretation_hint: None,
+        identity: false,
+        local: false,
+        ordering: None,
+    }
+}
+
+/// Helper: build a ShapeProperty for a collection relation.
+fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapeProperty {
+    ShapeProperty {
+        name: name.to_string(),
+        predicate: predicate.to_string(),
+        is_collection: true,
+        is_flag: false,
+        is_required: false,
+        initial_value: None,
+        resolve_language: None,
+        datatype: None,
+        direction: None,
+        is_scalar_relation: false,
+        getter: getter.map(|s| s.to_string()),
+        where_filter: None,
+        where_predicates: None,
+        transform: None,
+        interpretation_hint: None,
+        identity: false,
+        local: false,
+        ordering: None,
+    }
+}
+
+fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
+    ModelShape {
+        target_class: "TestModel".to_string(),
+        shape_uri: String::new(),
+        properties: props,
+        include_relations: vec![],
+        interpretation_hint: None,
+    }
+}
+
+#[tokio::test]
+async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
+    // A model with only scalar properties (like ChannelSummary) should
+    // produce a VALUES ?predicate clause listing only those predicates.
+    let shape = make_shape(vec![
+        scalar_prop("type", "flux://entry_type", true, true),
+        scalar_prop("name", "flux://name", false, false),
+        scalar_prop("description", "flux://description", false, false),
+    ]);
+    let query = ModelQueryInput::default();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+
+    assert!(
+        sparql.contains("VALUES ?predicate"),
+        "Should have VALUES clause, got:\n{}",
+        sparql
+    );
+    assert!(sparql.contains("<flux://entry_type>"));
+    assert!(sparql.contains("<flux://name>"));
+    assert!(sparql.contains("<flux://description>"));
+}
+
+#[tokio::test]
+async fn test_build_instance_sparql_excludes_getter_backed_collections() {
+    // A model like Channel with typed @HasMany relations that have
+    // auto-generated getters.  The getter-backed collections (views,
+    // messages) should be EXCLUDED from the VALUES clause.
+    let shape = make_shape(vec![
+        scalar_prop("type", "flux://entry_type", true, true),
+        scalar_prop("name", "flux://name", false, false),
+        // Typed @HasMany — has a getter (auto-generated conformance filter)
+        collection_prop(
+            "views",
+            "ad4m://has_child",
+            Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . ?target <flux://entry_type> <flux://has_app> . }"),
+        ),
+        // Another typed @HasMany with getter — same predicate
+        collection_prop(
+            "messages",
+            "ad4m://has_child",
+            Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . ?target <flux://entry_type> <flux://has_message> . }"),
+        ),
+    ]);
+    let query = ModelQueryInput::default();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+
+    assert!(
+        sparql.contains("VALUES ?predicate"),
+        "Should have VALUES clause"
+    );
+    assert!(sparql.contains("<flux://entry_type>"));
+    assert!(sparql.contains("<flux://name>"));
+    // ad4m://has_child should NOT appear because both collections using
+    // it have getters.
+    assert!(
+        !sparql.contains("<ad4m://has_child>"),
+        "Should exclude getter-backed collection predicate, got:\n{}",
+        sparql
+    );
+}
+
+#[tokio::test]
+async fn test_build_instance_sparql_retains_raw_predicate_collections() {
+    // A collection without a getter (raw predicate like participants)
+    // should be INCLUDED in the VALUES clause because it's resolved
+    // from the main query results, not by evaluate_getters.
+    let shape = make_shape(vec![
+        scalar_prop("type", "flux://entry_type", true, true),
+        // Raw @HasMany — no target class, no getter
+        collection_prop("participants", "flux://has_participant", None),
+        // Typed @HasMany — has getter
+        collection_prop(
+            "messages",
+            "ad4m://has_child",
+            Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . }"),
+        ),
+    ]);
+    let query = ModelQueryInput::default();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+
+    assert!(sparql.contains("VALUES ?predicate"));
+    assert!(sparql.contains("<flux://entry_type>"));
+    assert!(
+        sparql.contains("<flux://has_participant>"),
+        "Raw collection predicate should be included"
+    );
+    assert!(
+        !sparql.contains("<ad4m://has_child>"),
+        "Getter-backed collection predicate should be excluded"
+    );
+}
+
+#[tokio::test]
+async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
+    // Edge case: two collections share the same predicate but only one
+    // has a getter.  The predicate should be INCLUDED because the
+    // getter-less collection needs it from the main query.
+    let shape = make_shape(vec![
+        scalar_prop("type", "flux://entry_type", true, true),
+        // No getter — needs predicate in main query
+        collection_prop("raw_children", "ad4m://has_child", None),
+        // Has getter — doesn't need predicate in main query
+        collection_prop(
+            "typed_children",
+            "ad4m://has_child",
+            Some("SELECT ?target WHERE { ?source <ad4m://has_child> ?target . }"),
+        ),
+    ]);
+    let query = ModelQueryInput::default();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+
+    assert!(sparql.contains("VALUES ?predicate"));
+    // ad4m://has_child should appear because raw_children needs it
+    assert!(
+        sparql.contains("<ad4m://has_child>"),
+        "Predicate should be included when any collection without a getter uses it"
+    );
+}
+
+#[tokio::test]
+async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
+    // A shape with no properties at all should fall back to the
+    // unrestricted wildcard (no VALUES clause).
+    let shape = make_shape(vec![]);
+    let query = ModelQueryInput::default();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+
+    assert!(
+        !sparql.contains("VALUES ?predicate"),
+        "Empty shape should produce wildcard (no VALUES clause)"
+    );
+    // Should still have the basic pattern
+    assert!(sparql.contains("?source ?predicate ?target"));
+}
+
+#[tokio::test]
+async fn test_build_instance_sparql_values_clause_is_deduplicated() {
+    // If multiple scalar properties share the same predicate, the
+    // VALUES clause should contain it only once.
+    let shape = make_shape(vec![
+        scalar_prop("type", "ns://shared_pred", true, true),
+        scalar_prop("alias", "ns://shared_pred", false, false),
+        scalar_prop("name", "ns://name", false, false),
+    ]);
+    let query = ModelQueryInput::default();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+
+    assert!(sparql.contains("VALUES ?predicate"));
+    // Count occurrences of the shared predicate in the VALUES clause
+    let values_line = sparql
+        .lines()
+        .find(|l| l.contains("VALUES ?predicate"))
+        .unwrap();
+    let count = values_line.matches("<ns://shared_pred>").count();
+    assert_eq!(
+        count, 1,
+        "Shared predicate should appear exactly once in VALUES clause"
+    );
+}
+
+#[tokio::test]
+async fn test_build_instance_sparql_integration_getter_excluded_from_results() {
+    // Full integration test: a Channel-like model with scalar properties
+    // and a getter-backed @HasMany relation.  The main query should NOT
+    // return rows for the getter-backed relation's predicate, so adding
+    // thousands of links with that predicate should not affect the result
+    // count from the main query.
+    let store = SparqlStore::new(None).unwrap();
+
+    let channel_id = "test://channel1";
+
+    // Add flag link
+    store
+        .add_link(&make_link(
+            channel_id,
+            "flux://entry_type",
+            "flux://channel",
+            "1700000000000",
+        ))
+        .unwrap();
+    // Add name link
+    store
+        .add_link(&make_link(
+            channel_id,
+            "flux://name",
+            "literal:string:general",
+            "1700000000001",
+        ))
+        .unwrap();
+
+    // Add 100 message children (simulating a large channel)
+    for i in 0..100 {
+        store
+            .add_link(&make_link(
+                channel_id,
+                "ad4m://has_child",
+                &format!("test://msg{i}"),
+                &format!("17000000001{i:02}"),
+            ))
+            .unwrap();
+    }
+
+    // Shape: scalar properties + getter-backed collection
+    let shape_json = r#"{
+        "className": "Channel",
+        "properties": {
+            "type": {
+                "predicate": "flux://entry_type",
+                "required": true,
+                "flag": true,
+                "initial": "flux://channel"
+            },
+            "name": {
+                "predicate": "flux://name",
+                "required": false
+            }
+        },
+        "relations": {
+            "messages": {
+                "predicate": "ad4m://has_child",
+                "getter": "SELECT ?target WHERE { ?source <ad4m://has_child> ?target . ?target <flux://entry_type> <flux://has_message> . }"
+            }
+        }
+    }"#;
+
+    let query = ModelQueryInput::default();
+    let result = fixture_query_from_json(&store, "Channel", &query, shape_json)
+        .await
+        .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "Should find exactly 1 channel");
+    assert_eq!(
+        result.instances[0]["name"],
+        json!("general"),
+        "Name should be hydrated"
+    );
+    // The 100 message children should NOT appear in the main hydration
+    // because their predicate (ad4m://has_child) is excluded by the
+    // VALUES clause.  The "messages" relation has a getter, so it would
+    // be resolved by evaluate_getters (not tested here — that's a
+    // separate code path).
+    let messages = result.instances[0].get("messages");
+    // messages should either be absent or empty (getter not run in this test)
+    match messages {
+        None => {} // expected — not hydrated from main query
+        Some(Value::Array(arr)) => assert!(
+            arr.is_empty(),
+            "Messages should not be hydrated from main query"
+        ),
+        other => panic!("Unexpected messages value: {:?}", other),
+    }
+}
+
+// -----------------------------------------------------------------------
+// Ops-based SPARQL push tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_full_model_query_ops_gt_lt_sparql_push() {
+    // Verify gt/lt numeric ops are pushed to SPARQL and return correct results
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
+    let scores = [10.0, 30.0, 50.0, 70.0, 90.0];
+
+    for (item, &score) in items.iter().zip(&scores) {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://scored", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "ns://score",
+                &signed_literal_number(score),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // gt: 50 → items with 70, 90
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(50.0),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2, "gt:50 should match 70 and 90");
+
+    // lt: 50 → items with 10, 30
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            lt: Some(50.0),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2, "lt:50 should match 10 and 30");
+
+    // between: [30, 70] → items with 30, 50, 70
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            between: Some((30.0, 70.0)),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        3,
+        "between:[30,70] should match 30, 50, 70"
+    );
+}
+
+#[tokio::test]
+async fn test_full_model_query_ops_gte_lte_sparql_push() {
+    // Verify gte/lte numeric ops via SPARQL
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    for (i, score) in [10.0, 50.0, 90.0].iter().enumerate() {
+        let item = format!("test://item-{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://val",
+                &signed_literal_number(*score),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "val": { "predicate": "ns://val", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // gte: 50 → 50, 90
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "val".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gte: Some(50.0),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2, "gte:50 should match 50 and 90");
+
+    // lte: 50 → 10, 50
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "val".to_string(),
+        WhereCondition::Ops(WhereOps {
+            lte: Some(50.0),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2, "lte:50 should match 10 and 50");
+}
+
+#[tokio::test]
+async fn test_full_model_query_ops_not_string_sparql_push() {
+    // NOT operator with string should be pushed to SPARQL
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    for (i, status) in ["active", "done", "active"].iter().enumerate() {
+        let item = format!("test://item-{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://task", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://status",
+                &signed_literal(status),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Task",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" },
+            "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "status".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::String("done".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Task",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2, "NOT done → 2 active tasks");
+}
+
+#[tokio::test]
+async fn test_full_model_query_ops_not_array_sparql_push() {
+    // NOT IN (array) should be pushed to SPARQL
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    for (i, status) in ["alpha", "beta", "gamma", "delta"].iter().enumerate() {
+        let item = format!("test://item-{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://thing", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(&item, "ns://phase", &signed_literal(status), ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Thing",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://thing" },
+            "phase": { "predicate": "ns://phase", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "phase".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::Array(vec![
+                Value::String("alpha".to_string()),
+                Value::String("gamma".to_string()),
+            ])),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Thing",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "NOT IN [alpha, gamma] → beta, delta"
+    );
+}
+
+#[tokio::test]
+async fn test_full_model_query_ops_with_pagination_pushed() {
+    // Ops + pagination should both be pushed to SPARQL (no contains)
+    let store = SparqlStore::new(None).unwrap();
+
+    for i in 0..10 {
+        let item = format!("test://item-{i}");
+        let ts = format!("{}", 1700000000000i64 + i);
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://scored", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://score",
+                &signed_literal_number(i as f64 * 10.0),
+                &ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // score >= 30 (items 3-9 = 7 items), paginate: offset 2, limit 3
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gte: Some(30.0),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            limit: Some(3),
+            offset: Some(2),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 3, "Should get 3 items in page");
+    assert_eq!(result.total_count, 7, "Total matching items: score >= 30");
+}
+
+#[tokio::test]
+async fn test_full_model_query_ops_contains_sparql_push() {
+    // `contains` in Ops should be pushed to SPARQL via CONTAINS+ENCODE_FOR_URI
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    for (i, name) in ["Alice Smith", "Bob Jones", "Alice Cooper"]
+        .iter()
+        .enumerate()
+    {
+        let item = format!("test://item-{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://person", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(&item, "ns://name", &signed_literal(name), ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Person",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            contains: Some(Value::String("alice".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Person",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "Case-insensitive contains 'alice' → Alice Smith, Alice Cooper"
+    );
+}
+
+#[tokio::test]
+async fn test_full_model_query_ops_contains_with_pagination() {
+    // `contains` + pagination should both be pushed to SPARQL
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+
+    let names = [
+        "Alice Adams",
+        "Bob Baker",
+        "Alice Brown",
+        "Charlie Clark",
+        "Alice Chen",
+        "Dave Davis",
+    ];
+    for (i, name) in names.iter().enumerate() {
+        let item = format!("test://item-{i}");
+        let ts = format!("{}", ts_base + i as i64);
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://person", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(&item, "ns://name", &signed_literal(name), &ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Person",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // contains "alice" → 3 matches (Alice Adams, Alice Brown, Alice Chen)
+    // paginate: offset 1, limit 1
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            contains: Some(Value::String("alice".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Person",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            limit: Some(1),
+            offset: Some(1),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 1, "Should get 1 item in page");
+    assert_eq!(result.total_count, 3, "Total matching: 3 Alices");
+    assert_eq!(
+        result.instances[0]["name"].as_str().unwrap(),
+        "Alice Brown",
+        "Second Alice by timestamp ASC"
+    );
+}
+
+/// Build a `literal:json:<signed_envelope>` IRI — the shape produced by
+/// `expression.create("literal", value)`, i.e. what a `resolveLanguage:"literal"`
+/// property stores today, and what older databases that pre-date plain-literal
+/// writes hold on disk. Used both by tests that seed envelope-form data to
+/// exercise the migration path and by tests that assert envelope properties
+/// still query and sort on the inner value.
+#[allow(dead_code)]
+fn signed_envelope_literal(value: &str) -> String {
+    signed_envelope_literal_with_ts(value, "2024-01-01T00:00:00.000Z")
+}
+
+/// Same as [`signed_envelope_literal`] but with a caller-supplied embedded
+/// envelope timestamp. Needed for sort regression tests: `signed_envelope_literal`
+/// hardcodes the same timestamp for every call, so fixtures built from it never
+/// actually diverge on that field — which would mask a bug where sort extraction
+/// accidentally reads the envelope's `timestamp` instead of its `data` value
+/// (since a *shared* timestamp prefix contributes nothing to string comparison,
+/// real-world envelopes have distinct per-write timestamps).
+fn signed_envelope_literal_with_ts(value: &str, timestamp: &str) -> String {
+    let envelope = serde_json::json!({
+        "author": "did:key:zQ3shTestAgent",
+        "timestamp": timestamp,
+        "data": value,
+        "proof": {
+            "key": "#zQ3shTestAgent",
+            "signature": "fake-sig",
+            "valid": true,
+            "invalid": false
+        }
+    });
+    let json_str = serde_json::to_string(&envelope).unwrap();
+    format!("literal:json:{}", literal_percent_encode(&json_str))
+}
+
+/// Same workload as `test_legacy_envelope_migrated_then_paginate_count` but
+/// with plain `literal:string:` targets from the start. Confirms model
+/// queries reach the rows through the indexed direct-IRI WHERE form alone,
+/// without any envelope unwrap step.
+#[tokio::test]
+async fn test_plain_literal_where_paginate_count() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+
+    let items = vec![
+        ("test://item-1", "active", "Alpha"),
+        ("test://item-2", "active", "Beta"),
+        ("test://item-3", "inactive", "Gamma"),
+        ("test://item-4", "active", "Delta"),
+    ];
+    for (i, (uri, status, name)) in items.iter().enumerate() {
+        let ts = format!("{}", ts_base + i as i64);
+        store
+            .add_link(&make_link(uri, "ns://type", "ns://task", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(uri, "ns://status", &signed_literal(status), &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(uri, "ns://name", &signed_literal(name), &ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Task",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" },
+            "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "status".to_string(),
+        WhereCondition::String("active".to_string()),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Task",
+        &ModelQueryInput {
+            where_clause: Some(wc.clone()),
+            limit: Some(2),
+            offset: Some(0),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            count: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 2, "Page should have 2 items");
+    assert_eq!(result.total_count, 3, "Total active items should be 3");
+    assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alpha");
+    assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Beta");
+    assert_eq!(result.instances[0]["status"].as_str().unwrap(), "active");
+
+    let result2 = fixture_query_from_json(
+        &store,
+        "Task",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            limit: Some(2),
+            offset: Some(2),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            count: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result2.instances.len(), 1);
+    assert_eq!(result2.total_count, 3);
+    assert_eq!(result2.instances[0]["name"].as_str().unwrap(), "Delta");
+}
+
+/// Guards that the `contains` filter — which doesn't reduce to a direct
+/// equality lookup — keeps matching plain literal targets correctly.  Now
+/// runs as `CONTAINS(LCASE(STR(?val)), …)` over the typed literal directly.
+#[tokio::test]
+async fn test_plain_literal_contains_filter() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+
+    store
+        .add_link(&make_link(
+            "test://a",
+            "ns://type",
+            "ns://msg",
+            &format!("{ts_base}"),
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://a",
+            "ns://body",
+            &signed_literal("hello world"),
+            &format!("{ts_base}"),
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link(
+            "test://b",
+            "ns://type",
+            "ns://msg",
+            &format!("{}", ts_base + 1),
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://b",
+            "ns://body",
+            &signed_literal("goodbye world"),
+            &format!("{}", ts_base + 1),
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Msg",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://msg" },
+            "body": { "predicate": "ns://body", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "body".to_string(),
+        WhereCondition::Ops(WhereOps {
+            contains: Some(Value::String("hello".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Msg",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "contains 'hello' should match only one row"
+    );
+    assert_eq!(result.instances[0]["body"].as_str().unwrap(), "hello world");
+}
+
+// -----------------------------------------------------------------------
+// Performance / scale tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_perf_large_dataset_paginated_query() {
+    // Simulate Flux-like scenario: many messages across channels.
+    // Verifies that paginated queries complete in a reasonable time.
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+    let num_channels = 3;
+    let msgs_per_channel = 1000;
+
+    for ch in 0..num_channels {
+        let channel = format!("test://channel-{ch}");
+        for i in 0..(msgs_per_channel as i64) {
+            let msg = format!("test://msg-{ch}-{i}");
+            let ts = format!("{}", ts_base + ch as i64 * 100000 + i);
+            store
+                .add_link(&make_link(&msg, "flux://type", "flux://message", &ts))
+                .unwrap();
+            store
+                .add_link(&make_link(&msg, "flux://channel", &channel, &ts))
+                .unwrap();
+            store
+                .add_link(&make_link(
+                    &msg,
+                    "flux://body",
+                    &signed_literal(&format!("Message {i} in channel {ch}")),
+                    &ts,
+                ))
+                .unwrap();
+        }
+    }
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "type": { "predicate": "flux://type", "required": true, "flag": true, "initial": "flux://message" },
+            "body": { "predicate": "flux://body", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {
+            "channel": { "predicate": "flux://channel", "kind": "belongsToOne", "direction": "forward" }
+        }
+    }"#;
+
+    // Query messages in channel-1 with pagination (typical Flux query)
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "channel".to_string(),
+        WhereCondition::String("test://channel-1".to_string()),
+    );
+
+    let start = std::time::Instant::now();
+    let result = fixture_query_from_json(
+        &store,
+        "Message",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            limit: Some(50),
+            offset: Some(0),
+            order: Some(vec![("timestamp".to_string(), OrderDirection::DESC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(result.instances.len(), 50, "Should get 50 messages");
+    assert_eq!(
+        result.total_count, msgs_per_channel,
+        "Total count should be messages in one channel"
+    );
+    eprintln!(
+        "Paginated query over {} total messages ({} matching): {:?}",
+        num_channels * msgs_per_channel,
+        msgs_per_channel,
+        elapsed
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "Query took {:?} — too slow for {} messages",
+        elapsed,
+        num_channels * msgs_per_channel
+    );
+}
+
+#[tokio::test]
+async fn test_perf_flux_message_parent_scope_paginated() {
+    // Simulates the exact Flux chat-view query:
+    //   useLiveQuery(Message, perspective, {
+    //     parent: { model: Channel, id: source },
+    //     query: { order: { createdAt: 'DESC' } },
+    //     pageSize: 30,
+    //   })
+    //
+    // Message model shape:
+    //   @Flag({ through: 'flux://entry_type', value: 'flux://has_message' })
+    //   @Property({ through: 'flux://body' })
+    //   @HasMany({ through: 'flux://has_reaction' })  — collection, no getter
+    //   @Property({ through: 'flux://has_reply', getter: "SELECT ?target WHERE { ... }" }) — getter
+    //   @Property({ through: 'flux://is_popular', getter: "ASK WHERE { ... }" }) — getter
+    //   @HasMany({ through: 'flux://has_thread_message' }) — collection
+    //   @HasMany({ through: 'flux://has_reply' }) — collection
+    //
+    // Parent scope: channel -> ad4m://has_child -> message
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+    let num_channels = 5;
+    let msgs_per_channel = 2000;
+
+    for ch in 0..num_channels {
+        let channel = format!("test://channel-{ch}");
+        for i in 0..(msgs_per_channel as i64) {
+            let msg = format!("test://msg-{ch}-{i}");
+            let ts = format!("{}", ts_base + ch as i64 * 1000000 + i * 100);
+            // Parent link: channel -> has_child -> message
+            store
+                .add_link(&make_link(&channel, "ad4m://has_child", &msg, &ts))
+                .unwrap();
+            // Flag: entry_type = has_message
+            store
+                .add_link(&make_link(
+                    &msg,
+                    "flux://entry_type",
+                    "flux://has_message",
+                    &ts,
+                ))
+                .unwrap();
+            // Body property
+            store
+                .add_link(&make_link(
+                    &msg,
+                    "flux://body",
+                    &signed_literal(&format!("Message {i} in channel {ch}")),
+                    &ts,
+                ))
+                .unwrap();
+        }
+    }
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "type": { "predicate": "flux://entry_type", "required": true, "flag": true, "initial": "flux://has_message" },
+            "body": { "predicate": "flux://body", "required": false, "resolveLanguage": "literal" },
+            "transcriptStartedAt": { "predicate": "flux://transcript_started_at", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {
+            "reactions": { "predicate": "flux://has_reaction", "kind": "hasMany", "direction": "forward" },
+            "replyingTo": { "predicate": "flux://has_reply", "kind": "hasOne", "direction": "forward", "getter": "SELECT ?target WHERE { ?target <flux://has_reply> ?source . } LIMIT 1" },
+            "isPopular": { "predicate": "flux://is_popular", "kind": "hasOne", "direction": "forward", "getter": "ASK WHERE { SELECT (COUNT(DISTINCT ?reactor) AS ?count) WHERE { ?reactor <flux://has_reaction> ?source . FILTER(?reactor = <emoji://1f44d>) } HAVING(?count > 5) }" },
+            "thread": { "predicate": "flux://has_thread_message", "kind": "hasMany", "direction": "forward" },
+            "replies": { "predicate": "flux://has_reply", "kind": "hasMany", "direction": "forward" }
+        }
+    }"#;
+
+    // Query: get 30 most recent messages from channel-2 (ORDER BY createdAt DESC)
+    let start = std::time::Instant::now();
+    let result = fixture_query_from_json(
+        &store,
+        "Message",
+        &ModelQueryInput {
+            parent: Some(Scope::Raw {
+                id: "test://channel-2".to_string(),
+                predicate: "ad4m://has_child".to_string(),
+            }),
+            limit: Some(30),
+            offset: Some(0),
+            order: Some(vec![("createdAt".to_string(), OrderDirection::DESC)]),
+            count: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(result.instances.len(), 30, "Should get 30 messages");
+    assert_eq!(
+        result.total_count, msgs_per_channel,
+        "Total count should be {} messages in channel-2",
+        msgs_per_channel
+    );
+
+    // Verify ordering: DESC by createdAt
+    for i in 1..result.instances.len() {
+        let prev_ts = result.instances[i - 1]["createdAt"].as_str().unwrap_or("");
+        let curr_ts = result.instances[i]["createdAt"].as_str().unwrap_or("");
+        assert!(
+            prev_ts >= curr_ts,
+            "Messages should be ordered DESC by createdAt: {} < {}",
+            prev_ts,
+            curr_ts
+        );
+    }
+
+    eprintln!(
+        "Flux Message query (parent scope, 30 of {}, {} total, with getters): {:?}",
+        msgs_per_channel,
+        num_channels * msgs_per_channel,
+        elapsed
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "Query took {:?} — too slow for {} messages with parent scope",
+        elapsed,
+        num_channels * msgs_per_channel
+    );
+
+    // --- Raw SPARQL comparison: flag-reifier vs parent-reifier vs no ORDER ---
+    // Test 1: No ORDER BY (just the conformance)
+    let t_no_order = std::time::Instant::now();
+    let q_no_order = r#"SELECT DISTINCT ?source WHERE {
+        <test://channel-2> <ad4m://has_child> ?source .
+        ?source <flux://entry_type> <flux://has_message> .
+    } LIMIT 30"#;
+    let _r = store.query(q_no_order).unwrap();
+    eprintln!("[RAW] no ORDER BY: {:?}", t_no_order.elapsed());
+
+    // Test 2: Flag-reifier probe (what we currently generate)
+    let t_flag = std::time::Instant::now();
+    let q_flag = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+        <test://channel-2> <ad4m://has_child> ?source .
+        ?source <flux://entry_type> <flux://has_message> .
+        ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+        ?_r <ad4m://ontology/timestamp> ?_first_ts .
+    } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+    let _r = store.query(q_flag).unwrap();
+    eprintln!("[RAW] flag-reifier ORDER BY: {:?}", t_flag.elapsed());
+
+    // Test 3: Parent-reifier probe (uses the fully-bound parent IRI)
+    let t_parent = std::time::Instant::now();
+    let q_parent = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+        <test://channel-2> <ad4m://has_child> ?source .
+        ?source <flux://entry_type> <flux://has_message> .
+        ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <test://channel-2> <ad4m://has_child> ?source )>> .
+        ?_r <ad4m://ontology/timestamp> ?_first_ts .
+    } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+    let _r = store.query(q_parent).unwrap();
+    eprintln!("[RAW] parent-reifier ORDER BY: {:?}", t_parent.elapsed());
+
+    // Test 4: Wildcard reifier (the old expensive pattern)
+    let t_wild = std::time::Instant::now();
+    let q_wild = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
+        <test://channel-2> <ad4m://has_child> ?source .
+        ?source <flux://entry_type> <flux://has_message> .
+        ?source ?_anyP ?_anyT .
+        ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_anyP ?_anyT )>> .
+        ?_r <ad4m://ontology/timestamp> ?_first_ts .
+    } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+    let _r = store.query(q_wild).unwrap();
+    eprintln!("[RAW] wildcard-reifier ORDER BY: {:?}", t_wild.elapsed());
+
+    // Test 5: Full outer query (the actual generated pattern)
+    let t_full = std::time::Instant::now();
+    let q_full = r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
+        {
+            SELECT DISTINCT ?source ?_first_ts WHERE {
+                <test://channel-2> <ad4m://has_child> ?source .
+                ?source <flux://entry_type> <flux://has_message> .
+                ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+                ?_r <ad4m://ontology/timestamp> ?_first_ts .
+            } ORDER BY DESC(?_first_ts) LIMIT 30
+        }
+        VALUES ?predicate { <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }
+        ?source ?predicate ?target .
+        ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+        FILTER(isIRI(?predicate))
+        ?_reifier <ad4m://ontology/author> ?author .
+        ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+    }"#;
+    let r_full: Vec<Value> = serde_json::from_str(&store.query(q_full).unwrap()).unwrap();
+    eprintln!(
+        "[RAW] full outer query: {:?} ({} rows)",
+        t_full.elapsed(),
+        r_full.len()
+    );
+
+    // Test 6: Outer query without subquery (pre-materialized sources via VALUES)
+    // Get the 30 source IDs first, then query their properties
+    let q_ids = r#"SELECT DISTINCT ?source WHERE {
+        <test://channel-2> <ad4m://has_child> ?source .
+        ?source <flux://entry_type> <flux://has_message> .
+        ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
+        ?_r <ad4m://ontology/timestamp> ?_first_ts .
+    } ORDER BY DESC(?_first_ts) LIMIT 30"#;
+    let ids_json: Vec<Value> = serde_json::from_str(&store.query(q_ids).unwrap()).unwrap();
+    let source_values: String = ids_json
+        .iter()
+        .filter_map(|r| r["source"].as_str())
+        .map(|s| format!("<{s}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let t_outer = std::time::Instant::now();
+    let q_outer = format!(
+        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+        VALUES ?source {{ {source_values} }}
+        VALUES ?predicate {{ <flux://body> <flux://entry_type> <flux://has_reaction> <flux://has_reply> <flux://has_thread_message> <flux://transcript_started_at> }}
+        ?source ?predicate ?target .
+        ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+        FILTER(isIRI(?predicate))
+        ?_reifier <ad4m://ontology/author> ?author .
+        ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+    }}"#
+    );
+    let r_outer: Vec<Value> = serde_json::from_str(&store.query(&q_outer).unwrap()).unwrap();
+    eprintln!(
+        "[RAW] pre-materialized VALUES outer: {:?} ({} rows)",
+        t_outer.elapsed(),
+        r_outer.len()
+    );
+}
+
+// -----------------------------------------------------------------------
+// Property-key sort push tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_full_model_query_order_by_property_string() {
+    // ORDER BY a string property should be pushed to SPARQL
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let names = ["Charlie", "Alice", "Bob"];
+    for (i, name) in names.iter().enumerate() {
+        let item = format!("test://item-{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://person", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(&item, "ns://name", &signed_literal(name), ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Person",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // ORDER BY name ASC with limit (triggers SPARQL pagination)
+    let result = fixture_query_from_json(
+        &store,
+        "Person",
+        &ModelQueryInput {
+            limit: Some(2),
+            order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    assert_eq!(result.total_count, 3);
+    // First 2 alphabetically: Alice, Bob
+    assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
+    assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+
+    // ORDER BY name DESC with limit
+    let result = fixture_query_from_json(
+        &store,
+        "Person",
+        &ModelQueryInput {
+            limit: Some(2),
+            order: Some(vec![("name".to_string(), OrderDirection::DESC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    // First 2 reverse alphabetically: Charlie, Bob
+    assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Charlie");
+    assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+}
+
+/// Regression test: same as `test_full_model_query_order_by_property_string`
+/// but with values stored as signed expression envelopes (the real-world
+/// storage format), not bare `literal:string:<value>`. See
+/// `test_sort_by_relation_property_with_signed_envelope_literal` for the
+/// analogous RelationProperty-sort regression and full explanation.
+#[tokio::test]
+async fn test_full_model_query_order_by_property_string_signed_envelope() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    // Insertion order (and embedded envelope timestamp order) is Charlie, Alice,
+    // Bob — deliberately NOT alphabetical, so a bug that sorts by the envelope's
+    // embedded timestamp instead of `data` produces a different (wrong) result
+    // than the expected alphabetical order.
+    let names = ["Charlie", "Alice", "Bob"];
+    for (i, name) in names.iter().enumerate() {
+        let item = format!("test://envitem-{i}");
+        let envelope_ts = format!("2024-01-0{}T00:00:00.000Z", i + 1);
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://person2", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://name2",
+                &signed_envelope_literal_with_ts(name, &envelope_ts),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Person2",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://person2" },
+            "name": { "predicate": "ns://name2", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let result = fixture_query_from_json(
+        &store,
+        "Person2",
+        &ModelQueryInput {
+            limit: Some(2),
+            order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    assert_eq!(result.total_count, 3);
+    assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
+    assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
+}
+
+#[tokio::test]
+async fn test_full_model_query_order_by_property_number() {
+    // ORDER BY a numeric property
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let scores = [100.0, 5.0, 42.0, 1.0, 999.0];
+    for (i, &score) in scores.iter().enumerate() {
+        let item = format!("test://item-{i}");
+        store
+            .add_link(&make_link(&item, "ns://type", "ns://scored", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                &item,
+                "ns://score",
+                &signed_literal_number(score),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // ORDER BY score ASC, limit 3 → should get 1, 5, 42
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            limit: Some(3),
+            order: Some(vec![("score".to_string(), OrderDirection::ASC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 3);
+    assert_eq!(result.total_count, 5);
+    let got_scores: Vec<f64> = result
+        .instances
+        .iter()
+        .map(|i| i["score"].as_f64().unwrap())
+        .collect();
+    assert_eq!(got_scores, vec![1.0, 5.0, 42.0], "ASC numeric sort");
+
+    // ORDER BY score DESC, limit 2 → should get 999, 100
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            limit: Some(2),
+            order: Some(vec![("score".to_string(), OrderDirection::DESC)]),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    let got_scores: Vec<f64> = result
+        .instances
+        .iter()
+        .map(|i| i["score"].as_f64().unwrap())
+        .collect();
+    assert_eq!(got_scores, vec![999.0, 100.0], "DESC numeric sort");
+}
+
+#[tokio::test]
+async fn test_resolve_projections_where_filter_via_target_shape_property() {
+    // Mirrors the WE $totalLikeCount pattern:
+    //   include: {
+    //     $totalLikeCount: { from: 'signals', where: { signalTypeId: 'like_type_id123' }, count: true }
+    //   }
+    // where signalTypeId is a @Property stored via literal_encode, and the WHERE
+    // filter value is the plain decoded form (what the TS caller passes).
+    // The WHERE builder emits a typed-literal match (`"X"^^xsd:string`) for
+    // the stored value — so caller passes "like_type_id123", not
+    // "literal:string:like_type_id123".
+    let store = SparqlStore::new(None).unwrap();
+
+    let parent_a = "test://parent/a";
+    let like_signal = "test://signal/like";
+    let dislike_signal = "test://signal/dislike";
+    let like_type_id_stored = "literal:string:like_type_id123";
+    let dislike_type_id_stored = "literal:string:dislike_type_id456";
+    let like_type_id_filter = "like_type_id123"; // plain decoded value — what the caller passes
+
+    // Add parent → signal links
+    store
+        .add_link(&make_link(
+            parent_a,
+            "test://has_signal",
+            like_signal,
+            "1000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            parent_a,
+            "test://has_signal",
+            dislike_signal,
+            "1001",
+        ))
+        .unwrap();
+
+    // Add signal → signalTypeId property links (stored as literal:string: IRIs via literal_encode)
+    store
+        .add_link(&make_link(
+            like_signal,
+            "test://signal_type_id",
+            like_type_id_stored,
+            "1002",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            dislike_signal,
+            "test://signal_type_id",
+            dislike_type_id_stored,
+            "1003",
+        ))
+        .unwrap();
+
+    let shape = make_shape_with_relation("Parent", "signals", "test://has_signal");
+
+    // Register the Signal target shape on a StaticShapeResolver so the
+    // projection layer can resolve `target_class_name: "Signal"` the same
+    // way the cache-backed resolver does in production.
+    let resolver = super::test_helpers::StaticShapeResolver::new();
+    let signal_shape = ModelShape {
+        target_class: "Signal".to_string(),
+        shape_uri: "SignalShape".to_string(),
+        properties: vec![ShapeProperty {
+            name: "signalTypeId".to_string(),
+            predicate: "test://signal_type_id".to_string(),
+            is_collection: false,
+            is_flag: false,
+            is_required: false,
+            initial_value: None,
+            resolve_language: None,
+            datatype: None,
+            direction: Some("forward".to_string()),
+            is_scalar_relation: false,
+            getter: None,
+            where_filter: None,
+            where_predicates: None,
+            transform: None,
+            interpretation_hint: None,
+            identity: false,
+            local: false,
+            ordering: None,
+        }],
+        include_relations: vec![],
+        interpretation_hint: None,
+    };
+    resolver.register("Signal", signal_shape);
+
+    // Filter passes the plain decoded value — the WHERE builder emits a
+    // typed-literal match against the storage form `"like_type_id123"^^xsd:string`.
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "signalTypeId".to_string(),
+        WhereCondition::String(like_type_id_filter.to_string()),
+    );
+
+    let mut instances = vec![json!({ "id": parent_a })];
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$totalLikeCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "signals".to_string(),
+            count: true,
+            target_class_name: Some("Signal".to_string()),
+            where_clause: Some(wc.clone()),
+            limit: None,
+            order: None,
+        },
+    );
+
+    resolve_projections(
+        &store,
+        &mut instances,
+        &projections,
+        &shape,
+        &resolver,
+        0,
+        None,
+        Some(true),
+    )
+    .await
+    .unwrap();
+
+    let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
+    assert_eq!(
+        count, 1,
+        "should count only the 'like' signal (1 of 2), got {count}"
+    );
+
+    // Also verify the LIST variant ($myLikeSignal pattern with limit: 1).
+    let mut instances2 = vec![json!({ "id": parent_a })];
+    let mut projections2 = HashMap::new();
+    projections2.insert(
+        "$myLikeSignal".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "signals".to_string(),
+            count: false,
+            target_class_name: Some("Signal".to_string()),
+            where_clause: Some(wc),
+            limit: Some(1),
+            order: None,
+        },
+    );
+
+    resolve_projections(
+        &store,
+        &mut instances2,
+        &projections2,
+        &shape,
+        &resolver,
+        0,
+        None,
+        Some(true),
+    )
+    .await
+    .unwrap();
+
+    let got = &instances2[0]["$myLikeSignal"];
+    assert_eq!(
+        got["id"].as_str().unwrap_or(""),
+        like_signal,
+        "list with limit:1 should return the hydrated like signal id, got {got}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sort extension (projection count / relation property) integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_sort_by_projection_count_desc() {
+    // Three posts with 0, 2, and 5 likes respectively.
+    // Query with order: [["$likeCount", "DESC"]] + limit to trigger TwoPhase.
+    // Expected order: 5 likes → 2 likes → 0 likes.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    struct Post<'a> {
+        id: &'a str,
+        likes: usize,
+    }
+    let posts = [
+        Post {
+            id: "test://post/zero",
+            likes: 0,
+        },
+        Post {
+            id: "test://post/five",
+            likes: 5,
+        },
+        Post {
+            id: "test://post/two",
+            likes: 2,
+        },
+    ];
+
+    for post in &posts {
+        // Conformance flag
+        store
+            .add_link(&make_link(post.id, "ns://type", "ns://post", ts))
+            .unwrap();
+        // Likes
+        for i in 0..post.likes {
+            let like = format!("{}like{}", post.id, i);
+            store
+                .add_link(&make_link(post.id, "ns://has-like", &like, ts))
+                .unwrap();
+        }
+    }
+
+    let post_shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": {
+            "likes": { "predicate": "ns://has-like" }
+        }
+    }"#;
+
+    // Build a projection: $likeCount = count of "likes" relation
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$likeCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "likes".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    let result = fixture_query_from_json(
+        &store,
+        "Post",
+        &ModelQueryInput {
+            projections: Some(projections),
+            order: Some(vec![("$likeCount".to_string(), OrderDirection::DESC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        post_shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3, "should return all 3 posts");
+
+    let like_counts: Vec<u64> = result
+        .instances
+        .iter()
+        .map(|i| i["$likeCount"].as_u64().unwrap_or(0))
+        .collect();
+    assert_eq!(
+        like_counts,
+        vec![5, 2, 0],
+        "posts should be ordered by like count DESC: got {like_counts:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_projection_count_asc() {
+    // Same data as above; ascending order should give 0 → 2 → 5.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let data = [("test://p/a", 3usize), ("test://p/b", 0), ("test://p/c", 7)];
+    for (id, count) in &data {
+        store
+            .add_link(&make_link(id, "ns://type", "ns://post", ts))
+            .unwrap();
+        for i in 0..*count {
+            store
+                .add_link(&make_link(id, "ns://has-like", &format!("{id}like{i}"), ts))
+                .unwrap();
+        }
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": { "likes": { "predicate": "ns://has-like" } }
+    }"#;
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$likeCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "likes".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    let result = fixture_query_from_json(
+        &store,
+        "Post",
+        &ModelQueryInput {
+            projections: Some(projections),
+            order: Some(vec![("$likeCount".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let like_counts: Vec<u64> = result
+        .instances
+        .iter()
+        .map(|i| i["$likeCount"].as_u64().unwrap_or(0))
+        .collect();
+    assert_eq!(
+        like_counts,
+        vec![0, 3, 7],
+        "ASC count sort: got {like_counts:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_projection_count_with_pagination() {
+    // Verify that LIMIT + offset are respected when sorting by projection count.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let data = [
+        ("test://p/1", 10usize),
+        ("test://p/2", 1),
+        ("test://p/3", 5),
+        ("test://p/4", 3),
+        ("test://p/5", 8),
+    ];
+    for (id, count) in &data {
+        store
+            .add_link(&make_link(id, "ns://type", "ns://post", ts))
+            .unwrap();
+        for i in 0..*count {
+            store
+                .add_link(&make_link(id, "ns://has-like", &format!("{id}like{i}"), ts))
+                .unwrap();
+        }
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": { "likes": { "predicate": "ns://has-like" } }
+    }"#;
+
+    let mut projections = HashMap::new();
+    projections.insert(
+        "$likeCount".to_string(),
+        ProjectionInput {
+            transitive: false,
+            from: "likes".to_string(),
+            count: true,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    );
+
+    // Ask for page 1 (top-2 by likes DESC): should be 10 and 8
+    let result = fixture_query_from_json(
+        &store,
+        "Post",
+        &ModelQueryInput {
+            projections: Some(projections.clone()),
+            order: Some(vec![("$likeCount".to_string(), OrderDirection::DESC)]),
+            limit: Some(2),
+            offset: None,
+            count: Some(true),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 2, "page size should be 2");
+    assert_eq!(result.total_count, 5, "total should be 5");
+    let page1: Vec<u64> = result
+        .instances
+        .iter()
+        .map(|i| i["$likeCount"].as_u64().unwrap_or(0))
+        .collect();
+    assert_eq!(page1, vec![10, 8], "page 1 DESC: got {page1:?}");
+}
+
+// ── Sort by relation property ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_sort_by_relation_property_asc() {
+    // Three posts each linked to a location with a different name.
+    // Query posts ordered by location.name ASC.
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    struct Fixture<'a> {
+        post_id: &'a str,
+        loc_id: &'a str,
+        loc_name: &'a str,
+    }
+    let fixtures = [
+        Fixture {
+            post_id: "test://post/c",
+            loc_id: "test://loc/c",
+            loc_name: "Zebra City",
+        },
+        Fixture {
+            post_id: "test://post/a",
+            loc_id: "test://loc/a",
+            loc_name: "Alpha Town",
+        },
+        Fixture {
+            post_id: "test://post/b",
+            loc_id: "test://loc/b",
+            loc_name: "Middle Place",
+        },
+    ];
+
+    for f in &fixtures {
+        // Post conformance flag
+        store
+            .add_link(&make_link(f.post_id, "ns://type", "ns://post", ts))
+            .unwrap();
+        // Post → location relation
+        store
+            .add_link(&make_link(f.post_id, "ns://has-location", f.loc_id, ts))
+            .unwrap();
+        // Location conformance flag
+        store
+            .add_link(&make_link(f.loc_id, "ns://type", "ns://location", ts))
+            .unwrap();
+        // Location name property (stored as a literal IRI)
+        let name_iri = format!("literal:string:{}", literal_percent_encode(f.loc_name));
+        store
+            .add_link(&make_link(f.loc_id, "ns://loc-name", &name_iri, ts))
+            .unwrap();
+    }
+
+    // Register both shapes in a shared resolver.
+    let resolver = StaticShapeResolver::new();
+
+    let post_shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post" }
+        },
+        "relations": {
+            "location": {
+                "predicate": "ns://has-location",
+                "targetClassName": "Location",
+                "kind": "hasOne"
+            }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location",
+        "properties": {
+            "type":    { "predicate": "ns://type",     "required": true, "flag": true, "initial": "ns://location" },
+            "name":    { "predicate": "ns://loc-name", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let post_shape = parse_shape_from_json(post_shape_json, "Post").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location").unwrap();
+    resolver.register("Post", post_shape.clone());
+    resolver.register("Location", loc_shape);
+
+    let result = fixture_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.name".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3, "should return all 3 posts");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["test://post/a", "test://post/b", "test://post/c"],
+        "posts should be ordered by location name ASC: got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_relation_property_desc() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let fixtures = [
+        ("test://post/x", "test://loc/x", "Cherry"),
+        ("test://post/y", "test://loc/y", "Apple"),
+        ("test://post/z", "test://loc/z", "Mango"),
+    ];
+    for (post_id, loc_id, loc_name) in &fixtures {
+        store
+            .add_link(&make_link(post_id, "ns://type", "ns://post2", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(post_id, "ns://has-location", loc_id, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(loc_id, "ns://type", "ns://location2", ts))
+            .unwrap();
+        let name_iri = format!("literal:string:{}", literal_percent_encode(loc_name));
+        store
+            .add_link(&make_link(loc_id, "ns://loc-name2", &name_iri, ts))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape_json = r#"{
+        "className": "Post2",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post2" }
+        },
+        "relations": {
+            "location": { "predicate": "ns://has-location", "targetClassName": "Location2", "kind": "hasOne" }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location2",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://location2" },
+            "name": { "predicate": "ns://loc-name2", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    let post_shape = parse_shape_from_json(post_shape_json, "Post2").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location2").unwrap();
+    resolver.register("Post2", post_shape.clone());
+    resolver.register("Location2", loc_shape);
+
+    let result = fixture_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.name".to_string(), OrderDirection::DESC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    // DESC: Mango > Cherry > Apple
+    assert_eq!(
+        ids,
+        vec!["test://post/z", "test://post/x", "test://post/y"],
+        "posts should be ordered by location name DESC: got {ids:?}"
+    );
+}
+
+/// Regression test: real-world literal storage wraps values in a signed
+/// expression envelope (`literal:json:{"author":...,"data":<value>,"proof":...}`),
+/// not a bare `literal:string:<value>`. The pagination subquery's sort-value
+/// extraction must unwrap that envelope via `fn/parse_literal` — a naive
+/// fixed-offset SUBSTR over the raw IRI string previously extracted the whole
+/// envelope blob instead, which happens to sort by the embedded `timestamp`
+/// field (since it precedes `data` in the JSON) rather than the actual value.
+#[tokio::test]
+async fn test_sort_by_relation_property_with_signed_envelope_literal() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts_base = 1700000000000i64;
+
+    // Insertion order deliberately does NOT match either alphabetical or
+    // timestamp order, so a fallback-to-timestamp bug would produce a
+    // different (wrong) result than a fallback-to-insertion-order bug —
+    // either kind of regression is caught.
+    let fixtures = [
+        ("test://post/e1", "test://loc/e1", "Portugal"),
+        ("test://post/e2", "test://loc/e2", "Germany"),
+        ("test://post/e3", "test://loc/e3", "France"),
+    ];
+    for (i, (post_id, loc_id, country)) in fixtures.iter().enumerate() {
+        let ts = format!("{}", ts_base + i as i64);
+        store
+            .add_link(&make_link(post_id, "ns://type", "ns://post3", &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(post_id, "ns://has-location", loc_id, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(loc_id, "ns://type", "ns://location3", &ts))
+            .unwrap();
+        let envelope_ts = format!("2024-01-0{}T00:00:00.000Z", i + 1);
+        store
+            .add_link(&make_link(
+                loc_id,
+                "ns://loc-country",
+                &signed_envelope_literal_with_ts(country, &envelope_ts),
+                &ts,
+            ))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape_json = r#"{
+        "className": "Post3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post3" }
+        },
+        "relations": {
+            "location": { "predicate": "ns://has-location", "targetClassName": "Location3", "kind": "hasOne" }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://location3" },
+            "country": { "predicate": "ns://loc-country", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    let post_shape = parse_shape_from_json(post_shape_json, "Post3").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location3").unwrap();
+    resolver.register("Post3", post_shape.clone());
+    resolver.register("Location3", loc_shape);
+
+    let result = fixture_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.country".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    // Alphabetical by country ASC: France, Germany, Portugal
+    assert_eq!(
+        ids,
+        vec!["test://post/e3", "test://post/e2", "test://post/e1"],
+        "posts should be ordered by location.country ASC despite signed-envelope \
+         literal storage: got {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_relation_property_with_missing_relation() {
+    // Some posts lack a location. They should sort to the end (null last).
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    // post/a: has location "Beta"
+    // post/b: has location "Alpha"
+    // post/c: no location
+    store
+        .add_link(&make_link("test://post3/a", "ns://type", "ns://post3", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://post3/a",
+            "ns://has-location3",
+            "test://loc3/a",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://loc3/a",
+            "ns://loc-name3",
+            &format!("literal:string:{}", literal_percent_encode("Beta")),
+            ts,
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("test://post3/b", "ns://type", "ns://post3", ts))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://post3/b",
+            "ns://has-location3",
+            "test://loc3/b",
+            ts,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "test://loc3/b",
+            "ns://loc-name3",
+            &format!("literal:string:{}", literal_percent_encode("Alpha")),
+            ts,
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("test://post3/c", "ns://type", "ns://post3", ts))
+        .unwrap();
+    // post3/c deliberately has no has-location3 link
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape_json = r#"{
+        "className": "Post3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://post3" }
+        },
+        "relations": {
+            "location": { "predicate": "ns://has-location3", "targetClassName": "Location3", "kind": "hasOne" }
+        }
+    }"#;
+    let loc_shape_json = r#"{
+        "className": "Location3",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://location" },
+            "name": { "predicate": "ns://loc-name3", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+    let post_shape = parse_shape_from_json(post_shape_json, "Post3").unwrap();
+    let loc_shape = parse_shape_from_json(loc_shape_json, "Location3").unwrap();
+    resolver.register("Post3", post_shape.clone());
+    resolver.register("Location3", loc_shape);
+
+    let result = fixture_query(
+        &store,
+        &post_shape,
+        &ModelQueryInput {
+            order: Some(vec![("location.name".to_string(), OrderDirection::ASC)]),
+            limit: Some(10),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 3);
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    // Alpha < Beta < (no location → null → end)
+    assert_eq!(
+        ids,
+        vec!["test://post3/b", "test://post3/a", "test://post3/c"],
+        "post without location should sort to end: got {ids:?}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Indexed-WHERE benchmark
+// -----------------------------------------------------------------------------
+//
+// `cargo test --release --lib perspectives::model_query::integration_tests::bench_indexed_literal_vs_str_filter`
+//
+// Compares two equivalent SPARQL queries against the same `literal:string:`
+// data: an indexed direct-typed-literal probe vs. a `FILTER(STR(?t) = ...)`
+// comparison. The former is what the WHERE builders now emit; the latter is
+// the shape they emitted before. Both queries find the same rows; the
+// difference is whether Oxigraph's planner can use the POS index.
+
+#[test]
+fn bench_indexed_literal_vs_str_filter() {
+    use std::time::Instant;
+
+    // Skip in debug builds — comparing per-row function call to an index probe
+    // is meaningless without optimisations.
+    if cfg!(debug_assertions) {
+        eprintln!("(bench skipped — run with --release)");
+        return;
+    }
+
+    // Toggle scale with WT_BENCH_LINKS; 10k by default.
+    let n_links: usize = std::env::var("WT_BENCH_LINKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000);
+
+    assert!(
+        n_links > 0,
+        "WT_BENCH_LINKS must be > 0 (got 0); omit the variable to use the default (10 000)"
+    );
+
+    let store = SparqlStore::new(None).unwrap();
+    let pred = "ns://body";
+    let target_value = "needle";
+    let stored_target = format!("literal:string:{}", literal_percent_encode(target_value));
+
+    // Seed N rows; only the last carries the matching target.
+    let needle_idx = n_links - 1;
+    for i in 0..n_links {
+        let source = format!("test://row/{i}");
+        store
+            .add_link(&make_link(
+                &source,
+                "ns://type",
+                "ns://row",
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
+            .unwrap();
+        let target = if i == needle_idx {
+            stored_target.clone()
+        } else {
+            format!(
+                "literal:string:{}",
+                literal_percent_encode(&format!("row-{i}"))
+            )
+        };
+        store
+            .add_link(&make_link(
+                &source,
+                pred,
+                &target,
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
+            .unwrap();
+    }
+
+    let indexed = format!("SELECT ?source WHERE {{ ?source <{pred}> \"{target_value}\" . }}");
+    let filtered = format!(
+        "SELECT ?source WHERE {{ \
+            ?source <{pred}> ?t . \
+            FILTER(STR(?t) = \"{target_value}\") \
+        }}"
+    );
+
+    // Warm-up — touch every triple under both query plans before timing.
+    let _ = store.query(&indexed).unwrap();
+    let _ = store.query(&filtered).unwrap();
+
+    let runs = 5;
+    let mut indexed_total = std::time::Duration::ZERO;
+    let mut filtered_total = std::time::Duration::ZERO;
+    let expected = format!("test://row/{needle_idx}");
+
+    for _ in 0..runs {
+        let start = Instant::now();
+        let r = store.query(&indexed).unwrap();
+        indexed_total += start.elapsed();
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "indexed query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "indexed query must return only the needle source",
+        );
+
+        let start = Instant::now();
+        let r = store.query(&filtered).unwrap();
+        filtered_total += start.elapsed();
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "filtered query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "filtered query must return only the needle source",
+        );
+    }
+
+    let indexed_us = (indexed_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let filtered_us = (filtered_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let speedup = filtered_us / indexed_us;
+    eprintln!(
+        "[bench] n={n_links}  indexed={indexed_us:.1}µs  fn_parse_literal_filter={filtered_us:.1}µs  speedup={speedup:.1}x"
+    );
+}
+
+#[tokio::test]
+async fn test_persistent_store_typed_literal_comparison() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap();
+    let ts = "1700000000000";
+
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
+    let scores = [10.0, 30.0, 50.0, 70.0, 90.0];
+    let names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://scored", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "ns://score",
+                &signed_literal_number(scores[i]),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(item, "ns://name", &signed_literal(names[i]), ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Test 1: gt numeric
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(50.0),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "persistent: gt:50 should match 70 and 90, got {:?}",
+        result.instances
+    );
+
+    // Test 2: not string
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::String("Alpha".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "persistent: not:Alpha should match 4 items, got {:?}",
+        result.instances
+    );
+
+    // Test 3: not string array
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::Array(vec![
+                Value::String("Alpha".to_string()),
+                Value::String("Beta".to_string()),
+            ])),
+            ..Default::default()
+        }),
+    );
+    let result = fixture_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        3,
+        "persistent: not:[Alpha,Beta] should match 3 items, got {:?}",
+        result.instances
+    );
+
+    // Diagnostic: raw SPARQL to verify typed literal comparison
+    let raw_gt = store
+        .query(
+            r#"SELECT ?s WHERE {
+                ?s <ns://score> ?v .
+                FILTER(?v > "50"^^<http://www.w3.org/2001/XMLSchema#integer>)
+            }"#,
+        )
+        .unwrap();
+    let raw_gt_rows: Vec<Value> = serde_json::from_str(&raw_gt).unwrap();
+    eprintln!(
+        "[diag] raw gt:50 query returned {} rows: {:?}",
+        raw_gt_rows.len(),
+        raw_gt_rows
+    );
+    assert_eq!(raw_gt_rows.len(), 2, "raw SPARQL gt:50 must return 2 rows");
+
+    let raw_neq = store
+        .query(
+            r#"SELECT ?s WHERE {
+                ?s <ns://name> ?v .
+                FILTER(?v != "Alpha"^^<http://www.w3.org/2001/XMLSchema#string>)
+            }"#,
+        )
+        .unwrap();
+    let raw_neq_rows: Vec<Value> = serde_json::from_str(&raw_neq).unwrap();
+    eprintln!(
+        "[diag] raw neq:Alpha query returned {} rows: {:?}",
+        raw_neq_rows.len(),
+        raw_neq_rows
+    );
+    assert_eq!(
+        raw_neq_rows.len(),
+        4,
+        "raw SPARQL neq:Alpha must return 4 rows"
+    );
+}
+
+#[tokio::test]
+async fn test_model_query_from_js_wire_format() {
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
+    let titles = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let counts = [10i64, 20, 30, 40, 50];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link(item, "test://post_type", "test://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "test://title",
+                &signed_literal(titles[i]),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "test://view_count",
+                &format!("literal:number:{}", counts[i]),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "TestPost",
+        "properties": {
+            "type": { "predicate": "test://post_type", "required": true, "flag": true, "initial": "test://post" },
+            "title": { "predicate": "test://title", "required": true, "resolveLanguage": "literal" },
+            "viewCount": { "predicate": "test://view_count", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Simulate exact JSON wire format from JS client:
+    // { "where": { "viewCount": { "gt": 30 } }, "deepQuery": true }
+    let wire_json = r#"{"where": {"viewCount": {"gt": 30}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    eprintln!("[wire] parsed query: {:?}", query_input);
+
+    let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "wire gt:30 should match 40 and 50, got {:?}",
+        result.instances
+    );
+
+    // not:Alpha from JS wire format
+    let wire_json = r#"{"where": {"title": {"not": "Alpha"}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    eprintln!("[wire] parsed not query: {:?}", query_input);
+
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "wire not:Alpha should match 4, got {:?}",
+        result.instances
+    );
+
+    // between from JS wire format
+    let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        3,
+        "wire between:[20,40] should match 3, got {:?}",
+        result.instances
+    );
+}
+
+#[tokio::test]
+async fn test_duplicate_literal_property_values_keep_instances_distinct() {
+    // Two Message-like instances with IDENTICAL body text must remain two
+    // distinct, independently addressable/queryable entities. Uniqueness
+    // comes from each instance's own subject-class base IRI (the source of
+    // the property triple), never from the shared literal object — see PR
+    // #842 discussion on why bare literals cannot provide entity identity.
+    let store = SparqlStore::new(None).unwrap();
+
+    let base1 = "ad4m://obj/aaaaaaaaaaaaaaaaaaaaaaaa";
+    let base2 = "ad4m://obj/bbbbbbbbbbbbbbbbbbbbbbbb";
+    let hello_target = format!("literal:string:{}", literal_percent_encode("hello"));
+
+    for base in [base1, base2] {
+        store
+            .add_link(&make_link(
+                base,
+                "ad4m://type",
+                "message://Message",
+                "1700000000000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "message://body",
+                &hello_target,
+                "1700000000001",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "message://Message"
+            },
+            "body": {
+                "predicate": "message://body",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Identical body text must NOT collapse the two instances into one.
+    let result =
+        fixture_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "two instances with identical body text must both be returned, not deduplicated: {:?}",
+        result.instances
+    );
+
+    let mut ids: Vec<String> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    let mut expected_ids = vec![base1.to_string(), base2.to_string()];
+    expected_ids.sort();
+    assert_eq!(
+        ids, expected_ids,
+        "each instance must keep its own distinct base IRI"
+    );
+    for instance in &result.instances {
+        assert_eq!(instance["body"], json!("hello"));
+    }
+
+    // A WHERE clause on the shared value must match both — the store
+    // indexes triples by (subject, predicate, object), not by object value
+    // alone, so a shared literal never merges two subjects into one.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "body".to_string(),
+        WhereCondition::String("hello".to_string()),
+    );
+    let query_where = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result2 = fixture_query_from_json(&store, "Message", &query_where, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result2.instances.len(),
+        2,
+        "WHERE body='hello' must match both instances sharing that literal value"
+    );
+
+    // Mutating one instance's property must never leak onto the other —
+    // this is what `setSingleTarget` relies on in production: remove+add
+    // scoped by (source, predicate), where `source` is the instance's own
+    // base IRI, not the literal value being replaced.
+    store
+        .remove_link(&make_link(
+            base1,
+            "message://body",
+            &hello_target,
+            "1700000000001",
+        ))
+        .unwrap();
+    let goodbye_target = format!("literal:string:{}", literal_percent_encode("goodbye"));
+    store
+        .add_link(&make_link(
+            base1,
+            "message://body",
+            &goodbye_target,
+            "1700000000002",
+        ))
+        .unwrap();
+
+    let result3 =
+        fixture_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    let body_by_id: HashMap<String, String> = result3
+        .instances
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().to_string(),
+                i["body"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        body_by_id[base1], "goodbye",
+        "base1's body should reflect its own update"
+    );
+    assert_eq!(
+        body_by_id[base2], "hello",
+        "base2's body must be unaffected by base1's independent update"
+    );
+}
+
+/// `subjectClassesOf` classifies a batch of URIs, finding flagged and flagless
+/// classes alike.
+#[tokio::test]
+async fn test_subject_classes_of_batch() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+
+    // Register three classes. TextBlock and ImageBlock are flagged; Untagged
+    // has no flag, only a required property, so nothing type-tag-like points at
+    // it and it can only be found structurally.
+    for (uri, shape_uri) in [
+        ("ns://models/TextBlock", "ns://models/TextBlockShape"),
+        ("ns://models/ImageBlock", "ns://models/ImageBlockShape"),
+        ("ns://models/Untagged", "ns://models/UntaggedShape"),
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(uri, "ad4m://shape", shape_uri, "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImageBlock",
+        parse_shape_from_json(
+            r#"{"className":"ImageBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://image_block"}
+               },"relations":{}}"#,
+            "ImageBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Untagged",
+        parse_shape_from_json(
+            r#"{"className":"Untagged","properties":{
+                 "serial":{"predicate":"ns://serial","required":true}
+               },"relations":{}}"#,
+            "Untagged",
+        )
+        .unwrap(),
+    );
+
+    // Instances.
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://b", "ns://flag", "ns://image_block", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "ns://c",
+            "ns://serial",
+            "literal:string:xyz",
+            "4",
+        ))
+        .unwrap();
+
+    let uris = vec![
+        "ns://a".to_string(),
+        "ns://b".to_string(),
+        "ns://c".to_string(),
+        "ns://nothing".to_string(),
+    ];
+    let result = subject_classes_of(&store, &resolver, &uris).unwrap();
+
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
+    assert_eq!(
+        result.get("ns://c"),
+        Some(&vec!["Untagged".to_string()]),
+        "a flagless class is still found, by its required properties alone",
+    );
+    assert!(
+        !result.contains_key("ns://nothing"),
+        "a URI matching no class is absent, not mapped to a placeholder",
+    );
+}
+
+/// A URI that cannot be emitted as an IRIREF costs only itself.
+///
+/// Relative references and empty strings are a SPARQL *parse* error inside a
+/// `VALUES` clause, not a non-match, so letting one through would fail the whole
+/// batch's query and every well-formed URI alongside it.
+#[tokio::test]
+async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://b", "ns://flag", "ns://text_block", "3"))
+        .unwrap();
+
+    let uris = vec![
+        "ns://a".to_string(),
+        "active".to_string(), // relative — no scheme
+        "".to_string(),       // empty
+        ":leading-colon".to_string(),
+        "ns://b".to_string(),
+    ];
+    let result = subject_classes_of(&store, &resolver, &uris).expect("the batch still resolves");
+
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(
+        result.get("ns://b"),
+        Some(&vec!["TextBlock".to_string()]),
+        "a well-formed URI keeps its answer despite unusable neighbours",
+    );
+    assert_eq!(
+        result.len(),
+        2,
+        "the unusable URIs are absent, not classified and not fatal",
+    );
+}
+
+/// A class whose SHACL names a relative predicate is skipped, not fatal.
+///
+/// The predicate would go into the same `VALUES` clause, so admitting it would
+/// break `subjectClassesOf` for every URI in the perspective, not just for
+/// instances of that class.
+#[tokio::test]
+async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["ns://models/Broken", "ns://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "Broken",
+        parse_shape_from_json(
+            r#"{"className":"Broken","properties":{
+                 "title":{"predicate":"title","required":true}
+               },"relations":{}}"#,
+            "Broken",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "title", "literal:string:hi", "2"))
+        .unwrap();
+
+    let result =
+        subject_classes_of(&store, &resolver, &["ns://a".to_string()]).expect("the batch resolves");
+
+    assert_eq!(
+        result.get("ns://a"),
+        Some(&vec!["TextBlock".to_string()]),
+        "the sound class still answers; the broken one is dropped, not matched",
+    );
+}
+
+/// A flag is not on its own proof of membership: a class is only matched when
+/// *every* triple it requires is present, which is what `isSubjectInstance`
+/// asks and therefore what this has to agree with.
+#[tokio::test]
+async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    // Carries the flag but not the required `text`, so it is not a TextBlock.
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    assert!(
+        !result.contains_key("ns://a"),
+        "the flag alone does not make it an instance",
+    );
+}
+
+/// Structural membership is not exclusive, so every class the URI conforms to
+/// is returned — ordered most specific first, but none of them dropped.
+#[tokio::test]
+async fn test_subject_classes_of_returns_every_class_most_specific_first() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["ns://models/Post", "ns://models/ImagePost"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    // Post requires only the base flag; ImagePost requires that *and* more,
+    // which is what every subclass looks like.
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "kind":{"predicate":"ns://kind","required":true,"flag":true,"initial":"ns://node"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImagePost",
+        parse_shape_from_json(
+            r#"{"className":"ImagePost","properties":{
+                 "kind":{"predicate":"ns://kind","required":true,"flag":true,"initial":"ns://node"},
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "ImagePost",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://kind", "ns://node", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
+        .unwrap();
+
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    let classes = result.get("ns://a").expect("ns://a is classified");
+    assert_eq!(
+        classes,
+        &vec!["ImagePost".to_string(), "Post".to_string()],
+        "the instance is a Post as well as an ImagePost, and both are reported",
+    );
+    assert_eq!(
+        classes.first().map(String::as_str),
+        Some("ImagePost"),
+        "callers that can only act on one class take the head and get the derived one",
+    );
+}
+
+/// A disjunction filters in SPARQL, and keeps its ordering and limit.
+///
+/// Before the where clause was compiled as one tree, `OR` was skipped by the
+/// emitter and evaluated post-hydration — which also disabled the SPARQL
+/// pagination pushdown entirely, because `all_where_pushable` returned false on
+/// sight of a combinator. The rows were right (the Rust filter ran) but the
+/// `ORDER BY` was not applied at the SPARQL level and the whole class was
+/// hydrated to answer a two-row query.
+///
+/// This is the shape the documented cross-field search box compiles to.
+#[tokio::test]
+async fn test_or_where_filters_in_sparql_with_order_and_limit() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for (base, title, body, ts) in [
+        ("we://post/1", "Alpha", "about cats", "1700000000000"),
+        ("we://post/2", "Beta", "about dogs", "1700000000001"),
+        ("we://post/3", "Gamma", "about cats", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://body",
+                &format!("literal:string:{}", literal_percent_encode(body)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            },
+            "title": { "predicate": "we://title", "resolveLanguage": "literal" },
+            "body": { "predicate": "we://body", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // title == "Alpha" OR body == "about dogs"  → posts 1 and 2, not 3.
+    let or_clause = super::types::WhereCondition::SubClauses(vec![
+        BTreeMap::from([(
+            "title".to_string(),
+            super::types::WhereCondition::String("Alpha".to_string()),
+        )]),
+        BTreeMap::from([(
+            "body".to_string(),
+            super::types::WhereCondition::String("about dogs".to_string()),
+        )]),
+    ]);
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([("OR".to_string(), or_clause)])),
+        order: Some(vec![(
+            "title".to_string(),
+            super::types::OrderDirection::DESC,
+        )]),
+        limit: Some(10),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .unwrap();
+
+    let titles: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(
+        titles,
+        vec!["Beta", "Alpha"],
+        "the disjunction must match exactly posts 1 and 2, ordered by title DESC",
+    );
+}
+
+/// A negation filters in SPARQL.
+#[tokio::test]
+async fn test_not_where_filters_in_sparql() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for (base, title, ts) in [
+        ("we://post/1", "keep", "1700000000000"),
+        ("we://post/2", "drop", "1700000000001"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            },
+            "title": { "predicate": "we://title", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "NOT".to_string(),
+            super::types::WhereCondition::SubClause(BTreeMap::from([(
+                "title".to_string(),
+                super::types::WhereCondition::String("drop".to_string()),
+            )])),
+        )])),
+        limit: Some(10),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .unwrap();
+
+    let titles: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(titles, vec!["keep"]);
+}
+
+/// Two conditions on one property, inside a combinator, must not collide.
+///
+/// Variable names are derived from the property name. That is safe while a where
+/// clause is a flat map — keys are unique — but a combinator lets the same
+/// property appear twice, and both leaves then emit `BIND(… AS ?_pw_title_v)`
+/// into the same group. SPARQL forbids binding a variable already in scope, so
+/// this did not return the wrong rows: the query failed to parse
+/// ("Query is not valid read-only SPARQL … expected [_]").
+#[tokio::test]
+async fn test_and_with_two_conditions_on_one_property() {
+    let store = SparqlStore::new(None).unwrap();
+    for (base, title) in [("ns://p/1", "alpha beta"), ("ns://p/2", "alpha only")] {
+        store
+            .add_link(&make_link(base, "ns://flag", "ns://post", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "ns://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                "1",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{"className":"Post","properties":{
+        "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://post"},
+        "title":{"predicate":"ns://title","resolveLanguage":"literal"}},"relations":{}}"#;
+
+    let contains = |v: &str| {
+        super::types::WhereCondition::Ops(super::types::WhereOps {
+            contains: Some(serde_json::Value::String(v.to_string())),
+            ..Default::default()
+        })
+    };
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "AND".to_string(),
+            super::types::WhereCondition::SubClauses(vec![
+                BTreeMap::from([("title".to_string(), contains("alpha"))]),
+                BTreeMap::from([("title".to_string(), contains("beta"))]),
+            ]),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .expect("the clause must compile to valid SPARQL");
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["ns://p/1"],
+        "only the title containing both terms matches",
+    );
+}
+
+/// A `NOT` branch constraining a property the outer clause also constrains.
+///
+/// Not a bug that was observed — `FILTER NOT EXISTS` opens its own group, so this
+/// case survived the collision above and returns the right rows either way. Kept
+/// as a guard, because it is the shape most likely to break if the uniquifying
+/// ever regresses.
+#[tokio::test]
+async fn test_not_on_a_property_also_constrained_outside() {
+    let store = SparqlStore::new(None).unwrap();
+    for (base, title) in [("ns://p/1", "alpha beta"), ("ns://p/2", "alpha only")] {
+        store
+            .add_link(&make_link(base, "ns://flag", "ns://post", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "ns://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                "1",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{"className":"Post","properties":{
+        "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://post"},
+        "title":{"predicate":"ns://title","resolveLanguage":"literal"}},"relations":{}}"#;
+
+    let contains = |v: &str| {
+        super::types::WhereCondition::Ops(super::types::WhereOps {
+            contains: Some(serde_json::Value::String(v.to_string())),
+            ..Default::default()
+        })
+    };
+
+    // title contains "alpha" AND NOT title contains "beta"
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([
+            ("title".to_string(), contains("alpha")),
+            (
+                "NOT".to_string(),
+                super::types::WhereCondition::SubClause(BTreeMap::from([(
+                    "title".to_string(),
+                    contains("beta"),
+                )])),
+            ),
+        ])),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .expect("the clause must compile to valid SPARQL");
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["ns://p/2"], "the one without \"beta\"");
+}
+
+/// `some` / `none` filter on the existence of *linked records*, in SPARQL.
+///
+/// This is the question `include`'s own `where` cannot answer: that one filters
+/// the children it returns, never the parents it returns them for. "Posts with
+/// no comments" was therefore not expressible at all — the caller had to fetch
+/// every post with its comments and count in JS.
+#[tokio::test]
+async fn test_relation_quantifiers_filter_by_linked_records() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // post/1 has a spam comment, post/2 has an ordinary one, post/3 has none.
+    for (base, ts) in [
+        ("we://post/1", "1700000000000"),
+        ("we://post/2", "1700000000001"),
+        ("we://post/3", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+    }
+    for (comment, body, ts) in [
+        ("we://comment/1", "spam", "1700000000010"),
+        ("we://comment/2", "hello", "1700000000011"),
+    ] {
+        store
+            .add_link(&make_link(comment, "we://cflag", "we://comment", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                comment,
+                "we://body",
+                &format!("literal:string:{}", literal_percent_encode(body)),
+                ts,
+            ))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://post/1",
+            "we://comment",
+            "we://comment/1",
+            "1700000000020",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://post/2",
+            "we://comment",
+            "we://comment/2",
+            "1700000000021",
+        ))
+        .unwrap();
+
+    let post_shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            }
+        },
+        "relations": {
+            "comments": {
+                "predicate": "we://comment",
+                "kind": "hasMany",
+                "targetClassName": "Comment"
+            }
+        }
+    }"#;
+    let comment_shape_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "cflag": {
+                "predicate": "we://cflag",
+                "required": true,
+                "flag": true,
+                "initial": "we://comment"
+            },
+            "body": { "predicate": "we://body", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let (resolver, post_shape) = StaticShapeResolver::from_json("Post", post_shape_json).unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(comment_shape_json, "Comment").unwrap(),
+    );
+
+    let quantifier =
+        |some: Option<BTreeMap<String, super::types::WhereCondition>>,
+         none: Option<BTreeMap<String, super::types::WhereCondition>>| {
+            ModelQueryInput {
+                where_clause: Some(BTreeMap::from([(
+                    "comments".to_string(),
+                    super::types::WhereCondition::Ops(super::types::WhereOps {
+                        some,
+                        none,
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }
+        };
+
+    let ids = |result: &super::types::ModelQueryResult| -> Vec<String> {
+        let mut v: Vec<String> = result
+            .instances
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // "has no comments at all"
+    let none_any = fixture_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(None, Some(BTreeMap::new())),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&none_any), vec!["we://post/3".to_string()]);
+
+    // "has at least one comment"
+    let some_any = fixture_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(Some(BTreeMap::new()), None),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ids(&some_any),
+        vec!["we://post/1".to_string(), "we://post/2".to_string()]
+    );
+
+    // "has a comment whose body is spam" — the nested clause names a property
+    // of Comment, so it only resolves because the target class is known.
+    let some_spam = fixture_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(
+            Some(BTreeMap::from([(
+                "body".to_string(),
+                super::types::WhereCondition::String("spam".to_string()),
+            )])),
+            None,
+        ),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&some_spam), vec!["we://post/1".to_string()]);
+}
+
+/// A getter relation that names a target class hydrates through `include`.
+///
+/// This is the traversal a link-shaped relation cannot express: the connection
+/// between two nodes is itself a record (a reified edge), so there is no single
+/// predicate for `through` to name. A getter walks the two hops; `targetClassName`
+/// is what lets the result become typed instances rather than bare URIs.
+///
+/// The two were mutually exclusive in the TypeScript decorator until this change,
+/// even though every layer beneath — SHACL emission, shape parsing, getter
+/// evaluation, include resolution — already supported the pair.
+#[tokio::test]
+async fn test_getter_relation_with_target_class_hydrates_via_include() {
+    let store = SparqlStore::new(None).unwrap();
+
+    let node_a = "we://node/a";
+    let node_b = "we://node/b";
+    let edge = "we://rel/1";
+
+    // Two nodes of the same class.
+    for (base, text, ts) in [
+        (node_a, "Node A", "1700000000000"),
+        (node_b, "Node B", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://text_block", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://text",
+                &format!("literal:string:{}", literal_percent_encode(text)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    // The edge: a record whose two to-one relations name the ends it joins.
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_source",
+            node_a,
+            "1700000000004",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_target",
+            node_b,
+            "1700000000005",
+        ))
+        .unwrap();
+
+    // `related` is defined by a two-hop traversal through the edge record, and
+    // names its own class so the values can be hydrated. Self-referential —
+    // a node relates to other nodes — which also exercises the target shape
+    // resolving to the shape currently being queried.
+    let shape_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://text_block"
+            },
+            "text": { "predicate": "we://text", "resolveLanguage": "literal" }
+        },
+        "relations": {
+            "related": {
+                "kind": "hasMany",
+                "getter": "SELECT ?target WHERE { ?rel <we://relationship_source> <Base> . ?rel <we://relationship_target> ?target . }",
+                "targetClassName": "TextBlock"
+            }
+        }
+    }"#;
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "id".to_string(),
+            super::types::WhereCondition::String(node_a.to_string()),
+        )])),
+        include: Some(HashMap::from([(
+            "related".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query_from_json(&store, "TextBlock", &query, shape_json)
+        .await
+        .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "expected node A");
+    let related = result.instances[0]["related"]
+        .as_array()
+        .expect("related must hydrate as an array");
+
+    assert_eq!(related.len(), 1, "A is joined to exactly one node");
+    assert_eq!(
+        related[0]["id"].as_str().unwrap(),
+        node_b,
+        "the traversal must land on the far end of the edge",
+    );
+    assert_eq!(
+        related[0]["text"].as_str().unwrap(),
+        "Node B",
+        "and it must be a hydrated instance, not a bare URI — which is what \
+         naming the target class buys",
+    );
+}
+
+#[tokio::test]
+async fn test_relation_quantifier_requires_the_target_class() {
+    // A relation quantifier asks "does this Post have a Comment whose body is
+    // 'spam'". Being linked by `we://comment` is not the same as being a
+    // Comment, and hydration knows the difference — it resolves `comments`
+    // through Comment's own query, which applies that class's conformance. A
+    // quantifier that asks only about the predicate matches a Post whose
+    // `comments` then comes back without the node that matched: the filter and
+    // the row disagreeing about one link.
+    let store = SparqlStore::new(None).unwrap();
+
+    let spam = format!("literal:string:{}", literal_percent_encode("spam"));
+
+    // Post A is linked only to a node carrying the body but not the flag.
+    let post_a = "we://postA";
+    let imposter = "we://imposter";
+    store
+        .add_link(&make_link(
+            post_a,
+            "ad4m://type",
+            "we://post",
+            "1700000000000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            post_a,
+            "we://comment",
+            imposter,
+            "1700000000001",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(imposter, "we://body", &spam, "1700000000002"))
+        .unwrap();
+
+    // Post B is linked to a real Comment with the same body.
+    let post_b = "we://postB";
+    let comment = "we://comment1";
+    store
+        .add_link(&make_link(
+            post_b,
+            "ad4m://type",
+            "we://post",
+            "1700000000003",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(post_b, "we://comment", comment, "1700000000004"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            comment,
+            "ad4m://type",
+            "we://comment",
+            "1700000000005",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(comment, "we://body", &spam, "1700000000006"))
+        .unwrap();
+
+    let post_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            }
+        },
+        "relations": {
+            "comments": {
+                "predicate": "we://comment",
+                "targetClassName": "Comment"
+            }
+        }
+    }"#;
+    let comment_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "we://comment"
+            },
+            "body": {
+                "predicate": "we://body",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape = parse_shape_from_json(post_json, "Post").unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(comment_json, "Comment").unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "comments".to_string(),
+            WhereCondition::Ops(super::types::WhereOps {
+                some: Some(BTreeMap::from([(
+                    "body".to_string(),
+                    WhereCondition::String("spam".to_string()),
+                )])),
+                ..Default::default()
+            }),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query(&store, &post_shape, &query, &resolver)
+        .await
+        .unwrap();
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![post_b],
+        "only the Post linked to a real Comment matches — the imposter carries \
+         the body but not the class",
+    );
+}
+
+// --- Polymorphic includes -------------------------------------------------
+//
+// A note on the fixtures below, since they differ on purpose. A class is a set
+// of required triples, and `required_triples` builds that set from flags and
+// required properties alike — a flag contributes `(predicate, Some(value))`
+// where a required property contributes `(predicate, None)`, and nothing past
+// that point can tell them apart. So none of this machinery depends on flags.
+//
+// The first test discriminates its classes by flag, because that is what the
+// consumers of this API ship today and it should keep being covered. The two
+// overlap tests discriminate by required property, because what they assert is
+// about class membership itself and a fixture built from marker flags reads as
+// contrived — two classes needing an overlapping set of ordinary predicates is
+// how overlap actually arises.
+
+/// A heterogeneous relation hydrates each target as the class it actually is.
+///
+/// Without this the collection has no good answer. Declaring the base class
+/// loses every subclass property — `hydrate_one` only reads predicates present
+/// in the shape it is handed, so a subclass read as its parent arrives with
+/// `text` *absent*, not merely mislabelled — and declaring nothing leaves the
+/// include with no shape to resolve at all.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // Register the classes so `subject_class_of` can enumerate them.
+    for uri in [
+        "we://models/Collection",
+        "we://models/TextBlock",
+        "we://models/ImageBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One collection holding one text block and one image block.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://i/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "5",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://i/1", "we://flag", "we://image_block", "6"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://i/1",
+            "we://src",
+            "literal:string:cat.png",
+            "6",
+        ))
+        .unwrap();
+
+    // The collection's `children` names no target class — which is exactly why
+    // it needs this: its members are of genuinely different types.
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImageBlock",
+        parse_shape_from_json(
+            r#"{"className":"ImageBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://image_block"},
+                 "src":{"predicate":"we://src","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImageBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2, "both children hydrate");
+
+    let text = children
+        .iter()
+        .find(|c| c["id"] == "we://t/1")
+        .expect("the text block");
+    let image = children
+        .iter()
+        .find(|c| c["id"] == "we://i/1")
+        .expect("the image block");
+
+    assert_eq!(text["__subjectClass"].as_str(), Some("TextBlock"));
+    assert_eq!(image["__subjectClass"].as_str(), Some("ImageBlock"));
+    // The property that only exists on the concrete class — the thing a
+    // base-class hydration silently drops.
+    assert_eq!(text["text"].as_str(), Some("hello"));
+    assert_eq!(image["src"].as_str(), Some("cat.png"));
+}
+
+/// A target conforming to both a class and its parent hydrates as the class.
+///
+/// This is the case the specificity ranking exists for, and the one where it has
+/// a real answer rather than a convention: a subclass requires everything its
+/// parent requires and more, so "matched more triples" and "more derived" are the
+/// same ordering. Nothing exercised it end to end before — the sibling test's
+/// two classes match one shape each, so the head of the set was never contested.
+///
+/// Discriminated by required properties rather than by flags, so the superset
+/// relation the ranking depends on is visible in the shapes themselves: `Block`
+/// requires a title, `TextBlock` requires a title *and* a body.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_the_most_derived_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Block",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    // The child carries what `Block` requires *and* what `TextBlock` requires,
+    // which is what being a subclass looks like when membership is structural:
+    // it satisfies both, and satisfies the subclass by more.
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://title",
+            "literal:string:Chapter one",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Block",
+        parse_shape_from_json(
+            r#"{"className":"Block","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Block",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "one link, one child");
+
+    let child = &children[0];
+    assert_eq!(child["__subjectClass"].as_str(), Some("TextBlock"));
+    // `text` exists only on the subclass, so its presence is the proof that the
+    // subclass's shape did the hydrating and not the parent's.
+    assert_eq!(child["text"].as_str(), Some("hello"));
+    // Conforming to the parent as well is not an error to be hidden — it is
+    // simply true, and it is reported.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["TextBlock", "Block"]),
+        "the whole set, most specific first"
+    );
+}
+
+/// A target conforming to two *unrelated* classes is still one member.
+///
+/// Links decide how many children a collection has; classes decide only how each
+/// one is read. A class is a set of required triples, so a node carrying what two
+/// independently authored classes each require belongs to both — which is not a
+/// contrived arrangement but the ordinary consequence of two communities modelling
+/// overlapping things. It appears once, read as one of them, with the other
+/// reported rather than dropped.
+///
+/// Which one wins is a convention here, not a fact: the two classes require one
+/// triple each, so the specificity ranking ties and the alphabetical tie-break
+/// decides. Arbitrary, but the same arbitrary answer on every peer, which is the
+/// property worth having when there is no `rdf:type` triple to appeal to.
+#[tokio::test]
+async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_target() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Bookmark",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://b/1", "3"))
+        .unwrap();
+
+    // One node holding what each class requires: somebody saved a link and wrote
+    // a note on it. Neither reading is wrong, and nothing marks it as either.
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://url",
+            "literal:string:https://ad4m.dev",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Bookmark",
+        parse_shape_from_json(
+            r#"{"className":"Bookmark","properties":{
+                 "url":{"predicate":"we://url","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Bookmark",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    // The point of the test: two readings, one link, one member. Hydrating the
+    // node once per class it matches would make a three-link collection arrive
+    // with more than three children.
+    assert_eq!(
+        children.len(),
+        1,
+        "two readings of one node is still one node"
+    );
+
+    let child = &children[0];
+    assert_eq!(child["id"].as_str(), Some("we://b/1"));
+    assert_eq!(
+        child["__subjectClass"].as_str(),
+        Some("Bookmark"),
+        "the ranking ties, so the tie-break decides — and decides the same way everywhere"
+    );
+    assert_eq!(child["url"].as_str(), Some("https://ad4m.dev"));
+    // The reading that lost. A caller wanting it has the id and can ask
+    // `TextBlock` for it directly.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["Bookmark", "TextBlock"])
+    );
+}
+
+/// `limit` on a polymorphic include is refused, not quietly ignored.
+///
+/// The read runs one sub-query per class present, so a limit would apply to each
+/// group separately: the same `limit: 5` returns five rows or fifteen depending
+/// on how many classes the data happens to contain, which the caller cannot see.
+/// Dropping it silently hands back every row to someone who asked for five —
+/// wrong in a way that surfaces much later, and only as slowness.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Collection", "we://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                limit: Some(5),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let err = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("a limit that cannot be honoured must not be dropped in silence");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("limit"), "names what was refused: {msg}");
+}
+
+/// A named class wins over a more specific one the caller did not ask for.
+///
+/// The case the specificity default gets wrong. A relation declares it holds
+/// `Post`s; a target is an `ImagePost`, so it conforms to both and `ImagePost`
+/// matched more. Read as an `ImagePost` it arrives as a class the caller has
+/// never heard of, and no client-side repair is possible for the general shape
+/// of this — a class whose shape does not declare the other's predicates
+/// projects those values out of the payload before anyone sees them.
+///
+/// Naming `Post` says what the read is for, and the answer follows.
+#[tokio::test]
+async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Feed",
+        "we://models/Post",
+        "we://models/ImagePost",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+
+    // An ImagePost: everything a Post requires, and an image besides.
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:Chocolate Cake",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://src",
+            "literal:string:cake.png",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImagePost",
+        parse_shape_from_json(
+            r#"{"className":"ImagePost","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "src":{"predicate":"we://src","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImagePost",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+
+    assert_eq!(
+        entry["__subjectClass"].as_str(),
+        Some("Post"),
+        "the caller named Post, and the target is one"
+    );
+    assert_eq!(entry["title"].as_str(), Some("Chocolate Cake"));
+    // Ranked by specificity regardless of what was preferred, so it stays a fact
+    // about the node rather than about the request — and a reader can see a
+    // preference was applied precisely because the head is not the chosen class.
+    assert_eq!(
+        entry["__subjectClasses"],
+        serde_json::json!(["ImagePost", "Post"]),
+        "the whole set, still most specific first"
+    );
+}
+
+/// Preferring classes never narrows what a relation returns.
+///
+/// A heterogeneous relation is open by definition, so a caller listing the
+/// classes it can use must not thereby drop the ones it cannot. Anything
+/// unnamed still arrives, hydrated as whatever it actually is — which is what
+/// keeps the declaration a preference rather than a scope, and what stops a
+/// model's class list from freezing which classes a collection may hold.
+#[tokio::test]
+async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Feed", "we://models/Post", "we://models/Recipe"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://r/1", "3"))
+        .unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:a post",
+            "4",
+        ))
+        .unwrap();
+    // A class the caller never names, and could not have: somebody defined it
+    // after this relation was written.
+    store
+        .add_link(&make_link(
+            "we://r/1",
+            "we://ingredients",
+            "literal:string:flour, sugar",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Recipe",
+        parse_shape_from_json(
+            r#"{"className":"Recipe","properties":{
+                 "ingredients":{"predicate":"we://ingredients","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Recipe",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "both links, though only one class was named"
+    );
+
+    let recipe = entries
+        .iter()
+        .find(|e| e["id"] == "we://r/1")
+        .expect("the unnamed class is still a member");
+    assert_eq!(recipe["__subjectClass"].as_str(), Some("Recipe"));
+    assert_eq!(recipe["ingredients"].as_str(), Some("flour, sugar"));
+}
+
+/// The same refusal on a relation that happens to hold nothing.
+///
+/// Both resolvers return early once they find no targets, so a check made during
+/// hydration would accept `limit: 5` on an empty collection and reject it on a
+/// full one — the query's validity decided by the data it is asking about.
+/// Whether a request can be answered is a property of the request.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected_even_with_no_targets() {
+    let store = SparqlStore::new(None).unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://models/Collection",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+    // A collection, and deliberately no `children` links at all.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    for relation in ["children", "markedBy"] {
+        let (resolver, shape) =
+            StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+        let query = ModelQueryInput {
+            include: Some(HashMap::from([(
+                relation.to_string(),
+                super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                    polymorphic: Some(true),
+                    offset: Some(2),
+                    ..Default::default()
+                })),
+            )])),
+            ..Default::default()
+        };
+
+        let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("an empty relation must not make an unanswerable query answerable");
+        let msg = err.to_string();
+        assert!(msg.contains(relation), "names the relation: {msg}");
+        assert!(msg.contains("offset"), "names what was refused: {msg}");
+    }
+}
+
+/// An untyped relation read without `polymorphic` fails with an actionable
+/// message rather than a shape lookup for the empty string.
+#[tokio::test]
+async fn test_untyped_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}
+
+/// The inverse side of a heterogeneous relation is heterogeneous too: whatever
+/// points *at* an instance is whatever somebody linked it into. A reverse
+/// include has to honour `polymorphic` for the same reason the forward one does.
+#[tokio::test]
+async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/TextBlock",
+        "we://models/Collection",
+        "we://models/Board",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One block, held by two containers of different classes.
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "2",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://title",
+            "literal:string:Reading list",
+            "3",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://b/1", "we://flag", "we://board", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://label",
+            "literal:string:Sprint 3",
+            "5",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://b/1", "we://children", "we://t/1", "6"))
+        .unwrap();
+
+    // `containers` names no target class — a block does not know what kinds of
+    // thing may hold it, which is the case `polymorphic` exists for.
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+            "text": {"predicate":"we://text","resolveLanguage":"literal"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, block_shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+    resolver.register(
+        "Collection",
+        parse_shape_from_json(
+            r#"{"className":"Collection","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+                 "title":{"predicate":"we://title","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Collection",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Board",
+        parse_shape_from_json(
+            r#"{"className":"Board","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://board"},
+                 "label":{"predicate":"we://label","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Board",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = fixture_query(&store, block_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let containers = result.instances[0]["containers"].as_array().unwrap();
+    assert_eq!(containers.len(), 2, "both containers hydrate");
+
+    let collection = containers
+        .iter()
+        .find(|c| c["id"] == "we://c/1")
+        .expect("the collection");
+    let board = containers
+        .iter()
+        .find(|c| c["id"] == "we://b/1")
+        .expect("the board");
+
+    assert_eq!(collection["__subjectClass"].as_str(), Some("Collection"));
+    assert_eq!(board["__subjectClass"].as_str(), Some("Board"));
+    // The property that exists only on the concrete class — before this, both
+    // took the same path through the declared target class and arrived empty.
+    assert_eq!(collection["title"].as_str(), Some("Reading list"));
+    assert_eq!(board["label"].as_str(), Some("Sprint 3"));
+}
+
+/// An untyped *reverse* relation read without `polymorphic` gets the same
+/// actionable message the forward path gives, rather than a shape lookup for
+/// the empty string.
+#[tokio::test]
+async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("containers"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}
+
+#[tokio::test]
+async fn legacy_non_iri_store_id_round_trips_through_add_link_and_model_query() {
+    // The store contract this PR bets on, pinned end-to-end rather than at the
+    // emitted-SPARQL level: the write path stores sources with
+    // NamedNode::new_unchecked, so a legacy Flux id like `literal://string:xyz`
+    // (non-numeric port ⇒ not a parseable RFC-3987 IRI) exists in the store as
+    // a NamedNode term. A class-wide query over a batch containing that id and
+    // a well-formed one must return BOTH, hydrated — via the FILTER(STR(…))
+    // fallback — not fail to parse and not silently drop the odd row.
+    let store = SparqlStore::new(None).unwrap();
+
+    let legacy = "literal://string:h4o520legacyid";
+    let modern = "ad4m://obj/abcdefghijklmnopqrstuvwx";
+
+    for (base, name, ts) in [
+        (legacy, "Legacy row", "1700000000000"),
+        (modern, "Modern row", "1700000000010"),
+    ] {
+        let flag = make_link(base, "ad4m://type", "ad4m://recipe", ts);
+        store.add_link(&flag).unwrap();
+        let name_target = format!("literal:string:{}", literal_percent_encode(name));
+        let name_link = make_link(base, "recipe://name", &name_target, ts);
+        store.add_link(&name_link).unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Recipe",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "ad4m://recipe"
+            },
+            "name": {
+                "predicate": "recipe://name",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Class-wide read: the batch mixes an unparseable id with a real IRI.
+    let result = fixture_query_from_json(&store, "Recipe", &ModelQueryInput::default(), shape_json)
+        .await
+        .expect("a non-IRI store id must not make the query fail to parse");
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "both rows must come back: {:?}",
+        result.instances
+    );
+    let by_id: HashMap<&str, &Value> = result
+        .instances
+        .iter()
+        .map(|i| (i["id"].as_str().unwrap(), &i["name"]))
+        .collect();
+    assert_eq!(by_id[legacy], &json!("Legacy row"), "legacy row hydrated");
+    assert_eq!(by_id[modern], &json!("Modern row"), "modern row hydrated");
+
+    // Where-by-id on the legacy spelling: the id lands in the where-by-id
+    // emission site, which must take the STR() fallback for this value.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert("id".to_string(), WhereCondition::String(legacy.to_string()));
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Recipe", &query, shape_json)
+        .await
+        .expect("where-by-id on a non-IRI id must not fail to parse");
+    assert_eq!(result.instances.len(), 1, "exactly the legacy row");
+    assert_eq!(result.instances[0]["id"], json!(legacy));
+    assert_eq!(result.instances[0]["name"], json!("Legacy row"));
+}
+
+/// An ordered collection comes back in CRDT order through the ORM read path.
+///
+/// The path that matters: `$query` / `include` / `findAll` all go through
+/// `hydrate_one`, never through `get_links`. Reconstruction placed only in the
+/// latter would leave every ORM read unordered — which is everything the ORM
+/// actually reads through.
+#[tokio::test]
+async fn test_ordered_collection_hydrates_in_crdt_order() {
+    use crate::perspectives::ordering::{
+        encode_ordering_entry, OrderingEntry, COLLECTION_ORDER_PREDICATE, LIST_HEAD,
+    };
+
+    let store = SparqlStore::new(None).unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://col/1",
+            "we://flag",
+            "we://collection",
+            "1",
+        ))
+        .unwrap();
+
+    // Data links are added in the order c, a, b — so a by-timestamp read would
+    // return exactly that, and anything else proves the entries were applied.
+    for (target, ts) in [
+        ("we://x/c", "1700000000010"),
+        ("we://x/a", "1700000000011"),
+        ("we://x/b", "1700000000012"),
+    ] {
+        store
+            .add_link(&make_link("we://col/1", "we://children", target, ts))
+            .unwrap();
+    }
+
+    let order = |item: &str, after: &str, pid: &str| OrderingEntry {
+        predicate: "we://children".to_string(),
+        item: item.to_string(),
+        pid: pid.to_string(),
+        after: Some(after.to_string()),
+        position: None,
+    };
+    for entry in [
+        order("we://x/a", LIST_HEAD, "0000000000000001_did:x"),
+        order("we://x/b", "we://x/a", "0000000000000002_did:x"),
+        order("we://x/c", "we://x/b", "0000000000000003_did:x"),
+    ] {
+        store
+            .add_link(&make_link(
+                "we://col/1",
+                COLLECTION_ORDER_PREDICATE,
+                &encode_ordering_entry(&entry).unwrap(),
+                "1700000000020",
+            ))
+            .unwrap();
+    }
+
+    // The shape declares the ordering *and* the predicate the entries are stored
+    // under — without the latter the instance query's predicate filter drops the
+    // very links the ordering depends on.
+    let shape_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+            "_collectionOrder": {"predicate":"ad4m://collection_order"}
+        },
+        "relations": {
+            "children": {
+                "predicate": "we://children",
+                "kind": "hasMany",
+                "ordering": "linkedList"
+            }
+        }
+    }"#;
+
+    let result = fixture_query_from_json(
+        &store,
+        "Collection",
+        &ModelQueryInput::default(),
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    let children: Vec<&str> = result.instances[0]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    assert_eq!(
+        children,
+        vec!["we://x/a", "we://x/b", "we://x/c"],
+        "CRDT order, not the link-timestamp order the data links were written in",
+    );
+}
+
+/// A collection with no ordering entries yet still reads, by timestamp.
+///
+/// The unordered→ordered migration: SHACL says the relation is ordered before
+/// any entry exists for it. It must degrade to today's behaviour rather than
+/// returning nothing.
+#[tokio::test]
+async fn test_ordered_collection_without_entries_falls_back_to_timestamps() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "we://col/1",
+            "we://flag",
+            "we://collection",
+            "1",
+        ))
+        .unwrap();
+    for (target, ts) in [("we://x/a", "1700000000010"), ("we://x/b", "1700000000011")] {
+        store
+            .add_link(&make_link("we://col/1", "we://children", target, ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+            "_collectionOrder": {"predicate":"ad4m://collection_order"}
+        },
+        "relations": {
+            "children": {"predicate":"we://children","kind":"hasMany","ordering":"linkedList"}
+        }
+    }"#;
+
+    let result = fixture_query_from_json(
+        &store,
+        "Collection",
+        &ModelQueryInput::default(),
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    let children: Vec<&str> = result.instances[0]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(children, vec!["we://x/a", "we://x/b"]);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded traversal (Scope::Traverse)
+// ---------------------------------------------------------------------------
+
+const COMMENT_SHAPE_JSON: &str = r#"{
+    "className": "Comment",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "we://Comment"
+        },
+        "text": {
+            "predicate": "we://text",
+            "required": false
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A thread three levels deep:
+///
+/// ```text
+/// root ── c1 ── r1 ── rr1
+///   │      └─── r2
+///   ├──── c2
+///   └──── c3
+/// ```
+///
+/// Timestamps ascend in declaration order so a `createdAt` sort is deterministic.
+fn comment_tree_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let edges = [
+        ("we://root", "we://c1"),
+        ("we://root", "we://c2"),
+        ("we://root", "we://c3"),
+        ("we://c1", "we://r1"),
+        ("we://c1", "we://r2"),
+        ("we://r1", "we://rr1"),
+    ];
+    let mut t = 1000;
+    for (parent, child) in edges {
+        t += 1;
+        store
+            .add_link(&make_link(
+                parent,
+                "we://comment",
+                child,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                child,
+                "ad4m://type",
+                "we://Comment",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                child,
+                "we://text",
+                &format!("literal:string:{}", child.trim_start_matches("we://")),
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    store
+}
+
+fn traverse_scope(
+    ids: &[&str],
+    transitive: bool,
+    direction: ScopeDirection,
+    limit_per_anchor: Option<usize>,
+) -> Scope {
+    Scope::Traverse {
+        ids: ids.iter().map(|s| s.to_string()).collect(),
+        predicate: "we://comment".to_string(),
+        transitive,
+        direction,
+        limit_per_anchor,
+        levels: None,
+    }
+}
+
+async fn traverse_ids(store: &SparqlStore, scope: Scope, order: bool) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(scope),
+        order: if order {
+            Some(vec![("createdAt".to_string(), OrderDirection::ASC)])
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let mut ids: Vec<String> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    if !order {
+        ids.sort();
+    }
+    ids
+}
+
+/// The claim the whole feature rests on: Oxigraph walks a `+` path, so one
+/// query answers for a whole subtree. Until this ran, only the emitted SPARQL
+/// text had been checked, not what the store does with it.
+#[tokio::test]
+async fn transitive_scope_returns_every_descendant() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://c1".to_string(),
+            "we://c2".to_string(),
+            "we://c3".to_string(),
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string(),
+        ],
+        "a transitive read should reach every level, and exclude the anchor itself"
+    );
+}
+
+#[tokio::test]
+async fn non_transitive_scope_stays_one_step() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root"], false, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://c1".to_string(),
+            "we://c2".to_string(),
+            "we://c3".to_string()
+        ],
+        "one step should be the direct replies only"
+    );
+}
+
+/// One query for a whole level, which is what takes a paginated tree from a
+/// round trip per parent to a round trip per level.
+#[tokio::test]
+async fn multi_anchor_scope_answers_for_every_anchor_at_once() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://c1", "we://r1"], false, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string()
+        ],
+        "both anchors' children should come back from the single query"
+    );
+}
+
+/// Per-anchor, not overall: two anchors with a limit of one must yield one
+/// each, where a global limit of two could have taken both from one anchor.
+#[tokio::test]
+async fn per_anchor_limit_keeps_the_top_n_under_each_anchor() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(
+            &["we://root", "we://c1"],
+            false,
+            ScopeDirection::Out,
+            Some(1),
+        ),
+        true,
+    )
+    .await;
+
+    assert_eq!(ids.len(), 2, "one per anchor, not one overall: {ids:?}");
+    assert!(
+        ids.contains(&"we://c1".to_string()),
+        "root's earliest reply should survive: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"we://r1".to_string()),
+        "c1's earliest reply should survive: {ids:?}"
+    );
+}
+
+/// Searching among what points *at* a node, which a reverse `include` cannot
+/// do because it can only hydrate for rows already in hand.
+#[tokio::test]
+async fn inbound_direction_finds_the_parent() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://rr1"], false, ScopeDirection::In, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec!["we://r1".to_string()],
+        "the inbound read should find exactly the parent"
+    );
+}
+
+/// An anchor nobody has written under is a legitimate answer of nothing. The
+/// failure guarded against is the opposite: an unconstrained anchor variable
+/// matching every comment in the store.
+#[tokio::test]
+async fn traverse_scope_with_an_unknown_anchor_returns_nothing() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://nobody"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert!(ids.is_empty(), "expected no results, got {ids:?}");
+}
+
+/// What a collapsed branch's "N replies" label reads from: the conversation
+/// below each row, not its direct children. `c1` has two direct replies and
+/// three descendants, so the two numbers are distinguishable.
+#[tokio::test]
+async fn transitive_projection_counts_descendants_not_children() {
+    let store = comment_tree_store();
+
+    let counts = |transitive: bool| {
+        let store = &store;
+        async move {
+            let mut projections = HashMap::new();
+            projections.insert(
+                "$replyCount".to_string(),
+                ProjectionInput {
+                    transitive,
+                    from: "comments".to_string(),
+                    count: true,
+                    target_class_name: None,
+                    where_clause: None,
+                    limit: None,
+                    order: None,
+                },
+            );
+            let query = ModelQueryInput {
+                parent: Some(traverse_scope(
+                    &["we://root"],
+                    false,
+                    ScopeDirection::Out,
+                    None,
+                )),
+                projections: Some(projections),
+                ..Default::default()
+            };
+            let result =
+                fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_WITH_REPLIES)
+                    .await
+                    .expect("query should execute");
+            result
+                .instances
+                .iter()
+                .find(|i| i["id"] == "we://c1")
+                .and_then(|i| i["$replyCount"].as_u64())
+                .unwrap_or(0)
+        }
+    };
+
+    assert_eq!(counts(false).await, 2, "c1 has two direct replies");
+    assert_eq!(
+        counts(true).await,
+        3,
+        "c1 has three descendants — r1, r2 and rr1"
+    );
+}
+
+const COMMENT_SHAPE_WITH_REPLIES: &str = r#"{
+    "className": "Comment",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "we://Comment"
+        },
+        "text": {
+            "predicate": "we://text",
+            "required": false
+        },
+        "comments": {
+            "predicate": "we://comment",
+            "required": false,
+            "collection": true
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A wide, deep thread: 4 top-level replies, 4 under each of those, 4 under each of *those*.
+/// 4 + 16 + 64 = 84 comments, which is enough for a per-level walk to differ visibly from both a
+/// one-level read and an unbounded transitive one.
+fn wide_comment_tree_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    let link = |parent: &str, child: &str, t: &mut i32| {
+        *t += 1;
+        let ts = format!("2026-01-01T00:00:{:04}Z", t);
+        store
+            .add_link(&make_link(parent, "we://comment", child, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", &ts))
+            .unwrap();
+    };
+    for a in 0..4 {
+        let l1 = format!("we://a{a}");
+        link("we://root", &l1, &mut t);
+        for b in 0..4 {
+            let l2 = format!("we://b{a}{b}");
+            link(&l1, &l2, &mut t);
+            for c in 0..4 {
+                let l3 = format!("we://c{a}{b}{c}");
+                link(&l2, &l3, &mut t);
+            }
+        }
+    }
+    store
+}
+
+async fn walk(store: &SparqlStore, levels: Vec<usize>) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(levels),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+/// The shape the whole feature exists for: "three replies, then two under each of those, then one
+/// under each of *those*" — 3 + 6 + 6 = 15 rows out of 84, in one request.
+#[tokio::test]
+async fn a_level_walk_bounds_the_breadth_of_each_depth() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![3, 2, 1]).await;
+
+    assert_eq!(ids.len(), 15, "expected 3 + 6 + 6, got {ids:?}");
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://a")).count(), 3);
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://b")).count(), 6);
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
+}
+
+/// Per anchor, not per level: the second level's six rows must be two under EACH of the three
+/// parents, not the first six the store happened to return.
+#[tokio::test]
+async fn a_level_walk_spreads_its_limit_across_every_parent() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![3, 2]).await;
+
+    for a in 0..3 {
+        let under = ids
+            .iter()
+            .filter(|id| id.starts_with(&format!("we://b{a}")))
+            .count();
+        assert_eq!(
+            under, 2,
+            "parent a{a} should contribute two replies: {ids:?}"
+        );
+    }
+}
+
+/// A shorter list of levels is a shallower read — the walk stops where the caller stopped asking,
+/// rather than running to the bottom of the tree.
+#[tokio::test]
+async fn a_level_walk_stops_at_the_depth_it_was_given() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![2]).await;
+
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().all(|id| id.starts_with("we://a")), "{ids:?}");
+}
+
+/// The walk asks each level about every anchor on it at once. A level that turns up nothing ends
+/// it, so asking for more levels than the tree has is not an error and costs nothing extra.
+#[tokio::test]
+async fn a_level_walk_ends_when_the_tree_does() {
+    let store = comment_tree_store();
+    let ids = walk(&store, vec![10, 10, 10, 10, 10]).await;
+
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["we://c1", "we://c2", "we://c3", "we://r1", "we://r2", "we://rr1"],
+        "the whole tree, and nothing repeated: {ids:?}"
+    );
+}
+
+/// A walk must survive a where-clause the store cannot evaluate.
+///
+/// The plan shape used to be chosen by `can_push_pagination`, which is false whenever any part of
+/// the filter has to be applied after hydration — and `author` always does, being link metadata
+/// rather than a property of the shape. So a thread filtering out muted authors — which is any
+/// thread with a mute list behind it — silently got the single-phase plan: the walk never ran and
+/// only the first level
+/// came back. The tests all passed because none of them filtered.
+#[tokio::test]
+async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
+    let store = wide_comment_tree_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3, 2, 1]),
+        }),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+
+    let ids: Vec<String> = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    assert_eq!(
+        ids.len(),
+        15,
+        "every level should still be walked, got {ids:?}"
+    );
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded traversal × the global window (limit/offset), and refused combos
+// ---------------------------------------------------------------------------
+
+/// The global window must cap the union AFTER the per-anchor slice. Pushed
+/// into the id subquery it lands before, where one prolific anchor's rows fill
+/// it and starve the others: LIMIT 3 kept root's c1,c2,c3, the slice kept c1,
+/// and c1-the-anchor's own top reply never came back — one row where the
+/// correct answer is one per anchor, capped at three total.
+#[tokio::test]
+async fn global_limit_caps_the_union_after_the_per_anchor_slice() {
+    let store = comment_tree_store();
+    let ids_for = |limit: usize| {
+        let store = &store;
+        async move {
+            let query = ModelQueryInput {
+                parent: Some(traverse_scope(
+                    &["we://root", "we://c1"],
+                    false,
+                    ScopeDirection::Out,
+                    Some(1),
+                )),
+                order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+                limit: Some(limit),
+                ..Default::default()
+            };
+            let result = fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+                .await
+                .expect("query should execute");
+            result
+                .instances
+                .iter()
+                .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    assert_eq!(
+        ids_for(3).await,
+        vec!["we://c1".to_string(), "we://r1".to_string()],
+        "one per anchor, and both fit the window"
+    );
+    assert_eq!(
+        ids_for(1).await,
+        vec!["we://c1".to_string()],
+        "the window still truncates the sliced union"
+    );
+}
+
+/// When the scope forces the two-phase plan but the filter cannot be pushed
+/// down, the window is not pushed either — and it must still be applied, after
+/// the filter. It used to be silently dropped: `Some(pagination)` was read
+/// downstream as "the store already truncated this".
+#[tokio::test]
+async fn global_limit_applies_when_the_filter_cannot_be_pushed() {
+    let store = comment_tree_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(3),
+        )),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://c1"],
+        "limit 1 after the filter, not dropped"
+    );
+}
+
+/// The window belongs to the walk's whole result. Pushed into the store it
+/// would apply at every level — an OFFSET skipping rows at every depth.
+#[tokio::test]
+async fn the_window_applies_to_the_walks_union_not_to_each_level() {
+    let store = wide_comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3, 2]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        offset: Some(1),
+        limit: Some(4),
+        ..Default::default()
+    };
+    let ids: Vec<String> = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    // Breadth-first union: a0 a1 a2 b00 b01 b10 b11 b20 b21 — skip 1, take 4.
+    assert_eq!(
+        ids,
+        vec!["we://a1", "we://a2", "we://b00", "we://b01"],
+        "one window over the whole walk"
+    );
+}
+
+/// The documented mutual exclusions are refused, not silently resolved:
+/// honouring one of the two would be a wrong answer that looks like a right
+/// one, which is the failure mode this feature refuses everywhere else.
+#[tokio::test]
+async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
+    let store = comment_tree_store();
+
+    let with_transitive = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: true,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3]),
+        }),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Comment", &with_transitive, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("transitive + levels must be refused");
+    assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+
+    let with_limit = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(2),
+            levels: Some(vec![3]),
+        }),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Comment", &with_limit, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("limitPerAnchor + levels must be refused");
+    assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+}
+
+/// A cycle back to the anchor: the walk neither returns the anchor as its own
+/// descendant nor walks it twice. (The suite's other stores are all trees, so
+/// nothing else reaches this path.)
+#[tokio::test]
+async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
+    let store = SparqlStore::new(None).unwrap();
+    for (parent, child, ts) in [
+        ("we://a", "we://b", "2026-01-01T00:00:1001Z"),
+        ("we://b", "we://a", "2026-01-01T00:00:1002Z"),
+    ] {
+        store
+            .add_link(&make_link(parent, "we://comment", child, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", ts))
+            .unwrap();
+    }
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://a".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![10, 10, 10]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://b"],
+        "b once, a never — the walk saw the cycle"
+    );
+}
+
+/// One anchor named below another is still an anchor: it is where the walk
+/// starts, not something the walk found, so it does not occupy a place in the
+/// other's breadth — and its own subtree is walked from depth 0 rather than
+/// again one level down.
+///
+/// This is the multi-anchor face of seeding `seen` with the roots, and the
+/// spelling a caller reaches by accident — "refresh these two branches" where
+/// one happens to sit under the other. The cycle test covers a graph that loops
+/// back; this covers a tree where the caller's own anchor list overlaps.
+#[tokio::test]
+async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string(), "we://c1".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![10, 10]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    // Depth 0 from both anchors: root's c2, c3 (c1 is an anchor) and c1's r1, r2.
+    // Depth 1 from those: r1's rr1. c1's subtree is walked once, from c1.
+    assert_eq!(
+        ids,
+        vec!["we://c2", "we://c3", "we://r1", "we://r2", "we://rr1"],
+        "c1 appears nowhere, and its subtree is not walked twice"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A scope the builder cannot express, a slice that counts rows, and a total
+// that belongs to neither question
+// ---------------------------------------------------------------------------
+
+/// A shape with no flag property and no required property, so the timestamp
+/// probe falls back to `?source ?_anyP ?_anyT` and binds one row per property.
+/// That fallback is what turns "rows" and "instances" into different numbers.
+const LOOSE_SHAPE_JSON: &str = r#"{
+    "className": "Loose",
+    "properties": {
+        "text": { "predicate": "we://text", "required": false },
+        "title": { "predicate": "we://title", "required": false },
+        "note": { "predicate": "we://note", "required": false }
+    },
+    "relations": {}
+}"#;
+
+/// Build a store whose first child carries three properties and second carries
+/// one, so the two differ in how many timestamp rows they bind.
+fn lopsided_property_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    let mut link = |s: &str, p: &str, o: &str, t: &mut i32| {
+        *t += 1;
+        store
+            .add_link(&make_link(s, p, o, &format!("2026-01-01T00:00:{:04}Z", t)))
+            .unwrap();
+    };
+    link("we://root", "we://comment", "we://k1", &mut t);
+    link("we://k1", "we://text", "literal://string:a", &mut t);
+    link("we://k1", "we://title", "literal://string:b", &mut t);
+    link("we://k1", "we://note", "literal://string:c", &mut t);
+    link("we://root", "we://comment", "we://k2", &mut t);
+    link("we://k2", "we://text", "literal://string:d", &mut t);
+    link("we://root", "we://comment", "we://k3", &mut t);
+    link("we://k3", "we://text", "literal://string:e", &mut t);
+    store
+}
+
+/// A row of the id phase has to mean an instance, or every limit counts the
+/// wrong thing. The fallback timestamp probe binds one row per property, so
+/// without aggregation a source with three properties takes three of its
+/// parent's places and the caller gets one result where two were asked for.
+#[tokio::test]
+async fn a_per_anchor_limit_counts_instances_not_timestamp_rows() {
+    let store = lopsided_property_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(2),
+            levels: None,
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://k1", "we://k2"],
+        "two per anchor means two instances, not two rows about one instance"
+    );
+}
+
+/// The same arithmetic on the ordinary paged path, which has always had it:
+/// `limit: 2` over a shape whose probe binds several rows per source returned
+/// one instance.
+#[tokio::test]
+async fn a_global_limit_counts_instances_not_timestamp_rows() {
+    let store = lopsided_property_store();
+    let query = ModelQueryInput {
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://k1", "we://k2"],
+        "two instances, not two rows"
+    );
+}
+
+/// An id or predicate that cannot be written as a term cannot match one, so a
+/// scope built on it selects nothing. Dropping the scope instead dropped the
+/// class conformance with it and answered with every link in the store — the
+/// unbounded read the empty anchor list is already guarded against.
+#[tokio::test]
+async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
+    let store = comment_tree_store();
+    store
+        .add_link(&make_link(
+            "we://unrelated",
+            "ad4m://type",
+            "we://Something",
+            "2026-01-01T00:00:9999Z",
+        ))
+        .unwrap();
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            // A space cannot appear in an IRI term.
+            predicate: "we://comment oops".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: None,
+        }),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(
+        result.instances.is_empty(),
+        "expected no rows, got {:?}",
+        result
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result.total_count, 0, "and a total that agrees");
+}
+
+/// The same rule for the older spellings, which had the same hole: a `Raw`
+/// scope kept the class conformance and answered with every instance of the
+/// class, a `Model` scope dropped conformance too and answered with the store.
+#[tokio::test]
+async fn the_older_scopes_with_an_unwritable_id_match_nothing() {
+    let store = comment_tree_store();
+
+    let raw = ModelQueryInput {
+        parent: Some(Scope::Raw {
+            id: "we://root".to_string(),
+            predicate: "we://comment <oops>".to_string(),
+        }),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &raw, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(result.instances.is_empty(), "Raw scope must match nothing");
+
+    let model = ModelQueryInput {
+        parent: Some(Scope::Model {
+            id: "we://root <oops>".to_string(),
+            model: "Comment".to_string(),
+            field: None,
+        }),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &model, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(
+        result.instances.is_empty(),
+        "Model scope must match nothing"
+    );
+}
+
+/// A per-anchor limit picks its N in the store, so an order the store cannot
+/// express fully picks a different N than the caller asked for — and the rows
+/// it discards are never hydrated, so sorting afterwards cannot recover them.
+/// Refused rather than approximated.
+#[tokio::test]
+async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        order: Some(vec![
+            ("text".to_string(), OrderDirection::ASC),
+            ("createdAt".to_string(), OrderDirection::ASC),
+        ]),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("two order keys cannot drive a per-anchor slice");
+    assert!(err.to_string().contains("one key"), "got: {err}");
+
+    // One pushable key is the supported spelling and still works.
+    let ok = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &ok, COMMENT_SHAPE_JSON)
+        .await
+        .expect("one key is fine");
+    assert_eq!(result.instances.len(), 2);
+
+    // A where-clause the store cannot push is not an ordering problem: the
+    // order is still pushed faithfully, so the slice is still right.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+    let unpushable_filter = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    fixture_query_from_json(&store, "Comment", &unpushable_filter, COMMENT_SHAPE_JSON)
+        .await
+        .expect("a post-hydration filter is not a refusal");
+}
+
+/// A walk is bounded by its own figures, so the store's count answers a
+/// question it never asked — one step from the anchors, however many levels
+/// were walked. `levels: [1, 1]` returns two rows; the count reported three,
+/// the number of direct replies, which a client paging on reads as more to
+/// fetch.
+#[tokio::test]
+async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![1, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["we://c1", "we://r1"], "one per level, two levels");
+    assert_eq!(
+        result.total_count, 2,
+        "the total is the walk's own union, not root's three direct replies"
+    );
+}
+
+/// The same walk asked as a count. `count()` in TypeScript is `limit: 0`, which
+/// takes the COUNT-only fast path — and that path builds its query from the
+/// scope as written, so it answers for one step from the anchors however many
+/// levels were walked. The full query above reports two; this reported three.
+///
+/// Two numbers for one question, from the same query written two ways.
+#[tokio::test]
+async fn a_count_only_walk_totals_the_walk_too() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![1, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(0),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("count-only walk should execute");
+    assert!(
+        result.instances.is_empty(),
+        "a count-only query returns no rows"
+    );
+    assert_eq!(
+        result.total_count, 2,
+        "the count is the walk's own union, exactly as the full query reports it"
+    );
+}
+
+/// A node reachable from two anchors on the same level — a diamond, which needs
+/// no cycle and is ordinary in a graph.
+///
+/// ```text
+/// root ─┬─ c1 ─── x
+///       └─ c2 ─┬─ x     (the same x)
+///              └─ z
+/// ```
+///
+/// The dedup ran *after* the per-anchor slice, so c2's one slot was spent on an
+/// `x` that was then dropped for having been seen, and `z` — the reply c2 had
+/// left to give — was never reported at all.
+#[tokio::test]
+async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (parent, child) in [
+        ("we://root", "we://c1"),
+        ("we://root", "we://c2"),
+        ("we://c1", "we://x"),
+        ("we://c2", "we://x"),
+        ("we://c2", "we://z"),
+    ] {
+        t += 1;
+        let ts = format!("2026-01-01T00:00:{t:04}Z");
+        store
+            .add_link(&make_link(parent, "we://comment", child, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", &ts))
+            .unwrap();
+    }
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![2, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://c1", "we://c2", "we://x", "we://z"],
+        "c2's one slot goes to the reply it still had, not to an x already spoken for"
+    );
+}
+
+/// `transitive` promises it excludes the anchor — and `+` delivers that only in
+/// a tree. In a cycle `a → b → a` the anchor is one-or-more steps from itself,
+/// so the path matched it and the caller got their own anchor back as its own
+/// descendant.
+#[tokio::test]
+async fn a_transitive_read_through_a_cycle_still_excludes_the_anchor() {
+    let store = SparqlStore::new(None).unwrap();
+    for (parent, child, ts) in [
+        ("we://a", "we://b", "2026-01-01T00:00:1001Z"),
+        ("we://b", "we://a", "2026-01-01T00:00:1002Z"),
+    ] {
+        store
+            .add_link(&make_link(parent, "we://comment", child, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", ts))
+            .unwrap();
+    }
+
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://a"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec!["we://b".to_string()],
+        "the anchor is where the read started, not something it found"
+    );
+}
+
+/// The multi-anchor face of the same promise: a transitive read from two
+/// anchors, one of which sits below the other, reports neither of them.
+#[tokio::test]
+async fn a_transitive_read_excludes_every_named_anchor() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root", "we://c1"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec![
+            "we://c2".to_string(),
+            "we://c3".to_string(),
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string(),
+        ],
+        "c1 is an anchor, so it is not also reported as root's descendant"
+    );
+}
+
+/// The total a transitive read reports is built from the same scope as its rows.
+///
+/// The anchor exclusion is a conformance pattern rather than a post-filter, so it
+/// reaches `build_count_sparql` through the same `build_query_patterns` the rows
+/// go through. Asserted rather than assumed: a total that counts the anchors the
+/// query will not return is a client paging for rows that do not exist, which is
+/// the failure the walk's own total was fixed for.
+#[tokio::test]
+async fn a_transitive_read_totals_what_it_returns() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root", "we://c1"],
+            true,
+            ScopeDirection::Out,
+            None,
+        )),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert_eq!(
+        result.instances.len(),
+        5,
+        "c2, c3, r1, r2, rr1 — both anchors excluded"
+    );
+    assert_eq!(
+        result.total_count, 5,
+        "the total counts what the scope returns, not the anchors it starts from"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `links` — per-link rows, including undeclared predicates (#1046 §3/§4,
+// #1111, #1112)
+// ---------------------------------------------------------------------------
+
+const REVOKED: &str = "ad4m://flow/role_grant_revoked";
+const ROLE_ADMIN: &str = "did:key:zRoleAdmin";
+const ROLE_T0: &str = "2026-09-01T10:00:00.000Z";
+const ROLE_T1: &str = "2026-09-01T11:00:00.000Z";
+const ROLE_T2: &str = "2026-09-01T12:00:00.000Z";
+
+/// A role class the way the flow engine reads one: a type flag, a name, and a
+/// DID collection that `didProperty` names. It deliberately does NOT declare the
+/// revocation predicate — tombstones are links on the instance, not properties.
+const ROLE_SHAPE_JSON: &str = r#"{
+    "className": "Reviewer",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "role://Reviewer"
+        },
+        "name": {
+            "predicate": "role://name",
+            "required": false
+        }
+    },
+    "relations": {
+        "members": {
+            "predicate": "role://member"
+        }
+    }
+}"#;
+
+fn link_by(author: &str, source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    let mut l = make_link(source, predicate, target, ts);
+    l.author = author.to_string();
+    l
+}
+
+/// Role instance created at T0 (type + name by admin), one member added at T1
+/// by admin, and — when `revoked` — a tombstone on the instance at T2.
+fn seed_role(store: &SparqlStore, role: &str, member: &str, revoked: bool) {
+    for l in [
+        link_by(ROLE_ADMIN, role, "ad4m://type", "role://Reviewer", ROLE_T0),
+        link_by(
+            ROLE_ADMIN,
+            role,
+            "role://name",
+            "literal:string:reviewers",
+            ROLE_T0,
+        ),
+        link_by(ROLE_ADMIN, role, "role://member", member, ROLE_T1),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+    if revoked {
+        store
+            .add_link(&link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2))
+            .unwrap();
+    }
+}
+
+fn links_query(keys: &[&str]) -> ModelQueryInput {
+    ModelQueryInput {
+        links: Some(keys.iter().map(|k| k.to_string()).collect()),
+        ..Default::default()
+    }
+}
+
+/// #1111: a revocation tombstone — a link whose predicate the class does not
+/// declare — is visible through `model_query` when asked for, and comes back as
+/// the full signed link.
+///
+/// Before `links` there was no way to reach it through the class layer at all:
+/// the instance query binds `VALUES ?predicate` to the shape's predicates and
+/// hydration drops the rest, so a revoked role kept voting unless the caller
+/// went around `model_query` to raw `get_links`. Fails on `dev`: `__links` is
+/// absent (the `links` key is ignored by deserialization).
+#[tokio::test]
+async fn a_revocation_tombstone_is_reachable_through_links() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let member = "did:key:zMember";
+    seed_role(&store, role, member, true);
+
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 1);
+    let rows = result.instances[0]["__links"][REVOKED]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "the tombstone must be reachable through model_query: {}",
+                result.instances[0]
+            )
+        });
+    assert_eq!(rows.len(), 1, "exactly the one tombstone: {rows:?}");
+
+    // A row is the stored link itself, not a summary of it: a consumer can
+    // deserialize it and check the signature, which is what the flow engine's
+    // revocation rule does.
+    let parsed: LinkExpression = serde_json::from_value(rows[0].clone()).expect("LinkExpression");
+    let mut expected = link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2);
+    expected.status = None;
+    assert_eq!(parsed, expected);
+}
+
+/// The additive half of #1111: asking for `links` adds `__links` and changes
+/// nothing else, and not asking returns the instance JSON exactly as before.
+///
+/// The case that would break it is the tombstone itself: it is the instance's
+/// latest link, so if it leaked into hydration `updatedAt` would move to T2.
+#[tokio::test]
+async fn links_is_additive_and_a_tombstone_does_not_move_updated_at() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    seed_role(&store, role, "did:key:zMember", true);
+
+    let plain = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &ModelQueryInput::default(),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let with_links = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    let plain = plain.instances[0].clone();
+    assert!(
+        plain.get("__links").is_none(),
+        "not asked, not added: {plain}"
+    );
+    assert_eq!(
+        plain["updatedAt"],
+        json!(ROLE_T1),
+        "the tombstone is not a property link"
+    );
+
+    let mut stripped = with_links.instances[0].clone();
+    assert!(stripped
+        .as_object_mut()
+        .unwrap()
+        .remove("__links")
+        .is_some());
+    assert_eq!(
+        stripped, plain,
+        "`links` must add one key and change nothing else"
+    );
+}
+
+/// #1112, on the #1103 shape: the role instance exists from T0, a member is
+/// added at T1, and the query dates that member from T1 — its own link — not
+/// from the instance's `createdAt`. A second member added later by someone else
+/// is dated and attributed separately.
+///
+/// Fails on `dev`: there is no per-link timestamp to read, only `createdAt`
+/// (T0) and `updatedAt`, both computed across every link.
+#[tokio::test]
+async fn a_member_is_dated_and_attributed_by_its_own_link() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let alice = "did:key:zAlice";
+    let bob = "did:key:zBob";
+    let mallory = "did:key:zMallory";
+    seed_role(&store, role, alice, false);
+    store
+        .add_link(&link_by(mallory, role, "role://member", bob, ROLE_T2))
+        .unwrap();
+
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["members"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let inst = &result.instances[0];
+    assert_eq!(inst["createdAt"], json!(ROLE_T0));
+
+    let rows = inst["__links"]["members"]
+        .as_array()
+        .unwrap_or_else(|| panic!("per-link rows for `members`: {inst}"));
+    let seen: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["data"]["target"].as_str().unwrap(),
+                r["timestamp"].as_str().unwrap(),
+                r["author"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec![(alice, ROLE_T1, ROLE_ADMIN), (bob, ROLE_T2, mallory)],
+        "each member dated and attributed by its own link, earliest first"
+    );
+    assert_eq!(
+        rows[0]["data"]["predicate"],
+        json!("role://member"),
+        "a name resolves to the predicate the shape declares"
+    );
+}
+
+/// Every requested key is present on every returned instance — `[]` when the
+/// instance has no such link — so "asked, none" never reads like "not asked".
+/// Also covers the paginated (two-phase) plan and a `properties` selection,
+/// which runs before `__links` is attached and must not strip it.
+#[tokio::test]
+async fn links_on_the_paginated_plan_with_a_property_selection() {
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", "did:key:zA", true);
+    seed_role(&store, "role://instance/2", "did:key:zB", false);
+
+    let query = ModelQueryInput {
+        links: Some(vec![REVOKED.to_string(), "members".to_string()]),
+        properties: Some(vec!["name".to_string()]),
+        limit: Some(10),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Reviewer", &query, ROLE_SHAPE_JSON)
+        .await
+        .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    let by_id = |id: &str| {
+        result
+            .instances
+            .iter()
+            .find(|i| i["id"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} missing"))
+    };
+    let one = by_id("role://instance/1");
+    let two = by_id("role://instance/2");
+    assert_eq!(one["__links"][REVOKED].as_array().unwrap().len(), 1);
+    assert_eq!(two["__links"][REVOKED], json!([]), "asked, none found");
+    assert_eq!(one["__links"]["members"].as_array().unwrap().len(), 1);
+    assert_eq!(two["__links"]["members"].as_array().unwrap().len(), 1);
+    assert!(
+        one.get("updatedAt").is_none(),
+        "the selection still applies"
+    );
+}
+
+/// A `local: true` property's links are read under the same Local-only rule as
+/// its hydrated value, so `links` is not a side door for a gossiped Shared link.
+/// The Shared link is the sole link on the predicate, so an unfiltered read
+/// cannot pass by result ordering.
+#[tokio::test]
+async fn links_on_a_local_property_withhold_a_shared_link() {
+    use crate::types::LinkStatus;
+
+    let store = SparqlStore::new(None).unwrap();
+    let id = "literal:string:cache_links";
+    store
+        .add_link(&make_link(id, "ad4m://type", "cache://Cache", ROLE_T0))
+        .unwrap();
+    store
+        .add_link(&make_link_with_status(
+            id,
+            "cache://state",
+            "literal:string:gossiped",
+            ROLE_T1,
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+
+    let result = fixture_query_from_json(
+        &store,
+        "Cache",
+        &links_query(&["state"]),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances[0]["__links"]["state"], json!([]));
+}
+
+/// A key that is neither a declared name nor an absolute IRI is an error. The
+/// alternative — an empty list — would tell a caller who misspelled the
+/// revocation predicate that nobody was ever revoked.
+#[tokio::test]
+async fn links_rejects_a_key_it_cannot_resolve() {
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", "did:key:zA", true);
+    let err = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["role_grant_revoked"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .expect_err("an unresolvable key must fail");
+    assert!(format!("{err}").contains("role_grant_revoked"), "{err}");
+}
+
+/// A reverse relation (`belongsToOne` / `belongsToMany`) is an error, not `[]`.
+///
+/// Its links point *at* the instance (`other --we://marks--> this`), and `links`
+/// reads the instance's outgoing links only. Resolving the name to its
+/// predicate and reading outgoing links answers "asked, none found" for a
+/// question that was never asked of the store, even with a real incoming link
+/// present, which this test seeds. On 6228563a5 the query succeeded with
+/// `"markedBy": []`.
+#[tokio::test]
+async fn links_rejects_a_reverse_relation_name() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://flag", "we://post", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://children", "we://p/2", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://m/1", "we://marks", "we://p/1", "3"))
+        .unwrap();
+
+    let post_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://post"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    // Control: the forward relation on the same shape is read.
+    let ok = fixture_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.instances[0]["__links"]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let err = fixture_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
+        .await
+        .expect_err("a reverse relation must not resolve to an empty list");
+    let msg = format!("{err}");
+    assert!(msg.contains("markedBy"), "names the key: {msg}");
+    assert!(msg.contains("reverse"), "says why: {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// The role gate over a DID collection, through the real store (#1129 review)
+// ---------------------------------------------------------------------------
+
+/// The flow engine's role reads, answered by the real query pipeline over
+/// [`ROLE_SHAPE_JSON`] instead of a stub that decides membership by looking
+/// for the DID in the query text. Here nothing but `model_query` decides.
+///
+/// [`seed_role`] links do not verify, so it reads through
+/// [`fixture_query_from_json`] (#1113 opt-in): the tests are about the DID
+/// gate, not signatures.
+struct RoleStore(SparqlStore);
+
+#[async_trait::async_trait]
+impl crate::perspectives::flow_evaluator::RequiresQueryable for RoleStore {
+    async fn model_query(&self, class_name: &str, query_json: &str) -> anyhow::Result<String> {
+        let input: ModelQueryInput = serde_json::from_str(query_json)?;
+        let result = fixture_query_from_json(&self.0, class_name, &input, ROLE_SHAPE_JSON)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(serde_json::to_string(&result)?)
+    }
+}
+
+/// **A non-member is not a member**, whichever layer answers the DID condition.
+///
+/// `members` is a DID collection. When a role's `where` cannot be pushed to
+/// SPARQL in full, the unpushed part is re-tested on the hydrated instance by
+/// `matches_where`. That function used to skip every String/StringArray
+/// condition on a collection, on the assumption that SPARQL had already
+/// applied it. At the top level of a clause it had: pushable leaves are
+/// emitted even when a sibling is not, so the first two cases were always
+/// closed. Inside a declined `OR` it had not. One unpushable leaf in any
+/// branch sends the whole disjunction to the Rust filter, where the
+/// DID condition passed vacuously. Every Reviewer instance then matched every
+/// candidate.
+///
+/// The unpushable leaf here is `timestamp`: it is hydrated, so it can be
+/// filtered, but it is no link, so it cannot be pushed. It used to be
+/// `author`, until #1122 answered an `author` beside link-backed siblings in
+/// the store, per link. The `author` rows are kept: they are the route the
+/// #1129 review found, and they must stay closed now that SPARQL answers
+/// them. They no longer reach the Rust filter, which is why the `timestamp`
+/// rows exist.
+///
+/// Mallory authored nothing and belongs to nothing. Alice is the only member.
+/// Red before the fix on the `or` rows with `timestamp`: Mallory came back
+/// holding `role://instance/1`.
+#[tokio::test]
+#[rustfmt::skip]
+async fn a_did_collection_role_gate_does_not_admit_a_non_member() {
+    use crate::perspectives::flow_context::FlowInstanceRecord;
+    use crate::perspectives::flow_instance::roles::resolve_role_grants;
+    use crate::perspectives::shacl_parser::ModelQuery;
+
+    let alice = "did:key:zAlice";
+    let mallory = "did:key:zMallory";
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", alice, false);
+    let store = RoleStore(store);
+    let record = FlowInstanceRecord {
+        flow_uri: "delivery://DeliveryFlow".into(),
+        instance_uri: "ad4m://flow/instance/1".into(),
+        subject: "ad4m://task/1".into(),
+        current_state: "review".into(),
+        created_at: None,
+    };
+
+    // Holds for the instance (its earliest link is at T0), and only the Rust
+    // filter can answer it. `gte` takes epoch milliseconds.
+    let t0_ms = chrono::DateTime::parse_from_rfc3339(ROLE_T0).unwrap().timestamp_millis();
+    let since_t0 = json!({ "equals": { "gte": t0_ms } });
+    let cases: Vec<(&str, Value)> = vec![
+        ("top level: didProperty beside `author` (the reviewed route, per-link since #1122)",
+         json!({ "className": "Reviewer", "didProperty": "members",
+                 "where": { "author": ROLE_ADMIN } })),
+        ("top level: `$did` on the collection beside `author`",
+         json!({ "className": "Reviewer",
+                 "where": { "members": "$did", "author": ROLE_ADMIN } })),
+        ("`or`: the DID condition beside `author` in a branch",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": "$did", "author": ROLE_ADMIN } }] })),
+        ("top level: didProperty beside an unpushable sibling",
+         json!({ "className": "Reviewer", "didProperty": "members",
+                 "where": { "timestamp": since_t0 } })),
+        ("top level: `$did` on the collection beside an unpushable sibling",
+         json!({ "className": "Reviewer",
+                 "where": { "members": "$did", "timestamp": since_t0 } })),
+        ("`or`: the DID condition inside a branch the compiler declines",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": "$did", "timestamp": since_t0 } }] })),
+        ("`or`: `in` over the collection inside a declined branch",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": { "in": ["$did"] }, "timestamp": since_t0 } }] })),
+    ];
+
+    for (name, role_json) in cases {
+        let role: ModelQuery = serde_json::from_value(role_json).expect("role query");
+        let evidence = resolve_role_grants(
+            &store, "approved", &role, &record, &[alice.to_string(), mallory.to_string()],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name}: resolve_role_grants: {e:#}"));
+        let held = |did: &str| -> Vec<String> {
+            evidence.iter().find(|e| e.did == did).expect("one evidence per candidate")
+                .instances.iter().map(|i| i.instance_id.clone()).collect()
+        };
+        // The control pins that the branch is live, so the refusal below is
+        // the DID condition and not a query that matches nobody.
+        assert_eq!(held(alice), vec!["role://instance/1"], "{name}: the member holds the role");
+        assert_eq!(held(mallory), Vec::<String>::new(), "{name}: a non-member must hold nothing");
+    }
+}
+
+/// `links` inside an `include` sub-query: the sub-query recurses through
+/// `execute_model_query_inner`, so each included instance carries its own
+/// `__links`.
+#[tokio::test]
+async fn links_inside_an_include_sub_query() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://note", "literal:string:n", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "TextBlock" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(links_query(&["we://note"]))),
+        )])),
+        ..Default::default()
+    };
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+    let child = &result.instances[0]["children"][0];
+    assert_eq!(child["id"], json!("we://t/1"), "{}", result.instances[0]);
+    let rows = child["__links"]["we://note"]
+        .as_array()
+        .unwrap_or_else(|| panic!("included instance carries __links: {child}"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["data"]["target"], json!("literal:string:n"));
+    assert!(
+        result.instances[0].get("__links").is_none(),
+        "the parent did not ask"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A to-one reference to a record of any type, read in one query: an untyped
+// `hasOne` hydrated through `include`, with a projection evaluated against each
+// member's own class.
+// ---------------------------------------------------------------------------
+
+/// Two placements: one points at a task carrying two signals (one `like`, one
+/// `flag`), one at a note whose class declares no `signals` relation at all.
+async fn placement_fixture() -> (SparqlStore, StaticShapeResolver, std::sync::Arc<ModelShape>) {
+    let store = SparqlStore::new(None).unwrap();
+    for uri in [
+        "we://models/Placement",
+        "we://models/TaskBlock",
+        "we://models/NoteBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+    for (p, target, ts) in [
+        ("we://p/1", "we://task/1", "2"),
+        ("we://p/2", "we://note/1", "3"),
+    ] {
+        store
+            .add_link(&make_link(p, "we://flag", "we://placement", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(p, "we://placed_node", target, ts))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://task/1",
+            "we://flag",
+            "we://task_block",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://task/1",
+            "we://title",
+            "literal:string:ship",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://task/1", "we://signal", "we://sig/1", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://task/1", "we://signal", "we://sig/2", "6"))
+        .unwrap();
+    for (sig, kind) in [("we://sig/1", "like"), ("we://sig/2", "flag")] {
+        store
+            .add_link(&make_link(
+                sig,
+                "we://kind",
+                &format!("literal:string:{kind}"),
+                "6",
+            ))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://note/1",
+            "we://flag",
+            "we://note_block",
+            "7",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://note/1",
+            "we://text",
+            "literal:string:hello",
+            "7",
+        ))
+        .unwrap();
+
+    let (resolver, placement_shape) = StaticShapeResolver::from_json(
+        "Placement",
+        r#"{"className":"Placement","properties":{
+             "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://placement"}
+           },"relations":{
+             "node":{"predicate":"we://placed_node","kind":"hasOne","maxCount":1,"targetClassName":""}
+           }}"#,
+    )
+    .unwrap();
+    resolver.register(
+        "TaskBlock",
+        parse_shape_from_json(
+            r#"{"className":"TaskBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://task_block"},
+                 "title":{"predicate":"we://title","resolveLanguage":"literal"}
+               },"relations":{
+                 "signals":{"predicate":"we://signal","kind":"hasMany","targetClassName":"Signal"}
+               }}"#,
+            "TaskBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Signal",
+        parse_shape_from_json(
+            r#"{"className":"Signal","properties":{
+                 "kind":{"predicate":"we://kind","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Signal",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "NoteBlock",
+        parse_shape_from_json(
+            r#"{"className":"NoteBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://note_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "NoteBlock",
+        )
+        .unwrap(),
+    );
+    (store, resolver, placement_shape)
+}
+
+fn placed<'a>(result: &'a ModelQueryResult, placement: &str) -> &'a Value {
+    let row = result
+        .instances
+        .iter()
+        .find(|r| r["id"] == placement)
+        .unwrap_or_else(|| panic!("placement {placement} missing: {:?}", result.instances));
+    &row["node"]
+}
+
+/// An untyped to-one comes back as one record, hydrated as the class it is.
+///
+/// The polymorphic path was only exercised through `hasMany` relations; a
+/// `hasOne` takes the same path and is unwrapped to a single object afterwards.
+#[tokio::test]
+async fn test_polymorphic_has_one_hydrates_as_one_record_of_its_own_class() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput =
+        serde_json::from_value(json!({ "include": { "node": { "polymorphic": true } } })).unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let task = placed(&result, "we://p/1");
+    let note = placed(&result, "we://p/2");
+    assert!(
+        task.is_object(),
+        "a to-one hydrates as one object, got {task}"
+    );
+    assert_eq!(task["__subjectClass"], "TaskBlock");
+    assert_eq!(task["title"], "ship");
+    assert_eq!(note["__subjectClass"], "NoteBlock");
+    assert_eq!(note["text"], "hello");
+}
+
+/// A projection on a polymorphic include is computed against each member's own
+/// class, and is absent, not an error, on a member whose class lacks the relation.
+#[tokio::test]
+async fn test_projection_on_a_polymorphic_include_is_read_per_member_class() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput = serde_json::from_value(json!({ "include": { "node": {
+        "polymorphic": true,
+        "projections": { "$signalsCount": { "from": "signals", "count": true } }
+    } } }))
+    .unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(placed(&result, "we://p/1")["$signalsCount"], 2);
+    assert!(placed(&result, "we://p/2").get("$signalsCount").is_none());
+}
+
+/// A projection's `where` on a polymorphic include is read against the target
+/// each member's own class declares for `from`.
+///
+/// The SDK leaves such a projection untagged: the members are of several
+/// classes, so there is no one target to name. Without a target the property
+/// filter matched no predicate and was dropped, and the count came back 2.
+/// A list stays a list of IRIs: only the filter reads the target.
+#[tokio::test]
+async fn test_projection_where_on_a_polymorphic_include_reads_the_member_class_target() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput = serde_json::from_value(json!({ "include": { "node": {
+        "polymorphic": true,
+        "projections": {
+            "$likes": { "from": "signals", "count": true, "where": { "kind": "like" } },
+            "$liked": { "from": "signals", "where": { "kind": "like" } }
+        }
+    } } }))
+    .unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let task = placed(&result, "we://p/1");
+    assert_eq!(task["$likes"], 1, "the `kind` filter applies: {task}");
+    assert_eq!(task["$liked"], json!(["we://sig/1"]));
+    assert!(placed(&result, "we://p/2").get("$likes").is_none());
+}

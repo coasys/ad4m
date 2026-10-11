@@ -555,11 +555,12 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         // Hosting capabilities - allow users to view and manage their hosting info
         RUNTIME_HOSTING_READ_CAPABILITY.clone(),
         RUNTIME_HOSTING_UPDATE_CAPABILITY.clone(),
-        // AI capabilities - allow users to use AI (prompt, transcribe) but not manage models
+        // AI capabilities - allow users to use AI features including task management
         AI_READ_CAPABILITY.clone(),
+        AI_CREATE_CAPABILITY.clone(),
         AI_PROMPT_CAPABILITY.clone(),
         AI_TRANSCRIBE_CAPABILITY.clone(),
-        // Note: Excluding AI_CREATE_CAPABILITY, AI_UPDATE_CAPABILITY, AI_DELETE_CAPABILITY
+        // Note: Excluding AI_UPDATE_CAPABILITY, AI_DELETE_CAPABILITY
         // as these are admin operations for managing AI models
 
         // Note: Excluding RUNTIME_USER_MANAGEMENT_READ_CAPABILITY as it allows listing all users,

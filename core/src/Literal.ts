@@ -11,8 +11,10 @@ export class Literal {
     #url?: string
 
     public static fromUrl(url: string) {
-        if(!url || !url.startsWith("literal://"))
+        if(!url || !url.startsWith("literal:"))
             throw new Error("Can't create Literal from non-literal URL")
+        if(url.startsWith("literal://"))
+            throw new Error("literal:// format is no longer supported. Use literal: instead.")
         const l = new Literal()
         l.#url = url
         return l
@@ -25,9 +27,9 @@ export class Literal {
     }
 
     toUrl(): string {
-        if(this.#url && !this.#literal)
+        if(this.#url && this.#literal === undefined)
             return this.#url
-        if(!this.#url && (this.#literal === undefined || this.#literal === "" || this.#literal === null))
+        if(this.#literal === undefined)
             throw new Error("Can't turn empty Literal into URL")
 
         let encoded
@@ -46,21 +48,20 @@ export class Literal {
                 break;
         }
 
-        return `literal://${encoded}`
+        return `literal:${encoded}`
     }
 
     get(): any {
-        if(this.#literal)
+        if(this.#literal !== undefined)
             return this.#literal
             
         if(!this.#url)
             throw new Error("Can't render empty Literal")
 
-        if(!this.#url.startsWith("literal://"))
+        if(!this.#url.startsWith("literal:"))
             throw new Error("Can't render Literal from non-literal URL")
         
-        // get rid of "literal://"
-        const body = this.#url.substring(10)
+        const body = this.#url.substring(8)
         
 
         if(body.startsWith("string:")) {
@@ -70,6 +71,13 @@ export class Literal {
         if(body.startsWith("number:")) {
             const numberString = body.substring(7)
             return parseFloat(numberString)
+        }
+
+        if(body.startsWith("boolean:")) {
+            const boolString = decodeURIComponent(body.substring(8))
+            if (boolString === "true") return true
+            if (boolString === "false") return false
+            throw new Error(`Can't parse boolean literal: ${boolString}`)
         }
 
         if(body.startsWith("json:")) {

@@ -4,13 +4,12 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { startExecutor, runHcLocalServices, quitExecutor, pollUntil } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import fetch from 'node-fetch'
 
-//@ts-ignore
-global.fetch = fetch
+// Keep Node's native fetch for REST client calls. The node-fetch override here
+// breaks web-stream/EventSource expectations used by the REST stack.
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -29,7 +28,7 @@ describe("Email Verification with Mock Service", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "email-verification");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    let gqlPort: number;
+    let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
 
@@ -41,24 +40,37 @@ describe("Email Verification with Mock Service", () => {
     let localServicesProcess: ChildProcess | null = null;
 
     before(async () => {
-        [gqlPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
-        registerPorts([gqlPort, hcAdminPort, hcAppPort]);
+        [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
+        registerPorts([apiPort, hcAdminPort, hcAppPort]);
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
 
-        // Start local Holochain services
-        let localServices = await runHcLocalServices();
-        proxyUrl = localServices.proxyUrl;
-        bootstrapUrl = localServices.bootstrapUrl;
-        localServicesProcess = localServices.process;
+        const runHolochain = process.env.LOCAL_MODE !== 'true';
 
-        // Start executor with local services
-        executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+        if (runHolochain) {
+            // Prefer local Holochain bootstrap/proxy services when available, but
+            // fall back to the shared dev bootstrap so this suite still runs in
+            // environments where `kitsune2-bootstrap-srv` is not installed.
+            try {
+                const localServices = await runHcLocalServices();
+                proxyUrl = localServices.proxyUrl;
+                bootstrapUrl = localServices.bootstrapUrl;
+                localServicesProcess = localServices.process;
+            } catch (e: any) {
+                console.warn(`Falling back to default bootstrap/proxy URLs: ${e?.message || e}`);
+            }
+        }
 
-        // @ts-ignore - Suppress Apollo type mismatch
-        adminAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
+        executorProcess = proxyUrl && bootstrapUrl
+            ? await startExecutor(appDataPath, bootstrapSeedPath,
+                apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl,
+                undefined, false, undefined, undefined, runHolochain)
+            : await startExecutor(appDataPath, bootstrapSeedPath,
+                apiPort, hcAdminPort, hcAppPort, false,
+                undefined, undefined, undefined, undefined, false, undefined, undefined, runHolochain);
+
+        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -77,12 +89,12 @@ describe("Email Verification with Mock Service", () => {
         }
 
         if (executorProcess) {
-            await quitExecutor(executorProcess, gqlPort);
+            await quitExecutor(executorProcess, apiPort);
         }
         if (localServicesProcess) {
             localServicesProcess.kill('SIGKILL');
         }
-        deregisterPorts([gqlPort, hcAdminPort, hcAppPort]);
+        deregisterPorts([apiPort, hcAdminPort, hcAppPort]);
     })
 
     beforeEach(async () => {
@@ -315,9 +327,13 @@ describe("Email Verification with Mock Service", () => {
 
             // Request new code
             await adminAd4mClient!.agent.requestLoginVerification(email);
-            await sleep(100); // Small delay to ensure new code generation
 
-            const code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+            // Poll until a new code appears (different from the consumed one)
+            let code2: string | undefined;
+            await pollUntil(async () => {
+                code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                return code2 !== undefined && code2 !== code1;
+            }, { timeoutMs: 5000, label: "new verification code generated" });
 
             // Codes should be different
             expect(code1).to.not.equal(code2);

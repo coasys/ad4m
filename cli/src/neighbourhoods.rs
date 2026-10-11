@@ -1,3 +1,4 @@
+use ad4m_client::types::Perspective;
 use ad4m_client::Ad4mClient;
 use anyhow::Result;
 use clap::Subcommand;
@@ -21,7 +22,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: NeighbourhoodFunctions) -> Re
         } => {
             let neighbourhood = ad4m_client
                 .neighbourhoods
-                .publish(link_language, None, perspective_id)
+                .publish(perspective_id, link_language, Perspective { links: vec![] })
                 .await?;
             println!("Neighbourhood shared as: {}", neighbourhood);
         }

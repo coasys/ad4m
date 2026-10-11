@@ -7,7 +7,9 @@ import "../index.css";
 const AITypes = ["LLM", "EMBEDDING", "TRANSCRIPTION"];
 const llmModels = [
   "🌐 External API",
-  "🤗 Custom Hugging Face Model", 
+  "✴️ Anthropic API",
+  "🦙 Ollama API",
+  "🤗 Custom Hugging Face Model",
   "📁 Local File",
   "deephermes-3-llama-3-8b-Q4",
   "deephermes-3-llama-3-8b-Q6",
@@ -79,6 +81,11 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   const [apiModels, setApiModels] = useState<string[]>([]);
   const apiUrlRef = useRef("https://api.openai.com/v1");
   const apiKeyRef = useRef("");
+  // Bumped whenever provider, URL or key changes, so an API check still in
+  // flight for the old configuration cannot apply its result to the new one.
+  const apiCheckRef = useRef(0);
+  const [maxNumCtx, setMaxNumCtx] = useState("");
+  const [maxNumCtxError, setMaxNumCtxError] = useState("");
   const [useCustomTokenizer, setUseCustomTokenizer] = useState(false);
   const [customHfModel, setCustomHfModel] = useState({
     huggingfaceRepo: "",
@@ -103,7 +110,68 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
     if (items) items.open = false;
   }
 
+  // Which flavour of remote API the selected entry is. External speaks the
+  // OpenAI wire format and is checked with browser-side fetches; Anthropic
+  // and Ollama go through the executor's ai.discoverModels, which knows
+  // their native endpoints (and avoids CORS).
+  const isExternalApi = newModel.includes("External API");
+  const isAnthropic = newModel.includes("Anthropic API");
+  const isOllama = newModel.includes("Ollama API");
+  const isRemoteApi = isExternalApi || isAnthropic || isOllama;
+
+  function invalidateApiCheck() {
+    apiCheckRef.current += 1;
+    setLoading(false);
+  }
+
+  function resetApiState(url: string) {
+    setApiUrl(url);
+    apiUrlRef.current = url;
+    // A key entered for one provider must not follow the user to another
+    // provider's endpoint.
+    setApiKey("");
+    apiKeyRef.current = "";
+    setApiValid(false);
+    setApiModelValid(false);
+    setApiModels([]);
+    setApiModel("");
+    setApiKeyError("");
+    setApiUrlError("");
+    setApiModelError("");
+  }
+
+  // Check URL/key and list models via the executor, for the API types whose
+  // native endpoints the browser cannot (or should not) talk to directly.
+  async function checkApiViaExecutor(apiType: string) {
+    const check = ++apiCheckRef.current;
+    setLoading(true);
+    setApiKeyError("");
+    setApiUrlError("");
+    try {
+      const models = await client!.ai.discoverModels(
+        apiUrlRef.current,
+        apiKeyRef.current,
+        apiType
+      );
+      if (check !== apiCheckRef.current) return;
+      setApiValid(true);
+      setApiModels(models);
+      setApiModel("");
+    } catch (e: any) {
+      if (check !== apiCheckRef.current) return;
+      setApiValid(false);
+      setApiModels([]);
+      setApiModel("");
+      const message = `${e?.message || e}`;
+      // The Ollama view has no key field, so its errors go under the URL.
+      if (apiType !== "OLLAMA" && /401|403|key/i.test(message)) setApiKeyError(message);
+      else setApiUrlError(message);
+    }
+    setLoading(false);
+  }
+
   async function checkApi() {
+    const check = ++apiCheckRef.current;
     setLoading(true);
     setApiKeyError("");
     setApiUrlError("");
@@ -116,6 +184,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
           "Content-Type": "application/json",
         },
       });
+      if (check !== apiCheckRef.current) return;
       const { ok, status, statusText } = response;
       if (ok) valid = true;
       else {
@@ -123,6 +192,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         setApiKeyError(status === 401 ? "Invalid key" : statusText);
       }
     } catch {
+      if (check !== apiCheckRef.current) return;
       // url invalid
       setApiUrlError("Error connecting to API");
     }
@@ -143,6 +213,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         });
         if (response.ok) {
           const body = await response.json();
+          if (check !== apiCheckRef.current) return;
           const models = body.data.map((e: any) => e.id);
           setApiModels(models);
           if (apiUrlRef.current === "https://api.openai.com/v1") setApiModel("gpt-4o");
@@ -152,7 +223,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       setApiModels([]);
       setApiModel("");
     }
-    setLoading(false);
+    if (check === apiCheckRef.current) setLoading(false);
   }
 
   async function checkModel() {
@@ -192,20 +263,46 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   async function saveModel() {
     setLoading(true);
     // validate model settings
+    // Optional num_ctx ceiling for Ollama: a positive integer that fits the
+    // executor's u32. Anything else is rejected rather than silently dropped.
+    const cap = maxNumCtx.trim() === "" ? undefined : Number(maxNumCtx);
+    const capValid =
+      cap === undefined || (Number.isSafeInteger(cap) && cap > 0 && cap <= 0xffffffff);
     if (!newModelName) setNewModelNameError(true);
-    else {
+    else if (isRemoteApi && !apiModel) {
+      setApiModelError("Model required");
+    } else if (isOllama && !capValid) {
+      setMaxNumCtxError("Must be a whole number between 1 and 4294967295");
+    } else {
       // create new model
       const model = {
         name: newModelName,
         modelType: newModelType,
       } as ModelInput;
-      if (newModel.includes("External API")) {
+      if (isExternalApi) {
         model.api = {
           baseUrl: apiUrl,
           apiKey,
           apiType: "OPEN_AI",
           model: apiModel,
         };
+      } else if (isAnthropic) {
+        model.api = {
+          baseUrl: apiUrl,
+          apiKey,
+          apiType: "ANTHROPIC",
+          model: apiModel,
+        };
+      } else if (isOllama) {
+        model.api = {
+          baseUrl: apiUrl,
+          apiKey,
+          apiType: "OLLAMA",
+          model: apiModel,
+        };
+        // Optional ceiling for num_ctx — how much VRAM the Ollama host may
+        // spend on KV cache is the operator's call.
+        if (cap !== undefined) model.api.maxNumCtx = cap;
       } else if (newModel.includes("Custom Hugging Face Model")) {
         model.local = {
           fileName: customHfModel.fileName,
@@ -249,11 +346,15 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       if (oldModel.modelType === "LLM") {
         setNewModels(llmModels);
         if (oldModel.api) {
-          setNewModel("🌐 External API");
+          if (oldModel.api.apiType === "ANTHROPIC") setNewModel("✴️ Anthropic API");
+          else if (oldModel.api.apiType === "OLLAMA") setNewModel("🦙 Ollama API");
+          else setNewModel("🌐 External API");
           setApiUrl(oldModel.api.baseUrl);
           apiUrlRef.current = oldModel.api.baseUrl;
           setApiKey(oldModel.api.apiKey);
           apiKeyRef.current = oldModel.api.apiKey;
+          setApiModel(oldModel.api.model);
+          if (oldModel.api.maxNumCtx) setMaxNumCtx(String(oldModel.api.maxNumCtx));
         } else if (oldModel.local?.huggingfaceRepo) {
           setNewModel("🤗 Custom Hugging Face Model");
           setCustomHfModel({
@@ -362,7 +463,14 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                     <j-menu-item
                       selected={newModel === model}
                       onClick={() => {
+                        invalidateApiCheck();
                         setNewModel(model);
+                        if (model.includes("External API"))
+                          resetApiState("https://api.openai.com/v1");
+                        else if (model.includes("Anthropic API"))
+                          resetApiState("https://api.anthropic.com");
+                        else if (model.includes("Ollama API"))
+                          resetApiState("http://localhost:11434");
                         closeMenu("new-models");
                       }}
                     >
@@ -373,34 +481,38 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
               </j-menu>
             </j-flex>
 
-            {newModel.includes("External API") && (
+            {isRemoteApi && (
               <>
-                <j-flex a="center" gap="400">
-                  <j-button
-                    onClick={() => {
-                      setApiUrl("https://api.openai.com/v1");
-                      apiUrlRef.current = "https://api.openai.com/v1";
-                      setApiValid(false);
-                      setApiModelValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                  >
-                    OpenAI
-                  </j-button>
-                  <j-button
-                    onClick={() => {
-                      setApiUrl("http://localhost:11434/v1");
-                      apiUrlRef.current = "http://localhost:11434/v1";
-                      setApiValid(false);
-                      setApiModelValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                  >
-                    Ollama
-                  </j-button>
-                </j-flex>
+                {isExternalApi && (
+                  <j-flex a="center" gap="400">
+                    <j-button
+                      onClick={() => {
+                        invalidateApiCheck();
+                        setApiUrl("https://api.openai.com/v1");
+                        apiUrlRef.current = "https://api.openai.com/v1";
+                        setApiValid(false);
+                        setApiModelValid(false);
+                        setApiKeyError("");
+                        setApiUrlError("");
+                      }}
+                    >
+                      OpenAI
+                    </j-button>
+                    <j-button
+                      onClick={() => {
+                        invalidateApiCheck();
+                        setApiUrl("http://localhost:11434/v1");
+                        apiUrlRef.current = "http://localhost:11434/v1";
+                        setApiValid(false);
+                        setApiModelValid(false);
+                        setApiKeyError("");
+                        setApiUrlError("");
+                      }}
+                    >
+                      Ollama
+                    </j-button>
+                  </j-flex>
+                )}
 
                 <j-flex a="center" gap="400">
                   <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
@@ -413,6 +525,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                     error={!!apiUrlError}
                     errortext={apiUrlError}
                     onInput={(e: any) => {
+                      invalidateApiCheck();
                       setApiUrl(e.target.value);
                       apiUrlRef.current = e.target.value;
                       setApiValid(false);
@@ -425,28 +538,53 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                   {apiValid && <j-icon name="check-circle" color="success-500" />}
                 </j-flex>
 
-                <j-flex a="center" gap="400">
-                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                    API Key:
-                  </j-text>
-                  <j-input
-                    size="md"
-                    type="text"
-                    value={apiKey}
-                    error={!!apiKeyError}
-                    errortext={apiKeyError}
-                    onInput={(e: any) => {
-                      setApiKey(e.target.value);
-                      apiKeyRef.current = e.target.value;
-                      setApiValid(false);
-                      setApiKeyError("");
-                      setApiUrlError("");
-                    }}
-                    style={{ width: "100%" }}
-                  />
-                  {apiKeyError && <j-icon name="x-circle" color="danger-500" />}
-                  {apiValid && <j-icon name="check-circle" color="success-500" />}
-                </j-flex>
+                {!isOllama && (
+                  <j-flex a="center" gap="400">
+                    <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                      API Key:
+                    </j-text>
+                    <j-input
+                      size="md"
+                      type="text"
+                      value={apiKey}
+                      error={!!apiKeyError}
+                      errortext={apiKeyError}
+                      onInput={(e: any) => {
+                        invalidateApiCheck();
+                        setApiKey(e.target.value);
+                        apiKeyRef.current = e.target.value;
+                        setApiValid(false);
+                        setApiKeyError("");
+                        setApiUrlError("");
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                    {apiKeyError && <j-icon name="x-circle" color="danger-500" />}
+                    {apiValid && <j-icon name="check-circle" color="success-500" />}
+                  </j-flex>
+                )}
+
+                {isOllama && (
+                  <j-flex a="center" gap="400">
+                    <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                      Max context (tokens):
+                    </j-text>
+                    <j-input
+                      size="md"
+                      type="number"
+                      placeholder="131072"
+                      value={maxNumCtx}
+                      error={!!maxNumCtxError}
+                      errortext={maxNumCtxError}
+                      onInput={(e: any) => {
+                        setMaxNumCtx(e.target.value);
+                        setMaxNumCtxError("");
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                    {maxNumCtxError && <j-icon name="x-circle" color="danger-500" />}
+                  </j-flex>
+                )}
 
                 {apiValid && (
                   <j-flex direction="column" a="center" gap="400">
@@ -718,7 +856,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
             )}
           </j-flex>
 
-          {newModel === "🌐 External API" && (!apiModelValid || !apiValid) ? (
+          {isExternalApi && (!apiModelValid || !apiValid) ? (
             <>
               {!apiValid ? (
                 <j-button onClick={checkApi} variant="primary" loading={loading}>
@@ -730,6 +868,14 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                 </j-button>
               )}
             </>
+          ) : (isAnthropic || isOllama) && !apiValid ? (
+            <j-button
+              onClick={() => checkApiViaExecutor(isAnthropic ? "ANTHROPIC" : "OLLAMA")}
+              variant="primary"
+              loading={loading}
+            >
+              Check API
+            </j-button>
           ) : (
             <j-button onClick={saveModel} variant="primary" loading={loading}>
               Save Model

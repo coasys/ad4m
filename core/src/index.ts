@@ -2,13 +2,13 @@ export * from "./Ad4mClient"
 export * from "./Address";
 export * from "./agent/Agent";
 export * from "./agent/AgentStatus";
+export * from "./cache/PersistentCache";
 export * from "./Exception";
 export * from "./expression/Expression";
 export * from "./expression/ExpressionRef";
 export * from "./language/Icon";
 export * from "./language/Language";
 export * from "./language/LanguageRef";
-export * from "./language/LanguageContext";
 export * from "./language/LanguageHandle";
 export * from "./language/LanguageMeta";
 export * from "./links/Links";
@@ -16,6 +16,13 @@ export * from "./Literal";
 export * from "./perspectives/Perspective";
 export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
+export * from "./perspectives/AutoProcessor";
+export * from "./perspectives/InterpretationModels";
+export * from "./perspectives/FlowModels";
+// Also exports FlowFireOutcome / FlowProposeResult, the result shapes of the
+// flow write API — they live beside the `proposeTransition()` surface.
+export * from "./perspectives/FlowInstance";
+export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";
 export * from "./perspectives/PerspectiveDiff";
 export * from "./perspectives/LinkQuery";
@@ -29,6 +36,13 @@ export * from "./utils";
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./ai/Tasks"
-export * from "./runtime/RuntimeResolver"
+export * from "./runtime/RuntimeTypes"
+export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
 export * from './shacl/SHACLShape'
-export { SHACLFlow, FlowState, FlowTransition, LinkPattern, FlowableCondition } from './shacl/SHACLFlow'
+export { SHACLFlow, FlowState, FlowTransition, LinkPattern, ModelQuery, PropertyCondition, ConsensusRule } from './shacl/SHACLFlow'
+export * from './shacl/NodeExpression'
+export * from './shacl/builders'
+export { fileToDataUri } from './shacl/index'
+export * from "./generated/api";
+export { RpcError, LONG_TIMEOUT_MS } from "./apiClient";
+export type { CallOptions, EventFilter } from "./apiClient";

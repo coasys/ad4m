@@ -1,0 +1,528 @@
+/**
+ * Decorator → SHACL writer round-trip tests.
+ *
+ * Spec R11 gate on the TypeScript side: any field a decorator sets must
+ * survive into the SHACL graph produced by `generateSHACL()`.  These tests
+ * compare against the SHACL link emission (the format the Rust executor
+ * stores and reads), not against `getModelMetadata()` — which is the
+ * dying shape transport, not the source of truth.
+ */
+import { Ad4mModel } from "./Ad4mModel";
+import {
+  Model,
+  Property,
+  Flag,
+  HasMany,
+  HasOne,
+  BelongsToOne,
+  BelongsToMany,
+} from "./decorators";
+import { SHACLShape } from "../shacl/SHACLShape";
+
+function flatten(
+  shape: any,
+): Array<{ source: string; predicate: string; target: string }> {
+  return shape.toLinks().map((l: any) => ({
+    source: l.source,
+    predicate: l.predicate,
+    target: l.target,
+  }));
+}
+
+function findLinkTarget(
+  links: any[],
+  source: string,
+  predicate: string,
+): string | undefined {
+  return links.find((l) => l.source === source && l.predicate === predicate)
+    ?.target;
+}
+
+describe("Decorators → SHACL writer round-trip", () => {
+  it("emits ad4m:relationKind for every relation kind", () => {
+    @Model({ name: "Target" })
+    class Target extends Ad4mModel {}
+
+    @Model({ name: "Holder" })
+    class Holder extends Ad4mModel {
+      @HasMany({ through: "ns://hm", target: () => Target })
+      hmRel: string[] = [];
+
+      @HasOne({ through: "ns://ho", target: () => Target })
+      hoRel: string = "";
+
+      @BelongsToOne({ through: "ns://bto", target: () => Target })
+      btoRel: string = "";
+
+      @BelongsToMany({ through: "ns://btm", target: () => Target })
+      btmRel: string[] = [];
+    }
+
+    const { shape } = Holder.generateSHACL();
+    const links = flatten(shape);
+    const propUri = (name: string) => `ns://Holder.${name}`;
+
+    expect(findLinkTarget(links, propUri("hmRel"), "ad4m://relationKind")).toBe(
+      "literal:string:hasMany",
+    );
+    expect(findLinkTarget(links, propUri("hoRel"), "ad4m://relationKind")).toBe(
+      "literal:string:hasOne",
+    );
+    expect(
+      findLinkTarget(links, propUri("btoRel"), "ad4m://relationKind"),
+    ).toBe("literal:string:belongsToOne");
+    expect(
+      findLinkTarget(links, propUri("btmRel"), "ad4m://relationKind"),
+    ).toBe("literal:string:belongsToMany");
+  });
+
+  it("emits maxCount=1 for scalar relations", () => {
+    @Model({ name: "Target2" })
+    class Target2 extends Ad4mModel {}
+
+    @Model({ name: "Holder2" })
+    class Holder2 extends Ad4mModel {
+      @HasOne({ through: "ns://ho", target: () => Target2 })
+      hoRel: string = "";
+
+      @BelongsToOne({ through: "ns://bto", target: () => Target2 })
+      btoRel: string = "";
+    }
+
+    const { shape } = Holder2.generateSHACL();
+    const links = flatten(shape);
+
+    expect(findLinkTarget(links, "ns://Holder2.hoRel", "sh://maxCount")).toBe(
+      "literal:1^^xsd:integer",
+    );
+    expect(findLinkTarget(links, "ns://Holder2.btoRel", "sh://maxCount")).toBe(
+      "literal:1^^xsd:integer",
+    );
+  });
+
+  it("emits ad4m:targetClassName for relations with a target", () => {
+    @Model({ name: "Ingredient" })
+    class Ingredient extends Ad4mModel {}
+
+    @Model({ name: "Recipe" })
+    class Recipe extends Ad4mModel {
+      @HasMany({ through: "ns://ing", target: () => Ingredient })
+      ingredients: string[] = [];
+    }
+
+    const { shape } = Recipe.generateSHACL();
+    const links = flatten(shape);
+
+    expect(
+      findLinkTarget(
+        links,
+        "ns://Recipe.ingredients",
+        "ad4m://targetClassName",
+      ),
+    ).toBe("literal:string:Ingredient");
+  });
+
+  it("emits sh:hasValue for @Flag properties", () => {
+    @Model({ name: "Channel" })
+    class Channel extends Ad4mModel {
+      @Flag({ through: "ns://type", value: "ns://Channel" })
+      type: string = "";
+    }
+
+    const { shape } = Channel.generateSHACL();
+    const links = flatten(shape);
+
+    const hasValue = findLinkTarget(
+      links,
+      "ns://Channel.type",
+      "sh://hasValue",
+    );
+    expect(hasValue).toBeDefined();
+    // Writer emits literal:<value> for URI-style flags.
+    expect(hasValue).toContain("ns://Channel");
+  });
+
+  it("encodes ad4m:filter=false when explicitly disabled", () => {
+    @Model({ name: "Tag" })
+    class Tag extends Ad4mModel {}
+
+    @Model({ name: "Doc" })
+    class Doc extends Ad4mModel {
+      @HasMany({ through: "ns://tag", target: () => Tag, filter: false })
+      tags: string[] = [];
+    }
+
+    const { shape } = Doc.generateSHACL();
+    const links = flatten(shape);
+
+    expect(findLinkTarget(links, "ns://Doc.tags", "ad4m://filter")).toBe(
+      "literal:false",
+    );
+  });
+
+  it("does not emit ad4m:filter when defaulted to true", () => {
+    @Model({ name: "Tag2" })
+    class Tag2 extends Ad4mModel {}
+
+    @Model({ name: "Doc2" })
+    class Doc2 extends Ad4mModel {
+      @HasMany({ through: "ns://tag", target: () => Tag2 })
+      tags: string[] = [];
+    }
+
+    const { shape } = Doc2.generateSHACL();
+    const links = flatten(shape);
+
+    expect(
+      findLinkTarget(links, "ns://Doc2.tags", "ad4m://filter"),
+    ).toBeUndefined();
+  });
+
+  it("emits scalar property predicates", () => {
+    @Model({ name: "Profile" })
+    class Profile extends Ad4mModel {
+      @Property({ through: "ns://name" })
+      name: string = "";
+    }
+
+    const { shape } = Profile.generateSHACL();
+    const links = flatten(shape);
+
+    expect(findLinkTarget(links, "ns://Profile.name", "sh://path")).toBe(
+      "ns://name",
+    );
+    // A bare @Property is deterministic-literal by default — no
+    // resolveLanguage link is emitted.
+    expect(
+      findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLanguage"),
+    ).toBeUndefined();
+  });
+
+  it("emits ad4m://interpretation_hint on the class shape and per property", () => {
+    @Model({
+      name: "Belief",
+      interpretationHint:
+        "A claim a participant holds to be true about the world or the group. Not a task or a question.",
+    })
+    class Belief extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        resolveLanguage: "literal",
+        interpretationHint: "One-sentence statement in the claimant's framing.",
+      })
+      title: string = "";
+
+      @Property({ through: "ns://body", resolveLanguage: "literal" })
+      body: string = "";
+    }
+
+    const { shape } = Belief.generateSHACL();
+    const links = flatten(shape);
+
+    expect(findLinkTarget(links, shape.nodeShapeUri, "ad4m://interpretation_hint"))
+      .toBe(
+        "literal:string:A claim a participant holds to be true about the " +
+        "world or the group. Not a task or a question.",
+      );
+    expect(
+      findLinkTarget(links, "ns://Belief.title", "ad4m://interpretation_hint"),
+    ).toBe(
+      "literal:string:One-sentence statement in the claimant's framing.",
+    );
+    expect(
+      findLinkTarget(links, "ns://Belief.body", "ad4m://interpretation_hint"),
+    ).toBeUndefined();
+  });
+
+  it("emits ad4m://interpretation_hint on relation properties", () => {
+    // Relation-level interpretation hints (RelationOptions.interpretationHint)
+    // are read by the Rust harness's `ShaclProperty.interpretation_hint` and
+    // rendered into the `_propose_link_child` predicate-field description so
+    // the LLM knows what each relation MEANS semantically, not just that it
+    // exists. Regression against the follow-up-branch scope creep: pulled
+    // into PR #911 per Nico's 2026-08-24 ask.
+    @Model({ name: "Intention" })
+    class Intention extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        interpretationHint: "Imperative statement of intent.",
+      })
+      title: string = "";
+
+      @HasMany(() => Belief, {
+        through: "ns://basedOn",
+        interpretationHint:
+          "The prior beliefs this intention derives from.",
+      })
+      basedOn: Belief[] = [];
+
+      @HasMany(() => Belief, { through: "ns://contradicts" })
+      contradicts: Belief[] = [];
+    }
+    @Model({ name: "Belief" })
+    class Belief extends Ad4mModel {
+      @Property({ through: "ns://title", required: true }) title: string = "";
+    }
+
+    const { shape } = Intention.generateSHACL();
+    const links = flatten(shape);
+
+    // Named relation with a hint → link present on the relation's property
+    // node with the hint text.
+    expect(
+      findLinkTarget(links, "ns://Intention.basedOn", "ad4m://interpretation_hint"),
+    ).toBe(
+      "literal:string:The prior beliefs this intention derives from.",
+    );
+
+    // Named relation WITHOUT a hint → no interpretation_hint link (the
+    // scalar-property "no hint = no link" path is what relations follow too).
+    expect(
+      findLinkTarget(
+        links,
+        "ns://Intention.contradicts",
+        "ad4m://interpretation_hint",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("round-trips interpretationHint through toJSON/fromJSON", () => {
+    @Model({
+      name: "Task",
+      interpretationHint:
+        "Something a participant commits to doing - actionable outcome.",
+    })
+    class Task extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        resolveLanguage: "literal",
+        interpretationHint: "Imperative summary of the work.",
+      })
+      title: string = "";
+    }
+
+    const { shape } = Task.generateSHACL();
+    const json: any = shape.toJSON();
+
+    expect(json.interpretation_hint).toBe(
+      "Something a participant commits to doing - actionable outcome.",
+    );
+    const titleProp = json.properties.find((p: any) => p.name === "title");
+    expect(titleProp.interpretation_hint).toBe(
+      "Imperative summary of the work.",
+    );
+
+    const rebuilt = (shape.constructor as any).fromJSON(json);
+    expect(rebuilt.interpretationHint).toBe(
+      "Something a participant commits to doing - actionable outcome.",
+    );
+    const rebuiltTitle = rebuilt.properties.find(
+      (p: any) => p.name === "title",
+    );
+    expect(rebuiltTitle.interpretationHint).toBe(
+      "Imperative summary of the work.",
+    );
+  });
+
+  it("round-trips ordering through toLinks/fromLinks", () => {
+    @Model({ name: "OrderedItem" })
+    class OrderedItem extends Ad4mModel {}
+
+    @Model({ name: "OrderedHolder" })
+    class OrderedHolder extends Ad4mModel {
+      @HasMany({
+        through: "ns://ordered",
+        target: () => OrderedItem,
+        ordering: { strategy: "linkedList" },
+      })
+      ordered: string[] = [];
+    }
+
+    const { shape } = OrderedHolder.generateSHACL();
+    const links = shape.toLinks();
+
+    // Pin the wire format itself.  `ordering` is the one relation field the
+    // read path recovers by stripping a prefix off the target rather than by
+    // parsing a typed literal, so a change to how the writer spells it would
+    // otherwise surface as the executor silently seeing no strategy.
+    expect(
+      findLinkTarget(
+        flatten(shape),
+        "ns://OrderedHolder.ordered",
+        "ad4m://ordering",
+      ),
+    ).toBe("literal:string:linkedList");
+
+    const rebuilt = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+    const rebuiltProp = rebuilt.properties.find(
+      (p: any) => p.name === "ordered",
+    );
+    expect(rebuiltProp?.ordering).toBe("linkedList");
+  });
+
+  it("round-trips ordering through toJSON/fromJSON", () => {
+    @Model({ name: "JsonOrderedItem" })
+    class JsonOrderedItem extends Ad4mModel {}
+
+    @Model({ name: "JsonOrderedHolder" })
+    class JsonOrderedHolder extends Ad4mModel {
+      @HasMany({
+        through: "ns://ordered",
+        target: () => JsonOrderedItem,
+        ordering: { strategy: "linkedList" },
+      })
+      ordered: string[] = [];
+
+      @HasMany({ through: "ns://plain", target: () => JsonOrderedItem })
+      plain: string[] = [];
+    }
+
+    const { shape } = JsonOrderedHolder.generateSHACL();
+
+    // `toJSON` — not `toLinks` — is what `ensureSubjectClass` ships to the
+    // backend, which turns it into the `ad4m://ordering` link the executor
+    // reads the strategy back from. A declaration dropped here is inert
+    // end to end however faithfully `toLinks` spells it: the setter writes
+    // no ordering entries and hydration never reorders.
+    const json: any = shape.toJSON();
+    const orderedProp = json.properties.find((p: any) => p.name === "ordered");
+    expect(orderedProp?.ordering).toBe("linkedList");
+
+    const plainProp = json.properties.find((p: any) => p.name === "plain");
+    expect(plainProp?.ordering).toBeUndefined();
+
+    const rebuilt = SHACLShape.fromJSON(json);
+    expect(
+      rebuilt.properties.find((p: any) => p.name === "ordered")?.ordering,
+    ).toBe("linkedList");
+    expect(
+      rebuilt.properties.find((p: any) => p.name === "plain")?.ordering,
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * An inverse relation is registered twice by design: once in the relation
+ * registry, which describes the edge, and once as property metadata, which is
+ * what makes the accessor read-only. Both were then emitted into the shape, so
+ * `generateSHACL()` described the property twice — once thinly and once with
+ * its target class and options.
+ *
+ * A duplicate is not cosmetic. The executor reads the shape to decide what a
+ * class has; two entries for one name mean two conformance patterns and two
+ * hydration passes for the same predicate, and any consumer comparing a shape
+ * against a manifest sees a property the manifest cannot produce.
+ */
+describe("inverse relations appear once in the generated shape", () => {
+  @Model({ name: "RoundTripParent" })
+  class RoundTripParent extends Ad4mModel {
+    @HasMany({ through: "test://child" })
+    children: string[] = [];
+  }
+
+  @Model({ name: "RoundTripChild" })
+  class RoundTripChild extends Ad4mModel {
+    @BelongsToOne({ through: "test://child" })
+    parent?: string;
+
+    @BelongsToMany({ through: "test://tagged" })
+    taggedBy: string[] = [];
+  }
+
+  const propertiesOf = (cls: any): any[] =>
+    (cls.generateSHACL().shape?.properties ?? []) as any[];
+
+  it("emits one shape per inverse relation", () => {
+    const names = propertiesOf(RoundTripChild).map((p) => p.name);
+    expect(names.filter((n) => n === "parent")).toHaveLength(1);
+    expect(names.filter((n) => n === "taggedBy")).toHaveLength(1);
+  });
+
+  it("keeps the relation loop's description rather than the property loop's", () => {
+    const parent = propertiesOf(RoundTripChild).find((p) => p.name === "parent");
+    expect(parent.path).toBe("test://child");
+    // maxCount is the relation loop's contribution: belongsToOne is scalar.
+    expect(parent.maxCount).toBe(1);
+  });
+
+  it("leaves the owning side alone", () => {
+    const names = propertiesOf(RoundTripParent).map((p) => p.name);
+    expect(names.filter((n) => n === "children")).toHaveLength(1);
+  });
+
+  /**
+   * The forward and inverse of one link share a predicate, so a consumer
+   * keying shape properties by path finds two. That is correct and worth
+   * pinning: it is what made a downstream sort non-deterministic.
+   */
+  it("lets a forward and inverse relation share one predicate", () => {
+    @Model({ name: "RoundTripBoth" })
+    class RoundTripBoth extends Ad4mModel {
+      @HasMany({ through: "test://comment" })
+      comments: string[] = [];
+
+      @BelongsToOne({ through: "test://comment" })
+      inReplyTo?: string;
+    }
+
+    const props = propertiesOf(RoundTripBoth).filter(
+      (p) => p.path === "test://comment",
+    );
+    expect(props.map((p) => p.name).sort()).toEqual(["comments", "inReplyTo"]);
+  });
+
+  describe("datatype inferred from class-field initialisers", () => {
+    it("maps number and boolean fields to xsd://decimal and xsd://boolean", () => {
+      @Model({ name: "Counter" })
+      class Counter extends Ad4mModel {
+        @Property({ through: "ns://count" })
+        count: number = 0;
+
+        @Property({ through: "ns://done" })
+        done: boolean = false;
+
+        @Property({ through: "ns://label" })
+        label: string = "";
+
+        @Property({ through: "ns://explicit", datatype: "xsd://decimal" })
+        explicit: number = 0;
+
+        // No initialiser: no runtime type to read, so it keeps the string default.
+        @Property({ through: "ns://bare" })
+        bare!: number;
+      }
+
+      const { shape } = (Counter as any).generateSHACL();
+      const datatype = Object.fromEntries(shape.properties.map((p: any) => [p.name, p.datatype]));
+      expect(datatype).toEqual({
+        count: "xsd://decimal",
+        done: "xsd://boolean",
+        label: "xsd://string",
+        explicit: "xsd://decimal",
+        bare: "xsd://string",
+      });
+      expect(
+        flatten(shape).find((l) => l.source === "ns://Counter.count" && l.predicate === "sh://datatype")?.target,
+      ).toBe("xsd://decimal");
+    });
+
+    it("falls back to the string default when the constructor cannot run without arguments", () => {
+      @Model({ name: "NeedsArgs" })
+      class NeedsArgs extends Ad4mModel {
+        @Property({ through: "ns://count" })
+        count: number = 0;
+
+        constructor(perspective: any, baseExpression?: string) {
+          super(perspective, baseExpression);
+          if (!perspective) throw new Error("perspective required");
+        }
+      }
+
+      const { shape } = (NeedsArgs as any).generateSHACL();
+      expect(shape.properties.find((p: any) => p.name === "count").datatype).toBe("xsd://string");
+    });
+  });
+});

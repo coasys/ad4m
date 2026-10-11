@@ -3,29 +3,66 @@ import { Literal } from './Literal'
 describe("Literal", () => {
     it("can handle strings", () => {
         const testString = "test string"
-        const testUrl = "literal://string:test%20string"
+        const testUrl = "literal:string:test%20string"
         expect(Literal.from(testString).toUrl()).toBe(testUrl)
         expect(Literal.fromUrl(testUrl).get()).toBe(testString)
     })
 
     it("can handle numbers", () => {
         const testNumber = 3.1415
-        const testUrl = "literal://number:3.1415"
+        const testUrl = "literal:number:3.1415"
         expect(Literal.from(testNumber).toUrl()).toBe(testUrl)
         expect(Literal.fromUrl(testUrl).get()).toBe(testNumber)
     })
 
     it("can handle objects", () => {
         const testObject = {testNumber: "1337", testString: "test"}
-        const testUrl = "literal://json:%7B%22testNumber%22%3A%221337%22%2C%22testString%22%3A%22test%22%7D"
+        const testUrl = "literal:json:%7B%22testNumber%22%3A%221337%22%2C%22testString%22%3A%22test%22%7D"
         expect(Literal.from(testObject).toUrl()).toBe(testUrl)
         expect(Literal.fromUrl(testUrl).get()).toStrictEqual(testObject)
     })
 
     it("can handle special characters", () => {
         const testString = "message(X) :- triple('ad4m://self', _, X)."
-        const testUrl = "literal://string:message%28X%29%20%3A-%20triple%28%27ad4m%3A%2F%2Fself%27%2C%20_%2C%20X%29."
+        const testUrl = "literal:string:message%28X%29%20%3A-%20triple%28%27ad4m%3A%2F%2Fself%27%2C%20_%2C%20X%29."
         expect(Literal.from(testString).toUrl()).toBe(testUrl)
         expect(Literal.fromUrl(testUrl).get()).toBe(testString)
+    })
+
+    it("rejects legacy literal:// URLs", () => {
+        expect(() => Literal.fromUrl("literal://string:hello")).toThrow("literal:// format is no longer supported")
+        expect(() => Literal.fromUrl("literal://number:42")).toThrow("literal:// format is no longer supported")
+    })
+
+    describe("falsy values", () => {
+        it("get() returns 0, false, \"\", null and NaN set with from()", () => {
+            expect(Literal.from(0).get()).toBe(0)
+            expect(Literal.from(false).get()).toBe(false)
+            expect(Literal.from("").get()).toBe("")
+            expect(Literal.from(null).get()).toBe(null)
+            expect(Literal.from(NaN).get()).toBeNaN()
+        })
+
+        it("encodes falsy and non-string values and round-trips them", () => {
+            const cases: [any, string][] = [
+                [0, "literal:number:0"],
+                [false, "literal:boolean:false"],
+                [NaN, "literal:number:NaN"],
+                ["", "literal:string:"],
+                [null, "literal:json:null"],
+                [true, "literal:boolean:true"],
+                [{ a: 1, b: [0, false, ""] }, "literal:json:%7B%22a%22%3A1%2C%22b%22%3A%5B0%2Cfalse%2C%22%22%5D%7D"],
+            ]
+            for (const [value, url] of cases) {
+                expect(Literal.from(value).toUrl()).toBe(url)
+                expect(Literal.fromUrl(url).get()).toStrictEqual(value)
+                expect(Literal.fromUrl(Literal.from(value).toUrl()).get()).toStrictEqual(value)
+            }
+        })
+
+        it("treats undefined as empty", () => {
+            expect(() => Literal.from(undefined).toUrl()).toThrow("Can't turn empty Literal into URL")
+            expect(() => Literal.from(undefined).get()).toThrow("Can't render empty Literal")
+        })
     })
 })

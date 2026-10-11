@@ -1,25 +1,10 @@
-import { Field, InputType, ObjectType } from "type-graphql";
 import { Link } from "../links/Links"
-
-@ObjectType()
-@InputType()
 export class LinkQuery {
-    @Field({nullable: true})
     source?: string;
-
-    @Field({nullable: true})
     target?: string;
-
-    @Field({nullable: true})
     predicate?: string;
-
-    @Field({nullable: true})
     fromDate?: Date;
-
-    @Field({nullable: true})
     untilDate?: Date;
-
-    @Field({nullable: true})
     limit?: number;
 
     constructor(obj: object) {

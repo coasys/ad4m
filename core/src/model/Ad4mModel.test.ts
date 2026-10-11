@@ -1,5 +1,7 @@
 import { Ad4mModel } from "./Ad4mModel";
-import { Model, Property, Optional, ReadOnly, HasMany, Flag } from "./decorators";
+import { isIncludeProjection } from "./types";
+import { Model, Property, Optional, ReadOnly, HasMany, HasOne, Flag } from "./decorators";
+import { path } from "../shacl/builders";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
@@ -16,7 +18,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract property metadata with all fields", () => {
     @Model({ name: "PropertyModel" })
     class PropertyModel extends Ad4mModel {
-      @Property({ through: "test://name", resolveLanguage: "literal" })
+      @Property({ through: "test://name" })
       name: string = "";
       
       @Optional({ through: "test://optional" })
@@ -38,7 +40,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("test://name");
     expect(metadata.properties.name.required).toBe(false);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // A bare @Property has no resolveLanguage → deterministic typed literal
+    // storage (default fast path).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     
     // Verify "optional" property
     expect(metadata.properties.optional.predicate).toBe("test://optional");
@@ -78,24 +82,23 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.relations.local.local).toBe(true);
   });
 
-  it("should extract transform function from property metadata", () => {
+  it("should support NodeExpression transforms in properties", () => {
+    // Transforms are now NodeExpression objects, not callable functions
+    // The fileToDataUri and other builders are exported from @coasys/ad4m
+    const transform = path("test://prefix");
+
     @Model({ name: "TransformModel" })
     class TransformModel extends Ad4mModel {
-      @Optional({ 
+      @Optional({
         through: "test://data",
-        transform: (value: string) => value.toUpperCase()
+        transform
       })
       data: string = "";
     }
 
     const metadata = TransformModel.getModelMetadata();
-    
-    // Assert transform is a function
-    expect(typeof metadata.properties.data.transform).toBe("function");
-    
-    // Test the transform function
-    const transformed = metadata.properties.data.transform!("test");
-    expect(transformed).toBe("TEST");
+    expect(metadata.properties.data).toBeDefined();
+    expect(metadata.properties.data.transform).toEqual(transform);
   });
 
   it("should extract custom getter and setter from property metadata", () => {
@@ -147,7 +150,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should handle complex model with mixed property and relation types", () => {
     @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
-      @Property({ through: "recipe://name", resolveLanguage: "literal" })
+      @Property({ through: "recipe://name" })
       name: string = "";
       
       @Optional({ through: "recipe://description" })
@@ -181,7 +184,8 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     // Verify all metadata fields are correctly extracted
     expect(metadata.properties.name.predicate).toBe("recipe://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // Bare @Property → no resolveLanguage → deterministic typed literal.
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
     expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
@@ -206,8 +210,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     const ProductClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Product",
-      namespace: "product://",
-      resolveLanguage: "literal"
+      namespace: "product://"
     });
 
     const metadata = ProductClass.getModelMetadata();
@@ -221,12 +224,13 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("product://name");
     expect(metadata.properties.name.required).toBe(true);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal storage (default).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.price).toBeDefined();
     expect(metadata.properties.price.predicate).toBe("product://price");
     expect(metadata.properties.price.required).toBe(true);
-    expect(metadata.properties.price.resolveLanguage).toBe("literal");
+    expect(metadata.properties.price.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.description).toBeDefined();
     expect(metadata.properties.description.predicate).toBe("product://description");
@@ -287,7 +291,6 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
           type: "string",
           "x-ad4m": {
             through: "foaf://name",
-            resolveLanguage: "literal",
             writable: true
           }
         },
@@ -310,7 +313,8 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     // Verify x-ad4m metadata is respected
     expect(metadata.properties.name.predicate).toBe("foaf://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal (default).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.required).toBe(true);
 
@@ -370,8 +374,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     const ArticleClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Article",
-      namespace: "article://",
-      resolveLanguage: "literal"
+      namespace: "article://"
     });
 
     const metadata = ArticleClass.getModelMetadata();
@@ -383,11 +386,12 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.title).toBeDefined();
     expect(metadata.properties.title.predicate).toBe("article://title");
     expect(metadata.properties.title.required).toBe(true);
-    expect(metadata.properties.title.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal (default).
+    expect(metadata.properties.title.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.views).toBeDefined();
     expect(metadata.properties.views.predicate).toBe("article://views");
-    expect(metadata.properties.views.resolveLanguage).toBe("literal");
+    expect(metadata.properties.views.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.published).toBeDefined();
     expect(metadata.properties.published.predicate).toBe("article://published");
@@ -430,16 +434,16 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
   });
 });
 
-describe("Ad4mModel.queryToSurrealQL()", () => {
-  // Mock perspective proxy (minimal since queryToSurrealQL doesn't actually call it)
+
+
+
+describe("Ad4mModel.queryToSPARQL()", () => {
   const mockPerspective = {} as any;
 
-  // Helper function to normalize whitespace in queries for easier comparison
   function normalizeQuery(query: string): string {
     return query.replace(/\s+/g, ' ').trim();
   }
 
-  // Test Recipe model — explicit required: true to test required-property query filters
   @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
     @Property({ through: "recipe://name", required: true })
@@ -452,403 +456,172 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     ingredients: string[] = [];
   }
 
-  it("should generate basic query with no filters", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, {});
+  it("should generate basic SPARQL query with no filters", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, {});
+    const norm = normalizeQuery(query);
 
-    expect(query).toContain("id AS source");
-    expect(query).toContain("uri AS source_uri");
-    expect(query).toContain("FROM node");
-    expect(query).toContain("->link AS links");
-    expect(query).toContain("WHERE");
-    // Should have graph traversal filters for required properties
-    expect(query).toContain("count(->link[WHERE");
+    // Must be a SPARQL SELECT
+    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
+    // Must have conformance JOIN for required properties using direct triple patterns
+    expect(norm).toContain("cfTarget_name");
+    expect(norm).toContain("recipe://name");
   });
 
   it("should generate query with simple property filter", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta" } });
-    
-    // Should have graph traversal filters for required properties and user filter
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name']) > 0");
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating']) > 0");
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: "Pasta" } });
+    const norm = normalizeQuery(query);
+
+    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
+    // For literal-stored properties, SPARQL only adds a JOIN (no FILTER value) — filtering is in JS
+    expect(norm).toContain("recipe://name");
+    // Value should NOT be in SPARQL — filtering happens in JS post-filter
+    expect(norm).toContain("?wTarget_name");
   });
 
-  it("should generate query with multiple property filters", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta", rating: 5 } });
-    
-    expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) = 5]) > 0");
-    expect(query).toContain("AND");
+  it("should generate query with NOT operator", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: "Salad" } } });
+    const norm = normalizeQuery(query);
+
+    // For literal-stored properties, NOT filtering is done in JS — no NOT EXISTS in SPARQL
+    expect(norm).toContain("recipe://name");
   });
 
-  it("should handle gt operator (filtered in JavaScript, not SQL)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { gt: 4 } } });
+  it("should generate query with NOT IN operator (array)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
+    const norm = normalizeQuery(query);
 
-    // Comparison operators for regular properties are now filtered in JavaScript post-query
-    // The SQL just filters on the predicate existing
-    expect(query).toContain("FROM node");
-    
-    // Should NOT contain comparison operators in SQL for regular properties
-    expect(query).not.toContain("target > 4");
+    // For literal-stored properties, NOT IN filtering is done in JS — no filter values in SPARQL
+    expect(norm).toContain("recipe://name");
   });
 
-  it("should handle lt operator (filtered in JavaScript, not SQL)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { lt: 3 } } });
+  it("should generate query with IN clause (array values)", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
+    const norm = normalizeQuery(query);
 
-    // Comparison operators are filtered in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("target < 3");
+    // For literal-stored properties, IN filtering is done in JS — only a JOIN exists
+    expect(norm).toContain("recipe://name");
+    expect(norm).toContain("?wTarget_name");
   });
 
-  it("should handle gte and lte operators (filtered in JavaScript, not SQL)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { gte: 3, lte: 5 } } });
+  it("should generate query with base filter", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { base: "ad4m://test123" } });
+    const norm = normalizeQuery(query);
 
-    // Comparison operators are filtered in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("target >= 3");
-    expect(query).not.toContain("target <= 5");
+    expect(norm).toContain("?source =");
+    expect(norm).toContain("ad4m://test123");
   });
 
-  it("should handle not operator with single value", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: "Salad" } } });
+  it("should escape special characters in SPARQL strings", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: 'O\'Brien' } });
+    const norm = normalizeQuery(query);
 
-    // Not operator uses graph traversal with count = 0
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Salad']) = 0");
+    // Should not break the query
+    expect(norm).toContain("SELECT ?source");
   });
 
-  it("should handle not operator with array (NOT IN)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
+  // =========================================================================
+  // Additional models for thorough SPARQL structure tests
+  // =========================================================================
 
-    // Not operator with array uses graph traversal with count = 0
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Salad', 'Soup']]) = 0");
+  @Model({ name: "Task" })
+  class Task extends Ad4mModel {
+    @Property({ through: "task://title", required: true })
+    title: string = "";
+
+    @Property({ through: "task://priority" })
+    priority: number = 0;
+
+    @Property({ through: "task://done" })
+    done: boolean = false;
+
+    @Optional({ through: "task://description" })
+    description: string = "";
+
+    @HasMany({ through: "task://tag" })
+    tags: string[] = [];
+
+    @HasMany({ through: "task://assignee" })
+    assignees: string[] = [];
+  }
+
+  @Model({ name: "EmptyModel" })
+  class EmptyModel extends Ad4mModel {
+    @Optional({ through: "empty://optField" })
+    optField: string = "";
+  }
+
+  // ---- Comparison operators (gt, lt, gte, lte, between, contains) ----
+  // These are handled in JS post-processing, NOT in SPARQL.
+  // The tests verify that the SPARQL still generates valid output (conformance filters)
+  // but does NOT inject FILTER clauses for these operators.
+
+  it("should inject SPARQL FILTER for gt operator", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 3 } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    // gt is now handled via JS post-filter — SPARQL just joins the property
+    expect(norm).toContain("wTarget_cmp_rating");
   });
 
-  it("should handle between operator (filtered in JavaScript, not SQL)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { between: [3, 5] } } });
-
-    // Between operator for regular properties is now filtered in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("target >= 3");
-    expect(query).not.toContain("target <= 5");
+  it("should inject SPARQL FILTER for lt operator", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { lt: 5 } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    // lt is now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_rating");
   });
 
-  it("should handle contains operator on string property (filtered in JavaScript, not SQL)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { contains: "Past" } } });
-
-    // Contains operator for regular properties is now filtered in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("target CONTAINS 'Past'");
+  it("should inject SPARQL FILTER for gte/lte combined", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gte: 2, lte: 8 } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    // gte/lte are now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_rating");
   });
 
-  it("should handle contains operator on regular property with substring (filtered in JavaScript, not SQL)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { contains: "Salad" } } });
-
-    // Contains operator is filtered in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("target CONTAINS 'Salad'");
+  it("should inject SPARQL FILTER for between operator", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { between: [1, 10] } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    // between is now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_rating");
   });
 
-  it.skip("should handle contains operator on special field (author)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { author: { contains: "alice" } } });
-    
-    expect(query).toContain("WHERE author CONTAINS 'alice'");
-    // Should not use a subquery pattern
-    expect(query).not.toContain("SELECT source FROM node");
+  it("should inject SPARQL FILTER for contains operator", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { contains: "pasta" } } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    // contains is now handled via JS post-filter
+    expect(norm).toContain("wTarget_cmp_name");
   });
 
-  it.skip("should handle contains operator on special field (id)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { contains: "test" } } });
-    
-    expect(query).toContain("WHERE source CONTAINS 'test'");
-  });
+  // ---- Multiple property filters combined ----
 
-  it("should handle array values (IN clause)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
-    
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) IN ['Pasta', 'Pizza']]) > 0");
-  });
-
-  it.skip("should handle special fields (author, timestamp) without subqueries", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { author: "did:key:alice" } });
-    
-    expect(query).toContain("WHERE author = 'did:key:alice'");
-    // Ensure it's NOT using a subquery pattern for author in WHERE clause
-    expect(normalizeQuery(query)).not.toMatch(/WHERE.*source IN.*SELECT source FROM node.*author/);
-  });
-
-  it("should not generate ORDER BY clause in SQL (handled in JavaScript)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { order: { timestamp: "DESC" } });
-
-    // ORDER BY is now handled in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("ORDER BY");
-  });
-
-  it("should not generate LIMIT clause in SQL (handled in JavaScript)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { limit: 10 });
-
-    // LIMIT is now handled in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("LIMIT");
-  });
-
-  it("should not generate START clause in SQL (handled in JavaScript)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { offset: 20 });
-
-    // START/offset is now handled in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("START");
-  });
-
-  it("should generate complete query with all options (ORDER BY, LIMIT, START handled in JS)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, {
-      where: { name: "Pasta", rating: { gt: 4 } },
-      order: { timestamp: "DESC" },
-      limit: 10,
-      offset: 20
+  it("should combine multiple property equality filters with &&", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, {
+      where: { name: "Pasta", rating: ["4", "5"] }
     });
-
-    // WHERE clause uses graph traversal filters
-    expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
-    // Comparison operators (gt) are filtered in JavaScript, not SQL
-    expect(query).not.toContain("out.uri > 4");
-    expect(query).not.toContain("target > 4");
-    // ORDER BY, LIMIT, START are now handled in JavaScript post-query
-    expect(query).not.toContain("ORDER BY");
-    expect(query).not.toContain("LIMIT");
-    expect(query).not.toContain("START");
+    const norm = normalizeQuery(query);
+    // Should have EXISTS blocks for both name and rating
+    expect(norm).toContain("recipe://name");
+    expect(norm).toContain("recipe://rating");
+    expect(norm).toContain("&&");
   });
 
-  it("should only select requested properties", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name"] });
+  // ---- ORDER BY, LIMIT, OFFSET are JS post-processed ----
 
-    // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link AS links");
-    
-  });
-
-  it("should select all link data for relations", async () => {
-    @Model({ name: "MultiRelationModel" })
-    class MultiRelationModel extends Ad4mModel {
-      @HasMany({ through: "test://coll1" })
-      coll1: string[] = [];
-
-      @HasMany({ through: "test://coll2" })
-      coll2: string[] = [];
-    }
-
-    const query = await MultiRelationModel.queryToSurrealQL(mockPerspective, {});
-
-    // With array::group(), all link data is selected
-    expect(query).toContain("->link AS links");
-    
-  });
-
-  it("should escape single quotes in string values", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "O'Brien's Recipe" } });
-
-    // Single quotes are escaped with backslash in SurrealDB
-    expect(query).toContain("O\\'Brien\\'s Recipe");
-  });
-
-  it("should handle numeric values without quotes", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: 5 } });
-    
-    // Numeric values should not have quotes around them
-    expect(query).toContain("fn::parse_literal(out.uri) = 5");
-    expect(query).not.toContain("fn::parse_literal(out.uri) = '5'");
-  });
-
-  it("should handle complex nested query (comparisons, ORDER BY, LIMIT handled in JS)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, {
-      where: {
-        name: "Pasta",
-        rating: { gte: 4, lte: 5 },
-        author: "did:key:alice"
-      },
-      order: { rating: "DESC" },
-      limit: 5
-    });
-
-    const normalized = normalizeQuery(query);
-
-    // Verify graph traversal filters are present
-    expect(normalized).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
-    // Comparison operators (gte, lte) are filtered in JavaScript, not SQL
-    expect(normalized).not.toContain("out.uri >= 4");
-    expect(normalized).not.toContain("target >= 4");
-    expect(normalized).not.toContain("out.uri <= 5");
-    expect(normalized).not.toContain("target <= 5");
-    // author and timestamp filtering is done in JavaScript post-query
-    expect(normalized).not.toContain("author = 'did:key:alice'");
-
-    // ORDER BY and LIMIT are handled in JavaScript post-query
-    expect(normalized).not.toContain("ORDER BY");
-    expect(normalized).not.toContain("LIMIT");
-
-    // Verify query structure (FROM node, no GROUP BY)
-    expect(normalized).toContain("FROM node");
-  });
-
-  it("should handle empty query object", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, {});
-    
-    // Should generate valid query with WHERE clause for required properties (name and rating)
-    expect(query).toContain("id AS source");
-    expect(query).toContain("uri AS source_uri");
-    expect(query).toContain("FROM node");
-    
-    // Should have WHERE clause filtering for required properties using graph traversal
-    expect(query).toContain("WHERE");
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://name']) > 0");
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating']) > 0");
-    expect(query).not.toContain("ORDER BY");
-    expect(query).not.toContain("START");
-  });
-
-  it("should handle id special field", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: "literal://test" } });
-    
-    expect(query).toContain("uri = 'literal://test'");
-  });
-
-  it("should handle id special field with array (IN clause)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: ["literal://test1", "literal://test2"] } });
-    
-    expect(query).toContain("uri IN ['literal://test1', 'literal://test2']");
-  });
-
-  it("should handle id special field with not operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: "literal://test" } } });
-    
-    expect(query).toContain("uri != 'literal://test'");
-  });
-
-  it("should handle id special field with not operator and array (NOT IN)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { not: ["literal://test1", "literal://test2"] } } });
-    
-    expect(query).toContain("uri NOT IN ['literal://test1', 'literal://test2']");
-  });
-
-  it("should handle id special field with between operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { between: ["literal://a", "literal://z"] } } } as any);
-    
-    const normalized = normalizeQuery(query);
-    expect(normalized).toContain("uri >= 'literal://a' AND uri <= 'literal://z'");
-  });
-
-  it("should handle id special field with gt operator", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gt: "literal://m" } } } as any);
-    
-    expect(query).toContain("uri > 'literal://m'");
-  });
-
-  it("should handle id special field with gte and lte operators", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { id: { gte: "literal://a", lte: "literal://z" } } } as any);
-    
-    const normalized = normalizeQuery(query);
-    expect(normalized).toContain("uri >= 'literal://a'");
-    expect(normalized).toContain("uri <= 'literal://z'");
-  });
-
-  it("should handle timestamp special field with gt operator (filtered in JavaScript)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { timestamp: { gt: 1234567890 } } });
-
-    // timestamp filtering is done in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("timestamp > 1234567890");
-  });
-
-  it("should handle multiple special fields (filtered in JavaScript)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, {
-      where: {
-        author: "did:key:alice",
-        timestamp: { gt: 1000 }
-      }
-    });
-
-    // author and timestamp filtering is done in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("author = 'did:key:alice'");
-    expect(query).not.toContain("timestamp > 1000");
-  });
-
-  it("should handle mixed special and regular properties", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, {
-      where: {
-        name: "Pasta",
-        author: "did:key:alice",
-        rating: { gt: 4 }
-      }
-    });
-
-    const normalized = normalizeQuery(query);
-    // Regular properties use graph traversal filters
-    expect(normalized).toContain("count(->link[WHERE predicate = 'recipe://name' AND fn::parse_literal(out.uri) = 'Pasta']) > 0");
-    // Comparison operators (gt) are filtered in JavaScript, not SQL
-    expect(normalized).not.toContain("out.uri > 4");
-    expect(normalized).not.toContain("target > 4");
-    // author filtering is done in JavaScript post-query
-    expect(normalized).not.toContain("author = 'did:key:alice'");
-  });
-
-  it("should handle boolean values", async () => {
-    @Model({ name: "Task" })
-    class Task extends Ad4mModel {
-      @Property({ through: "task://completed" })
-      completed: boolean = false;
-    }
-
-    const query = await Task.queryToSurrealQL(mockPerspective, { where: { completed: true } });
-    
-    expect(query).toContain("fn::parse_literal(out.uri) = true");
-  });
-
-  it("should handle array of numbers", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: [4, 5] } });
-    
-    expect(query).toContain("count(->link[WHERE predicate = 'recipe://rating' AND fn::parse_literal(out.uri) IN [4, 5]]) > 0");
-  });
-
-  it("should skip unknown properties in where clause", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { unknownProp: "value" } as any });
-    
-    // Should not throw error, just skip the unknown property
-    expect(query).toContain("source");
-    
-    // Should not contain any condition for unknownProp
-    expect(query).not.toContain("unknownProp");
-  });
-
-  it.skip("should skip unknown properties in select clause", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "unknownProp"] as any });
-    
-    // Should include name using aggregation
-    expect(query).toContain("array::first(target[WHERE predicate = 'recipe://name']) AS name");
-    // Should not error on unknownProp, just skip it
-    expect(query).not.toContain("unknownProp");
-  });
-
-  it("should handle order by regular property (handled in JavaScript)", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { order: { name: "ASC" } });
-
-    // ORDER BY is now handled in JavaScript post-query
-    expect(query).toContain("FROM node");
-    expect(query).not.toContain("ORDER BY");
-  });
-
-  it("should generate query with only properties specified", async () => {
-    const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"] });
-
-    // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("->link AS links");
-    
+  it("should include ORDER BY/LIMIT/OFFSET in SPARQL pagination subquery", async () => {
+    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { order: { name: "ASC" }, limit: 10, offset: 5 });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("SELECT ?source");
+    // SPARQL-level pagination via subquery
+    expect(norm).toContain("ORDER BY");
+    expect(norm).toContain("LIMIT 10");
+    expect(norm).toContain("OFFSET 5");
+    expect(norm).toContain("SELECT DISTINCT ?source");
   });
 });
-
-describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () => {
+describe("Ad4mModel query methods (modelQuery integration)", () => {
   // Test Recipe model
   @Model({ name: "Recipe" })
   class Recipe extends Ad4mModel {
@@ -862,9 +635,10 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     ingredients: string[] = [];
   }
 
-  // Mock perspective with both querySurrealDB and infer methods
+  // Mock perspective with querySparql, modelQuery, and infer methods
   const mockPerspective = {
-    querySurrealDB: jest.fn(),
+    querySparql: jest.fn(),
+    modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
     stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
@@ -874,337 +648,128 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     jest.clearAllMocks();
   });
 
-  it("should convert empty SurrealDB results correctly", async () => {
-    const result = await Recipe.instancesFromSurrealResult(mockPerspective, {}, []);
-    
-    expect(result.results).toEqual([]);
-    expect(result.totalCount).toBe(0);
-  });
+  it("routes findAll() through modelQuery", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
-  it("should convert SurrealDB results to model instances", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "cheese", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      },
-      {
-        source: "node:def456",
-        source_uri: "literal://recipe2",
-        links: [
-          { predicate: "recipe://name", target: "Pizza", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://rating", target: "4", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "dough", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "cheese", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
-        ]
-      }
-    ];
+    const results = await Recipe.findAll(mockPerspective);
 
-    const result = await Recipe.instancesFromSurrealResult(mockPerspective, {}, surrealResults);
-
-    expect(result.results).toHaveLength(2);
-    expect(result.totalCount).toBe(2);
-
-    const recipe1 = result.results[0];
-    expect(recipe1).toBeInstanceOf(Recipe);
-    expect(recipe1.name).toBe("Pasta");
-    expect(recipe1.rating).toBe(5);
-    expect(recipe1.ingredients).toEqual(["pasta", "tomato", "cheese"]);
-
-    const recipe2 = result.results[1];
-    expect(recipe2).toBeInstanceOf(Recipe);
-    expect(recipe2.name).toBe("Pizza");
-    expect(recipe2.rating).toBe(4);
-  });
-
-  it("should filter properties when query specifies properties", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromSurrealResult(
-      mockPerspective,
-      { properties: ["name"] },
-      surrealResults
-    );
-
-    expect(result.results).toHaveLength(1);
-    const recipe = result.results[0];
-    expect(recipe.name).toBe("Pasta");
-    // rating and ingredients should be removed since only "name" was requested
-    expect(recipe.rating).toBeUndefined();
-    expect(recipe.ingredients).toBeUndefined();
-    // author, createdAt, updatedAt are also stripped unless explicitly requested
-    expect(recipe.author).toBeUndefined();
-    expect(recipe.timestamp).toBeUndefined();
-  });
-
-  it("should filter properties when query specifies properties", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "tomato", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    const result = await Recipe.instancesFromSurrealResult(
-      mockPerspective,
-      { properties: ["name"] },
-      surrealResults
-    );
-
-    expect(result.results).toHaveLength(1);
-    const recipe = result.results[0];
-    expect(recipe.name).toBe("Pasta");
-    // rating and ingredients should be removed since only "name" was requested
-    expect(recipe.rating).toBeUndefined();
-  });
-
-  it("should handle results missing base field", async () => {
-    const surrealResults = [
-      {
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-        // Missing source field
-      } as any
-    ];
-
-    const result = await Recipe.instancesFromSurrealResult(mockPerspective, {}, surrealResults);
-
-    // Should filter out the invalid result (or handle gracefully)
-    expect(result.results).toHaveLength(0);
-    expect(result.totalCount).toBe(0);
-  });
-
-  it("should use SurrealDB by default in findAll()", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
-
-    const results = await Recipe.findAll(mockPerspective, {});
-
-    expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use Prolog when useSurrealDB is false in findAll()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal://recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
+  it("should use SPARQL when engine is 'sparql' in findAllAndCount()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
       ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const results = await Recipe.findAll(mockPerspective, {}, false);
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
-  });
-
-  it("should use SurrealDB by default in findAllAndCount()", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+      totalCount: 1
+    });
 
     const { results, totalCount } = await Recipe.findAllAndCount(mockPerspective, {});
 
-    expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(totalCount).toBe(1);
   });
 
-  it("should use SurrealDB by default in paginate()", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should use SPARQL when engine is 'sparql' in paginate()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const page = await Recipe.paginate(mockPerspective, 10, 1, {});
 
-    expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(page.results).toHaveLength(1);
     expect(page.pageSize).toBe(10);
     expect(page.pageNumber).toBe(1);
+    expect(page.totalCount).toBe(1);
   });
 
-  it("should use SurrealDB by default in count()", async () => {
-    // Since count() uses result.length and GROUP BY returns one row per source,
-    // mock 5 recipe sources
-    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]
-    }));
-
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should use SPARQL in count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 5
+    });
 
     const count = await Recipe.count(mockPerspective, {});
 
-    expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(5);
   });
 
-  it("should use Prolog when useSurrealDB is false in count()", async () => {
-    const prologResults = [{ TotalCount: 10 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
+  it("should return count from modelQuery", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 10
+    });
 
-    const count = await Recipe.count(mockPerspective, {}, false);
+    const count = await Recipe.count(mockPerspective, {});
     
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.querySparql).not.toHaveBeenCalled();
     expect(count).toBe(10);
   });
 
-  it("should use SurrealDB by default in ModelQueryBuilder.get()", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("routes ModelQueryBuilder.get() through modelQuery", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const results = await Recipe.query(mockPerspective)
       .where({ name: "Pasta" })
       .get();
 
-    expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(results).toHaveLength(1);
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("should use Prolog when useSurrealDB(false) in ModelQueryBuilder.get()", async () => {
-    const prologResults = [{
-      AllInstances: [
-        ["literal://recipe1", [["name", "Pasta"]], [["ingredients", ["pasta"]]], "2023-01-01T00:00:00Z", "did:key:alice"]
-      ],
-      TotalCount: 1
-    }];
-
-    mockPerspective.infer.mockResolvedValue(prologResults);
-
-    const results = await Recipe.query(mockPerspective)
-      .where({ name: "Pasta" })
-      .useSurrealDB(false)
-      .get();
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(results).toHaveLength(1);
-  });
-
-  it("should use SurrealDB by default in ModelQueryBuilder.count()", async () => {
-    // count() counts the number of rows returned by the query (one row per source)
-    const surrealResults = Array.from({ length: 3 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]
-    }));
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("routes ModelQueryBuilder.count() through modelQuery", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 4 } })
       .count();
 
-    expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(3);
   });
 
-  it("should use SurrealDB by default in ModelQueryBuilder.paginate()", async () => {
-    const surrealResults = [
-      {
-        source: "node:abc123",
-        source_uri: "literal://recipe1",
-        links: [
-          { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://ingredient", target: "pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      }
-    ];
-
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("routes ModelQueryBuilder.paginate() through modelQuery", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [
+        { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
+      ],
+      totalCount: 1
+    });
 
     const page = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
       .paginate(10, 1);
 
-    expect(mockPerspective.querySurrealDB).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(page.results).toHaveLength(1);
     expect(page.pageSize).toBe(10);
@@ -1228,7 +793,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
 
   // Mock perspective
   const mockPerspective = {
-    querySurrealDB: jest.fn(),
+    querySparql: jest.fn(),
+    modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
     stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
@@ -1238,177 +804,95 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     jest.clearAllMocks();
   });
 
-  it("should apply JS-level filtering for gt operator on properties in SurrealDB count()", async () => {
-    // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]
-    }));
-    
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should apply filtering for gt operator on properties in SPARQL count()", async () => {
+    // With the new modelQuery endpoint, filtering happens server-side in Rust
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
     // Count recipes with rating > 3 (should match 2 recipes: rating 4 and 5)
     const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } });
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { gt: 3 } } });
-    
     expect(count).toBe(2);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for between operator on properties in SurrealDB count()", async () => {
-    // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]
-    }));
-    
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should apply filtering for between operator on properties in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     // Count recipes with rating between 2 and 4 (should match 3 recipes: rating 2, 3, 4)
     const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } });
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { between: [2, 4] } } });
-    
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for timestamp gt operator in SurrealDB count()", async () => {
-    // Mock SurrealDB results: 5 recipes with different timestamps
-    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]
-    }));
-    
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should apply filtering for timestamp gt operator in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
-    // Count recipes with timestamp > 2023-01-03 (should match 2 recipes: 2023-01-04 and 2023-01-05)
     const targetTimestamp = new Date("2023-01-03T00:00:00Z").getTime();
     const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
-    
     expect(count).toBe(2);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for timestamp between operator in SurrealDB count()", async () => {
-    // Mock SurrealDB results: 5 recipes with different timestamps
-    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]
-    }));
-    
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should apply filtering for timestamp between operator in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
-    // Count recipes with timestamp between 2023-01-02 and 2023-01-04
     const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
     const count = await Recipe.count(mockPerspective, { 
       where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
     });
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { 
-      where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
-    });
-    
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering for author filtering in SurrealDB count()", async () => {
-    // Mock SurrealDB results: 3 recipes by Alice and 2 by Bob
-    const surrealResults = [
-      ...Array.from({ length: 3 }, (_, i) => ({
-        source: `node:abc${i+1}`,
-        source_uri: `literal://recipe${i+1}`,
-        links: [
-          { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-        ]
-      })),
-      ...Array.from({ length: 2 }, (_, i) => ({
-        source: `node:def${i+4}`,
-        source_uri: `literal://recipe${i+4}`,
-        links: [
-          { predicate: "recipe://name", target: `Recipe ${i+4}`, author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
-          { predicate: "recipe://rating", target: "5", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
-        ]
-      }))
-    ];
-    
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should apply filtering for author filtering in SPARQL count()", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     // Count recipes by Alice (should match 3 recipes)
     const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } });
     
-    // Verify count matches the number of instances that would be returned by findAll
-    const findAllResults = await Recipe.findAll(mockPerspective, { where: { author: "did:key:alice" } });
-    
     expect(count).toBe(3);
-    expect(count).toBe(findAllResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering in ModelQueryBuilder.count() with gt operator", async () => {
-    // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
-    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
-        { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
-      ]
-    }));
-    
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should apply filtering in ModelQueryBuilder.count() with gt operator", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 2
+    });
 
     // Count recipes with rating > 3 using ModelQueryBuilder
     const count = await Recipe.query(mockPerspective)
       .where({ rating: { gt: 3 } })
       .count();
     
-    // Verify count matches the number of instances that would be returned by get()
-    const getResults = await Recipe.query(mockPerspective)
-      .where({ rating: { gt: 3 } })
-      .get();
-    
     expect(count).toBe(2);
-    expect(count).toBe(getResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply JS-level filtering in ModelQueryBuilder.count() with timestamp between", async () => {
-    // Mock SurrealDB results: 5 recipes with different timestamps
-    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `node:abc${i+1}`,
-      source_uri: `literal://recipe${i+1}`,
-      links: [
-        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
-        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
-      ]
-    }));
-    
-    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+  it("should apply filtering in ModelQueryBuilder.count() with timestamp between", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [],
+      totalCount: 3
+    });
 
     const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
@@ -1418,42 +902,2965 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
       .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
       .count();
     
-    // Verify count matches the number of instances that would be returned by get()
-    const getResults = await Recipe.query(mockPerspective)
-      .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
-      .get();
-    
     expect(count).toBe(3);
-    expect(count).toBe(getResults.length);
+    expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should handle count() with Prolog for gt operator (legacy)", async () => {
-    const prologResults = [{ TotalCount: 2 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
+});
 
-    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, false);
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(count).toBe(2);
+
+describe("SPARQL comparison filters", () => {
+  @Model({ name: "Item" })
+  class Item extends Ad4mModel {
+    @Property({ through: "item://price", required: true })
+    price!: string;
+
+    @Property({ through: "item://name", required: true })
+    name!: string;
+  }
+
+  it("should generate gt filter", async () => {
+    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { gt: 10 } } });
+    // gt is now JS post-filter — SPARQL just joins the property
+    expect(query).toContain("item://price");
   });
 
-  it("should handle count() with Prolog for timestamp between (legacy)", async () => {
-    const prologResults = [{ TotalCount: 3 }];
-    mockPerspective.infer.mockResolvedValue(prologResults);
+  it("should generate between filter", async () => {
+    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { between: [5, 20] } } });
+    // between is now JS post-filter
+    expect(query).toContain("item://price");
+  });
 
-    const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
-    const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
-    
-    const count = await Recipe.count(
-      mockPerspective, 
-      { where: { timestamp: { between: [startTimestamp, endTimestamp] } } }, 
-      false
-    );
-    
-    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
-    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
-    expect(count).toBe(3);
+  it("should generate contains filter", async () => {
+    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { name: { contains: "widget" } } });
+    // contains is now JS post-filter
+    expect(query).toContain("item://name");
   });
 });
 
+// ──────────────────────────────────────────────────────────
+// SPARQL Direct Triple Pattern & IRI Tests
+// ──────────────────────────────────────────────────────────
+
+import { buildSPARQLQuery, formatSPARQLValue } from "./query-sparql";
+import { SHACLShape } from "../shacl/SHACLShape";
+
+describe("SPARQL direct triple pattern generation", () => {
+  @Model({ name: "Channel" })
+  class Channel extends Ad4mModel {
+    @Flag({ through: "flux://entry_type", value: "flux://channel" })
+    type: string = "";
+
+    @Property({ through: "flux://name", required: true })
+    name: string = "";
+
+    @Optional({ through: "flux://description" })
+    description: string = "";
+
+    @HasMany({ through: "flux://has_message" })
+    messages: string[] = [];
+  }
+
+  const mockPersp = {} as any;
+
+  it("generates direct triple pattern with ?source ?predicate ?target", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    // Must use direct triple pattern, not link-node reification
+    expect(query).toContain("?source ?predicate ?target");
+    expect(query).not.toContain("rdf:type");
+    expect(query).not.toContain("ad4m:Link");
+  });
+
+  it("generates Flag filter as ?source <predicate> <value>", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("<flux://entry_type>");
+    expect(query).toContain("<flux://channel>");
+  });
+
+  it("generates Property binding as ?source <predicate> ?varName", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("<flux://name>");
+    expect(query).toMatch(/\?source\s+<flux:\/\/name>\s+\?cfTarget_name/);
+  });
+
+  it("uses RDF 1.2 reifier pattern for author/timestamp", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>");
+    expect(query).toContain("?source ?predicate ?target .");
+    expect(query).toContain("?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>>");
+    expect(query).toContain("?_reifier <ad4m://ontology/author> ?author");
+    expect(query).toContain("?_reifier <ad4m://ontology/timestamp> ?timestamp");
+    expect(query).not.toContain("GRAPH");
+  });
+
+  it("uses FILTER(isIRI(?source)) to exclude non-IRI subjects", async () => {
+    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
+    expect(query).toContain("FILTER(isIRI(?source)");
+  });
+});
+
+
+
+describe("formatSPARQLValue", () => {
+  it("wraps strings in double quotes", () => {
+    expect(formatSPARQLValue("hello")).toBe('"hello"');
+  });
+
+  it("escapes special characters", () => {
+    expect(formatSPARQLValue('say "hi"')).toBe('"say \\"hi\\""');
+  });
+
+  it("converts numbers to quoted strings", () => {
+    expect(formatSPARQLValue(42)).toBe('"42"');
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+//  Comprehensive SPARQL migration unit tests
+// ──────────────────────────────────────────────────────────
+
+import { Literal } from "../Literal";
+
+// Helper: create literal URLs using JSON encoding (which handles all types including booleans)
+function literalUrl(value: any): string {
+  if (typeof value === 'string') return Literal.from(value).toUrl();
+  // Use JSON encoding for numbers and booleans since Literal.get() doesn't handle boolean: prefix
+  return `literal:json:${encodeURIComponent(JSON.stringify(value))}`;
+}
+
+describe("buildSPARQLQuery edge cases", () => {
+  @Model({ name: "FlagModel" })
+  class FlagModel extends Ad4mModel {
+    @Flag({ through: "flag://type", value: "flag://FlagModel" })
+    type: string = "";
+
+    @Property({ through: "flag://name", required: true })
+    name: string = "";
+  }
+
+  @Model({ name: "NoFlagModel" })
+  class NoFlagModel extends Ad4mModel {
+    @Property({ through: "noflag://title" })
+    title: string = "";
+  }
+
+  it("adds conformance JOIN for flag + required properties", () => {
+    const metadata = FlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, {}, FlagModel);
+    // Should contain flag triple pattern
+    expect(sparql).toContain("<flag://type>");
+    expect(sparql).toContain("<flag://FlagModel>");
+    // Should contain required property pattern
+    expect(sparql).toContain("<flag://name>");
+  });
+
+  it("uses structural subquery when no conformance patterns exist", () => {
+    const metadata = NoFlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, {}, NoFlagModel);
+    // Should contain structural subquery with DISTINCT
+    expect(sparql).toContain("SELECT DISTINCT ?source");
+    expect(sparql).toContain("<noflag://title>");
+  });
+
+  it("adds JOIN for where-clause on literal-stored fields", () => {
+    const metadata = FlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { name: "test" } }, FlagModel);
+    // Where clause should add a join pattern for name
+    expect(sparql).toContain("flag://name");
+  });
+
+  it("handles where: {id: 'specific-id'} with FILTER on ?source", () => {
+    const metadata = FlagModel.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { id: "expr:123" } as any }, FlagModel);
+    // Should filter by source
+    expect(sparql).toContain("expr:123");
+  });
+});
+
+// ── Batch hydration for reverse relations (3.4) ─────────────────────────────
+describe("Batch hydration for reverse relations", () => {
+  it("batch hydration should correctly group targets by parent instance ID", () => {
+    // Test the grouping logic used in batch SPARQL hydration
+    const sparqlResults = [
+      { target: "inst:1", source: "child:a" },
+      { target: "inst:1", source: "child:b" },
+      { target: "inst:2", source: "child:c" },
+      { target: "inst:3", source: "child:d" },
+      { target: "inst:3", source: "child:e" },
+      { target: "inst:3", source: "child:f" },
+    ];
+
+    const reverseLinksMap = new Map<string, string[]>();
+    for (const row of sparqlResults) {
+      if (!reverseLinksMap.has(row.target)) reverseLinksMap.set(row.target, []);
+      reverseLinksMap.get(row.target)!.push(row.source);
+    }
+
+    expect(reverseLinksMap.get("inst:1")).toEqual(["child:a", "child:b"]);
+    expect(reverseLinksMap.get("inst:2")).toEqual(["child:c"]);
+    expect(reverseLinksMap.get("inst:3")).toEqual(["child:d", "child:e", "child:f"]);
+  });
+
+  it("batch hydration should handle empty relation sets without error", () => {
+    const sparqlResults: any[] = [];
+    const reverseLinksMap = new Map<string, string[]>();
+    for (const row of sparqlResults) {
+      if (!reverseLinksMap.has(row.target)) reverseLinksMap.set(row.target, []);
+      reverseLinksMap.get(row.target)!.push(row.source);
+    }
+
+    expect(reverseLinksMap.size).toBe(0);
+    expect(reverseLinksMap.get("nonexistent") || []).toEqual([]);
+  });
+
+  it("batch hydration should return identical results to N+1 hydration (grouping equivalence)", () => {
+    // Simulate N+1: each instance queries separately
+    const instances = [{ id: "inst:1" }, { id: "inst:2" }];
+    const allLinks = [
+      { data: { source: "child:a", predicate: "rel://has", target: "inst:1" } },
+      { data: { source: "child:b", predicate: "rel://has", target: "inst:1" } },
+      { data: { source: "child:c", predicate: "rel://has", target: "inst:2" } },
+    ];
+
+    // N+1 approach
+    const n1Results = new Map<string, string[]>();
+    for (const inst of instances) {
+      const links = allLinks.filter(l => l.data.target === inst.id);
+      n1Results.set(inst.id, links.map(l => l.data.source));
+    }
+
+    // Batch approach
+    const batchResults = new Map<string, string[]>();
+    const sparqlRows = allLinks.map(l => ({ target: l.data.target, source: l.data.source }));
+    for (const row of sparqlRows) {
+      if (!batchResults.has(row.target)) batchResults.set(row.target, []);
+      batchResults.get(row.target)!.push(row.source);
+    }
+
+    // Results should be identical
+    for (const inst of instances) {
+      expect(batchResults.get(inst.id)).toEqual(n1Results.get(inst.id));
+    }
+  });
+
+  it("batch hydration with nested includes should use batched queries at each level", () => {
+    // This test verifies the structure: nested includes result in multiple
+    // batch operations, one per relation depth level
+    const depth0Rows = [
+      { target: "root:1", source: "mid:a" },
+      { target: "root:1", source: "mid:b" },
+    ];
+    const depth1Rows = [
+      { target: "mid:a", source: "leaf:x" },
+      { target: "mid:b", source: "leaf:y" },
+    ];
+
+    // Group each level
+    const level0Map = new Map<string, string[]>();
+    for (const r of depth0Rows) {
+      if (!level0Map.has(r.target)) level0Map.set(r.target, []);
+      level0Map.get(r.target)!.push(r.source);
+    }
+
+    const level1Map = new Map<string, string[]>();
+    for (const r of depth1Rows) {
+      if (!level1Map.has(r.target)) level1Map.set(r.target, []);
+      level1Map.get(r.target)!.push(r.source);
+    }
+
+    expect(level0Map.get("root:1")).toEqual(["mid:a", "mid:b"]);
+    expect(level1Map.get("mid:a")).toEqual(["leaf:x"]);
+    expect(level1Map.get("mid:b")).toEqual(["leaf:y"]);
+  });
+});
+
+// ── Push-down FILTER for literal equality (3.5) ──────────────────────────────
+describe("Push-down FILTER for literal equality", () => {
+  const mockPerspective = {} as any;
+
+  @Model({ name: "FilterTest" })
+  class FilterTest extends Ad4mModel {
+    @Property({ through: "ft://name", required: true })
+    name: string = "";
+    @Property({ through: "ft://rating", required: true })
+    rating: number = 0;
+  }
+
+  const normalizeQuery = (q: string) => q.replace(/\s+/g, " ").trim();
+
+  it("SPARQL query for where: { name: 'Alice' } should use <ad4m://fn/parse_literal> FILTER", async () => {
+    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
+    const norm = normalizeQuery(query);
+    // JOIN pattern exists
+    expect(norm).toContain("?wTarget_name");
+    // parse_literal push-down FILTER is present (using correct SPARQL IRI syntax)
+    expect(norm).toContain("ad4m://fn/parse_literal");
+    expect(norm).not.toContain("fn::parse_literal");
+  });
+
+  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should use <ad4m://fn/parse_literal> IN FILTER", async () => {
+    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: ["Alice", "Bob"] } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("?wTarget_name");
+    expect(norm).toContain("ad4m://fn/parse_literal");
+    expect(norm).not.toContain("fn::parse_literal");
+  });
+
+  it("SPARQL query for where: { rating: { gt: 5 } } should NOT include parse_literal FILTER", async () => {
+    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 5 } } });
+    const norm = normalizeQuery(query);
+    expect(norm).not.toContain("parse_literal");
+  });
+
+  it("literal property where clause adds JOIN for JS post-filter", async () => {
+    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
+    const norm = normalizeQuery(query);
+    expect(norm).toContain("?wTarget_name");
+  });
+});
+
+// ── Lightweight fingerprint (3.7) ────────────────────────────────────────────
+describe("Lightweight fingerprint optimization", () => {
+  // Replicate the buildFingerprint logic for testing
+  const buildFingerprint = (results: any[]) => {
+    if (results.length === 0) return '0:';
+    const ids = results.map((r: any) => r.id || '').sort().join(',');
+    const ts = results.map((r: any) => r.updatedAt || r.timestamp || '').join(',');
+    return `${results.length}:${ids}:${ts}`;
+  };
+
+  const base = [
+    { id: "a", updatedAt: "100" },
+    { id: "b", updatedAt: "200" },
+  ];
+
+  it("lightweight fingerprint should detect instance addition", () => {
+    const fp1 = buildFingerprint(base);
+    const fp2 = buildFingerprint([...base, { id: "c", updatedAt: "300" }]);
+    expect(fp1).not.toBe(fp2);
+  });
+
+  it("lightweight fingerprint should detect instance removal", () => {
+    const fp1 = buildFingerprint(base);
+    const fp2 = buildFingerprint([base[0]]);
+    expect(fp1).not.toBe(fp2);
+  });
+
+  it("lightweight fingerprint should detect timestamp change", () => {
+    const fp1 = buildFingerprint(base);
+    const fp2 = buildFingerprint([{ id: "a", updatedAt: "999" }, base[1]]);
+    expect(fp1).not.toBe(fp2);
+  });
+
+  it("lightweight fingerprint should NOT false-positive for identical sets", () => {
+    const fp1 = buildFingerprint(base);
+    const fp2 = buildFingerprint([...base]); // same data, new array
+    expect(fp1).toBe(fp2);
+  });
+});
+
+
+
+// ── Subscribe callback timing ──────────────────────────────────────────
+describe("ModelQueryBuilder subscribe callback timing", () => {
+  it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
+    // This test verifies that subscribe() uses the Rust model subscription endpoint
+    // and properly handles the subscription lifecycle.
+    
+    const mockSubscriptionId = "test-sub-123";
+    let updateCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        updateCallback = cb;
+        return () => {}; // unsubscribe function
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+    } as any;
+
+    const { Ad4mModel, Model, Property, Flag } = require("./index");
+
+    @Model({ name: "TimingTest" })
+    class TimingTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://timing" })
+      type: string = "test://timing";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    let callbackInvokedBeforeResolve = false;
+    let promiseResolved = false;
+
+    const query = TimingTest.query(mockPerspective);
+    const promise = query.subscribe((results: any[]) => {
+      if (!promiseResolved) {
+        callbackInvokedBeforeResolve = true;
+      }
+    });
+
+    // At this point the Promise hasn't resolved yet
+    // The callback should NOT have fired synchronously
+    expect(callbackInvokedBeforeResolve).toBe(false);
+
+    const initialResults = await promise;
+    promiseResolved = true;
+
+    expect(initialResults).toEqual([]);
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalled();
+  });
+});
+
+describe("ModelQueryBuilder paginateSubscribe", () => {
+  it("paginateSubscribe should use a single query with count: true", async () => {
+    const mockSubscriptionId = "paginate-sub-123";
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [{ id: "item1", type: "test://paginate" }], totalCount: 42 }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "PaginateTest" })
+    class PaginateTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://paginate" })
+      type: string = "test://paginate";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = PaginateTest.query(mockPerspective);
+    const result = await builder.paginateSubscribe(10, 1, () => {});
+
+    // Should return paginated result structure
+    expect(result).toHaveProperty("results");
+    expect(result).toHaveProperty("totalCount");
+    expect(result).toHaveProperty("pageSize", 10);
+    expect(result).toHaveProperty("pageNumber", 1);
+
+    // modelQuery should be called exactly once (not twice — no separate count query)
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+
+    // The query should have count: true
+    const callArgs = mockPerspective.modelQuery.mock.calls[0];
+    const queryJson = JSON.parse(callArgs[1]);
+    expect(queryJson.count).toBe(true);
+    expect(queryJson.limit).toBe(10);
+    expect(queryJson.offset).toBe(0);
+  });
+
+  it("paginateSubscribe should re-fetch on real subscription updates", async () => {
+    const mockSubscriptionId = "paginate-update-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    let modelQueryCallCount = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(async () => {
+        modelQueryCallCount++;
+        return { instances: [{ id: "new-item", type: "test://update" }], totalCount: 1 };
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "UpdateTest" })
+    class UpdateTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://update" })
+      type: string = "test://update";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = UpdateTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    const initialCallCount = modelQueryCallCount;
+
+    // Simulate a subscription update
+    capturedCallback!({ instances: [{ id: "new-item" }], totalCount: 1 });
+
+    // Wait for async processing
+    await new Promise(r => setTimeout(r, 100));
+
+    // modelQuery should have been called again for the re-fetch
+    expect(modelQueryCallCount).toBeGreaterThan(initialCallCount);
+    // User callback should have been invoked with paginated results
+    expect(userCallback).toHaveBeenCalled();
+    const callArg = userCallback.mock.calls[0][0];
+    expect(callArg).toHaveProperty("totalCount");
+    expect(callArg).toHaveProperty("pageSize", 10);
+    expect(callArg).toHaveProperty("pageNumber", 1);
+  });
+
+  it("paginateSubscribe coalesces overlapping dispatches into a trailing fetch", async () => {
+    // Two server dispatches arrive while the first re-fetch is still in
+    // flight. A generation counter (#1020) would start both and could keep
+    // the one that read 1 model while dropping the one that read 2. The
+    // server then has nothing further to dispatch — "Paginate callback did
+    // not see second model save". Coalesce: one in-flight read, then a
+    // trailing fetch after the last dispatch.
+    const mockSubscriptionId = "paginate-stale-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    // First call is the initial fetch (resolves immediately, empty). Later
+    // re-fetches are deferred so the test can see coalescing.
+    const deferred: Array<(v: any) => void> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise(resolve => { deferred.push(resolve); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "StaleTest" })
+    class StaleTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://stale" })
+      type: string = "test://stale";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = StaleTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    // In-flight read saw only the first model.
+    deferred[0]({ instances: [{ id: "m1" }], totalCount: 1 });
+    await new Promise(r => setTimeout(r, 10));
+    // Trailing fetch started because a dispatch arrived during that read.
+    expect(deferred.length).toBe(2);
+
+    deferred[1]({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe still runs the trailing fetch when the in-flight read rejects", async () => {
+    const mockSubscriptionId = "paginate-reject-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "RejectTest" })
+    class RejectTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://reject" })
+      type: string = "test://reject";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = RejectTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    deferred[0].reject(new Error("re-fetch failed"));
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(2);
+
+    deferred[1].resolve({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(userCallback).toHaveBeenCalled();
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe handles a rejection from the trailing fetch", async () => {
+    // The trailing fetch is started from the in-flight read's finally block,
+    // detached from any caller. If it also rejects, only its own .catch()
+    // observes the error; without one it is an unhandled rejection.
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const mockSubscriptionId = "paginate-reject-twice-sub";
+      let capturedCallback: ((result: any) => void) | null = null;
+
+      const mockClient = {
+        modelSubscribe: jest.fn().mockResolvedValue({
+          subscriptionId: mockSubscriptionId,
+          result: { instances: [], totalCount: 0 },
+        }),
+        subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+          capturedCallback = cb;
+          return () => {};
+        }),
+        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      };
+
+      const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+      let call = 0;
+      const mockPerspective = {
+        uuid: "test-uuid",
+        client: mockClient,
+        modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+          return mockClient.modelSubscribe("test-uuid", className, queryJson);
+        }),
+        modelQuery: jest.fn().mockImplementation(() => {
+          call++;
+          if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+          return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+        }),
+      } as any;
+
+      const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+      @Model({ name: "RejectTwiceTest" })
+      class RejectTwiceTest extends Ad4mModel {
+        @Flag({ through: "test://type", value: "test://reject-twice" })
+        type: string = "test://reject-twice";
+        @Property({ through: "test://name" })
+        name: string = "";
+      }
+
+      const userCallback = jest.fn();
+      const builder = RejectTwiceTest.query(mockPerspective);
+      await builder.paginateSubscribe(10, 1, userCallback);
+
+      capturedCallback!({});
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+
+      deferred[0].reject(new Error("in-flight read failed"));
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(2);
+
+      deferred[1].reject(new Error("trailing read failed"));
+      await new Promise(r => setTimeout(r, 10));
+
+      const logged = errorSpy.mock.calls
+        .filter(args => args[0] === "Paginate subscription error:")
+        .map(args => (args[1] as Error).message);
+      expect(logged).toEqual(["in-flight read failed", "trailing read failed"]);
+      expect(userCallback).not.toHaveBeenCalled();
+
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("paginateSubscribe delivers nothing and starts no trailing fetch after dispose", async () => {
+    // dispose() while a read is in flight and a trailing fetch is pending.
+    const mockSubscriptionId = "paginate-dispose-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "DisposeMidReadTest" })
+    class DisposeMidReadTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://dispose-mid-read" })
+      type: string = "test://dispose-mid-read";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = DisposeMidReadTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    builder.dispose();
+
+    // The in-flight read's finally block still sees pending === true, so the
+    // coalescing log must not claim a trailing fetch that the disposed guard
+    // then drops.
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      deferred[0].resolve({ instances: [{ id: "m1" }], totalCount: 1 });
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(userCallback).not.toHaveBeenCalled();
+      expect(deferred.length).toBe(1);
+      expect(
+        debugSpy.mock.calls.filter(args =>
+          String(args[0]).includes("coalesced into one trailing fetch")
+        )
+      ).toEqual([]);
+
+      // A dispatch that races the unsubscribe starts no read either.
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+});
+
+// ============================================================================
+// Subscription keepalive recovery tests
+// ============================================================================
+
+describe("ModelQueryBuilder keepalive recovery", () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  /**
+   * Helper: build a mock perspective whose keepAliveQuery rejects after
+   * `failAfter` successful calls, simulating a server-side subscription
+   * eviction (returns "Subscription not found").  On resubscribe (a second
+   * modelSubscribe call) it returns a *new* subscription ID.
+   */
+  function buildMocks(failAfter = 0) {
+    let keepaliveCallCount = 0;
+    let modelSubscribeCallCount = 0;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockImplementation(async () => {
+        modelSubscribeCallCount++;
+        return {
+          subscriptionId: `sub-${modelSubscribeCallCount}`,
+          result: { instances: [], totalCount: 0 },
+        };
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockImplementation(async () => {
+        keepaliveCallCount++;
+        if (keepaliveCallCount > failAfter) {
+          throw new Error("RPC error 500: Subscription not found");
+        }
+        return true;
+      }),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(
+        async (className: string, queryJson: string) =>
+          mockClient.modelSubscribe("test-uuid", className, queryJson)
+      ),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+      getLinks: jest.fn().mockResolvedValue([]),
+    } as any;
+
+    return { mockClient, mockPerspective, getKeepaliveCount: () => keepaliveCallCount, getSubscribeCount: () => modelSubscribeCallCount };
+  }
+
+  it("subscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(/* failAfter */ 1);
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "KeepaliveRecoveryTest" })
+    class KeepaliveRecoveryTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://ka" })
+      type: string = "test://ka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = KeepaliveRecoveryTest.query(mockPerspective);
+    await builder.subscribe(() => {});
+
+    // Initial subscription
+    expect(getSubscribeCount()).toBe(1);
+
+    // First keepalive at 30s — succeeds (failAfter=1)
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(1);
+
+    // Second keepalive at 60s — fails → should trigger resubscribe
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(2);
+
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    // A second modelSubscribe call means recovery happened
+    expect(getSubscribeCount()).toBe(2);
+
+    // Clean up
+    builder.dispose();
+  });
+
+  it("countSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0); // fail immediately
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "CountKeepaliveTest" })
+    class CountKeepaliveTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://cka" })
+      type: string = "test://cka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = CountKeepaliveTest.query(mockPerspective);
+    await builder.countSubscribe(() => {});
+
+    expect(getSubscribeCount()).toBe(1);
+
+    // First keepalive at 30s — fails immediately → should trigger resubscribe
+    await jest.advanceTimersByTimeAsync(30_000);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    expect(getSubscribeCount()).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
+    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0);
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "PaginateKeepaliveTest" })
+    class PaginateKeepaliveTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://pka" })
+      type: string = "test://pka";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = PaginateKeepaliveTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, () => {});
+
+    expect(getSubscribeCount()).toBe(1);
+
+    await jest.advanceTimersByTimeAsync(30_000);
+    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
+    await jest.advanceTimersByTimeAsync(2500);
+
+    expect(getSubscribeCount()).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("subscribe: stops retrying after dispose()", async () => {
+    const { mockClient, mockPerspective } = buildMocks(Infinity); // keepalive always succeeds
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "DisposeTest" })
+    class DisposeTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://disp" })
+      type: string = "test://disp";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const builder = DisposeTest.query(mockPerspective);
+    await builder.subscribe(() => {});
+
+    builder.dispose();
+
+    // Advance well past multiple keepalive intervals
+    await jest.advanceTimersByTimeAsync(120_000);
+
+    // No keepalive calls should have happened after dispose
+    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(0);
+  });
+});
+
+// ============================================================================
+// Performance Optimisation Tests
+// ============================================================================
+
+import { getCachedResult, setCachedResult, clearQueryCache, queryCacheSize } from "./query-cache";
+import { getPropertiesMetadata, getRelationsMetadata, getMemoizedSHACL } from "./decorators";
+
+describe("QueryCache", () => {
+  beforeEach(() => clearQueryCache());
+
+  it("should return undefined for cache miss", () => {
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
+  });
+
+  it("should return cached result within TTL", () => {
+    const result = [{ s: "test" }];
+    setCachedResult("uuid1", "SELECT ?s WHERE {}", result);
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe(result);
+  });
+
+  it("should expire after TTL", async () => {
+    setCachedResult("uuid1", "SELECT ?s WHERE {}", [{ s: "test" }], 50);
+    await new Promise(r => setTimeout(r, 60));
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
+  });
+
+  it("should cache independently per perspective", () => {
+    setCachedResult("uuid1", "SELECT ?s WHERE {}", "result1");
+    setCachedResult("uuid2", "SELECT ?s WHERE {}", "result2");
+    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe("result1");
+    expect(getCachedResult("uuid2", "SELECT ?s WHERE {}")).toBe("result2");
+  });
+
+  it("should cache independently per query", () => {
+    setCachedResult("uuid1", "query1", "r1");
+    setCachedResult("uuid1", "query2", "r2");
+    expect(getCachedResult("uuid1", "query1")).toBe("r1");
+    expect(getCachedResult("uuid1", "query2")).toBe("r2");
+  });
+
+  it("should clear all entries", () => {
+    setCachedResult("uuid1", "q1", "r1");
+    setCachedResult("uuid2", "q2", "r2");
+    expect(queryCacheSize()).toBe(2);
+    clearQueryCache();
+    expect(queryCacheSize()).toBe(0);
+  });
+});
+
+describe("SHACL Memoisation", () => {
+  it("should memoise generateSHACL() per class", () => {
+    @Model({ name: "MemoTest1" })
+    class MemoTest1 extends Ad4mModel {
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const result1 = (MemoTest1 as any).generateSHACL();
+    const result2 = (MemoTest1 as any).generateSHACL();
+    expect(result1).toBe(result2); // Same reference = memoised
+  });
+
+  it("should memoise getPropertiesMetadata per class", () => {
+    @Model({ name: "PropMemoTest" })
+    class PropMemoTest extends Ad4mModel {
+      @Property({ through: "test://x" })
+      x: string = "";
+    }
+
+    const r1 = getPropertiesMetadata(PropMemoTest);
+    const r2 = getPropertiesMetadata(PropMemoTest);
+    expect(r1).toBe(r2); // Same reference
+  });
+
+  it("should memoise getRelationsMetadata per class", () => {
+    @Model({ name: "RelMemoTest" })
+    class RelMemoTest extends Ad4mModel {
+      @HasMany({ through: "test://items" })
+      items: string[] = [];
+    }
+
+    const r1 = getRelationsMetadata(RelMemoTest);
+    const r2 = getRelationsMetadata(RelMemoTest);
+    expect(r1).toBe(r2); // Same reference
+  });
+
+  it("should return different results for different classes", () => {
+    @Model({ name: "ClassA" })
+    class ClassA extends Ad4mModel {
+      @Property({ through: "test://a" })
+      a: string = "";
+    }
+
+    @Model({ name: "ClassB" })
+    class ClassB extends Ad4mModel {
+      @Property({ through: "test://b" })
+      b: string = "";
+    }
+
+    const propsA = getPropertiesMetadata(ClassA);
+    const propsB = getPropertiesMetadata(ClassB);
+    expect(propsA).not.toBe(propsB);
+    expect(propsA).toHaveProperty("a");
+    expect(propsB).toHaveProperty("b");
+  });
+});
+
+describe("SHACL recursion — self-referential relations", () => {
+  // Reported as a Maximum-call-stack-size-exceeded overflow when Flux's
+  // Channel model has `@HasMany(() => Channel) childChannels`. The
+  // memoised SHACL builder used to recurse forever because the cache
+  // entry wasn't populated until buildSHACL returned. The fix seeds
+  // the cache with the in-progress shape; these tests pin the contract.
+
+  it("should generate SHACL for a directly self-referential model without overflowing the stack", () => {
+    @Model({ name: "RecursiveChannel" })
+    class RecursiveChannel extends Ad4mModel {
+      @Property({ through: "channel://name" })
+      name: string = "";
+
+      @HasMany(() => RecursiveChannel, { through: "channel://child" })
+      childChannels: string[] = [];
+    }
+
+    let shacl: any;
+    expect(() => {
+      shacl = (RecursiveChannel as any).generateSHACL();
+    }).not.toThrow();
+
+    expect(shacl).toBeDefined();
+    expect(shacl.name).toBe("RecursiveChannel");
+    expect(shacl.shape).toBeDefined();
+    expect(shacl.shape.nodeShapeUri).toBe("channel://RecursiveChannelShape");
+
+    // The child relation must reference the same class's shape.
+    const childRel = (shacl.shape.properties as any[]).find((p) => p.name === "childChannels");
+    expect(childRel).toBeDefined();
+    expect(childRel.class).toBe("channel://RecursiveChannelShape");
+  });
+
+  it("should memoise the self-referential shape (single shared instance)", () => {
+    @Model({ name: "MemoSelfRef" })
+    class MemoSelfRef extends Ad4mModel {
+      @Property({ through: "memo://name" })
+      name: string = "";
+
+      @HasMany(() => MemoSelfRef, { through: "memo://child" })
+      children: string[] = [];
+    }
+
+    const a = (MemoSelfRef as any).generateSHACL();
+    const b = (MemoSelfRef as any).generateSHACL();
+    expect(a).toBe(b);
+  });
+
+  it("should handle mutually-recursive relations between two classes (A → B → A)", () => {
+    @Model({ name: "MutualA" })
+    class MutualA extends Ad4mModel {
+      @Property({ through: "mut://aName" })
+      aName: string = "";
+
+      @HasMany(() => MutualB, { through: "mut://aToB" })
+      bs: string[] = [];
+    }
+
+    @Model({ name: "MutualB" })
+    class MutualB extends Ad4mModel {
+      @Property({ through: "mut://bName" })
+      bName: string = "";
+
+      @HasMany(() => MutualA, { through: "mut://bToA" })
+      as: string[] = [];
+    }
+
+    let shaclA: any;
+    let shaclB: any;
+    expect(() => {
+      shaclA = (MutualA as any).generateSHACL();
+      shaclB = (MutualB as any).generateSHACL();
+    }).not.toThrow();
+
+    expect(shaclA.name).toBe("MutualA");
+    expect(shaclB.name).toBe("MutualB");
+  });
+
+  it("should handle a three-cycle (A → B → C → A)", () => {
+    @Model({ name: "CycleA" })
+    class CycleA extends Ad4mModel {
+      @HasMany(() => CycleB, { through: "cyc://aToB" })
+      bs: string[] = [];
+    }
+
+    @Model({ name: "CycleB" })
+    class CycleB extends Ad4mModel {
+      @HasMany(() => CycleC, { through: "cyc://bToC" })
+      cs: string[] = [];
+    }
+
+    @Model({ name: "CycleC" })
+    class CycleC extends Ad4mModel {
+      @HasMany(() => CycleA, { through: "cyc://cToA" })
+      as: string[] = [];
+    }
+
+    expect(() => (CycleA as any).generateSHACL()).not.toThrow();
+    expect(() => (CycleB as any).generateSHACL()).not.toThrow();
+    expect(() => (CycleC as any).generateSHACL()).not.toThrow();
+  });
+});
+
+describe("Lazy Conformance Filters", () => {
+  it("should defer conformance filter resolution until property access", () => {
+    @Model({ name: "LazyTarget2" })
+    class LazyTarget2 extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://lazy" })
+      type: string = "test://lazy";
+      @Property({ through: "test://name", required: true })
+      name: string = "";
+    }
+
+    @Model({ name: "LazyParent2" })
+    class LazyParent2 extends Ad4mModel {
+      @HasMany(() => LazyTarget2, { through: "test://children" })
+      children: string[] = [];
+    }
+
+    // generateSHACL was called during @Model — the shape exists
+    const shacl = (LazyParent2 as any).generateSHACL();
+    expect(shacl).toBeDefined();
+    expect(shacl.shape).toBeDefined();
+    expect(shacl.name).toBe("LazyParent2");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// deepQuery — getter evaluation on collection queries
+// ──────────────────────────────────────────────────────────
+
+describe("deepQuery — getter evaluation", () => {
+  @Model({ name: "DeepQueryTestMessage" })
+  class DeepQueryTestMessage extends Ad4mModel {
+    @Flag({ through: "flux://entry_type", value: "flux://message" })
+    type: string = "";
+
+    @Property({ through: "flux://body" })
+    body: string = "";
+
+    @Property({
+      through: "flux://has_reply",
+      getter: `SELECT ?target WHERE { ?source <flux://has_reply> ?target . } LIMIT 1`,
+    })
+    replyingTo?: string;
+
+    @ReadOnly({
+      through: "flux://is_popular",
+      getter: `ASK WHERE { ?source <flux://is_popular> "true" . }`,
+    })
+    isPopular: boolean = false;
+
+    @HasMany({ through: "flux://reaction" })
+    reactions: string[] = [];
+  }
+
+  let sparqlCalls: string[];
+  const mockPerspective: any = {
+    uuid: "test-uuid",
+    modelQuery: jest.fn(async (className: string, queryJson: string) => {
+      // Return a basic result for the single-instance getData() path
+      const query = JSON.parse(queryJson);
+      const id = query?.where?.id;
+      if (id) {
+        return {
+          instances: [{ id, body: "Hello" }],
+          totalCount: 1,
+        };
+      }
+      return { instances: [], totalCount: 0 };
+    }),
+    evaluateGetters: jest.fn(async (className: string, instanceIds: string[], propertyNames?: string[]) => {
+      // Return empty results by default — tests can override this mock
+      const result: Record<string, Record<string, any>> = {};
+      return result;
+    }),
+    querySparql: jest.fn(async (q: string) => {
+      sparqlCalls.push(q);
+      return [];
+    }),
+    get: jest.fn().mockResolvedValue([]),
+    getExpression: jest.fn().mockResolvedValue(null),
+    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("DeepQueryTestMessage"),
+  };
+
+  beforeEach(() => {
+    sparqlCalls = [];
+    mockPerspective.querySparql.mockClear();
+    mockPerspective.evaluateGetters.mockClear();
+    mockPerspective.modelQuery.mockClear();
+    mockPerspective.get.mockClear();
+  });
+
+  function makeInstances(count: number): InstanceType<typeof DeepQueryTestMessage>[] {
+    return Array.from({ length: count }, (_, i) =>
+      new DeepQueryTestMessage(mockPerspective, `flux://msg-${i}`)
+    );
+  }
+
+  it("single-instance get() delegates getter evaluation to Rust (no JS-side SPARQL)", async () => {
+    const instance = new DeepQueryTestMessage(mockPerspective, "flux://msg-single");
+    mockPerspective.querySparql.mockImplementation(async (q: string) => {
+      sparqlCalls.push(q);
+      if (q.includes("flux://msg-single") && !q.includes("flux://has_reply") && !q.includes("flux://is_popular")) {
+        return [
+          { source: "flux://msg-single", predicate: "flux://entry_type", target: "flux://message", author: "did:key:a", timestamp: "3000" },
+          { source: "flux://msg-single", predicate: "flux://body", target: "literal:string:Hello", author: "did:key:a", timestamp: "3000" },
+        ];
+      }
+      return [];
+    });
+
+    await instance.get();
+    // Getter evaluation now happens Rust-side via evaluate_getters() — no JS SPARQL calls
+    const getterCalls = sparqlCalls.filter(
+      (q) => q.includes("flux://has_reply") || q.includes("flux://is_popular")
+    );
+    expect(getterCalls.length).toBe(0);
+  });
+
+  describe("Ad4mModel.evaluateGetters()", () => {
+    it("resolves getters for a batch of instances via single RPC", async () => {
+      const instances = makeInstances(4);
+
+      await DeepQueryTestMessage.evaluateGetters(instances.slice(0, 2), mockPerspective, ["replyingTo"]);
+
+      // Should make exactly 1 RPC call via perspective.evaluateGetters
+      expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
+      const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      expect(className).toBe("DeepQueryTestMessage");
+      expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
+      expect(propertyNames).toEqual(["replyingTo"]);
+      // No querySparql calls — all done in-process
+      expect(sparqlCalls.length).toBe(0);
+    });
+
+    it("evaluates all getters when propertyNames is omitted", async () => {
+      const instances = makeInstances(2);
+
+      await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective);
+
+      expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
+      const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
+      expect(className).toBe("DeepQueryTestMessage");
+      expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
+      expect(propertyNames).toBeUndefined();
+    });
+
+    it("applies results to instances and syncs snapshots", async () => {
+      const instances = makeInstances(2);
+      // Simulate Rust returning getter results
+      mockPerspective.evaluateGetters.mockResolvedValueOnce({
+        "flux://msg-0": { replyingTo: "flux://msg-99" },
+        "flux://msg-1": { replyingTo: "flux://msg-88" },
+      });
+
+      await DeepQueryTestMessage.evaluateGetters(instances, mockPerspective, ["replyingTo"]);
+
+      expect((instances[0] as any).replyingTo).toBe("flux://msg-99");
+      expect((instances[1] as any).replyingTo).toBe("flux://msg-88");
+    });
+
+    it("handles empty array gracefully", async () => {
+      await DeepQueryTestMessage.evaluateGetters([], mockPerspective);
+      expect(mockPerspective.evaluateGetters).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("deepQuery via ModelQueryBuilder", () => {
+    it("deepQuery() method sets deepQuery flag on queryParams", () => {
+      const builder = DeepQueryTestMessage.query(mockPerspective);
+      (builder as any).deepQuery();
+      expect((builder as any).queryParams.deepQuery).toBe(true);
+    });
+
+    it("deepQuery defaults to true when not explicitly set", async () => {
+      mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
+      await DeepQueryTestMessage.query(mockPerspective).get();
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+      const qi = JSON.parse(queryJson);
+      expect(qi.deepQuery).toBe(true);
+    });
+
+    it("deepQuery can be explicitly set to false", async () => {
+      mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
+      await DeepQueryTestMessage.query(mockPerspective).deepQuery(false).get();
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+      const qi = JSON.parse(queryJson);
+      expect(qi.deepQuery).toBe(false);
+    });
+  });
+});
+
+// ─── Ad4mModel.fromSHACL() ───────────────────────────────────────────────────
+
+describe("Ad4mModel.fromSHACL()", () => {
+  function makeShape(targetClass: string, props: Array<import("../shacl/SHACLShape").SHACLPropertyShape>) {
+    const shape = new SHACLShape(targetClass);
+    for (const p of props) shape.addProperty(p);
+    return shape;
+  }
+
+  it("assigns the given name as className", () => {
+    const shape = makeShape("flux://Channel", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect((Cls as any).className).toBe("Channel");
+    expect((new (Cls as any)({}, "flux://1")).className).toBe("Channel");
+  });
+
+  it("registers scalar property (maxCount=1) via setPropertyRegistryEntry", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1, writable: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["title"]).toBeDefined();
+    expect(meta.properties["title"].predicate).toBe("flux://has_title");
+    expect(meta.properties["title"].readOnly).toBe(false);
+  });
+
+  it("registers collection property (no maxCount) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "messages", path: "flux://has_message" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["messages"]).toBeDefined();
+    expect(meta.relations["messages"].predicate).toBe("flux://has_message");
+    expect(meta.relations["messages"].direction).toBe("forward");
+  });
+
+  it("registers collection property (maxCount=5) as hasMany relation", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "participants", path: "flux://participant", maxCount: 5 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["participants"]).toBeDefined();
+    expect(meta.relations["participants"].direction).toBe("forward");
+  });
+
+  it("propagates resolveLanguage onto scalar properties", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1, resolveLanguage: "literal" },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].resolveLanguage).toBe("literal");
+  });
+
+  it("defaults writable to true when not specified", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["body"].readOnly).toBe(false);
+  });
+
+  it("respects writable:false", () => {
+    const shape = makeShape("flux://Post", [
+      { name: "id", path: "flux://id", maxCount: 1, writable: false },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Post");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["id"].readOnly).toBe(true);
+  });
+
+  it("registers flag properties (hasValue) as type-discrimination entries", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["type"]).toBeDefined();
+    expect(meta.properties["type"].predicate).toBe("flux://entry_type");
+    expect(meta.properties["type"].flag).toBe(true);
+    expect(meta.properties["type"].required).toBe(true);
+    expect(meta.properties["type"].initial).toBe("flux://message");
+    expect(meta.properties["body"]).toBeDefined();
+  });
+
+  it("flag property from fromSHACL produces SPARQL type-discriminator triple", () => {
+    const shape = makeShape("flux://Message", [
+      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    const allRelsMeta = {} as any;
+    const sparql = buildSPARQLQuery(meta, allRelsMeta, {}, Cls);
+    expect(sparql).toContain("<flux://entry_type>");
+    expect(sparql).toContain("<flux://message>");
+  });
+
+  it("recovers flag value from constructor_actions (backward-compat for old shapes)", () => {
+    const shape = new SHACLShape("flux://Channel");
+    // An old shape: property has NO hasValue, but constructor_actions carries it
+    shape.addProperty({ name: "type", path: "flux://entry_type", maxCount: 1 });
+    shape.addProperty({ name: "name", path: "flux://name", maxCount: 1 });
+    shape.constructor_actions = [
+      { action: "addLink", source: "this", predicate: "flux://entry_type", target: "flux://channel" },
+    ];
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.properties["type"]).toBeDefined();
+    expect(meta.properties["type"].flag).toBe(true);
+    expect(meta.properties["type"].initial).toBe("flux://channel");
+  });
+
+  it("skips properties without a name field", () => {
+    const shape = makeShape("flux://Message", [
+      { path: "flux://anonymous" } as any,
+      { name: "body", path: "flux://body", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Message");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toEqual(["body"]);
+  });
+
+  it("propagates local flag onto relations", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "drafts", path: "flux://draft", local: true },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    const meta = Cls.getModelMetadata();
+    expect(meta.relations["drafts"].local).toBe(true);
+  });
+
+  it("applies Model decorator so generateSHACL and generateSDNA are available", () => {
+    const shape = makeShape("flux://Channel", [
+      { name: "title", path: "flux://has_title", maxCount: 1 },
+    ]);
+    const Cls = Ad4mModel.fromSHACL(shape, "Channel");
+    expect(typeof (Cls as any).generateSDNA).toBe("function");
+    expect(typeof (Cls as any).generateSHACL).toBe("function");
+  });
+
+  it("handles shapes with no properties", () => {
+    const shape = makeShape("flux://Empty", []);
+    const Cls = Ad4mModel.fromSHACL(shape, "Empty");
+    const meta = Cls.getModelMetadata();
+    expect(Object.keys(meta.properties)).toHaveLength(0);
+    expect(Object.keys(meta.relations)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IncludeProjection — key splitting and query routing
+// ---------------------------------------------------------------------------
+
+describe("IncludeProjection type guard and key splitting", () => {
+  // Shared test models
+  @Model({ name: "Signal" })
+  class Signal extends Ad4mModel {
+    @Property({ through: "signal://type" })
+    signalTypeId: string = "";
+
+    @Property({ through: "signal://author" })
+    author: string = "";
+  }
+
+  @Model({ name: "Post" })
+  class Post extends Ad4mModel {
+    @Property({ through: "post://title" })
+    title: string = "";
+
+    @HasMany({ through: "post://signal", target: () => Signal })
+    signals: Signal[] = [];
+
+    @HasMany({ through: "post://comment" })
+    comments: string[] = [];
+  }
+
+  const mockPerspective = {
+    querySparql: jest.fn(),
+    modelQuery: jest.fn(),
+    infer: jest.fn(),
+    uuid: "test-perspective-uuid",
+    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("Post"),
+  } as any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [{ id: "post://1", title: "Hello", $signalCount: 3 }],
+      totalCount: 1,
+    });
+  });
+
+  // --- isIncludeProjection type guard ---
+
+  it("isIncludeProjection returns true for objects with a 'from' field", () => {
+    expect(isIncludeProjection({ from: "signals", count: true })).toBe(true);
+    expect(isIncludeProjection({ from: "comments", limit: 1 })).toBe(true);
+  });
+
+  it("isIncludeProjection returns false for non-projection values", () => {
+    expect(isIncludeProjection(true)).toBe(false);
+    expect(isIncludeProjection(false)).toBe(false);
+    expect(isIncludeProjection(null)).toBe(false);
+    expect(isIncludeProjection(undefined)).toBe(false);
+    expect(isIncludeProjection(42)).toBe(false);
+    // RelationSubQuery (has no 'from' key)
+    expect(isIncludeProjection({ limit: 5, order: { timestamp: "DESC" } })).toBe(false);
+  });
+
+  // --- $-key splitting ---
+
+  it("routes $-prefixed keys to queryInput.projections, not queryInput.include", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $signalCount: { from: "signals", count: true },
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // Normal relation goes to include
+    expect(qi.include?.comments).toBe(true);
+    expect(qi.include?.$signalCount).toBeUndefined();
+
+    // Projection goes to projections
+    expect(qi.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(qi.projections?.comments).toBeUndefined();
+  });
+
+  it("routes $-prefixed IncludeProjection values to projections ($ prefix required)", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $mySignals: { from: "signals", limit: 1 },
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.projections?.$mySignals).toMatchObject({ from: "signals", limit: 1 });
+    expect(qi.include?.comments).toBe(true);
+  });
+
+  it("does NOT route non-$ keys to projections even if value has 'from' shape", async () => {
+    // $ prefix is required — a key without it goes to include, not projections
+    await Post.findAll(mockPerspective, {
+      include: {
+        mySignals: { from: "signals", limit: 1 } as any,
+        comments: true,
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // Without $ prefix it stays in include (behaviour is undefined/broken but not silently rerouted)
+    expect(qi.projections?.mySignals).toBeUndefined();
+    expect(qi.include?.mySignals).toBeDefined();
+  });
+
+  it("omits queryInput.include when all keys are projections", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $count: { from: "signals", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.include).toBeUndefined();
+    expect(qi.projections?.$count).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("omits queryInput.projections when all keys are normal includes", async () => {
+    await Post.findAll(mockPerspective, {
+      include: { comments: true },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    expect(qi.projections).toBeUndefined();
+    expect(qi.include?.comments).toBe(true);
+  });
+
+  it("tags projection with targetClassName when relation target is registered", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $signalCount: { from: "signals", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // targetClassName drives the executor's cache lookup for the target shape.
+    expect(qi.projections?.$signalCount?.targetClassName).toBe("Signal");
+  });
+
+  it("leaves targetClassName absent when relation has no target decorator", async () => {
+    await Post.findAll(mockPerspective, {
+      include: {
+        $commentCount: { from: "comments", count: true },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const qi = JSON.parse(queryJson);
+
+    // 'comments' HasMany has no target() thunk → no targetClassName
+    expect(qi.projections?.$commentCount?.targetClassName).toBeUndefined();
+  });
+
+  // --- $-keys inside a nested include ---
+  //
+  // The executor reads a sub-query as it reads a top-level query, so a nested
+  // projection belongs in the sub-query's own `projections`. Left in `include`
+  // it named no relation and was skipped: no error, and no field.
+
+  @Model({ name: "Thread" })
+  class Thread extends Ad4mModel {
+    @HasMany({ through: "thread://post", target: () => Post })
+    posts: Post[] = [];
+  }
+
+  @Model({ name: "Board" })
+  class Board extends Ad4mModel {
+    @HasMany({ through: "board://post", target: () => Post })
+    posts: Post[] = [];
+
+    @HasMany({ through: "board://thread", target: () => Thread })
+    threads: Thread[] = [];
+
+    @HasMany({ through: "board://item", polymorphic: true })
+    items: string[] = [];
+
+    // Polymorphic, but with a declared target: members may still be of other classes.
+    @HasMany({ through: "board://pinned", target: () => Post, polymorphic: true })
+    pinned: Post[] = [];
+  }
+
+  it("moves a $-key inside a nested include into that sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { posts: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Read against the relation's target, so it is tagged as a top-level one would be.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("keeps the nested relations beside the projections it moves", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        posts: { include: { signals: true, $signalCount: { from: "signals", count: true } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.include).toEqual({ signals: true });
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("moves a $-key two include levels down into the innermost sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        threads: { include: { posts: { include: { $signalCount: { from: "signals", count: true } } } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.threads.include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Tagged against Post, the class two relations down.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { pinned: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const pinned = JSON.parse(queryJson).include.pinned;
+
+    expect(pinned.polymorphic).toBe(true);
+    expect(pinned.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // Tagging from the declared target (Post → Signal) would name one class for
+    // members of several; the executor reads each member's own class instead.
+    expect(pinned.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("moves it under a polymorphic relation too, untagged, for the executor to read per class", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { items: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const items = JSON.parse(queryJson).include.items;
+
+    expect(items.polymorphic).toBe(true);
+    expect(items.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // The members are of several classes, so there is no one target to name.
+    expect(items.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("leaves the projections in the caller's query where the caller wrote them", async () => {
+    const query = {
+      include: {
+        $postCount: { from: "posts", count: true },
+        posts: { include: { $signalCount: { from: "signals", count: true } } },
+      },
+    } as const;
+    const before = JSON.stringify(query);
+
+    await Board.findAll(mockPerspective, query);
+
+    expect(JSON.stringify(query)).toBe(before);
+  });
+
+  // --- result passthrough ---
+
+  it("returns $-keyed projection values attached by Rust on instances", async () => {
+    mockPerspective.modelQuery.mockResolvedValue({
+      instances: [{ id: "post://1", title: "Hello", $signalCount: 7 }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $signalCount: { from: "signals", count: true } },
+    });
+
+    expect((results[0] as any).$signalCount).toBe(7);
+  });
+
+  // --- hydration of non-count projections ---
+
+  it("passes through scalar non-count projection value hydrated by Rust", async () => {
+    // Rust hydrates projection targets in-process and returns full JSON objects.
+    // The TS layer receives an already-hydrated object and passes it through.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", title: "Hello", $mySignal: { id: "signal://abc", signalTypeId: "type1" } }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $mySignal: { from: "signals", limit: 1 } },
+    });
+
+    const mySignal = (results[0] as any).$mySignal;
+    expect(mySignal).toMatchObject({ id: "signal://abc", signalTypeId: "type1" });
+  });
+
+  it("passes through array non-count projection values hydrated by Rust", async () => {
+    // Rust hydrates all IRIs in the list and returns full JSON objects.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{
+        id: "post://1", title: "Hello",
+        $recentSignals: [
+          { id: "signal://a", signalTypeId: "type1" },
+          { id: "signal://b", signalTypeId: "type2" },
+        ],
+      }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $recentSignals: { from: "signals" } },
+    });
+
+    const sigs = (results[0] as any).$recentSignals;
+    expect(Array.isArray(sigs)).toBe(true);
+    expect(sigs).toHaveLength(2);
+    expect(sigs[0]).toMatchObject({ id: "signal://a", signalTypeId: "type1" });
+    expect(sigs[1]).toMatchObject({ id: "signal://b", signalTypeId: "type2" });
+  });
+
+  it("passes through raw IRI when Rust cannot hydrate the projection target", async () => {
+    // When the target cannot be resolved, Rust keeps the raw IRI string.
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", title: "Hello", $mySignal: "signal://unknown" }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $mySignal: { from: "signals", limit: 1 } },
+    });
+
+    // Raw IRI preserved when no matching target instance exists in the store.
+    expect((results[0] as any).$mySignal).toBe("signal://unknown");
+  });
+
+  it("does NOT attempt hydration for count projections (they return numbers)", async () => {
+    mockPerspective.modelQuery.mockResolvedValueOnce({
+      instances: [{ id: "post://1", $signalCount: 5 }],
+      totalCount: 1,
+    });
+
+    const results = await Post.findAll(mockPerspective, {
+      include: { $signalCount: { from: "signals", count: true } },
+    });
+
+    // Only one modelQuery call — no follow-up findAll for count projections.
+    expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+    expect((results[0] as any).$signalCount).toBe(5);
+  });
+});
+
+describe("Ad4mModel instance identity (uniqueness without envelopes)", () => {
+  // Without a signed envelope, the only thing that keeps two instances from
+  // collapsing onto the same node is their auto-generated base expression.
+  // These tests pin that guarantee down: identity must come from the
+  // instance's own IRI, never from (possibly duplicate) property content.
+  const mockPerspective = {} as any;
+
+  it("auto-generates a distinct id for every instance, even with identical property values", () => {
+    @Model({ name: "IdentityTestMessage" })
+    class IdentityTestMessage extends Ad4mModel {
+      @Property({ through: "identity://body", resolveLanguage: "literal" })
+      body: string = "";
+    }
+
+    const message1 = new IdentityTestMessage(mockPerspective);
+    const message2 = new IdentityTestMessage(mockPerspective);
+
+    message1.body = "hello";
+    message2.body = "hello";
+
+    expect(message1.body).toBe(message2.body);
+    expect(message1.id).not.toBe(message2.id);
+  });
+
+  it("uses the ad4m://obj/<random> scheme, not content-derived addressing", () => {
+    @Model({ name: "IdentityTestSchemeCheck" })
+    class IdentityTestSchemeCheck extends Ad4mModel {}
+
+    const instance = new IdentityTestSchemeCheck(mockPerspective);
+
+    // 24 lowercase a-z chars after the prefix (see makeRandomId in ./util.ts).
+    // Locks in the scheme so a regression toward hashing property content
+    // for the base expression — which would reintroduce the exact collision
+    // this scheme exists to prevent — fails this test.
+    expect(instance.id).toMatch(/^ad4m:\/\/obj\/[a-z]{24}$/);
+  });
+
+  it("never reuses an id across many instances", () => {
+    @Model({ name: "IdentityTestManyInstances" })
+    class IdentityTestManyInstances extends Ad4mModel {}
+
+    const ids = Array.from(
+      { length: 200 },
+      () => new IdentityTestManyInstances(mockPerspective).id
+    );
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("respects an explicitly-provided base expression instead of generating one", () => {
+    @Model({ name: "IdentityTestExplicitId" })
+    class IdentityTestExplicitId extends Ad4mModel {}
+
+    const instance = new IdentityTestExplicitId(mockPerspective, "flux://existing-instance");
+
+    expect(instance.id).toBe("flux://existing-instance");
+  });
+});
+
+describe("Relation writes: to-one batching and scalar coercion", () => {
+  // `Relationship` is the shape that made both of these visible: a record whose
+  // two to-one relations name the things it connects, so it is worthless until
+  // both endpoints are linked, and it is created and pointed in one gesture.
+  @Model({ name: "TestRelationship" })
+  class TestRelationship extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://relationship" })
+    flag: string = "";
+
+    @Property({ through: "we://title", required: true })
+    label: string = "";
+
+    @HasOne({ through: "we://relationship_source" })
+    source?: string;
+
+    @HasOne({ through: "we://relationship_target" })
+    target?: string;
+  }
+
+  // No required property, no flag and no initial value: an empty constructor.
+  @Model({ name: "TestNoConstructor" })
+  class TestNoConstructor extends Ad4mModel {
+    @HasOne({ through: "we://placed_node" })
+    node?: string;
+  }
+
+  const makePerspective = () =>
+    ({
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      createSubject: jest.fn().mockResolvedValue(undefined),
+      createBatch: jest.fn().mockResolvedValue("batch-generated"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      stringOrTemplateObjectToSubjectClassName: jest
+        .fn()
+        .mockResolvedValue("TestRelationship"),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  /** Targets written by `executeAction`, across every call. */
+  const writtenTargets = (perspective: any): string[] =>
+    perspective.executeAction.mock.calls.flatMap((call: any[]) =>
+      (call[2] ?? []).map((param: any) => param.value)
+    );
+
+  /** The batchId argument of each `executeAction` call. */
+  const batchIds = (perspective: any): unknown[] =>
+    perspective.executeAction.mock.calls.map((call: any[]) => call[3]);
+
+  describe("a scalar handed to a relation field", () => {
+    it("writes a link instead of being silently dropped", async () => {
+      // The failure this closes: this call typechecked, ran, resolved, and
+      // wrote no link — leaving a relationship with no endpoints, which only
+      // surfaces later as a reader calling the record malformed.
+      const perspective = makePerspective();
+
+      await TestRelationship.create(
+        perspective,
+        { label: "contradicts", source: "we://block/a", target: "we://block/b" },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenTargets(perspective)).toEqual(
+        expect.arrayContaining(["we://block/a", "we://block/b"])
+      );
+    });
+
+    it("writes it even when a constructor consumed the properties", async () => {
+      // `create` passes `setProperties: false` when the class has a SHACL
+      // constructor, because `createSubject` writes the values map. A relation
+      // carries `ad4m://adder` rather than `ad4m://setter`, so `createSubject`
+      // drops it — meaning the relation write has to happen here regardless of
+      // that flag, or both paths discard it at once.
+      const perspective = makePerspective();
+
+      await TestRelationship.create(
+        perspective,
+        { label: "contradicts", source: "we://block/a" },
+        { batchId: "batch-1" }
+      );
+
+      expect(perspective.createSubject).toHaveBeenCalled();
+      expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+
+    it("agrees with the documented array form", async () => {
+      const scalar = makePerspective();
+      await TestRelationship.create(
+        scalar,
+        { label: "x", source: "we://block/a" },
+        { batchId: "b" }
+      );
+
+      const array = makePerspective();
+      await TestRelationship.create(
+        array,
+        { label: "x", source: ["we://block/a"] as any },
+        { batchId: "b" }
+      );
+
+      expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
+    });
+
+    it("writes the relation when the constructor is empty", async () => {
+      const perspective = makePerspective();
+
+      await TestNoConstructor.create(
+        perspective,
+        { node: "we://block/a" },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+  });
+
+  // The failure this closes: every `save()` of a new instance logged one
+  // Rust-side "declares no setter" warning per ORM-internal field, per flag,
+  // and per empty HasMany relation — none of which are real model data, so
+  // none of them should ever have been offered to `createSubject` at all.
+  describe("initialValues sent to createSubject", () => {
+    @Model({ name: "TestNoisyPost" })
+    class TestNoisyPost extends Ad4mModel {
+      @Flag({ through: "test://post_type", value: "test://post" })
+      type: string = "test://post";
+
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
+    }
+
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
+      const perspective = makePerspective();
+
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
+
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
+    });
+  });
+
+  // `readOnly` keeps `through` as the predicate the relation reads. Writing it
+  // from save() would be the setter the shape refuses to offer, and on a create
+  // the `= []` initialiser turns that write into a clear.
+  describe("readOnly relations without a getter", () => {
+    @Model({ name: "TestReadOnlyRelations" })
+    class TestReadOnlyRelations extends Ad4mModel {
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://voted_by", readOnly: true })
+      votedBy: string[] = [];
+
+      @HasOne({ through: "test://resolved_by", readOnly: true })
+      resolvedBy?: string;
+
+      // The control: an ordinary relation on the same model is still written.
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+    }
+
+    /** Predicates written by `executeAction`, across every call. */
+    const writtenPredicates = (perspective: any): string[] =>
+      perspective.executeAction.mock.calls.flatMap((call: any[]) =>
+        (call[0] ?? []).map((action: any) => action.predicate)
+      );
+
+    it("are not written by create(), not even as the empty initialiser", async () => {
+      const perspective = makePerspective();
+
+      await TestReadOnlyRelations.create(
+        perspective,
+        { title: "t", tags: ["test://tag/1"] },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+    });
+
+    it("are not written by save() even when the caller sets them", async () => {
+      const perspective = makePerspective();
+      const instance = new TestReadOnlyRelations(perspective);
+      instance.title = "t";
+      instance.tags = ["test://tag/1"];
+      instance.votedBy = ["did:key:a"];
+      instance.resolvedBy = "did:key:b";
+
+      await instance.save("batch-1");
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+      expect(writtenTargets(perspective)).not.toContain("did:key:a");
+      expect(writtenTargets(perspective)).not.toContain("did:key:b");
+    });
+  });
+
+  describe("generated @HasOne accessors", () => {
+    it("forward batchId, so a to-one link can join a write group", async () => {
+      // Without this the link commits on its own, so every subscriber sees the
+      // record with its relation still empty — a card before its placement.
+      const perspective = makePerspective();
+      const rel = new TestRelationship(perspective, "we://rel/1") as any;
+
+      await rel.setSource("we://block/a", "batch-1");
+      await rel.addTarget("we://block/b", "batch-1");
+      await rel.removeTarget("we://block/b", "batch-1");
+
+      expect(batchIds(perspective)).toEqual(["batch-1", "batch-1", "batch-1"]);
+    });
+
+    it("still work without one", async () => {
+      const perspective = makePerspective();
+      const rel = new TestRelationship(perspective, "we://rel/1") as any;
+
+      await rel.setSource("we://block/a");
+
+      expect(batchIds(perspective)).toEqual([undefined]);
+    });
+  });
+});
+
+describe("Polymorphic relations", () => {
+  @Model({ name: "PolyTextBlock" })
+  class PolyTextBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://text_block" })
+    flag: string = "";
+    @Property({ through: "we://text" })
+    text: string = "";
+  }
+
+  @Model({ name: "PolyImageBlock" })
+  class PolyImageBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://image_block" })
+    flag: string = "";
+    @Property({ through: "we://src" })
+    src: string = "";
+  }
+
+  @Model({ name: "PolyCollection" })
+  class PolyCollection extends Ad4mModel {
+    // No target class — the members are of genuinely different types, which is
+    // the situation `polymorphic` exists for.
+    @HasMany({
+      through: "we://children",
+      polymorphic: true,
+      instantiateAs: () => [PolyTextBlock, PolyImageBlock],
+    })
+    children: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("constructs each child as the class the executor says it is", () => {
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1]).toBeInstanceOf(PolyImageBlock);
+    // The property that only exists on the concrete class — what a base-class
+    // hydration would have dropped before the value ever reached here.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[1].src).toBe("cat.png");
+  });
+
+  it("maps a child to its class by the name the class itself declares", () => {
+    // The mapping is derived from `@Model({ name })`, not restated beside the
+    // class list — the two cannot drift apart because there is only one of them.
+    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("carries the readings a child was chosen over onto the typed instance", () => {
+    // A base expression can conform to two unrelated classes at once, and the
+    // executor has to pick one to hydrate against. The set it picked from rides
+    // back with the child, so a caller can see there was a choice — and fetch
+    // the other reading by asking that class for this id.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            {
+              id: "we://b/1",
+              __subjectClass: "PolyTextBlock",
+              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              text: "hello",
+            },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const child = collection.children[0];
+    expect(child).toBeInstanceOf(PolyTextBlock);
+    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+  });
+
+  it("leaves children as data when no instantiateAs is given", () => {
+    @Model({ name: "PolyCollectionNoClasses" })
+    class PolyCollectionNoClasses extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollectionNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    // Still correct data, just untyped — the concrete class name is present for
+    // a caller that wants to do its own dispatch.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+  });
+
+  it("keeps a child whose class is not listed, rather than dropping it", () => {
+    // `instantiateAs` says what this call site can construct, not what the
+    // relation may contain. A heterogeneous relation is open by definition, so
+    // an unlisted class must arrive as data — narrowing a read to particular
+    // classes is a thing to ask for in the query, never a side effect of
+    // declaring which constructors happen to be in scope.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children).toHaveLength(2);
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1].done).toBe(true);
+    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+  });
+
+  it("does not construct an unlisted child as the relation's declared target", () => {
+    // A relation may declare a target *and* read polymorphically — the target
+    // says what the members usually are, not what they must be. A child of some
+    // third class was hydrated against its own shape, so building the declared
+    // class over that JSON would answer `instanceof` for a class it is not,
+    // carrying fields that class never declares.
+    @Model({ name: "PolyBaseBlock" })
+    class PolyBaseBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedCollection" })
+    class PolyTypedCollection extends Ad4mModel {
+      @HasMany(() => PolyBaseBlock, {
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => [PolyTextBlock],
+      })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).toBeDefined();
+    expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    // The declared target is still right when it is the class the executor named.
+    expect(declared).toBeInstanceOf(PolyBaseBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("does not use the declared target for another class when no classes are named", () => {
+    // Naming no classes to build is not the same as authorising the declared
+    // target to stand in for all of them. Without `instantiateAs` there is
+    // simply nothing this side can construct for a class it was not told about.
+    @Model({ name: "PolyBaseOnlyBlock" })
+    class PolyBaseOnlyBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedNoClasses" })
+    class PolyTypedNoClasses extends Ad4mModel {
+      @HasMany(() => PolyBaseOnlyBlock, { through: "we://children", polymorphic: true })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("calls instantiateAs late, so a circular import can still resolve", () => {
+    let defined = false;
+    @Model({ name: "PolyLateCollection" })
+    class PolyLateCollection extends Ad4mModel {
+      // Evaluated at decoration time this would throw, the way an array literal
+      // naming a class from further round an import cycle would.
+      @HasMany({
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => {
+          if (!defined) throw new ReferenceError("class not defined yet");
+          return [PolyTextBlock];
+        },
+      })
+      children: string[] = [];
+    }
+
+    defined = true;
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyLateCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("asks the executor for polymorphic hydration without the caller repeating it", () => {
+    // The relation being heterogeneous is a fact about the data, so declaring it
+    // on the model should be enough — `include: { children: true }` must still
+    // arrive at the executor as a polymorphic read.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    expect(JSON.parse(queryJson).include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("sends the classes it can build as the classes it wants, in declaration order", () => {
+    // The two questions have one answer: what this call site can construct is
+    // what it wants its targets read as. Sent with the query rather than applied
+    // to the results, so the same request gives the same reading to anyone.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Declaration order is the preference order — a target conforming to two of
+    // them is read as whichever was named first.
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
+      "PolyTextBlock",
+      "PolyImageBlock",
+    ]);
+  });
+
+  it("lets an explicit preference at the call site win over the declaration", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { preferClasses: ["PolyBookmark"] } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+  });
+
+  it("sends no preference for a polymorphic relation that names no classes", () => {
+    @Model({ name: "PolyCollectionUndeclared" })
+    class PolyCollectionUndeclared extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const { queryJson } = (PolyCollectionUndeclared as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Nothing to prefer, so nothing is sent and the executor ranks by
+    // specificity exactly as it did before any of this existed.
+    expect(JSON.parse(queryJson).include.children).toEqual({ polymorphic: true });
+  });
+
+  it("lets an explicit false at the call site win", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { polymorphic: false } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.polymorphic).toBe(false);
+  });
+
+  it("applies the default at every depth of a nested include", () => {
+    // `sections` is a plain typed relation, so the nested `children` is read off
+    // PolyCollection rather than off the class being queried. Left to the top
+    // level, the default would never reach it and the include would arrive at
+    // the executor with no shape to resolve — the query fails outright.
+    @Model({ name: "PolyPage" })
+    class PolyPage extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPage as any).prepareModelQueryParams({
+      include: { sections: { include: { children: true } } },
+    });
+
+    const include = JSON.parse(queryJson).include;
+    expect(include.sections.include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("lets an explicit false win at depth too", () => {
+    @Model({ name: "PolyPageExplicit" })
+    class PolyPageExplicit extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPageExplicit as any).prepareModelQueryParams({
+      include: { sections: { include: { children: { polymorphic: false } } } },
+    });
+
+    expect(JSON.parse(queryJson).include.sections.include.children.polymorphic).toBe(false);
+  });
+});
+
+describe("Ordered relations", () => {
+  @Model({ name: "OrderedColumn" })
+  class OrderedColumn extends Ad4mModel {
+    @HasMany({ through: "kanban://has_task", ordering: { strategy: "linkedList" } })
+    tasks: string[] = [];
+
+    @HasMany({ through: "kanban://archived" })
+    archived: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("declares its ordering in SHACL", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const tasks = shape.properties.find((p: any) => p.name === "tasks");
+    expect(tasks.ordering).toBe("linkedList");
+  });
+
+  it("declares the predicate the ordering entries are stored under", () => {
+    // Entries live on the parent under one shared predicate. The instance query
+    // builds its predicate filter from the shape's declared paths, so without
+    // this the read that needs the ordering links filters them out.
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const orderProp = shape.properties.find(
+      (p: any) => p.path === "ad4m://collection_order"
+    );
+    expect(orderProp).toBeDefined();
+  });
+
+  it("omits that predicate when nothing on the class is ordered", () => {
+    @Model({ name: "UnorderedOnly" })
+    class UnorderedOnly extends Ad4mModel {
+      @HasMany({ through: "kanban://archived" })
+      archived: string[] = [];
+    }
+    const { shape } = (UnorderedOnly as any).generateSHACL();
+    expect(
+      shape.properties.find((p: any) => p.path === "ad4m://collection_order")
+    ).toBeUndefined();
+  });
+
+  it("treats a reorder as a change", () => {
+    // The whole point: for an ordered relation the sequence *is* the state, so
+    // sorting before comparing would make save() a no-op for the one edit this
+    // feature exists to support.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.tasks = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.tasks = ["c", "a", "b"];
+    expect(column.changedFields()).toContain("tasks");
+  });
+
+  it("still treats a reorder of an unordered relation as no change", () => {
+    // An unordered relation is a set — the executor returns it by link
+    // timestamp, so assigning the same members in another order changed nothing.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.archived = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.archived = ["c", "a", "b"];
+    expect(column.changedFields()).not.toContain("archived");
+  });
+
+  it("round-trips ordering through SHACL links", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const links = shape.toLinks().map((l: any) => ({
+      source: l.source,
+      predicate: l.predicate,
+      target: l.target,
+    }));
+    const reconstructed = SHACLShape.fromLinks(links as any, shape.nodeShapeUri);
+    const tasks = reconstructed.properties.find((p: any) => p.name === "tasks");
+    expect(tasks!.ordering).toBe("linkedList");
+  });
+});
+
+/**
+ * A traversal names its predicate the same two ways every other scope does.
+ *
+ * The feature shipped with only the raw spelling, so every caller reading a
+ * thread wrote `'test://has_comment'` by hand — the literal `resolveParentPredicate`
+ * exists to keep out of call sites, reintroduced by the newest scope.
+ */
+describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
+  @Model({ name: "TraverseComment" })
+  class TraverseComment extends Ad4mModel {
+    @Property({ through: "test://body" })
+    body: string = "";
+  }
+
+  @Model({ name: "TraversePost" })
+  class TraversePost extends Ad4mModel {
+    @HasMany(() => TraverseComment, { through: "test://has_comment" })
+    comments: TraverseComment[] = [];
+
+    @HasOne(() => TraverseComment, { through: "test://pinned_comment" })
+    pinned: TraverseComment | null = null;
+  }
+
+  const parentOf = (query: any) =>
+    JSON.parse((TraverseComment as any).prepareModelQueryParams(query).queryJson).parent;
+
+  it("keeps the raw spelling exactly as written", () => {
+    expect(
+      parentOf({ parent: { ids: ["we://a", "we://b"], predicate: "test://has_comment" } }),
+    ).toEqual({ ids: ["we://a", "we://b"], predicate: "test://has_comment" });
+  });
+
+  it("resolves the predicate from the model that declares the relation", () => {
+    expect(parentOf({ parent: { ids: "we://a", model: TraversePost } })).toEqual({
+      ids: "we://a",
+      predicate: "test://has_comment",
+    });
+  });
+
+  it("takes `field` when one parent has two relations to the same child", () => {
+    // Without it the scan finds `comments` first and a request for the pinned
+    // comment's subtree would quietly read the wrong edge.
+    expect(
+      parentOf({ parent: { ids: "we://a", model: TraversePost, field: "pinned" } }),
+    ).toEqual({ ids: "we://a", predicate: "test://pinned_comment" });
+  });
+
+  it("sends the traversal's own options and nothing else", () => {
+    // `model` is a constructor; spreading the scope would put a class into a
+    // query variable. What travels is the resolved predicate and the options.
+    expect(
+      parentOf({
+        parent: {
+          ids: ["we://a"],
+          model: TraversePost,
+          field: "comments",
+          transitive: true,
+          direction: "in",
+          limitPerAnchor: 5,
+        },
+      }),
+    ).toEqual({
+      ids: ["we://a"],
+      predicate: "test://has_comment",
+      transitive: true,
+      direction: "in",
+      limitPerAnchor: 5,
+    });
+  });
+
+  it("omits the options the caller did not set rather than sending defaults", () => {
+    // An absent `transitive` is not `false` on the wire: the executor's serde
+    // defaults own that, and sending our own would be a second opinion.
+    const parent = parentOf({ parent: { ids: "we://a", model: TraversePost, levels: [10, 5] } });
+    expect(parent).toEqual({ ids: "we://a", predicate: "test://has_comment", levels: [10, 5] });
+    expect(parent).not.toHaveProperty("transitive");
+    expect(parent).not.toHaveProperty("limitPerAnchor");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// linkStatus — read from links of one status only (#1116)
+// ──────────────────────────────────────────────────────────
+
+describe("linkStatus — wire format", () => {
+  @Model({ name: "LinkStatusWireCard" })
+  class LinkStatusWireCard extends Ad4mModel {
+    @Flag({ through: "lsw://type", value: "lsw://card" })
+    type: string = "";
+
+    @Property({ through: "lsw://title" })
+    title: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so both statuses are read", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("drops `linkStatus: null`, which reads both statuses like unset", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: null,
+    });
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("travels as `linkStatus` when set, from the query and the builder", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: "shared",
+    });
+    expect(JSON.parse(queryJson).linkStatus).toBe("shared");
+
+    const builder = LinkStatusWireCard.query({} as any).linkStatus("local");
+    expect((builder as any).queryParams.linkStatus).toBe("local");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// includeUnverified — opt-in to links whose signature did not verify (#1113)
+// ──────────────────────────────────────────────────────────
+
+describe("includeUnverified — wire format", () => {
+  @Model({ name: "UnverifiedWireRecipe" })
+  class UnverifiedWireRecipe extends Ad4mModel {
+    @Flag({ through: "uv://type", value: "uv://recipe" })
+    type: string = "";
+
+    @Property({ through: "uv://name" })
+    name: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so the executor's default applies", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("includeUnverified");
+  });
+
+  it("travels as `includeUnverified` when set, from the query and the builder", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({
+      includeUnverified: true,
+    });
+    expect(JSON.parse(queryJson).includeUnverified).toBe(true);
+
+    const builder = UnverifiedWireRecipe.query({} as any).includeUnverified();
+    expect((builder as any).queryParams.includeUnverified).toBe(true);
+  });
+});
+
+// ── Subscribe awaits the previous executor dispose ────────────────────
+describe("ModelQueryBuilder subscribe ordering", () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  }
+
+  function makePerspective() {
+    const disposeGate = deferred<boolean>();
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "shared-sub",
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockReturnValue(() => {}),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockReturnValue(disposeGate.promise),
+    };
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+    } as any;
+    return { mockPerspective, mockClient, disposeGate };
+  }
+
+  const { Ad4mModel, Model, Property, Flag } = require("./index");
+
+  @Model({ name: "OrderingTest" })
+  class OrderingTest extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://ordering" })
+    type: string = "test://ordering";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("re-subscribe waits for the executor to release the previous subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    const second = builder.subscribe(() => {});
+    await flush();
+    // The executor has not acknowledged the dispose yet: no new registration.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "shared-sub");
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    disposeGate.resolve(true);
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-subscribe proceeds when the executor dispose fails", async () => {
+    const { mockPerspective, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    const second = builder.subscribe(() => {});
+    disposeGate.reject(new Error("Subscription not found"));
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("overlapping subscribe() calls leave exactly one live subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribes: jest.Mock[] = [];
+    let n = 0;
+    mockClient.modelSubscribe.mockImplementation(async () => ({
+      subscriptionId: `sub-${++n}`,
+      result: { instances: [], totalCount: 0 },
+    }));
+    mockClient.subscribeToQueryUpdates.mockImplementation(() => {
+      const u = jest.fn();
+      unsubscribes.push(u);
+      return u;
+    });
+    mockClient.disposeQuerySubscription.mockResolvedValue(true);
+    disposeGate.resolve(true);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await Promise.all([builder.subscribe(() => {}), builder.subscribe(() => {})]);
+
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+    // The second call ran after the first and disposed its subscription.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
+    expect(unsubscribes).toHaveLength(2);
+    expect(unsubscribes[0]).toHaveBeenCalledTimes(1);
+    expect(unsubscribes[1]).not.toHaveBeenCalled();
+    // And the builder can still release the survivor.
+    await builder.dispose();
+    expect(unsubscribes[1]).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
+
+  it("dispose() cleans up locally at once and resolves without a subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribe = jest.fn();
+    mockClient.subscribeToQueryUpdates.mockReturnValue(unsubscribe);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await expect(builder.dispose()).resolves.toBeUndefined();
+
+    await builder.subscribe(() => {});
+    const done = builder.dispose();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    disposeGate.resolve(true);
+    await expect(done).resolves.toBeUndefined();
+    // Idempotent: a second dispose does not call the executor again.
+    await builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+});

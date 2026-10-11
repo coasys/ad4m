@@ -1,22 +1,28 @@
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
+import { Perspective, PerspectiveExpression } from "../perspectives/Perspective";
+
+const signal = new PerspectiveExpression("did:test:alice", "2026-01-01T00:00:00Z", new Perspective(), { key: "key", signature: "sig" });
+
+// Mock ApiClient's on() to avoid real WebSocket connections
+jest.mock('../apiClient', () => {
+  return {
+    ApiClient: jest.fn().mockImplementation(() => ({
+      get: jest.fn(),
+      post: jest.fn(),
+      put: jest.fn(),
+      delete: jest.fn(),
+      on: jest.fn().mockReturnValue(() => {}),
+      watchApplied: jest.fn().mockResolvedValue(undefined),
+    }))
+  };
+});
 
 describe("NeighbourhoodProxy", () => {
   it("should add multiple signal handlers", async () => {
     const neighbourhoodURI = "did://123";
 
-    const mockApolloClient = {
-      subscribe: () => ({
-        subscribe: () =>
-          new Promise((resolve) => {
-            setTimeout(() => {
-              resolve({});
-            }, 10);
-          }),
-      }),
-    } as any;
-
-    const neighbourhoodClient = new NeighbourhoodClient(mockApolloClient);
+    const neighbourhoodClient = new NeighbourhoodClient("http://localhost:0", "test-token");
     const neighbourhoodProxy = new NeighbourhoodProxy(
       neighbourhoodClient,
       neighbourhoodURI
@@ -31,12 +37,12 @@ describe("NeighbourhoodProxy", () => {
       callbacks++;
     };
 
-    // Add multiple signal handlers in paralell
+    // Add multiple signal handlers in parallel
     const promise = neighbourhoodProxy.addSignalHandler(handler1);
     neighbourhoodProxy.addSignalHandler(handler2);
     await promise;
 
-    neighbourhoodClient.dispatchSignal(neighbourhoodURI, true);
+    neighbourhoodClient.dispatchSignal(neighbourhoodURI, signal);
 
     expect(callbacks).toBe(2);
   });
@@ -44,23 +50,22 @@ describe("NeighbourhoodProxy", () => {
   it("should not add multiple subscriptions when removing and adding another signal handler", async () => {
     const neighbourhoodURI = "did://123";
 
-    const subscriptions = [];
-    const subscribe = (args: { next: (result: any) => void }) => {
-      subscriptions.push(args);
-      new Promise((resolve) => {
-        setTimeout(() => {
-          resolve({});
-        }, 10);
-      });
-    };
-
-    const mockApolloClient = {
-      subscribe: () => ({
-        subscribe,
+    // Track on() calls via the mock
+    let onCallCount = 0;
+    const { ApiClient } = jest.requireMock('../apiClient');
+    ApiClient.mockImplementation(() => ({
+      get: jest.fn(),
+      post: jest.fn(),
+      put: jest.fn(),
+      delete: jest.fn(),
+      on: jest.fn().mockImplementation(() => {
+        onCallCount++;
+        return () => {};
       }),
-    } as any;
+      watchApplied: jest.fn().mockResolvedValue(undefined),
+    }));
 
-    const neighbourhoodClient = new NeighbourhoodClient(mockApolloClient);
+    const neighbourhoodClient = new NeighbourhoodClient("http://localhost:0", "test-token");
     const neighbourhoodProxy = new NeighbourhoodProxy(
       neighbourhoodClient,
       neighbourhoodURI
@@ -79,21 +84,19 @@ describe("NeighbourhoodProxy", () => {
     // Add signal handler 1
     await neighbourhoodProxy.addSignalHandler(handler1);
 
-    // Remove signal handler 2
+    // Remove signal handler 1
     neighbourhoodProxy.removeSignalHandler(handler1);
 
     // Add signal handler 2
     await neighbourhoodProxy.addSignalHandler(handler2);
 
-    // Check that only one subscription was added
-    expect(subscriptions.length).toBe(1);
+    // Check that subscription was re-created (handler1 removed = unsub, handler2 added = new sub)
+    expect(onCallCount).toBe(2);
 
-    // mock trigger signal event
-    for (const subscription of subscriptions) {
-      subscription.next({ data: { signal: { neighbourhoodSignal: true } } });
-    }
+    // Dispatch signal
+    neighbourhoodClient.dispatchSignal(neighbourhoodURI, signal);
 
-    // Check that only our second callback was called
+    // Check that only handler2 was called (handler1 was removed)
     expect(callbacks1).toBe(0);
     expect(callbacks2).toBe(1);
   });

@@ -62,8 +62,6 @@ export function AgentProvider({ children }: any) {
     console.log("agent status in generate: ", agentStatus);
 
     setLoading(false);
-
-    await invoke("login_proxy", { subdomain: agentStatus.did! });
   };
 
   const mutateAgent = async (username: string, firstName: string, lastName: string) => {
@@ -134,7 +132,6 @@ export function AgentProvider({ children }: any) {
       console.log("agent status in unlock: ", agentStatus);
       await invoke("close_main_window");
       await invoke("open_tray_message");
-      await invoke("login_proxy", { subdomain: agentStatus!.did });
       navigate("/apps");
     } else {
       setState((prev) => ({ ...prev, hasLoginError: true }));

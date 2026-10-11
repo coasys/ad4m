@@ -1,10 +1,8 @@
 use crate::{
     agent::{sign_string_hex, AgentService},
     db::Ad4mDb,
-    graphql::graphql_types::EntanglementProof,
+    types::EntanglementProof,
 };
-
-pub mod entanglement_service_extension;
 
 pub fn sign_device_key(device_key: String, device_key_type: String) -> EntanglementProof {
     let signed_device_key = sign_string_hex(device_key.clone()).unwrap();

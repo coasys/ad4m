@@ -11,7 +11,7 @@ It runs your agent’s instance locally, managing keys and data as the back-end 
   `ADAM_Launcher_<version>-release-candidate-1_aarch64.dmg`, or `ADAM.Launcher_<version>-release-candidate-1_amd64-CUDA.AppImage` 
   (**We are working on a Windows build!.**)
 - Run/Install: Execute the file. Windows may prompt a security warning (allow it; signed builds are coming); macOS/Linux follow standard app install steps.
-- Initialize: Launch it to generate or unlock an agent (DID and keys). It runs on localhost:12000, offering WebSocket and GraphQL endpoints.
+- Initialize: Launch it to generate or unlock an agent (DID and keys). It runs on localhost:12000, offering a WebSocket RPC endpoint.
 
 The Launcher delivers a plug-and-play AD4M experience, ready for UI connections.
 
@@ -30,8 +30,9 @@ cargo install --path .
 ```
 (Or install from Crates.io once we have published all dependencies: `cargo install ad4m`.)
 
-Run the Executor: Start the full runtime with:
+Run the Executor: Start the full runtime with an admin credential (required; see [Authentication](/auth)):
 ```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"
 ad4m-executor run
 ```
 Use ad4m init first to generate an agent if needed. It runs on localhost:12000.
@@ -53,7 +54,7 @@ npm install @coasys/ad4m
 Use it for raw interactions:
 ```javascript
 import { Ad4mClient } from "@coasys/ad4m";
-const client = new Ad4mClient("ws://localhost:12000");
+const client = new Ad4mClient("http://localhost:12000");
 const agent = await client.agent.me();
 console.log(agent.did); // e.g., "did:key:z6Mk..."
 ```

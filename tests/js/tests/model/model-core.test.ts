@@ -12,11 +12,25 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
+import {
+  Ad4mClient,
+  Ad4mModel,
+  HasOne,
+  LinkQuery,
+  Model,
+  PerspectiveProxy,
+} from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag } from "./models.js";
+
+// No required property, no flag and no initial value: an empty constructor.
+@Model({ name: "TestAllOptional" })
+class TestAllOptional extends Ad4mModel {
+  @HasOne({ through: "test://placed_node" })
+  node?: string;
+}
 
 describe("Ad4mModel — Core CRUD", function () {
   this.timeout(120_000);
@@ -75,6 +89,17 @@ describe("Ad4mModel — Core CRUD", function () {
     });
     expect(found).to.not.be.null;
     expect(found!.title).to.equal("Created");
+  });
+
+  it("create() and findAll() work for a model whose fields are all optional", async () => {
+    await TestAllOptional.register(perspective);
+    const created = await TestAllOptional.create(perspective, {
+      node: "test://block/a",
+    });
+
+    const all = await TestAllOptional.findAll(perspective);
+    expect(all.map((m) => m.id)).to.deep.equal([created.id]);
+    expect(all[0].node).to.equal("test://block/a");
   });
 
   // ── get() ──────────────────────────────────────────────────────────────────
@@ -197,7 +222,7 @@ describe("Ad4mModel — Core CRUD", function () {
 
   it("findOne() returns null for non-existent id", async () => {
     const missing = await TestPost.findOne(perspective, {
-      where: { id: "literal://string:no-such-id" },
+      where: { id: "literal:string:no-such-id" },
     });
     expect(missing).to.be.null;
   });

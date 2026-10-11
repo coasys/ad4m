@@ -56,9 +56,9 @@ Each AD4M instance is a full-featured data node that:
 AD4M integrates several powerful technologies into a cohesive whole:
 - [Holochain](https://github.com/holochain/holochain): For distributed hash tables and p2p networking
 - [Deno & V8](https://github.com/denoland/deno): For secure JavaScript/TypeScript execution
-- [SurrealDB](https://github.com/surrealdb/surrealdb): For local graph-relational data persistence and live queries
+- [Oxigraph](https://github.com/oxigraph/oxigraph): For local RDF/SPARQL persistence and live queries
 - [Scryer-Prolog](https://github.com/mthom/scryer-prolog): For semantic reasoning and queries
-- [Juniper](https://github.com/graphql-rust/juniper): For GraphQL API capabilities
+- [Axum](https://github.com/tokio-rs/axum): For WebSocket RPC and HTTP API
 - [Kalosm](https://github.com/floneum/floneum): For AI model inference with Candle
 
 This complexity is necessary to provide a rich, sovereign computing environment – but it's all packaged to run smoothly on personal devices.
@@ -92,6 +92,21 @@ const expression = await ad4m.expression.create(
 );
 // Returns: QmIPFSHash://unique-address
 ```
+
+#### Link languages: Holochain or self-hosted
+
+Perspective sync between agents in a neighbourhood is handled by a **link
+language**. The default, `bootstrap-languages/p-diff-sync`, syncs over
+Holochain — fully P2P, no server required. For communities that would rather
+run their own lightweight server than join a Holochain DHT,
+[`bootstrap-languages/server-link-language`](bootstrap-languages/server-link-language/)
+is a drop-in alternative that syncs through a companion
+[`link-server`](link-server/) (Fastify + SQLite, self-hostable on small
+hardware) over HTTP + WebSocket. Both implement the same link-language
+interface (`perspective-commit`, `perspective-sync`, `perspective-query`,
+`peers`, `telepresence`) and are interchangeable when publishing a
+neighbourhood — see each package's README for setup and its AGENTS.md for
+architecture notes and known limitations.
 
 ### 2. Expressions: Agent-Authored Data
 
@@ -249,10 +264,11 @@ Find the launcher bundle in `target/release/bundle`.
 ```
 ad4m/
 ├── core/                   # Core AD4M types, Ad4mModel, and TypeScript client (@coasys/ad4m)
-├── rust-executor/         # Rust executor: GraphQL server, Deno runtime, Holochain, AI, Prolog
+├── rust-executor/         # Rust executor: WebSocket RPC server, Deno runtime, Holochain, AI, Prolog
 ├── rust-client/          # Rust client library (ad4m-client on crates.io)
 ├── executor/             # JavaScript executor: agent state, perspectives, languages, expressions
 ├── bootstrap-languages/  # Core Languages required for AD4M to function
+├── link-server/          # Self-hosted link-persistence server (Fastify/SQLite) for bootstrap-languages/server-link-language
 ├── cli/                 # Command line tools (ad4m on crates.io)
 ├── connect/            # Library for connecting apps to AD4M with capability management
 ├── dapp/              # DApp server for blockchain integration
@@ -289,6 +305,7 @@ Basic usage:
 ad4m-executor init
 
 # Start the executor
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"   # required
 ad4m-executor run
 
 # Create a perspective
@@ -317,6 +334,11 @@ This powers integrations like the [OpenClaw AD4M Plugin](https://github.com/open
 # Run JS integration tests
 pnpm test
 
+# Run the integration suites against a built executor (cd tests/js)
+pnpm run test-main                        # local languages, no Holochain (CI: integration-tests-js)
+pnpm run test-main-server-link            # multi-node suites over the server-link-language + link-server
+pnpm run test-main-multi-node-holochain   # multi-node suites over Holochain (p-diff-sync)
+
 # Run Rust tests (--test-threads=1 required: shared state)
 cd rust-executor && cargo test --release -- --test-threads=1
 
@@ -335,6 +357,19 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 3. Make your changes
 4. Run tests
 5. Submit a pull request to `dev` branch
+
+### Recommended git hooks
+
+Activate the repo-managed pre-commit hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+See [`.githooks/README.md`](.githooks/README.md). The main thing it
+catches: accidentally committing `tests/js/bootstrapSeed.json` or
+`tests/js/publishBootstrapSeed.json` in the populated state that an
+interrupted test run leaves behind.
 
 ## Community
 

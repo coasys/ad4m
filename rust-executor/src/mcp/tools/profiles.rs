@@ -4,10 +4,10 @@
 //! Uses native Rust agent service calls (no JS runtime required).
 
 use super::Ad4mMcpHandler;
-use crate::agent::capabilities::user_email_from_token;
 use crate::agent::{create_signed_expression, AgentContext, AgentService};
-use crate::graphql::graphql_types::{Agent, Perspective};
 use crate::languages::LanguageController;
+use crate::types::domain::Perspective;
+use crate::types::Agent;
 use crate::types::{DecoratedLinkExpression, Link, VerifiedExpression};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -67,9 +67,8 @@ pub struct SetAgentPublicPerspectiveParams {
 // ============================================================================
 
 /// Get the current agent, handling both multi-user and single-user modes.
-fn get_current_agent(auth_token: &str) -> Result<Agent, String> {
-    let context = AgentContext::from_auth_token(auth_token.to_string());
-    match AgentService::get_agent_for_context(&context) {
+fn get_current_agent(context: &AgentContext) -> Result<Agent, String> {
+    match AgentService::get_agent_for_context(context) {
         Ok(agent) => Ok(agent),
         Err(_) if context.user_email.is_some() => {
             // Multi-user fallback: user exists in wallet but has no profile yet
@@ -88,19 +87,23 @@ fn get_current_agent(auth_token: &str) -> Result<Agent, String> {
 
 /// Update the current agent's public perspective, handling both multi-user and single-user modes.
 async fn update_agent_perspective(
-    auth_token: &str,
+    context: &AgentContext,
     links: Vec<DecoratedLinkExpression>,
 ) -> Result<Agent, String> {
-    let context = AgentContext::from_auth_token(auth_token.to_string());
-
-    if let Some(user_email) = user_email_from_token(auth_token.to_string()) {
+    if let Some(user_email) = context.user_email.clone() {
         // Multi-user mode
         let agent_data = AgentService::get_user_agent_data(&user_email)
             .map_err(|e| format!("User agent not available: {}", e))?;
 
+        // Keep the user's DM language: this call updates only the perspective.
+        let direct_message_language = AgentService::with_global_instance(|agent_service| {
+            agent_service.load_user_agent_profile(&user_email)
+        })
+        .map_err(|e| format!("Failed to load user profile: {}", e))?
+        .and_then(|profile| profile.direct_message_language);
         let agent = Agent {
             did: agent_data.did,
-            direct_message_language: None,
+            direct_message_language,
             perspective: Some(Perspective { links }),
         };
 
@@ -109,7 +112,7 @@ async fn update_agent_perspective(
         })
         .map_err(|e| format!("Failed to store user profile: {}", e))?;
 
-        if let Err(e) = AgentService::publish_agent_to_language(&context).await {
+        if let Err(e) = AgentService::publish_agent_to_language(context).await {
             log::warn!("Failed to publish user profile to agent language: {}", e);
         }
 
@@ -174,8 +177,12 @@ impl Ad4mMcpHandler {
             Some(t) => t,
             None => return json!({"error": "Failed to get auth token"}).to_string(),
         };
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
 
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
@@ -185,12 +192,16 @@ impl Ad4mMcpHandler {
 
     /// Get the current agent's public profile
     #[tool(
-        description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and Flux users see in neighbourhoods."
+        description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and human users see in neighbourhoods."
     )]
     pub async fn get_agent_profile(&self, _params: Parameters<GetAgentProfileParams>) -> String {
         let token = self.get_auth_token().await.unwrap_or_default();
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
 
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
@@ -226,7 +237,7 @@ impl Ad4mMcpHandler {
 
     /// Set the current agent's public profile fields
     #[tool(
-        description = "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and Flux users in neighbourhoods. Only provided fields are updated; omitted fields keep their current values."
+        description = "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and to the human users of whichever app renders the neighbourhood. Only provided fields are updated; omitted fields keep their current values."
     )]
     pub async fn set_agent_profile(&self, params: Parameters<SetAgentProfileParams>) -> String {
         let _capabilities = match self.get_capabilities().await {
@@ -235,13 +246,16 @@ impl Ad4mMcpHandler {
         };
 
         let token = self.get_auth_token().await.unwrap_or_default();
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
 
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
 
-        let context = AgentContext::from_auth_token(token.clone());
         let current_links = agent
             .perspective
             .as_ref()
@@ -297,7 +311,7 @@ impl Ad4mMcpHandler {
             }
         }
 
-        match update_agent_perspective(&token, all_links).await {
+        match update_agent_perspective(&context, all_links).await {
             Ok(_) => {
                 let mut updated = json!({"success": true});
                 if let Some(u) = p.username.as_ref() {
@@ -323,7 +337,7 @@ impl Ad4mMcpHandler {
 
     /// Set the agent's profile picture
     #[tool(
-        description = "Set the current agent's profile picture. Provide raw base64-encoded image data (NOT a data URI). The image will be uploaded to the centralized file store and linked in the agent's public profile. For best results, use a square image (Flux will display it as a circle)."
+        description = "Set the current agent's profile picture. Provide raw base64-encoded image data (NOT a data URI). The image will be uploaded to the centralized file store and linked in the agent's public profile. For best results, use a square image (apps usually crop profile pictures to a circle)."
     )]
     pub async fn set_agent_profile_picture(
         &self,
@@ -335,6 +349,10 @@ impl Ad4mMcpHandler {
         };
 
         let token = self.get_auth_token().await.unwrap_or_default();
+        let context = match self.agent_context_for(&token) {
+            Ok(context) => context,
+            Err(e) => return json!({"error": e}).to_string(),
+        };
         let mime = params.0.mime_type.as_deref().unwrap_or("image/png");
 
         // Find the file-storage language via the LanguageController
@@ -352,7 +370,7 @@ impl Ad4mMcpHandler {
         //    }
         //};
 
-        let file_storage_addr = "QmzSYwdjqeP9D13Sfmyc5HcabM9jL3DtPyhadnF6dQXu4FjVSbQ".to_string();
+        let file_storage_addr = "QmzSYwddqhm49PrRMzSrJf3AvmmreXMKtr1u56nbTjBFVmCzS8N".to_string();
 
         // Ensure the file-storage language is loaded before trying to create an expression.
         // language_by_ref() downloads and installs the language if it isn't already running.
@@ -369,9 +387,8 @@ impl Ad4mMcpHandler {
             "name": "profile-image",
             "file_type": mime,
         });
-        let agent_context = crate::agent::AgentContext::from_auth_token(token.clone());
         let profile_img = match controller
-            .expression_create(&file_storage_addr, content, &agent_context)
+            .expression_create(&file_storage_addr, content, &context)
             .await
         {
             Ok(addr) => addr,
@@ -381,12 +398,11 @@ impl Ad4mMcpHandler {
         };
 
         // Get current agent and rebuild links with the new profile image
-        let agent = match get_current_agent(&token) {
+        let agent = match get_current_agent(&context) {
             Ok(a) => a,
             Err(e) => return json!({"error": format!("Failed to get agent: {}", e)}).to_string(),
         };
 
-        let context = AgentContext::from_auth_token(token.clone());
         let current_links = agent
             .perspective
             .as_ref()
@@ -429,11 +445,11 @@ impl Ad4mMcpHandler {
         all_links.push(image_link);
         all_links.push(thumb_link);
 
-        match update_agent_perspective(&token, all_links).await {
+        match update_agent_perspective(&context, all_links).await {
             Ok(_) => json!({
                 "success": true,
                 "profile_image": profile_img,
-                "message": "Profile picture updated. For best results in Flux, use a square image."
+                "message": "Profile picture updated. Use a square image for best results — apps usually crop it to a circle."
             })
             .to_string(),
             Err(e) => json!({"error": format!("Failed to update profile: {}", e)}).to_string(),
@@ -482,7 +498,11 @@ impl Ad4mMcpHandler {
             }
         } else {
             // Get own agent
-            match get_current_agent(&token) {
+            let context = match self.agent_context_for(&token) {
+                Ok(context) => context,
+                Err(e) => return json!({"error": e}).to_string(),
+            };
+            match get_current_agent(&context) {
                 Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
                 Err(e) => {
                     json!({"error": format!("Failed to get agent perspective: {}", e)}).to_string()
@@ -499,19 +519,17 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<SetAgentPublicPerspectiveParams>,
     ) -> String {
-        let _agent_context = match self.get_agent_context().await {
+        let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
         };
-
-        let token = self.get_auth_token().await.unwrap_or_default();
 
         let links: Vec<DecoratedLinkExpression> = match serde_json::from_str(&params.0.links_json) {
             Ok(l) => l,
             Err(e) => return json!({"error": format!("Invalid links JSON: {}", e)}).to_string(),
         };
 
-        match update_agent_perspective(&token, links).await {
+        match update_agent_perspective(&agent_context, links).await {
             Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
             Err(e) => {
                 json!({"error": format!("Failed to update agent perspective: {}", e)}).to_string()

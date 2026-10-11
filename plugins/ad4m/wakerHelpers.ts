@@ -10,7 +10,7 @@ export function buildWakeMessage(
   const event =
     sub.type === "mention"
       ? "You were @mentioned in an AD4M neighbourhood."
-      : "New messages in an AD4M neighbourhood.";
+      : "New items in an AD4M neighbourhood.";
 
   const lines: string[] = [
     event,
@@ -24,9 +24,12 @@ export function buildWakeMessage(
 
   if (mentions && mentions.length > 0) {
     lines.push("");
-    lines.push(`Mentioned messages (${mentions.length}):`);
+    // "items", not "messages": the mention query matches any link whose text
+    // carries the agent's name, so the address can be an instance of any class
+    // the space defines — the agent types it from the ontology, not from here.
+    lines.push(`Mentioned items (${mentions.length}):`);
     for (const m of mentions) {
-      lines.push(`  Message: ${m.address}`);
+      lines.push(`  Item: ${m.address}`);
       if (m.parents.length > 0) {
         lines.push(`  Parents: ${m.parents.join(", ")}`);
       } else {

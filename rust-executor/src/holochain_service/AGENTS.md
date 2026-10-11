@@ -1,0 +1,43 @@
+# holochain_service/ — agent guide
+
+Embedded Holochain conductor run on a dedicated thread + tokio runtime, driven
+through an actor channel. Split plan: spec item 10.
+
+| File | Role |
+|---|---|
+| `mod.rs` | `HolochainService::init` (spawns the thread, builds the `StreamMap` signal fan-in, spawns the dispatch loop), conductor construction, `install_app`, `call_zome_function`, agent infos, sign, pack/unpack dna+happ |
+| `dispatch/mod.rs` | `run_dispatch_loop` (the request loop: lifecycle requests inline under a write lock, everything else handed with a read guard to one of two FIFO lanes that each spawn under their own permits: `is_local` keystore/app-info requests (`LOCAL_CONCURRENCY`) and the rest (`ZOME_CALL_CONCURRENCY`); time-in-queue log, deadline refusal), the `RequestDispatch` trait, `ConductorDispatch` (the big `match` over `HolochainServiceRequest`, one arm per variant with its timeout). `dispatch/tests.rs` checks the loop against a mock, no conductor. |
+| `interface.rs` | `HolochainServiceInterface` (channel sender + signal receiver), `Envelope` (request + `queued_at` + `deadline`), `HolochainServiceRequest`/`Response` enums with `name`/`is_lifecycle`/`is_local`/`refuse`, one async method per request, the global service and its three accessors |
+| `holochain_service_extension.rs` + `.js` | 15 `#[op2]` ops exposed to Languages (`ad4m:host` holochain section) |
+
+Adding a Holochain request currently means four edits: request enum variant
+(plus its `name`/`refuse` arms), dispatch arm in `dispatch/mod.rs::ConductorDispatch`,
+method in `interface.rs`. Keep them in sync until item 10 collapses them. A new
+variant that mutates the conductor's app set must also be added to `is_lifecycle`,
+or it will run concurrently with zome calls (#1133). Add a variant to `is_local` only
+if it never reaches a zome or the network: local requests bypass the zome call bound.
+
+Zome calls run concurrently, including two on the same cell. Language code is
+serialized per language by its runtime; a Rust caller that writes to a cell from
+several tasks must serialize itself, as `unyt_service::call_alliance_zome` does.
+
+## Facts
+
+- `HolochainService::init` is invoked from `agent/conductor_startup.rs`, in a task that
+  agent generate/unlock spawn before replying, not from `lib.rs`. The reply may go out
+  before the conductor is up, so nothing that runs during or straight after unlock may
+  assume it is. The `start_holochain_conductor` op in `holochain_service_extension.rs`
+  also calls `init`, bypassing both the in-flight claim and `ConductorStarting`; it has
+  no in-repo JS caller, so don't add one.
+- Signals are consumed by `lib.rs::holochain_signal_receiver` and routed to the language
+  runtime registered for that cell.
+- Three accessors, all in `interface.rs`: `maybe_get_holochain_service()` returns at once;
+  `holochain_service_once_started()` waits while a start is in progress (the
+  `ConductorStarting` guard), up to 120 s, then returns `None`; `get_holochain_service()`
+  polls up to 120 s then **panics**, so prefer the other two in anything not on the
+  critical boot path.
+- DHT is full-arc: use `GetStrategy::Local`; cross-agent flakiness is gossip timing
+  (see root `AGENTS.md`). K2 spaces exist only after `join`; `add_agent_infos` on a
+  missing space returns `K2SpaceNotFound`.
+- Local test networking: bootstrap and relay URLs must both be `http://` for a local
+  bootstrap-srv, or cross-node traffic silently dies.

@@ -2,8 +2,8 @@
  * Ad4mModel — custom getter integration tests
  *
  * Covers:
- *   - @Property(getter:) — custom SurrealQL expression for computed properties
- *   - @HasMany(getter:)  — custom SurrealQL expression for computed relations
+ *   - @Property(getter:) — custom SPARQL expression for computed properties
+ *   - @HasMany(getter:)  — custom SPARQL expression for computed relations
  *   - @HasMany(where:)   — DSL-compiled getter for relation filtering
  *   - None / empty-value filtering from getter results
  *
@@ -41,13 +41,13 @@ describe("Ad4mModel — Custom Getters", function () {
     @Property({
       through: "blog://parent",
       getter:
-        "(->link[WHERE predicate = 'blog://reply_to'].out.uri)[0]",
+        "SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1",
     })
     parentPost: string | undefined;
 
     @HasMany({
       getter:
-        "(->link[WHERE predicate = 'blog://tagged_with'].out.uri)",
+        "SELECT ?target WHERE { <Base> <blog://tagged_with> ?target . }",
     })
     tags: string[] = [];
   }
@@ -232,13 +232,13 @@ describe("Ad4mModel — Where-Clause Relation Filtering", function () {
     const retrieved = new TaskBoard(perspective, board.id);
     await retrieved.get();
 
+    // allTasks (no where filter) should have all 3
+    expect(retrieved.allTasks).to.have.lengthOf(3);
+
     // activeTasks (where: status = "active") should only have 2
     expect(retrieved.activeTasks).to.have.lengthOf(2);
     expect(retrieved.activeTasks).to.include(active1.id);
     expect(retrieved.activeTasks).to.include(active2.id);
     expect(retrieved.activeTasks).to.not.include(done.id);
-
-    // allTasks (no where filter) should have all 3
-    expect(retrieved.allTasks).to.have.lengthOf(3);
   });
 });

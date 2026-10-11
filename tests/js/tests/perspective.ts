@@ -1,8 +1,8 @@
-import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, PerspectiveState } from "@coasys/ad4m";
-import { TestContext } from './integration.test'
+import { Ad4mClient, Link, LinkQuery, MentionMessage, PerspectiveProxy, PerspectiveState, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
-import { sleep } from "../utils/utils";
+import { pollUntil } from "../utils/utils";
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -159,13 +159,16 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(create.name).to.equal("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
-                await sleep(10);
+                // Each wait ends once the clock has passed the last link's timestamp, so timestamps
+                // strictly increase. The date bounds are inclusive, so the queries below bound on
+                // the links' own timestamps.
+                await pollUntil(() => Date.now() > new Date(addLink.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink" });
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
-                await sleep(10);
+                await pollUntil(() => Date.now() > new Date(addLink2.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink2" });
                 let addLink3 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
-                await sleep(10);
+                await pollUntil(() => Date.now() > new Date(addLink3.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink3" });
                 let addLink4 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
-                await sleep(10);
+                await pollUntil(() => Date.now() > new Date(addLink4.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink4" });
                 let addLink5 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
 
                 // Get all the links
@@ -189,17 +192,17 @@ export default function perspectiveTests(testContext: TestContext) {
 
 
                 //Test can get all links but first by querying from second timestamp
-                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date()}));
+                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date()}));
                 expect(queryLinks.length).to.equal(4);
 
                 //Test can get links limited
-                let queryLinksLimited = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date(), limit: 3}));
+                let queryLinksLimited = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date(), limit: 3}));
                 expect(queryLinksLimited.length).to.equal(3);
 
                 //Test can get only the first link
                 let queryLinksFirst = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({
                     source: "lang://test", fromDate: new Date(addLink.timestamp),
-                    untilDate: new Date(new Date(addLink2.timestamp).getTime() - 1)
+                    untilDate: new Date(addLink.timestamp)
                 }));
                 expect(queryLinksFirst.length).to.equal(1);
                 expect(queryLinksFirst[0].data.target).to.equal("lang://test-target");
@@ -258,26 +261,57 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(queryLinksDeleted.length).to.equal(0);
             })
 
+            it('waker resolves the parent of a new mention', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("waker mention parents")
+                const quiet = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
+                const wakes: (MentionMessage[] | undefined)[] = []
+                const manager = new WakerSubscriptionManager({
+                    perspectiveClient: ad4mClient.perspective,
+                    logger: quiet,
+                    QuerySubscriptionProxy,
+                    debounceMs: 50,
+                    onWake: (_sub, _result, mentions) => { wakes.push(mentions) },
+                })
+                try {
+                    await manager.subscribe({
+                        id: 'waker-mention-parents',
+                        type: 'mention',
+                        perspective: p.uuid,
+                        channel: '',
+                        query: 'SELECT ?source WHERE { ?source <test://mentions> <test://me> . }',
+                    })
+                    await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
+                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
+
+                    await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
+                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'] }]])
+                } finally {
+                    manager.disposeAll()
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            })
+
             it('subscriptions', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
 
                 const perspectiveAdded = sinon.fake()
-                ad4mClient.perspective.addPerspectiveAddedListener(perspectiveAdded)
+                ad4mClient.on('perspective-added', ({ perspective }) => perspectiveAdded(perspective))
                 const perspectiveUpdated = sinon.fake()
-                ad4mClient.perspective.addPerspectiveUpdatedListener(perspectiveUpdated)
+                ad4mClient.on('perspective-updated', ({ perspective }) => perspectiveUpdated(perspective))
                 const perspectiveRemoved = sinon.fake()
-                ad4mClient.perspective.addPerspectiveRemovedListener(perspectiveRemoved)
+                ad4mClient.on('perspective-removed', ({ perspectiveUuid }) => perspectiveRemoved(perspectiveUuid))
 
                 const name = "Subscription Test Perspective"
                 const p = await ad4mClient.perspective.add(name)
-                await sleep(1000)
+                await pollUntil(() => perspectiveAdded.calledOnce, { timeoutMs: 5000, label: "perspectiveAdded callback fires" });
                 expect(perspectiveAdded.calledOnce).to.be.true;
                 const pSeenInAddCB = perspectiveAdded.getCall(0).args[0];
                 expect(pSeenInAddCB.uuid).to.equal(p.uuid)
                 expect(pSeenInAddCB.name).to.equal(p.name)
 
                 const p1 = await ad4mClient.perspective.update(p.uuid , "New Name")
-                await sleep(1000)
+                await pollUntil(() => perspectiveUpdated.calledOnce, { timeoutMs: 5000, label: "perspectiveUpdated callback fires" });
                 expect(perspectiveUpdated.calledOnce).to.be.true;
                 const pSeenInUpdateCB = perspectiveUpdated.getCall(0).args[0];
                 expect(pSeenInUpdateCB.uuid).to.equal(p1.uuid)
@@ -285,26 +319,26 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(pSeenInUpdateCB.state).to.equal(PerspectiveState.Private)
 
                 const linkAdded = sinon.fake()
-                await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
+                ad4mClient.on('link-added', ({ link }) => linkAdded(link), { perspective: p1.uuid })
                 const linkRemoved = sinon.fake()
-                await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
+                ad4mClient.on('link-removed', ({ link }) => linkRemoved(link), { perspective: p1.uuid })
                 const linkUpdated = sinon.fake()
-                await ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
+                ad4mClient.on('link-updated', ({ oldLink, newLink }) => linkUpdated({ oldLink, newLink }), { perspective: p1.uuid })
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'ad4m://root', target: 'lang://123'})
-                await sleep(1000)
+                await pollUntil(() => linkAdded.called, { timeoutMs: 5000, label: "linkAdded callback fires" });
                 expect(linkAdded.called).to.be.true;
                 expect(linkAdded.getCall(0).args[0]).to.eql(linkExpression)
 
                 const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'ad4m://root', target: 'lang://456'})
-                await sleep(1000)
+                await pollUntil(() => linkUpdated.called, { timeoutMs: 5000, label: "linkUpdated callback fires" });
                 expect(linkUpdated.called).to.be.true;
                 expect(linkUpdated.getCall(0).args[0].newLink).to.eql(updatedLinkExpression)
 
                 const copiedUpdatedLinkExpression = {...updatedLinkExpression}
 
                 await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
-                await sleep(1000)
+                await pollUntil(() => linkRemoved.called, { timeoutMs: 5000, label: "linkRemoved callback fires" });
                 expect(linkRemoved.called).to.be.true;
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
             })
@@ -331,18 +365,14 @@ export default function perspectiveTests(testContext: TestContext) {
                 // Assert they got same subscription ID
                 expect(sub1Id).to.equal(sub2Id)
 
-                // Wait for the subscriptions to be established
-                // it's sending the initial result a couple of times
-                // to allow clients to wait and ensure for the subscription to be established
-                await sleep(1000)
-
                 // Add a link that matches the query
                 await p.add(new Link({
                     source: "test://source",
                     target: "test://target"
                 }))
 
-                await sleep(1000)
+                // Wait for subscription callbacks to fire (covers establishment + propagation)
+                await pollUntil(() => callback1.called && callback2.called, { timeoutMs: 5000, intervalMs: 100, label: "subscription callbacks fire" });
 
                 // Verify both callbacks were called
                 expect(callback1.called).to.be.true
@@ -811,6 +841,29 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await proxy.get(all)).to.eql([])
             })
 
+            it('an on() handler fires without awaiting; dispose stops it and leaves a second proxy listening', async () => {
+                const p = await ad4mClient.perspective.add("proxy listener test")
+                try {
+                    const first = sinon.fake()
+                    p.on('link-added', ({ link }) => first(link))
+                    await p.add(new Link({ source: 'test://listener', predicate: 'test://p', target: 'test://one' }))
+                    await pollUntil(() => first.callCount === 1, { label: 'link-added on the first proxy' })
+
+                    const other = (await ad4mClient.perspective.byUUID(p.uuid))!
+                    const second = sinon.fake()
+                    other.on('link-added', ({ link }) => second(link))
+                    p.dispose()
+                    await p.add(new Link({ source: 'test://listener', predicate: 'test://p', target: 'test://two' }))
+                    await pollUntil(() => second.callCount === 1, { label: 'link-added on the second proxy' })
+                    // Both proxies share one socket, so the first would have seen the event by now.
+                    expect(first.callCount).to.equal(1)
+                    expect(second.getCall(0).args[0].data.target).to.equal('test://two')
+                    other.dispose()
+                } finally {
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            })
+
             it('can do singleTarget operations', async () => {
                 const all = new LinkQuery({})
 
@@ -877,7 +930,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 }))
 
                 // Wait for subscription update
-                await sleep(1000)
+                await pollUntil(() => updates.length > 0, { timeoutMs: 5000, intervalMs: 100, label: "subscription update received" });
 
                 // Verify we got an update
                 expect(updates.length).to.be.greaterThan(0)
@@ -892,140 +945,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 subscription.dispose()
             })
 
-        })
-
-        describe('SurrealDB Queries', () => {
-            it('should execute basic SurrealQL SELECT query', async () => {
-                const ad4mClient = testContext.ad4mClient!
-                const perspective = await ad4mClient.perspective.add("test-surrealdb-basic")
-                
-                // Add sample links
-                const link1 = new Link({
-                    source: "test://source1",
-                    predicate: "test://follows",
-                    target: "test://target1"
-                })
-                const link2 = new Link({
-                    source: "test://source2",
-                    predicate: "test://likes",
-                    target: "test://target2"
-                })
-                
-                await perspective.addLinks([link1, link2])
-                
-                // Execute SurrealQL query
-                const result = await perspective.querySurrealDB('SELECT * FROM link')
-                
-                // Verify results
-                expect(result).to.be.an('array')
-                expect(result.length).to.be.greaterThanOrEqual(2)
-                
-                // Check that our links are present
-                const sources = result.map((r: any) => r.source)
-                expect(sources).to.include('test://source1')
-                expect(sources).to.include('test://source2')
-                
-                // Clean up
-                await ad4mClient.perspective.remove(perspective.uuid)
-            })
-
-            it('should handle SurrealQL query with WHERE clause', async () => {
-                const ad4mClient = testContext.ad4mClient!
-                const perspective = await ad4mClient.perspective.add("test-surrealdb-where")
-                
-                // Add links with different predicates
-                const followsLink = new Link({
-                    source: "test://alice",
-                    predicate: "test://follows",
-                    target: "test://bob"
-                })
-                const likesLink = new Link({
-                    source: "test://alice",
-                    predicate: "test://likes",
-                    target: "test://post123"
-                })
-                
-                await perspective.addLinks([followsLink, likesLink])
-                
-                // Query with WHERE clause
-                const result = await perspective.querySurrealDB(
-                    "SELECT * FROM link WHERE predicate = 'test://follows'"
-                )
-                
-                // Verify filtered results
-                expect(result).to.be.an('array')
-                expect(result.length).to.be.greaterThanOrEqual(1)
-                
-                // All results should have the 'follows' predicate
-                result.forEach((link: any) => {
-                    if (link.source === 'test://alice') {
-                        expect(link.predicate).to.equal('test://follows')
-                    }
-                })
-                
-                // Clean up
-                await ad4mClient.perspective.remove(perspective.uuid)
-            })
-
-            it('should return empty array for query with no matches', async () => {
-                const ad4mClient = testContext.ad4mClient!
-                const perspective = await ad4mClient.perspective.add("test-surrealdb-empty")
-                
-                // Add a link
-                await perspective.add(new Link({
-                    source: "test://source",
-                    predicate: "test://predicate",
-                    target: "test://target"
-                }))
-                
-                // Query for something that doesn't exist
-                const result = await perspective.querySurrealDB(
-                    "SELECT * FROM link WHERE predicate = 'test://nonexistent'"
-                )
-                
-                // Should return empty array
-                expect(result).to.be.an('array')
-                expect(result.length).to.equal(0)
-                
-                // Clean up
-                await ad4mClient.perspective.remove(perspective.uuid)
-            })
-
-            it('should integrate with link mutations', async () => {
-                const ad4mClient = testContext.ad4mClient!
-                const perspective = await ad4mClient.perspective.add("test-surrealdb-mutations")
-                
-                // Add a link
-                const link = new Link({
-                    source: "test://mutation-source",
-                    predicate: "test://mutation-predicate",
-                    target: "test://mutation-target"
-                })
-                
-                const addedLink = await perspective.add(link)
-                
-                // Query to verify it's there
-                let result = await perspective.querySurrealDB(
-                    "SELECT * FROM link WHERE source = 'test://mutation-source'"
-                )
-                
-                expect(result).to.be.an('array')
-                expect(result.length).to.be.greaterThanOrEqual(1)
-                
-                // Remove the link
-                await perspective.removeLinks([addedLink])
-                
-                // Query again and verify it's gone
-                result = await perspective.querySurrealDB(
-                    "SELECT * FROM link WHERE source = 'test://mutation-source'"
-                )
-                
-                expect(result).to.be.an('array')
-                expect(result.length).to.equal(0)
-                
-                // Clean up
-                await ad4mClient.perspective.remove(perspective.uuid)
-            })
         })
     }
 }

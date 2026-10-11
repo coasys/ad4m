@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::{fs::File, sync::Mutex};
+pub(crate) mod notification_access;
 pub mod runtime_service_extension;
 use std::sync::Arc;
 
@@ -23,9 +24,9 @@ pub struct BootstrapSeed {
 
 use serde::{Deserialize, Serialize};
 
-use crate::graphql::graphql_types::{ExceptionInfo, ExceptionType, NotificationInput};
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
-use crate::{agent::did, db::Ad4mDb, graphql::graphql_types::SentMessage};
+use crate::types::{ExceptionInfo, ExceptionType, NotificationInput};
+use crate::{agent::did, db::Ad4mDb, types::SentMessage};
 
 lazy_static! {
     static ref RUNTIME_INSTANCE: Arc<Mutex<Option<RuntimeService>>> = Arc::new(Mutex::new(None));
@@ -38,16 +39,28 @@ pub struct RuntimeService {
 impl RuntimeService {
     pub fn init_global_instance(mainnet_seed_file_path: String) {
         let mut instance = RUNTIME_INSTANCE.lock().unwrap();
-        *instance = Some(RuntimeService::new(mainnet_seed_file_path));
+        match RuntimeService::new(&mainnet_seed_file_path) {
+            Ok(service) => *instance = Some(service),
+            Err(e) => {
+                log::warn!(
+                    "Failed to load mainnet seed from '{}': {}. RuntimeService will not be available.",
+                    mainnet_seed_file_path, e
+                );
+            }
+        }
     }
 
-    fn new(mainnet_seed_file_path: String) -> RuntimeService {
-        let mut file = File::open(mainnet_seed_file_path).unwrap();
+    fn new(mainnet_seed_file_path: &str) -> Result<RuntimeService, deno_core::anyhow::Error> {
+        let mut file = File::open(mainnet_seed_file_path).map_err(|e| {
+            deno_core::anyhow::anyhow!("Cannot open seed file '{}': {}", mainnet_seed_file_path, e)
+        })?;
         let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
-        let seed: BootstrapSeed = serde_json::from_str(&contents).unwrap();
+        file.read_to_string(&mut contents)
+            .map_err(|e| deno_core::anyhow::anyhow!("Cannot read seed file: {}", e))?;
+        let seed: BootstrapSeed = serde_json::from_str(&contents)
+            .map_err(|e| deno_core::anyhow::anyhow!("Cannot parse seed file: {}", e))?;
 
-        RuntimeService { seed }
+        Ok(RuntimeService { seed })
     }
 
     pub fn global_instance() -> Arc<Mutex<Option<RuntimeService>>> {
@@ -161,28 +174,18 @@ impl RuntimeService {
 
     pub async fn request_install_notification(
         notification_input: NotificationInput,
-        user_email: Option<String>,
+        owner_did: String,
+        managed_user: bool,
     ) -> Result<String, String> {
+        // A managed user's notification is granted now: the caller has refused
+        // every perspective the user does not own (see `notification_access`).
+        // The main agent's notification waits for operator approval.
         let notification_id = Ad4mDb::with_global_instance(|db| {
-            db.add_notification(notification_input, user_email.clone())
+            db.add_notification(notification_input, &owner_did, managed_user)
         })
         .map_err(|e| e.to_string())?;
 
-        // For managed users (user_email is Some), auto-grant the notification
-        // Only the main agent (user_email is None) needs manual approval
-        if user_email.is_some() {
-            let mut notification =
-                Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
-                    .map_err(|e| e.to_string())?
-                    .ok_or("Notification with given id not found")?;
-
-            notification.granted = true;
-
-            Ad4mDb::with_global_instance(|db| {
-                db.update_notification(notification_id.clone(), &notification)
-            })
-            .map_err(|e| e.to_string())?;
-        } else {
+        if !managed_user {
             // Main agent needs manual approval via ADAM Launcher
             let notification =
                 Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))

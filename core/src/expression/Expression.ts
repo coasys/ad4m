@@ -1,20 +1,12 @@
-import { ClassType, Field, InputType, ObjectType } from "type-graphql";
 import { Icon } from "../language/Icon";
 import { LanguageRef } from "../language/LanguageRef";
 
-@ObjectType()
-@InputType()
+type ClassType<T = any> = new (...args: any[]) => T;
+
 export class ExpressionProof {
-    @Field({nullable: true})
     signature: string;
-    
-    @Field({nullable: true})
     key: string;
-    
-    @Field({nullable: true})
     valid?: boolean;
-    
-    @Field({nullable: true})
     invalid?: boolean;
 
     constructor(sig: string, k: string) {
@@ -22,36 +14,26 @@ export class ExpressionProof {
         this.signature = sig
     }
 }
-
-@InputType()
 export class ExpressionProofInput {
-    @Field({nullable: true})
     signature: string;
-    
-    @Field({nullable: true})
     key: string;
-    
-    @Field({nullable: true})
     valid?: boolean;
-    
-    @Field({nullable: true})
     invalid?: boolean;
 }
 
-//Note having any as return type here fixes compilation errors but I think we loose the ExpressionClass type in resulting .d.ts gql files
-export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>): any {
-    @ObjectType()
+/** The fields every expression carries, with `DataType` as its data. */
+export type ExpressionShape<DataType, Proof = ExpressionProof> = {
+    author: string
+    timestamp: string
+    data: DataType
+    proof: Proof
+}
+
+export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>): abstract new (author?: string, timestamp?: string, data?: DataType, proof?: ExpressionProof) => ExpressionShape<DataType> {
     abstract class ExpressionClass {
-        @Field()
         author: string;
-    
-        @Field()
         timestamp: string;
-    
-        @Field(type => DataTypeClass)
         data: DataType;
-    
-        @Field()
         proof: ExpressionProof;
         
         constructor(author: string, timestamp: string, data: DataType, proof: ExpressionProof) {
@@ -64,33 +46,20 @@ export function ExpressionGeneric<DataType>(DataTypeClass: ClassType<DataType>):
     return ExpressionClass;
 }
 
-export function ExpressionGenericInput<DataType>(DataTypeClass: ClassType<DataType>): any {
-    @InputType()
+export function ExpressionGenericInput<DataType>(DataTypeClass: ClassType<DataType>): abstract new () => ExpressionShape<DataType, ExpressionProofInput> {
     abstract class ExpressionClass {
-        @Field()
         author: string;
-    
-        @Field()
         timestamp: string;
-    
-        @Field(type => DataTypeClass)
         data: DataType;
-    
-        @Field()
         proof: ExpressionProofInput;
     }
     return ExpressionClass;
 }
-
-@ObjectType()
 export class Expression extends ExpressionGeneric(Object) {};
-
-@ObjectType()
 export class ExpressionRendered extends ExpressionGeneric(String) {
-    @Field()
+    /** The expression's data as a JSON string, as the executor renders it. */
+    declare data: string
     language: LanguageRef
-
-    @Field()
     icon: Icon
 };
 

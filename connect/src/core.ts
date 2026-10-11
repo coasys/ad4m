@@ -1,7 +1,6 @@
-import { ApolloClient, InMemoryCache, NormalizedCacheObject } from "@apollo/client/core";
-import { createClient, Client as WSClient } from "graphql-ws";
-import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
-import { isEmbedded, setLocal, getLocal, removeLocal, connectWebSocket } from './utils';
+import { isEmbedded, setLocal, getLocal, removeLocal, checkConnection, wsUrlToHttpBase } from './utils';
+import { PostMessageWebSocket } from './PostMessageWebSocket';
+import { makePostMessageFetch } from './PostMessageFetch';
 import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
@@ -9,9 +8,36 @@ import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates, RemoteH
 import { fetchUserInfo, requestPayment } from './services/hostIndex';
 
 const DEFAULT_PORT = 12000;
+/** What the executor says, in words, when a call needs keys a locked wallet cannot open. */
+const LOCKED_WALLET = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+
+/** \`error\` is set for 'unauthenticated': the refusal, which decides whether the token is dropped. */
+type AuthReading = { state: 'authenticated' | 'locked' | 'unauthenticated'; error?: any };
+
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 60000;
 const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
+
+/**
+ * Check whether `origin` is permitted by an entry in `allowedOrigins`.
+ * Supports the wildcard pattern `http://localhost:*` / `https://localhost:*`
+ * to allow any localhost port (useful in development environments where tools
+ * run on arbitrary ports). All other patterns require an exact match.
+ */
+function originAllowed(allowedOrigins: string[], origin: string): boolean {
+  return allowedOrigins.some((pattern) => {
+    if (pattern === 'http://localhost:*' || pattern === 'https://localhost:*') {
+      try {
+        const u = new URL(origin);
+        const scheme = pattern.startsWith('https') ? 'https:' : 'http:';
+        return u.hostname === 'localhost' && u.protocol === scheme;
+      } catch {
+        return false;
+      }
+    }
+    return pattern === origin;
+  });
+}
 
 export default class Ad4mConnect extends EventTarget {
   options: Ad4mConnectOptions;
@@ -22,9 +48,11 @@ export default class Ad4mConnect extends EventTarget {
   connectionState: ConnectionStates = "not-connected";
   authState: AuthStates = "unauthenticated";
   ad4mClient?: Ad4mClient;
-  wsClient?: WSClient;
-  apolloClient?: ApolloClient<NormalizedCacheObject>;
-  activeSocket: WebSocket | null = null;
+  /** HTTP base URL (normalizes legacy ws:// URLs from localStorage) */
+  get baseUrl(): string {
+    return wsUrlToHttpBase(this.url);
+  }
+
   requestId?: string;
   requestedRestart: boolean = false;
 
@@ -34,6 +62,7 @@ export default class Ad4mConnect extends EventTarget {
   hostIndexUrl: string;
   lowCreditThreshold: number;
   private creditPollInterval: ReturnType<typeof setInterval> | null = null;
+  private releaseCreditListener?: () => void;
 
   private embeddedResolve?: (client: Ad4mClient) => void;
   private embeddedReject?: (error: Error) => void;
@@ -44,7 +73,7 @@ export default class Ad4mConnect extends EventTarget {
   
     this.options = options;
     this.port = options.port || parseInt(getLocal("ad4m-port")) || DEFAULT_PORT
-    this.url = options.url || getLocal("ad4m-url") || `ws://localhost:${this.port}/graphql`;
+    this.url = options.url || getLocal("ad4m-url") || `http://localhost:${this.port}`;
     this.token = getLocal("ad4m-token") || '';
     this.embedded = isEmbedded();
     this.hostIndexUrl = options.hostIndexUrl || DEFAULT_INDEX_URL;
@@ -79,181 +108,182 @@ export default class Ad4mConnect extends EventTarget {
       console.log('[Ad4m Connect] Embedded mode - waiting for AD4M config via postMessage');
       
       return new Promise((resolve, reject) => {
-        // Set up 30 second timeout
-        const timeout = setTimeout(() => {
-          reject(new Error('Timeout waiting for AD4M config from parent window'));
+        // The 30-second timeout only guards waiting for AD4M_CONFIG_ACK — the parent
+        // acknowledging that it received our request and is alive. Once the ACK arrives
+        // we know auth is in progress and we wait indefinitely for the actual AD4M_CONFIG
+        // (the user may take several minutes to complete the auth flow).
+        const ackTimeout = setTimeout(() => {
+          window.removeEventListener('message', handleAck);
+          reject(new Error('Timeout waiting for AD4M_CONFIG_ACK from parent window (is the app running inside we-web?)'));
         }, 30000);
-        
-        // Store resolvers to call when AD4M_CONFIG arrives
+
+        const handleAck = (event: MessageEvent) => {
+          if (event.data?.type === 'AD4M_CONFIG_ACK' && event.source === window.parent) {
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
+            console.log('[Ad4m Connect] Received AD4M_CONFIG_ACK — parent is alive, waiting for config after auth');
+          }
+        };
+        window.addEventListener('message', handleAck);
+
+        // Store resolvers to call when AD4M_CONFIG arrives (via initializeEmbeddedMode listener)
         this.embeddedResolve = (client: Ad4mClient) => {
-          clearTimeout(timeout);
+          clearTimeout(ackTimeout);
+          window.removeEventListener('message', handleAck);
           console.log('[Ad4m Connect] Successfully connected in embedded mode');
           resolve(client);
         };
         
         this.embeddedReject = (error: Error) => {
-          clearTimeout(timeout);
+          clearTimeout(ackTimeout);
+          window.removeEventListener('message', handleAck);
           reject(error);
         };
         
         // If we already have a client (message arrived before connect() was called)
         if (this.ad4mClient) {
           if (this.authState === 'authenticated') {
-            clearTimeout(timeout);
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
             console.log('[Ad4m Connect] Client already initialized in embedded mode');
             resolve(this.ad4mClient);
           } else {
             // Auth already failed before connect() was called
-            clearTimeout(timeout);
+            clearTimeout(ackTimeout);
+            window.removeEventListener('message', handleAck);
             reject(new Error(`Embedded auth state: ${this.authState}`));
           }
         }
       });
     }
 
-    // Standalone mode - connect directly
+    // Standalone mode - connect directly.
+    //
+    // The health check and the first authenticated call run together. The health check exists to
+    // turn a wrong URL into a readable error, and awaiting it before opening the socket cost every
+    // successful connect an extra round trip. Its answer still decides: when it fails, its error is
+    // thrown at once, without waiting for the auth read (which can hang on an unreachable socket).
+    //
+    // The token rides in the socket URL, so it goes out early only to the URL it was last accepted
+    // at. A different URL gets no socket, and no token, until its health check passes.
+    const open = () => {
+      const client = new Ad4mClient(this.baseUrl, this.token);
+      const auth: Promise<AuthReading> = this.readAuth(client)
+        .catch((error) => ({ state: 'unauthenticated' as const, error }));
+      return { client, auth };
+    };
+    let session = getLocal("ad4m-url") === this.url ? open() : undefined;
     try {
-      await connectWebSocket(this.url);
-      setLocal("ad4m-url", this.url);
-      this.ad4mClient = await this.buildClient();
-      await this.checkAuth();
-      return this.ad4mClient;
+      await checkConnection(this.baseUrl);
     } catch (error) {
+      session?.client.close();
       console.error('[Ad4m Connect] Connection failed:', error);
       this.notifyConnectionChange("error");
       throw error;
     }
+    if (!session) session = open();
+    const auth = await session.auth;
+    setLocal("ad4m-url", this.url);
+    this.adoptClient(session.client);
+    this.applyAuth(auth);
+    return this.ad4mClient;
   }
 
-  private async buildClient(): Promise<Ad4mClient> {
+  /** Make this client the connection, closing the one it replaces. */
+  private adoptClient(client: Ad4mClient): void {
+    this.notifyConnectionChange("connecting");
+    // Close old client's WebSocket connections to avoid connection pool exhaustion
+    if (this.ad4mClient && this.ad4mClient !== client && typeof this.ad4mClient.close === 'function') {
+      this.ad4mClient.close();
+    }
+    this.ad4mClient = client;
+    this.notifyConnectionChange("connected");
+  }
+
+  private buildClient(): Ad4mClient {
     this.notifyConnectionChange("connecting");
 
-    if (this.apolloClient && this.wsClient) {
-      this.requestedRestart = true;
-      this.wsClient.dispose();
-      this.apolloClient.stop();
-      this.wsClient = null;
-      this.apolloClient = null;
+    // Close old client's WebSocket connections to avoid connection pool exhaustion
+    if (this.ad4mClient && typeof this.ad4mClient.close === 'function') {
+      this.ad4mClient.close();
     }
 
-    this.wsClient = createClient({
-      url: this.url,
-      connectionParams: async () => ({ headers: { authorization: this.token } }),
-      on: {
-        opened: (socket: WebSocket) => {
-          this.activeSocket = socket;
-        },
-        error: (e) => {
-          this.notifyConnectionChange("error");
-        },
-        connected: () => {
-          this.notifyConnectionChange("connected");
-        },
-        closed: async (event: CloseEvent) => {
-          // If the connection was closed cleanly, which happens on every first connection, don't treat this as a disconnect
-          if (event.wasClean || this.requestedRestart) return;
-
-          if (!this.token) {
-            this.notifyConnectionChange("error");
-          } else {
-            try {
-              // Force a fresh connection by rebuilding the client
-              // instead of potentially reusing a dead embedded client
-              this.ad4mClient = await this.buildClient();
-              await this.checkAuth();
-            } catch (error) {
-              console.error('[Ad4m Connect] Reconnection failed:', error);
-              this.notifyConnectionChange("error");
-            }
-          }
-        },
-      },
-    });
-
-    this.apolloClient = this.createApolloClient(this.wsClient);
-    this.ad4mClient = new Ad4mClient(this.apolloClient);
-    this.requestedRestart = false;
+    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token);
+    this.notifyConnectionChange("connected");
 
     return this.ad4mClient;
   }
 
-  private createApolloClient(wsClient: WSClient): ApolloClient<NormalizedCacheObject> {
-    return new ApolloClient({
-      link: new GraphQLWsLink(wsClient),
-      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-      defaultOptions: {
-        watchQuery: { fetchPolicy: "no-cache" as const },
-        query: { fetchPolicy: "no-cache" as const },
-        mutate: { fetchPolicy: "no-cache" as const },
-      },
-    });
-  }
-
-  private async withTempClient<T>(url: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
-    // Create a temporary client for the duration of the callback
-    const wsClient = createClient({ url, connectionParams: async () => ({ headers: { authorization: "" } }) });
-    const apolloClient = this.createApolloClient(wsClient);
-    const client = new Ad4mClient(apolloClient);
-
+  private async withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
+    const baseUrl = wsUrlToHttpBase(wsUrl);
+    const client = new Ad4mClient(baseUrl);
     try {
       return await callback(client);
     } finally {
-      wsClient.dispose();
+      client.close();
     }
   }
 
   async checkAuth(): Promise<boolean> {
+    console.log('[Ad4m Connect] Checking authentication status...');
+    return this.applyAuth(await this.readAuth(this.ad4mClient));
+  }
+
+  /**
+   * What the executor says about this session, with nothing applied yet.
+   *
+   * \`agent.status\` first: on an authorised session — every connect after the first — it answers
+   * in one call. \`agent.isLocked\` needs no capability, so when \`status\` fails
+   * it is the one that can tell a locked wallet from a refused token.
+   */
+  private async readAuth(client: Ad4mClient): Promise<AuthReading> {
+    let statusError: any;
     try {
-      console.log('[Ad4m Connect] Checking authentication status...');
-      const isLocked = await this.ad4mClient.agent.isLocked();
-
-      if (isLocked) {
-        console.log('[Ad4m Connect] Agent wallet is locked');
-        this.notifyAuthChange("locked");
-      } else {
-        await this.ad4mClient.agent.status();
-        this.notifyAuthChange("authenticated");
-      }
-
-      // Return true as we are authenticated
-      return true;
+      const status = await client.agent.status();
+      // A node with no agent yet has nothing to authenticate against: the user must create and
+      // unlock an agent first, which is what `locked` asks for.
+      if (!status.isInitialized) return { state: 'locked' };
+      return { state: status.isUnlocked ? 'authenticated' : 'locked' };
     } catch (error) {
-      console.error('[Ad4m Connect] Authentication check failed:', error);
-      const lockedMessage = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
-      
-      if (error.message === lockedMessage) {
-        // TODO: isLocked throws an error, should just return a boolean. Temp fix
-        this.notifyAuthChange("locked");
-        return true;
-      }
-      
-      // Clear token if it's invalid (signed by different agent)
-      if (error.message === "InvalidSignature") {
-        console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
-        this.token = '';
-        removeLocal('ad4m-token');
-      }
-      
-      this.notifyAuthChange("unauthenticated");
-      return false;
+      if (error?.message === LOCKED_WALLET) return { state: 'locked' };
+      statusError = error;
     }
+
+    try {
+      if (await client.agent.isLocked()) return { state: 'locked' };
+    } catch (lockErr) {
+      if (lockErr?.message === LOCKED_WALLET) return { state: 'locked' };
+      console.warn('[Ad4m Connect] isLocked check failed:', lockErr?.message);
+    }
+    return { state: 'unauthenticated', error: statusError };
+  }
+
+  /** Act on what \`readAuth\` found. Answers whether it found anything usable — see \`checkAuth\`. */
+  private applyAuth(reading: AuthReading): boolean {
+    if (reading.state === 'locked') {
+      console.log('[Ad4m Connect] Agent wallet is locked');
+      this.notifyAuthChange("locked");
+      return true;
+    }
+    if (reading.state === 'authenticated') {
+      this.notifyAuthChange("authenticated");
+      return true;
+    }
+
+    console.error('[Ad4m Connect] Authentication check failed:', reading.error);
+    // Clear token if it's invalid (signed by different agent)
+    if (reading.error?.message === "InvalidSignature") {
+      console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
+      this.token = '';
+      removeLocal('ad4m-token');
+    }
+    this.notifyAuthChange("unauthenticated");
+    return false;
   }
 
   // Disconnect and clean up
   async disconnect(): Promise<void> {
     console.log('[Ad4m Connect] Disconnecting...');
-    
-    // Dispose WebSocket client
-    if (this.wsClient) {
-      this.wsClient.dispose();
-      this.wsClient = null;
-    }
-    
-    // Stop Apollo client
-    if (this.apolloClient) {
-      this.apolloClient.stop();
-      this.apolloClient = null;
-    }
     
     // Clear client reference
     this.ad4mClient = undefined;
@@ -269,6 +299,7 @@ export default class Ad4mConnect extends EventTarget {
     this.connectedHost = null;
     this.userInfo = null;
     this.stopCreditPolling();
+    this.releaseCreditListener?.();
     removeLocal('ad4m-last-host');
 
     // Update connection state
@@ -280,34 +311,30 @@ export default class Ad4mConnect extends EventTarget {
   // Hosting — credit subscription & polling fallback
 
   /**
-   * Subscribe to real-time credit updates via GraphQL subscription.
-   * Falls back to polling if the subscription is not supported by the executor.
+   * Subscribe to real-time credit updates.
+   * Polling runs beside it as a safety net.
    */
   startCreditSubscription(): void {
     if (!this.ad4mClient) return;
 
-    try {
-      this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
-        const userInfo: UserInfo = {
-          email: info.email,
-          remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
-          hotWalletAddress: info.hotWalletAddress || null,
-          freeAccess: info.freeAccess,
-        };
-        this.userInfo = userInfo;
-        this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
+    this.releaseCreditListener?.();
+    this.releaseCreditListener = this.ad4mClient.on('hosting-user-info-changed', (info) => {
+      const userInfo: UserInfo = {
+        email: info.email,
+        remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
+        hotWalletAddress: info.hotWalletAddress || null,
+        freeAccess: info.freeAccess,
+      };
+      this.userInfo = userInfo;
+      this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
 
-        if (userInfo.remainingCredits <= 0) {
-          this.dispatchEvent(new CustomEvent('creditdepleted'));
-        }
-        if (userInfo.remainingCredits <= this.lowCreditThreshold) {
-          this.dispatchEvent(new CustomEvent('creditlow'));
-        }
-      });
-      this.ad4mClient.agent.subscribeHostingUserInfoChanged();
-    } catch (e) {
-      console.warn('[Ad4m Connect] Subscription not available, falling back to polling:', e);
-    }
+      if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
+        this.dispatchEvent(new CustomEvent('creditdepleted'));
+      }
+      if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
+        this.dispatchEvent(new CustomEvent('creditlow'));
+      }
+    });
 
     // Always start polling as a safety-net (at a longer 60s interval)
     this.startCreditPolling();
@@ -323,10 +350,10 @@ export default class Ad4mConnect extends EventTarget {
         this.userInfo = info;
         this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
 
-        if (info.remainingCredits <= this.lowCreditThreshold) {
+        if (!info.freeAccess && info.remainingCredits <= this.lowCreditThreshold) {
           this.dispatchEvent(new CustomEvent('creditlow'));
         }
-        if (info.remainingCredits <= 0) {
+        if (!info.freeAccess && info.remainingCredits <= 0) {
           this.dispatchEvent(new CustomEvent('creditdepleted'));
         }
       } catch (error) {
@@ -346,9 +373,15 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
-  async requestTopUp(amountHOT: number): Promise<{ success: boolean; message: string }> {
+  async requestTopUp(amountHOT: number): Promise<{ success: boolean; amountHOT: string }> {
     if (!this.ad4mClient) throw new Error('Not connected');
     return requestPayment(this.ad4mClient, amountHOT);
+  }
+
+  /** Fetch recent compute log entries. */
+  async fetchComputeLog(since?: string, limit?: number): Promise<import('./types').ComputeLogEntryData[]> {
+    if (!this.ad4mClient) throw new Error('Not connected');
+    return this.ad4mClient.agent.computeLog(since, limit) as any;
   }
 
   /** Persist selected host after successful auth */
@@ -370,20 +403,85 @@ export default class Ad4mConnect extends EventTarget {
           return;
         }
 
-        // Verify origin is in allowlist (if configured)
-        if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
-          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+        // Verify origin is in allowlist (if configured).
+        // In proxy mode the parent sees ALL API traffic, so the allowlist is the
+        // only gate against a malicious site embedding this app — enforce it strictly.
+        if (event.data.proxy) {
+          if (!this.options.allowedOrigins || this.options.allowedOrigins.length === 0) {
+            console.error('[Ad4m Connect] proxy mode requires allowedOrigins to be configured. Rejecting AD4M_CONFIG to prevent arbitrary sites from embedding this app.');
+            this.rejectEmbedded(new Error('proxy mode requires allowedOrigins'));
+            return;
+          }
+          if (!event.origin || !originAllowed(this.options.allowedOrigins, event.origin)) {
+            console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
+            this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
+            return;
+          }
+        } else if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
+          if (!event.origin || !originAllowed(this.options.allowedOrigins, event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
             this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
             return;
           }
         }
 
-        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { port: event.data.port, hasToken: !!event.data.token });
+        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { port: event.data.port, hasToken: !!event.data.token, proxy: !!event.data.proxy });
         
+        // Validate and normalize token (optional but must be string if present)
+        const { token: rawToken } = event.data;
+        const normalizedToken = rawToken !== undefined && rawToken !== null && typeof rawToken === 'string' 
+          ? rawToken 
+          : '';
+
+        // ── Proxy mode ───────────────────────────────────────────────────────
+        // Parent sends proxy: true when the host application will open the real
+        // WebSocket to the AD4M daemon and proxy frames via postMessage.
+        // The URL/port fields are not needed in this path.
+        if (event.data.proxy) {
+          try {
+            this.token = normalizedToken;
+            if (normalizedToken) {
+              setLocal('ad4m-token', normalizedToken);
+            } else {
+              removeLocal('ad4m-token');
+            }
+
+            // Use the verified origin of the AD4M_CONFIG sender so postMessage
+            // frames are never delivered to an unexpected parent origin.
+            // Refuse to proceed if the origin is opaque (sandboxed iframe without
+            // allow-same-origin) — falling back to '*' would re-introduce the
+            // wildcard vulnerability for sensitive JSON-RPC frames.
+            if (!event.origin || event.origin === 'null') {
+              throw new Error('AD4M proxy mode requires a non-opaque parent origin. Ensure the host iframe is not sandboxed without allow-same-origin.');
+            }
+            const parentOrigin = event.origin;
+            // Must be a real constructor class — the WS client calls `new webSocketImpl(url)`.
+            // Arrow functions cannot be called with `new`, so we use a class expression here.
+            class WsImpl extends PostMessageWebSocket {
+              constructor(url: string) { super(url, parentOrigin); }
+            }
+
+            const fetchImpl = makePostMessageFetch(parentOrigin);
+
+            this.notifyConnectionChange('connecting');
+            this.ad4mClient = new Ad4mClient(
+              'http://proxy', // URL ignored by PostMessageWebSocket; HTTP requests are proxied via fetchImpl
+              normalizedToken,
+              { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket, fetchImpl }
+            );
+            this.notifyConnectionChange('connected');
+            await this.checkAuth();
+          } catch (error) {
+            console.error('[Ad4m Connect] Failed to initialize proxy client from AD4M_CONFIG:', error);
+            this.rejectEmbedded(error as Error);
+          }
+          return;
+        }
+
+        // ── Direct mode (desktop / local where PNA is not an issue) ──────────
         // Validate and normalize port
-        const { port: rawPort, token: rawToken } = event.data;
-        
+        const { port: rawPort } = event.data;
+
         if (rawPort === undefined || rawPort === null) {
           const error = new Error('AD4M_CONFIG missing required field: port');
           console.error('[Ad4m Connect]', error.message);
@@ -399,16 +497,15 @@ export default class Ad4mConnect extends EventTarget {
           return;
         }
         
-        // Validate and normalize token (optional but must be string if present)
-        const normalizedToken = rawToken !== undefined && rawToken !== null && typeof rawToken === 'string' 
-          ? rawToken 
-          : '';
-        
         try {
           // Set connection details from parent (after successful validation)
           this.port = parsedPort;
           this.token = normalizedToken;
-          this.url = `ws://localhost:${parsedPort}/graphql`;
+          // Use the URL provided by the parent if valid (e.g. remote host), otherwise fall back to localhost
+          const rawUrl = event.data.url;
+          this.url = (rawUrl && typeof rawUrl === 'string' && rawUrl.startsWith('http'))
+            ? rawUrl
+            : `http://localhost:${parsedPort}`;
           
           // Store in localStorage for persistence (avoid storing undefined or stale credentials)
           setLocal('ad4m-port', parsedPort.toString());
@@ -421,7 +518,7 @@ export default class Ad4mConnect extends EventTarget {
           setLocal('ad4m-url', this.url);
           
           // Build the client with received credentials
-          this.ad4mClient = await this.buildClient();
+          this.ad4mClient = this.buildClient();
           await this.checkAuth();
         } catch (error) {
           console.error('[Ad4m Connect] Failed to initialize from AD4M_CONFIG:', error);
@@ -432,6 +529,13 @@ export default class Ad4mConnect extends EventTarget {
     
     // Request AD4M config from parent window
     console.log('[Ad4m Connect] Requesting AD4M config from parent window');
+    // REQUEST_AD4M_CONFIG carries no sensitive data — it is a pure handshake
+    // signal asking the parent to respond with credentials. We use '*' because
+    // at this point we don't yet know which of the allowedOrigins the parent is
+    // actually at (e.g. WE dev:web and dev:electron run on different ports, both
+    // listed in allowedOrigins). Security is enforced on the *incoming* side:
+    // the AD4M_CONFIG listener below validates event.origin against
+    // allowedOrigins before accepting any credentials.
     window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, '*');
   }
 
@@ -557,6 +661,71 @@ export default class Ad4mConnect extends EventTarget {
       console.error("[Ad4m Connect] Account creation error:", e);
       return false;
     }
+  }
+
+  /**
+   * Connect to a remote hosted node as a guest without any UI interaction.
+   * Generates a persistent random identity stored in localStorage so that
+   * refreshing the page reuses the same guest account.
+   *
+   * Tries loginUser first (returning visitor); falls back to createUser +
+   * loginUser (first visit). No email verification required — password-based
+   * accounts on multi-user executors skip the email code step entirely.
+   */
+  async connectAsGuest(hostUrl: string): Promise<Ad4mClient> {
+    this.url = hostUrl;
+    setLocal("ad4m-url", hostUrl);
+
+    // Reuse stored guest credentials so the identity survives page reloads.
+    // Keys are scoped to the normalised host so credentials from one host
+    // are never tried against a different host.
+    const normalizedHost  = hostUrl.replace(/\/+$/, '').toLowerCase();
+    const GUEST_EMAIL_KEY = `ad4m-guest-email-${normalizedHost}`;
+    const GUEST_PASS_KEY  = `ad4m-guest-pass-${normalizedHost}`;
+    const storedEmail    = getLocal(GUEST_EMAIL_KEY);
+    const storedPassword = getLocal(GUEST_PASS_KEY);
+    let email: string;
+    let password: string;
+
+    if (storedEmail && storedPassword) {
+      email    = storedEmail;
+      password = storedPassword;
+    } else {
+      email    = `guest-${crypto.randomUUID()}@flux.demo`;
+      password = crypto.randomUUID();
+      // Credentials are written to localStorage only after successful
+      // account creation below — not here — so a failed createUser call
+      // leaves localStorage clean and the next attempt gets fresh credentials.
+    }
+
+    const isReturningGuest = !!(storedEmail && storedPassword);
+
+    const token = await this.withTempClient(hostUrl, async (client) => {
+      if (isReturningGuest) {
+        // Returning guest: credentials already exist on the server, just log in
+        return await client.agent.loginUser(email, password);
+      } else {
+        // First visit: create the account then log in
+        const result = await client.agent.createUser(email, password);
+        if (!result.success) throw new Error(result.error || "Failed to create guest account");
+        const newToken = await client.agent.loginUser(email, password);
+        // Persist only after both steps succeed so a partial failure leaves
+        // localStorage clean for the next attempt
+        setLocal(GUEST_EMAIL_KEY, email);
+        setLocal(GUEST_PASS_KEY, password);
+        return newToken;
+      }
+    });
+
+    this.token = token;
+    setLocal("ad4m-token", token);
+
+    this.ad4mClient = this.buildClient();
+    await this.checkAuth();
+    if (this.authState !== "authenticated") {
+      throw new Error(`Guest authentication failed: auth state is "${this.authState}"`);
+    }
+    return this.ad4mClient;
   }
 
   // Private helpers

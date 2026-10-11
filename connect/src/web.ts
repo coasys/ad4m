@@ -1,8 +1,8 @@
 import { css, html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import autoBind from "auto-bind";
-import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
-import { connectWebSocket, setLocal } from "./utils";
+import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeTypes";
+import { checkConnection, setLocal, wsUrlToHttpBase } from "./utils";
 import Ad4mConnect from "./core";
 import { Ad4mLogo, ArrowLeftIcon, CreditIcon } from "./components/icons";
 import { fetchHosts } from "./services/hostIndex";
@@ -212,6 +212,7 @@ export class Ad4mConnectElement extends LitElement {
   @state() private lowCredit = false;
   @state() private requestingPayment = false;
   @state() private paymentError: string | null = null;
+  private openedDueToCreditDepletion = false;
 
   connectedCallback() {
     super.connectedCallback();
@@ -223,6 +224,10 @@ export class Ad4mConnectElement extends LitElement {
         // Token expired or invalid - show connection options
         this.currentView = "connection-options";
         this.modalOpen = true;
+      } else if (e.detail === 'authenticated') {
+        // Successfully authenticated - switch to dashboard and close modal
+        this.currentView = "logged-in-dashboard";
+        this.modalOpen = false;
       }
       // Trigger re-render to update UI based on new auth state
       this.requestUpdate();
@@ -242,10 +247,15 @@ export class Ad4mConnectElement extends LitElement {
 
     this.core.addEventListener('creditdepleted', () => {
       this.lowCredit = true;
-      // Auto-open the dashboard so the user sees the top-up options
-      if (this.core.connectedHost && !this.modalOpen) {
-        this.currentView = "logged-in-dashboard";
-        this.modalOpen = true;
+      if (this.core.connectedHost) {
+        // Always record depletion state so .forceOpen can act on it later
+        this.openedDueToCreditDepletion = true;
+        try { this.core.options.onCreditsDepleted?.(); } catch (e) { console.error('[Ad4m Connect] onCreditsDepleted callback error:', e); }
+        // Auto-open the dashboard so the user sees the top-up options
+        if (!this.modalOpen) {
+          this.currentView = "logged-in-dashboard";
+          this.modalOpen = true;
+        }
       }
       this.requestUpdate();
     });
@@ -278,9 +288,21 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async connectLocalNode() {
-    // Update URL to local and persist
-    this.core.url = `ws://localhost:${this.core.port}/graphql`;
-    setLocal("ad4m-url", this.core.url);
+    // First, try same-origin (works when Vite dev server proxies /health to executor)
+    try {
+      const probeRes = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(2000) });
+      if (!probeRes.ok) throw new Error('probe failed');
+      const body = await probeRes.json();
+      if (body?.status !== 'ok') throw new Error('not an ad4m executor');
+      this.core.url = window.location.origin;
+      setLocal("ad4m-url", this.core.url);
+      console.log('[Ad4m Connect UI] Using same-origin proxy:', this.core.url);
+    } catch {
+      // Fall back to direct connection
+      const host = window.location.hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost';
+      // Unchecked: connect() stores it once /health accepts it.
+      this.core.url = `http://${host}:${this.core.port}`;
+    }
     
     try {
       await this.core.connect();
@@ -340,8 +362,8 @@ export class Ad4mConnectElement extends LitElement {
     const candidateUrl = host.url;
 
     try {
-      // Verify WS reachability before committing URL
-      await connectWebSocket(candidateUrl);
+      // Verify HTTP reachability before committing URL
+      await checkConnection(wsUrlToHttpBase(candidateUrl));
       console.log('[Ad4m Connect UI] Host connection successful:', host.name);
 
       // Verify it's an AD4M API
@@ -384,7 +406,7 @@ export class Ad4mConnectElement extends LitElement {
     try {
       const result = await this.core.requestTopUp(e.detail.amountHOT);
       if (!result.success) {
-        this.paymentError = result.message;
+        this.paymentError = "Payment request failed";
       }
     } catch (error) {
       this.paymentError = error instanceof Error ? error.message : "Payment request failed";
@@ -409,12 +431,12 @@ export class Ad4mConnectElement extends LitElement {
   private async connectRemoteNode(e: CustomEvent) {
     // Legacy direct-URL connection (kept for backward compat if needed)
     this.core.url = e.detail.remoteUrl;
-    setLocal("ad4m-url", this.core.url);
 
     try {
-      await connectWebSocket(e.detail.remoteUrl);
+      await checkConnection(wsUrlToHttpBase(e.detail.remoteUrl));
       const isValidAd4mApi = await this.core.isValidAd4mAPI();
       if (!isValidAd4mApi) throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
+      setLocal("ad4m-url", this.core.url);
 
       this.currentView = "remote-authentication";
     } catch (error) {
@@ -585,10 +607,24 @@ export class Ad4mConnectElement extends LitElement {
           .userInfo=${this.userInfo}
           .requestingPayment=${this.requestingPayment}
           .paymentError=${this.paymentError}
-          @close=${() => { this.modalOpen = false; }}
+          .forceOpen=${this.openedDueToCreditDepletion}
+          @close=${() => { this.openedDueToCreditDepletion = false; this.modalOpen = false; }}
+          @use-app=${() => {
+            this.openedDueToCreditDepletion = false;
+            try { this.core.options.onUseApp?.(); } catch (e) { console.error('[Ad4m Connect] onUseApp callback error:', e); }
+            this.modalOpen = false;
+          }}
           @disconnect=${this.disconnect}
           @request-top-up=${this.handleRequestTopUp}
           @set-wallet-address=${this.handleSetWalletAddress}
+          @fetch-compute-log=${(e: CustomEvent) => {
+            const cb = e?.detail?.callback;
+            if (typeof cb !== 'function') return;
+            this.core.fetchComputeLog().then(cb).catch((err: any) => {
+              console.error('[Ad4m Connect] Failed to fetch compute log:', err);
+              cb([]);
+            });
+          }}
         ></logged-in-dashboard>
       `;
     }
@@ -630,9 +666,10 @@ export class Ad4mConnectElement extends LitElement {
     } else if (this.core.authState === "authenticated") {
       // Show settings button when authenticated and modal is closed
       const credits = this.userInfo?.remainingCredits;
+      const showCredits = credits != null && isFinite(credits);
       return html`
         <div class="settings-bar">
-          ${credits != null ? html`
+          ${showCredits ? html`
             <span class="credit-badge ${this.lowCredit ? 'low-credit' : ''}">
               ${CreditIcon()} ${credits.toFixed(2)} wHOT
             </span>

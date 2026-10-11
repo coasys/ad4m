@@ -1,20 +1,8 @@
-import { Field, ObjectType } from "type-graphql";
-
-@ObjectType()
 export class AgentStatus {
-    @Field()
     isInitialized: Boolean
-
-    @Field()
     isUnlocked: Boolean
-
-    @Field({nullable: true})
     did?: string
-
-    @Field({nullable: true})
     didDocument?: string
-    
-    @Field({nullable: true})
     error?: string
 
     constructor(obj?: object) {
