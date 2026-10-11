@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use ts_rs::TS;
 
 use crate::agent::capabilities::{
-    anonymous_capabilities, perspective_query_capability, Capability, AGENT_AUTH_CAPABILITY,
+    anonymous_capabilities_when, perspective_query_capability, Capability, AGENT_AUTH_CAPABILITY,
     AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY,
 };
 use crate::agent::AgentService;
@@ -132,6 +132,21 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("agent.removeApp", || json!({ "id": "request-id" })),
     ("agent.revokeToken", || json!({ "token": "request-id" })),
     ("agent.addTrustedAgents", || json!({ "agents": [] })),
+    ("agent.byDid", || json!({ "did": "did:key:z6Mk" })),
+    (
+        "agent.import",
+        || json!({ "did": "did:key:z6Mk", "didDocument": "{}", "keystore": "k", "passphrase": "p" }),
+    ),
+    ("agent.sign", || json!({ "message": "m" })),
+    (
+        "agent.requestCapability",
+        || json!({ "authInfo": { "appName": "a", "appDesc": "d", "appDomain": "example.org" } }),
+    ),
+    ("agent.permitCapability", || json!({ "auth": "{}" })),
+    (
+        "agent.generateJwt",
+        || json!({ "requestId": "request-id", "rand": "123" }),
+    ),
     ("agent.deleteTrustedAgents", || json!({ "agents": [] })),
     (
         "agent.addEntanglementProofs",
@@ -158,6 +173,20 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "id": "m1", "model": { "name": "m", "type": "LLM" } }),
     ),
     ("ai.removeModel", || json!({ "id": "m1" })),
+    ("ai.getDefaultModel", || json!({ "modelType": "LLM" })),
+    ("ai.addTask", || json!({ "task": ai_task() })),
+    ("ai.updateTask", || {
+        let mut task = ai_task();
+        task["taskId"] = json!("t1");
+        task["createdAt"] = json!("2026-01-01T00:00:00Z");
+        task["updatedAt"] = json!("2026-01-01T00:00:00Z");
+        json!({ "task": task })
+    }),
+    ("ai.removeTask", || json!({ "id": "t1" })),
+    ("ai.prompt", || json!({ "taskId": "t1", "prompt": "p" })),
+    ("ai.embed", || json!({ "modelId": "m1", "text": "t" })),
+    ("ai.transcriptionOpen", || json!({ "modelId": "m1" })),
+    ("ai.transcriptionClose", || json!({ "streamId": "s1" })),
     (
         "ai.setDefaultModel",
         || json!({ "id": "m1", "modelType": "LLM" }),
@@ -169,6 +198,13 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         })
     }),
     ("language.remove", || json!({ "address": "QmLang" })),
+    ("language.get", || json!({ "address": "QmLang" })),
+    ("language.meta", || json!({ "address": "QmLang" })),
+    ("language.source", || json!({ "address": "QmLang" })),
+    (
+        "language.applyTemplate",
+        || json!({ "sourceLanguageHash": "QmLang", "templateData": "{}" }),
+    ),
     (
         "language.writeSettings",
         || json!({ "address": "QmLang", "settings": {} }),
@@ -200,6 +236,86 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "runtime.setFreeHostingEnabled",
         || json!({ "enabled": true }),
     ),
+    ("runtime.setStatus", || json!({ "status": {} })),
+    (
+        "runtime.verifySignature",
+        || json!({ "did": "did:key:z6Mk", "data": "d", "signedData": "s" }),
+    ),
+    ("runtime.friendStatus", || json!({ "did": "did:key:z6Mk" })),
+    ("runtime.createNotification", notification),
+    ("runtime.updateNotification", || {
+        let mut params = notification();
+        params["id"] = json!("n1");
+        params
+    }),
+    (
+        "runtime.grantNotification",
+        || json!({ "id": "n1", "granted": true }),
+    ),
+    ("runtime.deleteNotification", || json!({ "id": "n1" })),
+    (
+        "user.create",
+        || json!({ "email": "new@example.org", "password": "p" }),
+    ),
+    (
+        "user.login",
+        || json!({ "email": "new@example.org", "password": "p" }),
+    ),
+    (
+        "user.verifyEmail",
+        || json!({ "email": "new@example.org", "code": "123456" }),
+    ),
+    (
+        "user.requestVerification",
+        || json!({ "email": "new@example.org" }),
+    ),
+    ("user.wallet", || json!({ "email": "new@example.org" })),
+    ("user.emailTest", || json!({ "action": "clear" })),
+    (
+        "neighbourhood.join",
+        || json!({ "url": "neighbourhood://Qm" }),
+    ),
+    (
+        "neighbourhood.publish",
+        || json!({ "perspectiveUuid": "p", "linkLanguage": "QmLang", "meta": { "links": [] } }),
+    ),
+    (
+        "neighbourhood.sendBroadcast",
+        || json!({ "uuid": "p", "payload": { "links": [] } }),
+    ),
+    (
+        "neighbourhood.sendSignal",
+        || json!({ "uuid": "p", "remoteAgentDid": "did:key:z6Mk", "payload": { "links": [] } }),
+    ),
+    (
+        "neighbourhood.setOnlineStatus",
+        || json!({ "uuid": "p", "status": { "links": [] } }),
+    ),
+    ("neighbourhood.hasTelepresence", || json!({ "uuid": "p" })),
+    ("neighbourhood.onlineAgents", || json!({ "uuid": "p" })),
+    ("neighbourhood.otherAgents", || json!({ "uuid": "p" })),
+    ("expression.get", || json!({ "url": "literal://string:x" })),
+    (
+        "expression.getRaw",
+        || json!({ "url": "literal://string:x" }),
+    ),
+    ("expression.getMany", || json!({ "urls": [] })),
+    (
+        "expression.create",
+        || json!({ "content": "x", "languageAddress": "literal" }),
+    ),
+    (
+        "expression.interactions",
+        || json!({ "url": "literal://string:x" }),
+    ),
+    ("expression.interact", || {
+        json!({
+            "url": "literal://string:x",
+            "interactionCall": { "name": "n", "parametersStringified": "{}" },
+        })
+    }),
+    ("hosting.requestPayment", || json!({ "amountHOT": "1" })),
+    ("hosting.setHotWallet", || json!({ "address": "a" })),
     // Guard::Perspective: the params beside `uuid`.
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
@@ -345,6 +461,22 @@ fn link_expression() -> Value {
     })
 }
 
+fn ai_task() -> Value {
+    json!({ "name": "n", "modelId": "m1", "systemPrompt": "s", "promptExamples": [] })
+}
+
+fn notification() -> Value {
+    json!({
+        "description": "d",
+        "appName": "a",
+        "appUrl": "https://example.org",
+        "trigger": "t",
+        "perspectiveIds": [],
+        "webhookUrl": "https://example.org/hook",
+        "webhookAuth": "w",
+    })
+}
+
 fn entanglement_proof() -> Value {
     json!({
         "deviceKey": "k",
@@ -378,9 +510,11 @@ fn context(caller: Caller, capability: Capability) -> RequestContext {
         Caller::OtherUser => {
             RequestContext::user_for_test("other@example.org", OTHER_USER_DID, vec![capability])
         }
+        // The most a caller without a token holds: multi-user mode on adds signing up,
+        // logging in and verifying an email.
         Caller::Anonymous => {
             RequestContext::for_test(crate::agent::session::Principal::Anonymous {
-                caps: anonymous_capabilities(),
+                caps: anonymous_capabilities_when(true),
             })
         }
     }
@@ -671,6 +805,47 @@ fn every_method_on_one_perspective_has_a_guard() {
         .collect();
     // Neither names one perspective: `all` lists the caller's, `create` makes a new one.
     assert_eq!(unguarded, vec!["perspective.all", "perspective.create"]);
+}
+
+/// Every guard checks a capability first. A method that checks none keeps no guard: a guard
+/// would refuse the callers that reach it today without a capability. Nor does a method that
+/// answers every caller but the operator "Admin credential required": a guard would answer
+/// with the capability's message. `perspective.all` and `perspective.create` name no
+/// perspective.
+#[test]
+fn only_methods_a_guard_cannot_express_lack_one() {
+    let map = build_handler_map();
+    let unguarded: Vec<&str> = map
+        .guards()
+        .into_iter()
+        .filter_map(|(name, guard)| guard.is_none().then_some(name))
+        .collect();
+    assert_eq!(
+        unguarded,
+        vec![
+            "agent.isLocked",
+            "perspective.all",
+            "perspective.create",
+            "runtime.freeHostingEnabled",
+            "runtime.info",
+            "runtime.openLink",
+            "runtime.restartHolochain",
+            "runtime.setHostRates",
+            "runtime.setUnytMembraneProof",
+            "runtime.tlsDomain",
+            "runtime.unytAgentKey",
+            "runtime.unytHotAgentPubkey",
+            "runtime.unytReinstallDna",
+            "runtime.unytSendHot",
+            "runtime.unytWalletBalance",
+            "runtime.unytWalletHistory",
+            "user.credits",
+            "user.freeAccess",
+            "user.logout",
+            "user.revokeAllSessions",
+            "user.setMultiUserEnabled",
+        ]
+    );
 }
 
 #[tokio::test]

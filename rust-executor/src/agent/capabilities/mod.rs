@@ -290,8 +290,13 @@ pub fn capabilities_from_token(
 /// so anonymous callers cannot list them.
 pub fn anonymous_capabilities() -> Vec<Capability> {
     use crate::db::Ad4mDb;
-    let multi_user_enabled =
-        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    anonymous_capabilities_when(Ad4mDb::with_global_instance(|db| {
+        db.get_multi_user_enabled().unwrap_or(false)
+    }))
+}
+
+/// [`anonymous_capabilities`] with multi-user mode on or off.
+pub fn anonymous_capabilities_when(multi_user_enabled: bool) -> Vec<Capability> {
     if multi_user_enabled {
         vec![
             AGENT_AUTH_CAPABILITY.clone(),

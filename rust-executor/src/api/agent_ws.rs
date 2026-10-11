@@ -70,9 +70,6 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
 
 /// agent.get — current agent info + status + lock state
 async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     // Multi-user mode: extract user DID from JWT token if present
     if let Some(user_email) = ctx.user_email().map(str::to_string) {
         let agent_data = AgentService::get_user_agent_data(&user_email)
@@ -111,18 +108,12 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 /// agent.apps — list registered apps
-async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_apps(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
 /// agent.byDid — get agent by DID
-async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_agent_by_did(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let did = params.require_str("did")?;
 
     // Check if DID matches main agent
@@ -182,9 +173,6 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 /// agent.updateProfile — update DM language and/or public perspective
 async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: UpdateProfileRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -486,9 +474,6 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
 /// agent.sign — sign a message
 async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: SignMessageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -514,9 +499,6 @@ async fn remove_app(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
 
 /// agent.requestCapability — request capability
 async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: RequestCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -568,11 +550,8 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
 /// agent.permitCapability — permit capability
 async fn permit_capability_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: PermitCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -584,10 +563,7 @@ async fn permit_capability_handler(
 }
 
 /// agent.generateJwt — generate JWT
-async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn generate_jwt(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GenerateJwtRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -628,9 +604,6 @@ fn revoke_user_token(token: &str) -> Result<(), WsRpcError> {
 
 /// agent.status — agent status
 async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     // Multi-user mode
     if let Some(user_email) = ctx.user_email().map(str::to_string) {
         let agent_data = AgentService::get_user_agent_data(&user_email)
@@ -675,10 +648,10 @@ async fn is_locked(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
 // ── Trust ──
 
 /// agent.getTrustedAgents — list trusted agents
-async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_trusted_agents(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
     });
@@ -812,10 +785,7 @@ async fn delete_entanglement(
 }
 
 /// agent.import — import agent from keystore
-async fn import_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn import_agent(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     Err(WsRpcError::not_implemented(
         "Agent import not yet implemented",
     ))
@@ -839,41 +809,63 @@ async fn entanglement_proof_preflight(
 ///
 /// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.method::<NoParams, Agent>("agent.get", get_agent).read();
+    // The caller's own agent: a user's, else the main agent.
+    map.method::<NoParams, Agent>("agent.get", get_agent)
+        .read()
+        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+    // The node's approved apps (without tokens). Users read the list too.
     map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
     map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
-        .read();
-    map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
+        .read()
+        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+    map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile)
+        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long()
         .guard(Guard::Node(AGENT_CREATE_CAPABILITY.clone()));
-    // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
-    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent);
+    // Always fails (not implemented); the result type is the SDK's `AgentStatus`. Users get
+    // the 501 too.
+    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent)
+        .guard(Guard::SelfAgent(AGENT_CREATE_CAPABILITY.clone()));
     map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
         .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
         .long()
         .guard(Guard::Node(AGENT_SIGN_CAPABILITY.clone()));
-    map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message);
+    map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message)
+        .guard(Guard::SelfAgent(AGENT_SIGN_CAPABILITY.clone()));
     // Approved apps belong to the node's operator. The default user capabilities include
     // AGENT_UPDATE, so without the guard a user session could remove or revoke them.
     map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
         .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
-    map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability);
+    // An app without a token asks for one.
+    map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability)
+        .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
+    // Approving an app is the operator's (or an app holding AGENT_PERMIT).
     map.method::<PermitCapabilityRequest, String>(
         "agent.permitCapability",
         permit_capability_handler,
-    );
-    map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt);
+    )
+    .guard(Guard::Node(AGENT_PERMIT_CAPABILITY.clone()));
+    map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt)
+        .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
     map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
         .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+    // No guard: every caller may ask, with or without capabilities, and every guard checks a
+    // capability.
     map.method::<NoParams, bool>("agent.isLocked", is_locked)
         .read();
+    // The node's trust list, which users read too.
     map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(
+            RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY.clone(),
+        ));
     // The node's trust list decides whose languages this node installs and runs.
     map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents)
         .guard(Guard::Node(

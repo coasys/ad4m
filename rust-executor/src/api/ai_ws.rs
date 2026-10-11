@@ -43,10 +43,7 @@ fn check_compute_credits_ws(user_email: Option<&str>) -> Result<(), WsRpcError> 
 
 // ── Models ──
 
-async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let _service = AIService::global_instance()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -219,10 +216,7 @@ async fn set_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<V
     Ok(Value::Bool(true))
 }
 
-async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let model_type_str = params.require_str("modelType")?;
 
     let model_type: ModelType = serde_json::from_str(&format!("\"{}\"", model_type_str))
@@ -243,11 +237,8 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 
 async fn get_model_loading_status(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let model = params
         .opt_str("model")
         .or_else(|| params.opt_str("modelId"))
@@ -262,18 +253,12 @@ async fn get_model_loading_status(
 
 // ── Tasks ──
 
-async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn list_tasks(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let tasks = AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(tasks)?)
 }
 
-async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn add_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let task: AITaskInput =
         serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
@@ -290,10 +275,7 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     Ok(serde_json::to_value(result)?)
 }
 
-async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn update_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let task: AITask = serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
         .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
 
@@ -309,10 +291,7 @@ async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::to_value(result)?)
 }
 
-async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
 
     let service = AIService::global_instance()
@@ -330,8 +309,6 @@ async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 // ── Prompt & Embed ──
 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_email())?;
 
     let body: PromptRequest = serde_json::from_value(params)
@@ -354,8 +331,6 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_email())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
@@ -388,8 +363,6 @@ async fn open_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_email())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
@@ -411,9 +384,6 @@ async fn close_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: AiTranscriptionCloseParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -430,8 +400,10 @@ async fn close_transcription_stream(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
+    // The node's models (without keys), which users read too.
     map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
     // The provider's own model ids.
     map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
         .read()
@@ -451,33 +423,46 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "ai.getDefaultModel",
         get_default_model,
     )
-    .read();
+    .read()
+    .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
     map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
         "ai.modelLoadingStatus",
         get_model_loading_status,
     )
-    .read();
+    .read()
+    .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
+    // Tasks have no owner yet: every caller with the capability reaches every task.
     map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
-        .read();
-    map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task);
-    map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task);
-    map.method::<AiIdParams, bool>("ai.removeTask", remove_task);
+        .read()
+        .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
+    map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task)
+        .guard(Guard::SelfAgent(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task)
+        .guard(Guard::SelfAgent(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
+        .guard(Guard::SelfAgent(AI_CREATE_CAPABILITY.clone()));
+    // Prompts, embeddings and transcription bill the caller's user; the handlers check its
+    // compute credits after the guard.
     // The completion text.
     map.method::<PromptRequest, String>("ai.prompt", ai_prompt)
-        .long();
+        .long()
+        .guard(Guard::SelfAgent(AI_PROMPT_CAPABILITY.clone()));
     // The embedding vector as JSON, zlib-deflated, base64-encoded.
     map.method::<EmbedRequest, String>("ai.embed", ai_embed)
-        .long();
+        .long()
+        .guard(Guard::SelfAgent(AI_PROMPT_CAPABILITY.clone()));
     // The new stream's id.
     map.method::<AiTranscriptionOpenParams, String>(
         "ai.transcriptionOpen",
         open_transcription_stream,
-    );
+    )
+    .guard(Guard::SelfAgent(AI_TRANSCRIBE_CAPABILITY.clone()));
     // Always the string `"true"`.
     map.method::<AiTranscriptionCloseParams, String>(
         "ai.transcriptionClose",
         close_transcription_stream,
-    );
+    )
+    .guard(Guard::SelfAgent(AI_TRANSCRIBE_CAPABILITY.clone()));
 }
 
 // ── HTTP-only: binary transcription feed ────────────────────────────────────

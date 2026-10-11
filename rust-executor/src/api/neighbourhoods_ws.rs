@@ -12,13 +12,11 @@ use crate::perspectives::get_perspective;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -34,9 +32,6 @@ async fn publish_neighbourhood(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -89,9 +84,6 @@ fn build_signed_perspective(
 }
 
 async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let uuid = params.require_str("uuid")?;
     let body: BroadcastRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -112,9 +104,6 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let uuid = params.require_str("uuid")?;
     let body: SignalRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -135,9 +124,6 @@ async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let uuid = params.require_str("uuid")?;
     let body: SetOnlineStatusRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -157,10 +143,7 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Ok(Value::Bool(true))
 }
 
-async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn has_telepresence(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     let perspective = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
@@ -168,10 +151,7 @@ async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::Bool(perspective.has_telepresence_adapter().await))
 }
 
-async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn online_agents(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     let perspective = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
@@ -185,9 +165,6 @@ async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let uuid = params.require_str("uuid")?;
     let agent_context = ctx.acts_as();
     let current_user_did = crate::agent::did_for_context(&agent_context)
@@ -220,31 +197,43 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
+    // The caller joins and publishes as itself (`ctx.acts_as()`).
     map.method::<JoinNeighbourhoodRequest, PerspectiveHandle>(
         "neighbourhood.join",
         join_neighbourhood,
     )
-    .long();
+    .long()
+    .guard(Guard::SelfAgent(NEIGHBOURHOOD_READ_CAPABILITY.clone()));
     map.method::<PublishNeighbourhoodRequest, String>(
         "neighbourhood.publish",
         publish_neighbourhood,
     )
-    .long();
-    map.method::<NeighbourhoodBroadcastParams, bool>("neighbourhood.sendBroadcast", send_broadcast);
-    map.method::<NeighbourhoodSignalParams, bool>("neighbourhood.sendSignal", send_signal);
+    .long()
+    .guard(Guard::SelfAgent(NEIGHBOURHOOD_CREATE_CAPABILITY.clone()));
+    // These name a perspective, but check only the neighbourhood capability and that the
+    // perspective exists (404); `otherAgents` also checks that the caller owns it. A
+    // perspective guard would add the owner rule to the others.
+    map.method::<NeighbourhoodBroadcastParams, bool>("neighbourhood.sendBroadcast", send_broadcast)
+        .guard(Guard::SelfAgent(NEIGHBOURHOOD_UPDATE_CAPABILITY.clone()));
+    map.method::<NeighbourhoodSignalParams, bool>("neighbourhood.sendSignal", send_signal)
+        .guard(Guard::SelfAgent(NEIGHBOURHOOD_UPDATE_CAPABILITY.clone()));
     map.method::<NeighbourhoodOnlineStatusParams, bool>(
         "neighbourhood.setOnlineStatus",
         set_online_status,
-    );
+    )
+    .guard(Guard::SelfAgent(NEIGHBOURHOOD_UPDATE_CAPABILITY.clone()));
     map.method::<NeighbourhoodUuidParams, bool>("neighbourhood.hasTelepresence", has_telepresence)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(NEIGHBOURHOOD_READ_CAPABILITY.clone()));
     map.method::<NeighbourhoodUuidParams, Vec<OnlineAgent>>(
         "neighbourhood.onlineAgents",
         online_agents,
     )
-    .read();
+    .read()
+    .guard(Guard::SelfAgent(NEIGHBOURHOOD_READ_CAPABILITY.clone()));
     map.method::<NeighbourhoodUuidParams, Vec<String>>("neighbourhood.otherAgents", other_agents)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(NEIGHBOURHOOD_READ_CAPABILITY.clone()));
 }
 
 // ── Contracts ──

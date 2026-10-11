@@ -13,10 +13,7 @@ use super::guards::{session_agent_context, Guard};
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
-async fn list_languages(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn list_languages(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let filter = params.opt_str("filter");
     let controller = LanguageController::global_instance();
     let refs = controller.get_installed_languages(filter.as_deref()).await;
@@ -42,10 +39,7 @@ async fn list_languages(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(handles)?)
 }
 
-async fn get_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let controller = LanguageController::global_instance();
 
@@ -94,10 +88,7 @@ async fn get_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )))
 }
 
-async fn get_language_meta(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_language_meta(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let controller = LanguageController::global_instance();
     let meta = controller
@@ -113,10 +104,10 @@ async fn get_language_meta(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Ok(serde_json::to_value(meta)?)
 }
 
-async fn get_language_source(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_language_source(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let controller = LanguageController::global_instance();
     let source = controller
@@ -194,9 +185,6 @@ async fn publish_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: ApplyTemplateRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -308,21 +296,27 @@ async fn write_settings(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
+    // The node's installed languages, which users read too.
     map.method::<LanguageListParams, Vec<LanguageHandle>>("language.all", list_languages)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, LanguageHandle>("language.get", get_language)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, LanguageMeta>("language.meta", get_language_meta)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, String>("language.source", get_language_source)
-        .read();
+        .read()
+        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
     // Reads `languagePath` from any path on the host and publishes the file signed by the
     // node's main agent.
     map.method::<PublishLanguageRequest, LanguageMeta>("language.publish", publish_language)
         .long()
         .guard(Guard::Node(LANGUAGE_CREATE_CAPABILITY.clone()));
     map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
-        .long();
+        .long()
+        .guard(Guard::SelfAgent(LANGUAGE_CREATE_CAPABILITY.clone()));
     // Installed languages and their settings are shared by every user of the node.
     map.method::<LanguageAddressParams, bool>("language.remove", remove_language)
         .guard(Guard::Node(LANGUAGE_DELETE_CAPABILITY.clone()));

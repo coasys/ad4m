@@ -35,8 +35,8 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 
 A guard (next section) checks the capability and the access, so the handler does neither: a
 perspective handler only fetches the perspective (`guarded_perspective`). **Every new method
-registers a guard**, or, until its module moves to guards, checks a capability itself (or is
-registered with an explicit comment saying why not), and takes `AgentContext` from the session
+registers a guard** (a method open to callers without any capability registers none, with a
+comment saying why), and takes `AgentContext` from the session
 (`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
 
@@ -75,9 +75,43 @@ handler already refuses with the same code. A handler check that is not part of 
 (compute credits, param validation beyond the contract type) now runs after the access check:
 a call that fails both gets the access answer.
 
-Guarded today: `Node` on the node-wide methods of `agent`, `ai`, `hosting`, `language` and
-`runtime` that refuse user sessions; `Perspective` on every `perspective.*` method that names one
-perspective. The rest still check in their handlers until their module moves to guards.
+Guarded today: every method that checks a capability first.
+
+- `Node`: the node-wide methods that refuse user sessions (agent keys, apps, trust list and
+  entanglement writes, `agent.permitCapability`, AI models, hosting wallet, language
+  publish/remove/settings, export/import, friends and outbox, link-language template writes,
+  `runtime.addHcAgentInfos`, `runtime.setFreeHostingEnabled`, `runtime.quit`, `user.list`,
+  `user.wallet`, `user.emailTest`). `runtime.importData` keeps its handler's
+  `ctx.is_operator()` check: the guard admits apps.
+- `Anonymous`: `agent.requestCapability`, `agent.generateJwt`, `user.create`, `user.login`,
+  `user.verifyEmail`, `user.requestVerification`, `user.multiUserEnabled`.
+- `SelfAgent`: the methods any authenticated caller with the capability may call, users
+  included. Most act as the caller (profile, sign, notifications, prompts, expressions,
+  neighbourhood calls, `hosting.setHotWallet`, which also refuses a session without a user).
+  `runtime.grantNotification` keeps its handler's `ctx.is_operator()` check, so a user gets
+  the handler's message.
+  Some read node-wide data that users read today: `agent.getApps`,
+  `agent.getTrustedAgents`, `ai.models`, AI tasks, `language.*` reads, link-language templates,
+  `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Node` would refuse
+  users there, a behaviour change.
+- `Perspective`: every `perspective.*` method that names one perspective. The neighbourhood
+  calls that name one (`sendBroadcast`, `sendSignal`, `setOnlineStatus`, `hasTelepresence`,
+  `onlineAgents`, `otherAgents`) are `SelfAgent` on the neighbourhood capability: they check
+  only that the perspective exists (`otherAgents` also the owner), and a perspective guard
+  would add the owner rule.
+
+Without a guard, because every guard checks a capability first:
+
+- the methods that check no capability (`agent.isLocked`, `runtime.info`, `runtime.tlsDomain`,
+  `runtime.freeHostingEnabled`, the `runtime.unyt*` stubs, `user.credits`, `user.logout`,
+  `user.revokeAllSessions`): a guard would refuse callers that pass today;
+- the operator-only methods whose handler answers every other caller "Admin credential
+  required" (`runtime.openLink`, `restartHolochain`, `setHostRates`, `setUnytMembraneProof`,
+  `user.setMultiUserEnabled`, `user.freeAccess`): a guard would answer with the capability's
+  message, which `anonymous_access_tests` pins;
+- `perspective.all` and `perspective.create`, which name no perspective.
+
+`only_methods_a_guard_cannot_express_lack_one` lists them.
 
 `tests/method_matrix_tests.rs` walks every guarded method in `build_handler_map()` and calls
 `admit` as each kind of caller (operator, app with and without the capability, user, another
