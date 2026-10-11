@@ -46,6 +46,7 @@ use crate::agent::capabilities::{
 };
 use crate::agent::session::{AuthError, Session};
 use crate::agent::AgentContext;
+use crate::api::guards::Admission;
 use crate::api::perspectives_ws::ACCESS_DENIED;
 use crate::api::ws_handler::{shared_handler_map, WsRpcError};
 use crate::perspectives::get_perspective;
@@ -335,6 +336,24 @@ impl Ad4mMcpHandler {
     ) -> Result<Value, WsRpcError> {
         let session = self.session().await.map_err(WsRpcError::unauthorized)?;
         call_method_as(session, method, params).await
+    }
+
+    /// The steps of [`Self::call_method`] before the handler (404, 400, the guard), for a tool
+    /// that must stop a refused caller before work of its own that precedes the call.
+    pub(crate) async fn admit_method(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Result<(), WsRpcError> {
+        let session = self.session().await.map_err(WsRpcError::unauthorized)?;
+        match shared_handler_map()
+            .admit(method, params, &request_context(session))
+            .await?
+        {
+            Admission::Granted => Ok(()),
+            // A method that hides existence answers `null`: as missing to a tool.
+            Admission::Hidden => Err(WsRpcError::not_found(format!("{method}: not found"))),
+        }
     }
 
     /// Build the tool router manually, registering all tools from domain modules.
@@ -873,6 +892,33 @@ pub(crate) mod test_support {
             .await
             .expect("a test perspective");
         uuid
+    }
+
+    /// Starts the runtime service on an empty bootstrap seed, which the link language template
+    /// reads need, and stops it when dropped. Without it they panic holding its lock.
+    pub(crate) struct RuntimeService;
+
+    impl RuntimeService {
+        pub(crate) fn start() -> Self {
+            use crate::runtime_service::RuntimeService as Service;
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let seed = dir.path().join("seed.json");
+            let empty = json!({
+                "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+                "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+                "languageLanguageBundle": "",
+            });
+            std::fs::write(&seed, empty.to_string()).expect("a seed file");
+            Service::init_global_instance(seed.to_string_lossy().into_owned());
+            RuntimeService
+        }
+    }
+
+    impl Drop for RuntimeService {
+        fn drop(&mut self) {
+            let instance = crate::runtime_service::RuntimeService::global_instance();
+            *instance.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
     }
 
     /// The `status` of a tool's answer to a refused or failed RPC method ([`method_error`]),
