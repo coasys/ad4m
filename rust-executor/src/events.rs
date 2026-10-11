@@ -5,8 +5,9 @@
 //! `Session::may_receive` (who) and `event_interest::wants` (what the socket asked for)
 //! both hold. The payload is serialized once, here, not once per socket.
 
+use crate::agent::{did_for_context, AgentContext, AgentService};
 use crate::api::events_ws::events as names;
-use crate::types::{Agent, AgentStatus, ExceptionInfo, ExceptionType};
+use crate::types::{Agent, AgentStatus, ExceptionInfo, ExceptionType, HostingUserInfo};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -200,6 +201,21 @@ impl Event {
     pub fn agent_updated(agent: &Agent) -> Event {
         let audience = Audience::agent(Some(&agent.did));
         Event::new(Topic::AgentUpdated, audience, agent)
+    }
+
+    /// `hosting-user-info-changed` for `info`: to the user it is about, and to the operator
+    /// and apps (they act as the main agent). `matches_hosting_user` let every session
+    /// without a user email through, and a user's session only for its own email.
+    pub fn hosting_user_info(info: &HostingUserInfo) -> Event {
+        let user = AgentService::get_user_did_by_email(&info.email);
+        if let Err(e) = &user {
+            log::warn!(
+                "hosting-user-info-changed: no DID for the user, so no user session gets it: {e}"
+            );
+        }
+        let main = did_for_context(&AgentContext::main_agent()).ok();
+        let dids = user.ok().into_iter().chain(main).collect();
+        Event::new(Topic::HostingUserInfoChanged, Audience::Dids(dids), info)
     }
 
     /// `exception-occurred` for `exception`, to the audience of its type.

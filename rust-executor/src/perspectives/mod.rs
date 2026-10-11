@@ -47,7 +47,7 @@ use std::sync::RwLock;
 
 use crate::db::Ad4mDb;
 use crate::events::{Audience, Event, Topic};
-use crate::pubsub::{get_global_pubsub, get_global_pubsub_sync, NEIGHBOURHOOD_SIGNAL_TOPIC};
+use crate::pubsub::get_global_pubsub_sync;
 use crate::types::{LinkExpression, PerspectiveDiff};
 
 lazy_static! {
@@ -570,103 +570,61 @@ pub fn handle_telepresence_signal_from_link_language(
     }
 }
 
-/// Publish a telepresence signal to PubSub for delivery to REST subscribers
-pub(crate) async fn publish_telepresence_signal(
+/// `neighbourhood-signal-received` for `signal` on `handle`, to `recipient`. A signal without
+/// a recipient goes to every session, as `matches_signal_recipient` let it through.
+pub(crate) fn signal_event(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
-    recipient_did: Option<String>,
-) {
-    if let Some(recipient) = recipient_did {
-        get_global_pubsub()
-            .await
-            .publish(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective_uuid: handle.uuid.clone(),
-                    perspective: handle,
-                    signal,
-                    recipient: Some(recipient),
-                })
-                .unwrap(),
-            )
-            .await;
-    } else if let Some(owners) = handle.owners.as_ref().filter(|o| !o.is_empty()) {
-        for owner_did in owners {
-            get_global_pubsub()
-                .await
-                .publish(
-                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                    &serde_json::to_string(&NeighbourhoodSignalFilter {
-                        perspective_uuid: handle.uuid.clone(),
-                        perspective: handle.clone(),
-                        signal: signal.clone(),
-                        recipient: Some(owner_did.clone()),
-                    })
-                    .unwrap(),
-                )
-                .await;
-        }
-    } else {
-        get_global_pubsub()
-            .await
-            .publish(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective_uuid: handle.uuid.clone(),
-                    perspective: handle,
-                    signal,
-                    recipient: None,
-                })
-                .unwrap(),
-            )
-            .await;
-    }
+    recipient: Option<String>,
+) -> Event {
+    let audience = match &recipient {
+        Some(did) => Audience::Dids(vec![did.clone()]),
+        None => Audience::Everyone,
+    };
+    let payload = NeighbourhoodSignalFilter {
+        perspective_uuid: handle.uuid.clone(),
+        perspective: handle,
+        signal,
+        recipient,
+    };
+    Event::new(Topic::NeighbourhoodSignal, audience, payload)
 }
 
-/// Synchronous version of publish_telepresence_signal for use in Deno op context
-/// where tokio::spawn tasks get delayed by Tokio scheduler contention.
-fn publish_telepresence_signal_sync(
+/// Publishes a telepresence signal from the link language: to `recipient_did`, or else
+/// once to each owner, or else (no owners) to every session.
+pub(crate) fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
     recipient_did: Option<String>,
 ) {
     let pubsub = get_global_pubsub_sync();
     if let Some(recipient) = recipient_did {
-        pubsub.publish_sync(
-            &NEIGHBOURHOOD_SIGNAL_TOPIC,
-            &serde_json::to_string(&NeighbourhoodSignalFilter {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle,
-                signal,
-                recipient: Some(recipient),
-            })
-            .unwrap(),
-        );
-    } else if let Some(owners) = &handle.owners {
+        pubsub.publish_event(signal_event(handle, signal, Some(recipient)));
+    } else if let Some(owners) = handle.owners.clone().filter(|o| !o.is_empty()) {
         for owner_did in owners {
-            pubsub.publish_sync(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective_uuid: handle.uuid.clone(),
-                    perspective: handle.clone(),
-                    signal: signal.clone(),
-                    recipient: Some(owner_did.clone()),
-                })
-                .unwrap(),
-            );
+            pubsub.publish_event(signal_event(
+                handle.clone(),
+                signal.clone(),
+                Some(owner_did),
+            ));
         }
     } else {
-        pubsub.publish_sync(
-            &NEIGHBOURHOOD_SIGNAL_TOPIC,
-            &serde_json::to_string(&NeighbourhoodSignalFilter {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle,
-                signal,
-                recipient: None,
-            })
-            .unwrap(),
-        );
+        pubsub.publish_event(signal_event(handle, signal, None));
     }
+}
+
+/// [`publish_telepresence_signal`] for the cached-handle path in the Deno op. One
+/// difference kept from before typed events: a handle with an empty owner list publishes
+/// nothing here.
+fn publish_telepresence_signal_sync(
+    handle: PerspectiveHandle,
+    signal: PerspectiveExpression,
+    recipient_did: Option<String>,
+) {
+    if recipient_did.is_none() && handle.owners.as_ref().is_some_and(|o| o.is_empty()) {
+        return;
+    }
+    publish_telepresence_signal(handle, signal, recipient_did);
 }
 
 pub async fn handle_telepresence_signal_from_link_language_impl(

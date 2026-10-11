@@ -19,7 +19,6 @@ type Message = String;
 
 pub struct PubSub {
     subscribers: Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
-    subscribers_sync: std::sync::Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
     /// Typed events, every topic on one channel: each socket decides per event.
     events: broadcast::Sender<Arc<Event>>,
 }
@@ -28,7 +27,6 @@ impl PubSub {
     pub fn new() -> Self {
         Self {
             subscribers: Mutex::new(HashMap::new()),
-            subscribers_sync: std::sync::Mutex::new(HashMap::new()),
             events: broadcast::channel(10000).0,
         }
     }
@@ -46,14 +44,9 @@ impl PubSub {
 
     pub async fn subscribe(&self, topic: &Topic) -> broadcast::Receiver<Message> {
         let mut subscribers = self.subscribers.lock().await;
-        let mut subscribers_sync = self.subscribers_sync.lock().unwrap();
         let sender = subscribers
             .entry(topic.to_owned())
             .or_insert_with(|| broadcast::channel(10000).0);
-        // Keep sync map in sync
-        subscribers_sync
-            .entry(topic.to_owned())
-            .or_insert_with(|| sender.clone());
         sender.subscribe()
     }
 
@@ -61,15 +54,6 @@ impl PubSub {
         let subscribers = self.subscribers.lock().await;
         if let Some(sender) = subscribers.get(topic) {
             let _ = sender.send(message.clone()); // Ignore if no receivers
-        }
-    }
-
-    /// Synchronous publish that doesn't require tokio runtime.
-    /// Uses a separate std::sync::Mutex to avoid blocking the async runtime.
-    pub fn publish_sync(&self, topic: &Topic, message: &Message) {
-        let subscribers = self.subscribers_sync.lock().unwrap();
-        if let Some(sender) = subscribers.get(topic) {
-            let _ = sender.send(message.clone());
         }
     }
 }
@@ -131,13 +115,9 @@ pub(crate) async fn subscribe_and_process<
 lazy_static::lazy_static! {
     static ref GLOBAL_PUB_SUB: Arc<PubSub> = Arc::new(PubSub::new());
 
-    pub static ref NEIGHBOURHOOD_SIGNAL_TOPIC: String = "neighbourhood-signal-received-topic".to_owned();
-    pub static ref RUNTIME_MESSAGED_RECEIVED_TOPIC: String = "runtime-messaged-received-topic".to_owned();
-    pub static ref RUNTIME_NOTIFICATION_TRIGGERED_TOPIC: String = "runtime-notification-triggered-topic".to_owned();
     pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
     pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
-    pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
     pub static ref AUTO_PROCESSOR_EVENT_TOPIC: String = "auto-processor-event-topic".to_owned();
     /// Neighbourhood observation of an auto-processor pass: fires when THIS
     /// executor claims, finishes, or abandons a batch. Payload is a

@@ -57,7 +57,12 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   `events_ws::wire_message` — the same message the string topic sends. The stream builder takes
   the socket's interest, so callers pass it (`Connection::interest()` on the RPC socket).
   `audience_matrix_tests` in `events_ws.rs` pins who receives each audience; add a case per moved
-  topic. Moved so far: the agent, app and exception topics, and the perspective and link topics.
+  topic. Moved so far: the agent, app, exception and runtime topics, and the perspective and
+  link topics. `notification-triggered` goes to the notification's `ownerDid`, never to
+  co-owners. `signal` goes to its `recipient` (`perspectives::signal_event`), or to every
+  session when it names none. `hosting-user-info-changed` goes to the user's DID (looked up by
+  email at publish) and the main agent's (the operator and apps see every user's).
+  `message-received` has no publisher; a new one uses `Audience::Authenticated`.
   `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` and the approval exceptions (`CapabilityRequested`,

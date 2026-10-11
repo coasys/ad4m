@@ -18,14 +18,11 @@ use crate::prolog_service::{
     engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
 };
 use crate::prolog_service::{PrologMode, PROLOG_MODE};
-use crate::pubsub::{
-    get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-    RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-};
+use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
-    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
-    OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
+    DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, OnlineAgent,
+    PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
     PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
     PerspectiveStateFilter,
 };
@@ -1677,7 +1674,7 @@ impl PerspectiveInstance {
         log::debug!("telepresence_signal_from_link_language: perspective={}, recipient_did={:?}, signal_author={}",
             handle.uuid, recipient_did, signal.author);
 
-        super::publish_telepresence_signal(handle, signal, recipient_did).await;
+        super::publish_telepresence_signal(handle, signal, recipient_did);
     }
 
     pub async fn add_link(
@@ -4318,7 +4315,7 @@ impl PerspectiveInstance {
             .collect()
     }
 
-    async fn publish_notification_matches(
+    pub(crate) async fn publish_notification_matches(
         uuid: String,
         match_map: BTreeMap<Notification, Vec<serde_json::Value>>,
     ) {
@@ -4339,10 +4336,14 @@ impl PerspectiveInstance {
 
                 let message = serde_json::to_string(&payload).unwrap();
 
-                get_global_pubsub()
-                    .await
-                    .publish(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC, &message)
-                    .await;
+                // The trigger matches and the webhook secret are the owner's: only the
+                // notification owner's sessions receive it, not the perspective's co-owners.
+                let owner = Audience::Dids(vec![notification.owner_did.clone()]);
+                get_global_pubsub().await.publish_event(Event::new(
+                    Topic::RuntimeNotificationTriggered,
+                    owner,
+                    &payload,
+                ));
 
                 if url::Url::parse(&notification.webhook_url).is_ok() {
                     log::info!(
@@ -4562,19 +4563,11 @@ impl PerspectiveInstance {
                                  mut signal: PerspectiveExpression,
                                  recipient: String| async move {
                 signal.verify_signatures();
-                get_global_pubsub()
-                    .await
-                    .publish(
-                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                        &serde_json::to_string(&NeighbourhoodSignalFilter {
-                            perspective_uuid: handle.uuid.clone(),
-                            perspective: handle,
-                            signal,
-                            recipient: Some(recipient),
-                        })
-                        .unwrap(),
-                    )
-                    .await;
+                get_global_pubsub().await.publish_event(super::signal_event(
+                    handle,
+                    signal,
+                    Some(recipient),
+                ));
             };
 
             // Check if any managed email user is the recipient
@@ -4667,19 +4660,11 @@ impl PerspectiveInstance {
                                 let mut signal = payload.clone();
                                 signal.verify_signatures();
 
-                                get_global_pubsub()
-                                    .await
-                                    .publish(
-                                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                                        &serde_json::to_string(&NeighbourhoodSignalFilter {
-                                            perspective_uuid: handle.uuid.clone(),
-                                            perspective: handle,
-                                            signal,
-                                            recipient: Some(user_did),
-                                        })
-                                        .unwrap(),
-                                    )
-                                    .await;
+                                get_global_pubsub().await.publish_event(super::signal_event(
+                                    handle,
+                                    signal,
+                                    Some(user_did),
+                                ));
                             }
                         }
                     }
@@ -4707,19 +4692,11 @@ impl PerspectiveInstance {
                         current_perspective_handle.shared_url
                     );
 
-                    get_global_pubsub()
-                        .await
-                        .publish(
-                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                            &serde_json::to_string(&NeighbourhoodSignalFilter {
-                                perspective_uuid: handle.uuid.clone(),
-                                perspective: handle,
-                                signal,
-                                recipient: Some(main_agent_did),
-                            })
-                            .unwrap(),
-                        )
-                        .await;
+                    get_global_pubsub().await.publish_event(super::signal_event(
+                        handle,
+                        signal,
+                        Some(main_agent_did),
+                    ));
                 }
             }
         }

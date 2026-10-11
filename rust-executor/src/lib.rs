@@ -664,9 +664,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
         use crate::db::Ad4mDb;
-        use crate::pubsub::{
-            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
-        };
+        use crate::events::Event;
+        use crate::pubsub::{get_global_pubsub, DIRTY_CREDIT_USERS};
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -741,11 +740,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     free_access,
                 };
 
-                if let Ok(json) = serde_json::to_string(&info) {
-                    pubsub
-                        .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
-                        .await;
-                }
+                pubsub.publish_event(Event::hosting_user_info(&info));
             }
         }
     });

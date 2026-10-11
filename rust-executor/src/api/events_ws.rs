@@ -20,7 +20,7 @@
 //! | `agent-status-changed`        | `agent`       | typed: the agent's DID | Agent status changed                 |
 //! | `agent-updated`               | `agent`       | typed: the agent's DID | Agent profile updated                |
 //! | `apps-changed`                | (inline)      | typed: approvers       | Installed apps changed (no token)    |
-//! | `hosting-user-info-changed`   | (inline)      | email                  | Hosting user info changed            |
+//! | `hosting-user-info-changed`   | (inline)      | typed: the user + main agent | Hosting user info changed      |
 //! | `perspective-added`           | (inline)      | typed: `owner` only    | New perspective created              |
 //! | `perspective-removed`         | (inline)      | typed: `owner` only    | Perspective deleted                  |
 //! | `perspective-updated`         | (inline)      | typed: `owner` only    | Perspective metadata updated         |
@@ -28,9 +28,9 @@
 //! | `link-added`                  | (inline)      | typed: `owner` only    | Link added to perspective            |
 //! | `link-removed`                | (inline)      | typed: `owner` only    | Link removed from perspective        |
 //! | `link-updated`                | (inline)      | typed: `owner` only    | Link updated in perspective          |
-//! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
-//! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification` + `perspectiveUuid` | notification owner DID | Notification triggered |
+//! | `signal`                      | (inline)      | typed: `recipient`, else everyone | Neighbourhood signal received |
+//! | `message-received`            | `message`     | typed: authenticated (no publisher yet) | Runtime message received |
+//! | `notification-triggered`      | `notification` + `perspectiveUuid` | typed: notification owner DID | Notification triggered |
 //! | `exception-occurred`          | `exception`   | typed: per type, see `Audience::for_exception` | Exception occurred |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
@@ -106,9 +106,7 @@ impl LazyDid {
 use crate::pubsub::{
     get_global_pubsub, AI_MODEL_LOADING_STATUS, AI_TRANSCRIPTION_TEXT_TOPIC,
     AUTO_PROCESSOR_EVENT_TOPIC, AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC,
-    HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, RUNTIME_MESSAGED_RECEIVED_TOPIC,
-    RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
 };
 
 use super::auth::{AppState, AuthContext};
@@ -329,11 +327,10 @@ pub(crate) async fn build_event_stream_for(
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
-    // #881: "Resolve the DID after it becomes available"). The auto-processor
-    // and notification streams share one lazy cell.
+    // #881: "Resolve the DID after it becomes available"). The two auto-processor
+    // streams share one lazy cell.
     let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
-    let d_notif = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -387,89 +384,6 @@ pub(crate) async fn build_event_stream_for(
                 })
         };
     }
-
-    macro_rules! broadcast_stream_nested {
-        ($rx:expr, $ty:expr, $key:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| async move {
-                    match result {
-                        Ok(msg) => Some(wrap_event_nested($ty, $key, &msg)),
-                        _ => None,
-                    }
-                })
-        };
-    }
-
-    let s_hosting = {
-        let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
-        BroadcastStream::new(hosting_rx)
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| {
-                let email = user_email.clone();
-                async move {
-                    match result {
-                        Ok(ref msg) if matches_hosting_user(msg, email.as_deref()) => {
-                            Some(wrap_event(events::HOSTING_USER_INFO_CHANGED, msg))
-                        }
-                        _ => None,
-                    }
-                }
-            })
-    };
-
-    // ── Neighbourhood signals ──
-    // Lazy DID resolution: the WebSocket may connect before agent.generate()
-    // completes, leaving resolved_did as None. The shared lazy cell resolves
-    // again until a DID exists, so by the time signals flow, it is available.
-    let s_signal = {
-        let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
-        let d_signal = d_auto_processor.clone();
-        BroadcastStream::new(rx)
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| {
-                let d_signal = d_signal.clone();
-                async move {
-                    match result {
-                        Ok(ref msg) => {
-                            let did = d_signal.get();
-                            if matches_signal_recipient(msg, did.as_deref()) {
-                                Some(wrap_event(events::SIGNAL, msg))
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                }
-            })
-    };
-
-    // ── Runtime events ──
-    let s_msg = broadcast_stream_nested!(
-        pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await,
-        events::MESSAGE_RECEIVED,
-        "message"
-    );
-    // Inlined (not `did_stream!`) so the filter reads the shared `LazyDid`.
-    let s_notif = {
-        let rx = pubsub
-            .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-            .await;
-        BroadcastStream::new(rx)
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| {
-                let did = d_notif.clone();
-                async move {
-                    match result {
-                        Ok(ref msg) if matches_notification_owner(msg, did.get().as_deref()) => {
-                            Some(wrap_event(events::NOTIFICATION_TRIGGERED, msg))
-                        }
-                        _ => None,
-                    }
-                }
-            })
-    };
 
     // ── AI events ──
     let s_trans = did_stream!(
@@ -558,8 +472,7 @@ pub(crate) async fn build_event_stream_for(
     };
 
     // ── Merge all streams ──
-    let runtime = stream::select(s_msg, s_notif);
-    let ai = stream::select(
+    let top = stream::select(
         s_trans,
         stream::select(
             s_loading,
@@ -568,11 +481,6 @@ pub(crate) async fn build_event_stream_for(
                 stream::select(s_auto_processor, s_auto_processor_state),
             ),
         ),
-    );
-
-    let top = stream::select(
-        s_hosting,
-        stream::select(s_signal, stream::select(runtime, ai)),
     );
 
     // ── Typed events: the session decides who ──
@@ -781,34 +689,6 @@ pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &
     )
 }
 
-pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
-    match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(serde_json::Value::Object(map)) => match map.get("recipient") {
-            Some(serde_json::Value::String(recipient)) => {
-                current_did.is_some_and(|did| did == recipient)
-            }
-            Some(serde_json::Value::Null) | None => true,
-            _ => false,
-        },
-        Err(_) => true,
-        _ => false,
-    }
-}
-
-pub(crate) fn matches_hosting_user(msg: &str, user_email: Option<&str>) -> bool {
-    match user_email {
-        None => true,
-        Some(email) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(msg_email)) = map.get("email") {
-                    return msg_email == email;
-                }
-            }
-            true
-        }
-    }
-}
-
 pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
     match current_did {
         None => true,
@@ -821,17 +701,6 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
             true
         }
     }
-}
-
-/// A triggered notification carries its owner's trigger matches and webhook
-/// secret, so only sessions whose DID equals `notification.notification.ownerDid`
-/// receive it. The perspective's other owners do not. A session without a DID,
-/// or a malformed event, matches nothing.
-pub(crate) fn matches_notification_owner(msg: &str, session_did: Option<&str>) -> bool {
-    session_did.is_some_and(|did| {
-        serde_json::from_str::<NotificationTriggeredEvent>(msg)
-            .is_ok_and(|event| event.notification.notification.owner_did == did)
-    })
 }
 
 /// Multi-user: only events about a perspective the session owns. An event
@@ -1370,69 +1239,6 @@ mod lazy_did_tests {
 }
 
 #[cfg(test)]
-mod notification_owner_filter_tests {
-    //! A triggered notification carries the owner's trigger matches and
-    //! webhook secret, so only the owner's sessions may receive it.
-    use super::matches_notification_owner;
-    use crate::types::{Notification, NotificationTriggeredEvent, TriggeredNotification};
-
-    fn event(owner: &str) -> String {
-        serde_json::to_string(&NotificationTriggeredEvent {
-            perspective_uuid: "perspective".to_string(),
-            notification: TriggeredNotification {
-                notification: Notification {
-                    id: "notification".to_string(),
-                    granted: true,
-                    description: String::new(),
-                    app_name: String::new(),
-                    app_url: String::new(),
-                    app_icon_path: String::new(),
-                    trigger: String::new(),
-                    perspective_ids: vec!["perspective".to_string()],
-                    webhook_url: String::new(),
-                    webhook_auth: "secret".to_string(),
-                    owner_did: owner.to_string(),
-                },
-                perspective_id: "perspective".to_string(),
-                trigger_match: "[]".to_string(),
-            },
-        })
-        .unwrap()
-    }
-
-    #[test]
-    fn triggered_notification_reaches_only_its_owners_sessions() {
-        let main_agents = event("did:key:main");
-        assert!(matches_notification_owner(
-            &main_agents,
-            Some("did:key:main")
-        ));
-        assert!(!matches_notification_owner(
-            &main_agents,
-            Some("did:key:alice")
-        ));
-
-        let alices = event("did:key:alice");
-        assert!(matches_notification_owner(&alices, Some("did:key:alice")));
-        assert!(!matches_notification_owner(&alices, Some("did:key:bob")));
-        assert!(!matches_notification_owner(&alices, Some("did:key:main")));
-        assert!(!matches_notification_owner(&alices, None));
-    }
-
-    #[test]
-    fn malformed_event_reaches_nobody() {
-        assert!(!matches_notification_owner(
-            "not json",
-            Some("did:key:main")
-        ));
-        assert!(!matches_notification_owner(
-            r#"{"perspectiveUuid":"p","notification":{}}"#,
-            Some("did:key:main")
-        ));
-    }
-}
-
-#[cfg(test)]
 mod events_socket_message_tests {
     use crate::api::event_interest::SharedInterest;
     use serde_json::json;
@@ -1859,6 +1665,31 @@ mod audience_matrix_tests {
                 cases.push((format!("{topic}-{name}"), topic, Audience::agent(did), to));
             }
         }
+        // A triggered notification goes to its owner (`matches_notification_owner` before),
+        // never to the perspective's co-owners.
+        for (name, owner, to) in [
+            ("a", A, vec!["user A"]),
+            ("main", &main, main_agent.to_vec()),
+        ] {
+            let audience = Audience::Dids(vec![owner.to_string()]);
+            let topic = Topic::RuntimeNotificationTriggered;
+            cases.push((format!("notification-of-{name}"), topic, audience, to));
+        }
+        // A signal goes to its recipient, or to every session without one
+        // (`matches_signal_recipient` before).
+        for (name, recipient, to) in [
+            ("to-a", Some(A.to_string()), vec!["user A"]),
+            ("to-main", Some(main.clone()), main_agent.to_vec()),
+            ("to-nobody-named", None, all.to_vec()),
+        ] {
+            let signal = crate::perspectives::signal_event(
+                Default::default(),
+                Default::default(),
+                recipient,
+            );
+            let topic = Topic::NeighbourhoodSignal;
+            cases.push((format!("signal-{name}"), topic, signal.audience, to));
+        }
         // Exceptions go per type (`exception_visible` before): approval requests to the
         // sessions that may approve apps, the others to every session.
         {
@@ -2169,6 +2000,118 @@ mod audience_matrix_tests {
                 _ => vec![],
             };
             assert_eq!(got, expected, "{name}");
+        }
+    }
+
+    // The link language's signal publisher: a signal without a recipient goes once to each
+    // owner, each copy naming that owner as `recipient`; on a perspective without owners it
+    // goes to every session (the rule of `matches_signal_recipient`, which let a signal
+    // without a recipient through to every socket).
+    #[tokio::test]
+    async fn telepresence_signals_reach_their_recipients() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let sessions = sessions();
+        let mut streams = Vec::new();
+        for (name, session) in &sessions {
+            streams.push((*name, open(session.clone()).await));
+        }
+
+        let run = uuid::Uuid::new_v4().to_string();
+        let handle = |name: &str, owners: Option<Vec<String>>| crate::types::PerspectiveHandle {
+            uuid: format!("{run}-{name}"),
+            owners,
+            ..Default::default()
+        };
+        let shared = handle("owned-by-a-b", Some(vec![A.into(), B.into()]));
+        let unowned = handle("unowned", None);
+        let publish = crate::perspectives::publish_telepresence_signal;
+        publish(shared.clone(), Default::default(), None);
+        publish(shared.clone(), Default::default(), Some(B.into()));
+        publish(unowned.clone(), Default::default(), None);
+        let fence = format!("{run}-fence");
+        get_global_pubsub().await.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            serde_json::json!({ "perspectiveUuid": fence }),
+        ));
+
+        // `(type, perspectiveUuid, recipient)` triples.
+        let signal = |p: &crate::types::PerspectiveHandle, to: &str| {
+            (events::SIGNAL.to_string(), p.uuid.clone(), to.to_string())
+        };
+        for (name, stream) in &mut streams {
+            let mut got = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let msg = stream.next().await.expect("the stream stays open");
+                    let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+                    let Some(uuid) = v["perspectiveUuid"]
+                        .as_str()
+                        .filter(|u| u.starts_with(&run))
+                    else {
+                        continue;
+                    };
+                    if uuid == fence {
+                        return;
+                    }
+                    let to = v["recipient"].as_str().unwrap_or_default().to_string();
+                    got.push((
+                        v["type"].as_str().unwrap().to_string(),
+                        uuid.to_string(),
+                        to,
+                    ));
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the fence never arrived; got {got:?}"));
+            got.sort();
+            let mut expected = vec![signal(&unowned, "")];
+            match *name {
+                "user A" => expected.push(signal(&shared, A)),
+                "user B" => expected.extend([signal(&shared, B), signal(&shared, B)]),
+                _ => {}
+            }
+            expected.sort();
+            assert_eq!(got, expected, "{name}");
+        }
+    }
+
+    // A user's hosting info goes to that user and to the sessions that act as the main agent:
+    // `matches_hosting_user` let every session without a user email through, and a user's
+    // session only for its own email. Other users get nothing.
+    #[tokio::test]
+    async fn hosting_user_info_reaches_the_user_and_the_main_agent() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        database();
+        let email = format!("hosting-{}@example.org", uuid::Uuid::new_v4());
+        crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
+        let did = crate::agent::AgentService::get_user_did_by_email(&email).unwrap();
+        let hosted = Principal::User {
+            token_id: TokenId("matrix-hosted".into()),
+            email: email.clone(),
+            did,
+            caps: vec![],
+        };
+        let mut sessions = sessions();
+        sessions.push((
+            "hosted user",
+            Arc::new(Session::for_test(hosted, ListenerReach::Network)),
+        ));
+
+        let info = crate::types::HostingUserInfo {
+            email: email.clone(),
+            remaining_credits: "7".into(),
+            hot_wallet_address: None,
+            free_access: false,
+        };
+        let event = Event::hosting_user_info(&info);
+        assert_eq!(event.topic, Topic::HostingUserInfoChanged);
+        assert_eq!(event.payload, serde_json::to_value(&info).unwrap());
+        for (name, session) in &sessions {
+            let expected = matches!(*name, "hosted user" | "operator" | "app" | "permit app");
+            assert_eq!(session.may_receive(&event), expected, "{name}");
         }
     }
 
