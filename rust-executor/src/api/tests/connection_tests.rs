@@ -33,11 +33,13 @@ impl Socket {
     async fn open_as(did: &str) -> Self {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
+        // `admin_ctx()` holds every capability, so this socket can approve apps.
         let events = build_event_stream_for(
             crate::agent::capabilities::TokenCheck::new("", false),
             Some(did.into()),
             None,
             false,
+            true,
         )
         .await;
         let conn = Connection::new(
