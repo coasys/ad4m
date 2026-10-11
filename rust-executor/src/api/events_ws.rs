@@ -7,6 +7,12 @@
 //! Events are filtered per-user in multi-user mode, then to what the socket
 //! asked for with `events.watch` (nothing until it does).
 //!
+//! Two paths deliver events while topics move to typed events (Plan 20, PR 3):
+//! string topics through the per-topic filters below, and typed
+//! [`Event`](crate::events::Event)s from `PubSub::publish_event`, which reach a
+//! socket when `Session::may_receive` and `event_interest::wants` hold. Both
+//! send the same wire message ([`wire_message`]).
+//!
 //! ## Event types
 //!
 //! | Type                          | Payload key   | Filtering              | Description                          |
@@ -52,10 +58,12 @@ use futures::stream::StreamExt;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use super::event_interest::{self, SharedInterest};
 use crate::agent::capabilities::*;
 use crate::agent::session::Session;
 use crate::agent::session_registry::SessionRegistry;
 use crate::agent::{did_for_context, AgentContext};
+use crate::events::{Event, Topic};
 
 /// Cached DID for a single WebSocket subscription, with lazy re-resolution.
 ///
@@ -289,9 +297,11 @@ pub async fn events_ws(
 /// Build the merged event stream for a given user.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user. The stream ends at the first event after `session.check()` fails.
+/// per-user and to `interest` (what the socket asked for with `events.watch`).
+/// The stream ends at the first event after `session.check()` fails.
 pub(crate) async fn build_event_stream(
     session: Arc<Session>,
+    interest: SharedInterest,
     user_email: Option<String>,
     is_admin: bool,
     can_approve_apps: bool,
@@ -304,6 +314,7 @@ pub(crate) async fn build_event_stream(
     let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
     build_event_stream_for(
         session,
+        interest,
         resolved_did,
         user_email,
         is_admin,
@@ -316,6 +327,7 @@ pub(crate) async fn build_event_stream(
 /// inject one directly).
 pub(crate) async fn build_event_stream_for(
     session: Arc<Session>,
+    interest: SharedInterest,
     resolved_did: Option<String>,
     user_email: Option<String>,
     is_admin: bool,
@@ -720,8 +732,84 @@ pub(crate) async fn build_event_stream_for(
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
+    // ── Typed events: the session decides who ──
+    let typed = {
+        let session = session.clone();
+        BroadcastStream::new(pubsub.subscribe_events())
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                futures::future::ready(match result {
+                    Ok(event) if session.may_receive(&event) => Some(Outgoing::Typed(event)),
+                    _ => None,
+                })
+            })
+    };
+
     // Events end with the token: expiry and revokeToken() stop them as they stop requests.
-    Box::pin(top.take_while(move |_| futures::future::ready(session.check().is_ok())))
+    // Then the socket's interest decides what it gets.
+    Box::pin(
+        stream::select(top.map(Outgoing::Wire), typed)
+            .take_while(move |_| futures::future::ready(session.check().is_ok()))
+            .filter_map(move |out| {
+                futures::future::ready(match out {
+                    Outgoing::Wire(msg) => {
+                        event_interest::wants_json(&interest, &msg).then_some(msg)
+                    }
+                    Outgoing::Typed(event) => {
+                        event_interest::wants(&interest, &event).then(|| wire_message(&event))
+                    }
+                })
+            }),
+    )
+}
+
+/// An event a session may receive, before the socket's interest is applied.
+enum Outgoing {
+    /// From a string topic: already the wire message.
+    Wire(String),
+    Typed(Arc<Event>),
+}
+
+/// The socket message for `event`: the same message a string topic's stream sends for
+/// that topic, built without parsing the payload again.
+pub(crate) fn wire_message(event: &Event) -> String {
+    let event_type = event.topic.as_str();
+    if let Some(key) = payload_key(event.topic) {
+        return wrap_event_nested(event_type, key, &event.payload.to_string());
+    }
+    match &event.payload {
+        serde_json::Value::Object(map) => wrap_object(event_type, map.clone())
+            .unwrap_or_else(|| wrap_data(event_type, &event.payload.to_string())),
+        other => wrap_data(event_type, &other.to_string()),
+    }
+}
+
+/// The key that holds the payload of a topic whose message nests it
+/// (`{"type":"agent-updated","agent":{…}}`). The other topics put the payload's
+/// fields beside `type`.
+fn payload_key(topic: Topic) -> Option<&'static str> {
+    match topic {
+        Topic::AgentStatusChanged | Topic::AgentUpdated => Some("agent"),
+        Topic::RuntimeMessageReceived => Some("message"),
+        Topic::ExceptionOccurred => Some("exception"),
+        // No `_` arm: a new topic does not compile until someone picks its shape.
+        Topic::AppsChanged
+        | Topic::HostingUserInfoChanged
+        | Topic::PerspectiveAdded
+        | Topic::PerspectiveRemoved
+        | Topic::PerspectiveUpdated
+        | Topic::PerspectiveSyncStateChange
+        | Topic::LinkAdded
+        | Topic::LinkRemoved
+        | Topic::LinkUpdated
+        | Topic::NeighbourhoodSignal
+        | Topic::RuntimeNotificationTriggered
+        | Topic::AiTranscriptionText
+        | Topic::AiModelLoadingStatus
+        | Topic::PerspectiveQuerySubscription
+        | Topic::AutoProcessorEvent
+        | Topic::AutoProcessorNeighbourhoodState => None,
+    }
 }
 
 async fn handle_events_ws(
@@ -737,12 +825,15 @@ async fn handle_events_ws(
     let revoked = tokio_util::sync::CancellationToken::new();
     let _registered = SessionRegistry::global().register(&session, revoked.clone());
 
-    let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream = build_event_stream(session, user_email, is_admin, can_approve_apps).await;
-    let mut event_stream = Box::pin(super::event_interest::filter_stream(
-        event_stream,
+    let interest = SharedInterest::default();
+    let mut event_stream = build_event_stream(
+        session,
         interest.clone(),
-    ));
+        user_email,
+        is_admin,
+        can_approve_apps,
+    )
+    .await;
 
     loop {
         tokio::select! {
@@ -789,16 +880,13 @@ async fn handle_events_ws(
 
 /// The reply to a client message on the events socket: `pong` for `ping`,
 /// the `events.watch` / `events.unwatch` reply, or `None` (ignored).
-fn client_message_reply(
-    text: &str,
-    interest: &super::event_interest::SharedInterest,
-) -> Option<String> {
+fn client_message_reply(text: &str, interest: &SharedInterest) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
     let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if msg_type == "ping" {
         return Some(r#"{"type":"pong"}"#.to_string());
     }
-    super::event_interest::handle_control(
+    event_interest::handle_control(
         msg_type,
         parsed.get("id").unwrap_or(&serde_json::Value::Null),
         parsed.get("params").unwrap_or(&serde_json::json!({})),
@@ -810,9 +898,9 @@ fn client_message_reply(
 
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-pub(crate) fn handle_broadcast_result(
-    r: Result<String, BroadcastStreamRecvError>,
-) -> Option<Result<String, u64>> {
+pub(crate) fn handle_broadcast_result<T>(
+    r: Result<T, BroadcastStreamRecvError>,
+) -> Option<Result<T, u64>> {
     match r {
         Ok(msg) => Some(Ok(msg)),
         Err(BroadcastStreamRecvError::Lagged(n)) => {
@@ -826,16 +914,28 @@ pub(crate) fn handle_broadcast_result(
 }
 
 pub(crate) fn wrap_event(event_type: &str, raw_json: &str) -> String {
-    if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(raw_json) {
-        map.insert(
-            "type".to_string(),
-            serde_json::Value::String(event_type.to_string()),
-        );
-        serde_json::to_string(&map)
-            .unwrap_or_else(|_| format!(r#"{{"type":"{}","data":{}}}"#, event_type, raw_json))
-    } else {
-        format!(r#"{{"type":"{}","data":{}}}"#, event_type, raw_json)
+    match serde_json::from_str(raw_json) {
+        Ok(serde_json::Value::Object(map)) => wrap_object(event_type, map),
+        _ => None,
     }
+    .unwrap_or_else(|| wrap_data(event_type, raw_json))
+}
+
+/// An object payload's fields with `type` beside them.
+fn wrap_object(
+    event_type: &str,
+    mut map: serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    map.insert(
+        "type".to_string(),
+        serde_json::Value::String(event_type.to_string()),
+    );
+    serde_json::to_string(&map).ok()
+}
+
+/// A payload that is not an object, under `data`.
+fn wrap_data(event_type: &str, raw_json: &str) -> String {
+    format!(r#"{{"type":"{}","data":{}}}"#, event_type, raw_json)
 }
 
 pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> String {
@@ -1678,8 +1778,9 @@ mod app_approval_event_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let pubsub = get_global_pubsub().await;
-        let mut other = build_event_stream(unending(), None, false, false).await;
-        let mut approver = build_event_stream(unending(), None, false, true).await;
+        let all = event_interest::watching_all;
+        let mut other = build_event_stream(unending(), all(), None, false, false).await;
+        let mut approver = build_event_stream(unending(), all(), None, false, true).await;
 
         pubsub
             .publish(&APPS_CHANGED, &"{\"requestId\":\"request-1\"}".to_string())
@@ -1736,7 +1837,8 @@ mod app_approval_event_tests {
         let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
             .expect("the test agent has a DID");
         crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
-        let mut stream = build_event_stream(unending(), None, false, false).await;
+        let all = event_interest::watching_all();
+        let mut stream = build_event_stream(unending(), all, None, false, false).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -1777,6 +1879,309 @@ mod app_approval_event_tests {
 }
 
 #[cfg(test)]
+mod typed_wire_tests {
+    use super::*;
+    use crate::events::Audience;
+    use serde_json::{json, Value};
+
+    /// The message today's string stream sends for `topic`, built by its macro's helper.
+    fn string_path(topic: Topic, raw_json: &str) -> String {
+        let nested = [
+            (events::AGENT_STATUS_CHANGED, "agent"),
+            (events::AGENT_UPDATED, "agent"),
+            (events::MESSAGE_RECEIVED, "message"),
+            (events::EXCEPTION_OCCURRED, "exception"),
+        ];
+        match nested.iter().find(|(name, _)| *name == topic.as_str()) {
+            Some((name, key)) => wrap_event_nested(name, key, raw_json),
+            None => wrap_event(topic.as_str(), raw_json),
+        }
+    }
+
+    // A typed event goes out as the message its string topic sends: the same JSON for every
+    // topic, and the same bytes where the payload's fields sit beside `type`.
+    #[test]
+    fn a_typed_event_sends_the_message_of_its_string_topic() {
+        let payloads = [
+            json!({ "perspectiveUuid": "p", "owner": "did:x", "link": { "data": { "source": "s" } } }),
+            json!({ "did": "did:x", "perspective": null }),
+            json!("a string"),
+            json!([1, 2]),
+        ];
+        for topic in Topic::ALL {
+            for payload in &payloads {
+                let raw = serde_json::to_string(payload).unwrap();
+                let typed = wire_message(&Event::new(topic, Audience::Everyone, payload));
+                let string = string_path(topic, &raw);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&typed).unwrap(),
+                    serde_json::from_str::<Value>(&string).unwrap(),
+                    "{topic}: {raw}"
+                );
+                if payload_key(topic).is_none() {
+                    assert_eq!(typed, string, "{topic}: {raw}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod audience_matrix_tests {
+    //! Plan 20 §8.2: for each (topic, audience) case, which sessions' event streams deliver
+    //! the event. Each case goes through `Session::may_receive` and through a real stream
+    //! from `build_event_stream_for`. Later commits add a case per topic they move.
+    use super::*;
+    use crate::agent::session::{Principal, TokenId};
+    use crate::events::Audience;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    const A: &str = "did:key:matrix-user-a";
+    const B: &str = "did:key:matrix-user-b";
+
+    fn user(name: &str, did: &str) -> Principal {
+        Principal::User {
+            token_id: TokenId(format!("matrix-{name}")),
+            email: format!("matrix.{name}@example.org"),
+            did: did.to_string(),
+            caps: vec![],
+        }
+    }
+
+    /// The sessions of the matrix, by name.
+    fn sessions() -> Vec<(&'static str, Arc<Session>)> {
+        let app = Principal::App {
+            token_id: TokenId("matrix-app".into()),
+            caps: vec![],
+        };
+        [
+            ("operator", Principal::Operator, ListenerReach::Loopback),
+            ("app", app, ListenerReach::Network),
+            ("user A", user("a", A), ListenerReach::Network),
+            ("user B", user("b", B), ListenerReach::Network),
+            (
+                "anonymous",
+                Principal::Anonymous { caps: vec![] },
+                ListenerReach::Network,
+            ),
+        ]
+        .into_iter()
+        .map(|(name, principal, reach)| (name, Arc::new(Session::for_test(principal, reach))))
+        .collect()
+    }
+
+    type Stream = Pin<Box<dyn futures::stream::Stream<Item = String> + Send>>;
+
+    /// A stream that watches every event, as a socket that asked for all of them.
+    async fn open(session: Arc<Session>) -> Stream {
+        build_event_stream_for(
+            session,
+            event_interest::watching_all(),
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+    }
+
+    /// The tags of this run's events that `stream` delivers before `fence`. Events reach a
+    /// stream in publish order, so everything published before the fence has arrived.
+    async fn delivered(stream: &mut Stream, run: &str, fence: &str) -> BTreeSet<String> {
+        let mut tags = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = stream.next().await.expect("the stream stays open");
+                let Some(at) = msg.find(&format!("\"{run}:")) else {
+                    continue; // another test's event
+                };
+                let tag = msg[at + 1..].split('"').next().unwrap().to_string();
+                if tag == fence {
+                    return;
+                }
+                tags.insert(tag);
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the fence never arrived; got {tags:?}"));
+        tags
+    }
+
+    #[tokio::test]
+    async fn each_audience_reaches_exactly_its_sessions() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let sessions = sessions();
+        let main = sessions[0]
+            .1
+            .acts_as_did()
+            .expect("the main agent has a DID");
+        let main = main.to_string();
+        assert_eq!(sessions[1].1.acts_as_did(), Some(main.as_str()), "app");
+
+        let all = ["operator", "app", "user A", "user B", "anonymous"];
+        let cases: Vec<(&str, Topic, Audience, Vec<&str>)> = vec![
+            (
+                "everyone",
+                Topic::AiModelLoadingStatus,
+                Audience::Everyone,
+                all.to_vec(),
+            ),
+            (
+                "authenticated",
+                Topic::RuntimeMessageReceived,
+                Audience::Authenticated,
+                vec!["operator", "app", "user A", "user B"],
+            ),
+            (
+                "operator",
+                Topic::AppsChanged,
+                Audience::Operator,
+                vec!["operator"],
+            ),
+            (
+                "user-a",
+                Topic::LinkAdded,
+                Audience::Dids(vec![A.into()]),
+                vec!["user A"],
+            ),
+            (
+                "users-a-b",
+                Topic::NeighbourhoodSignal,
+                Audience::Dids(vec![A.into(), B.into()]),
+                vec!["user A", "user B"],
+            ),
+            (
+                "main-agent",
+                Topic::PerspectiveUpdated,
+                Audience::Dids(vec![main.clone()]),
+                vec!["operator", "app"],
+            ),
+            (
+                "no-did",
+                Topic::AgentUpdated,
+                Audience::Dids(vec![]),
+                vec![],
+            ),
+        ];
+
+        let mut streams = Vec::new();
+        for (name, session) in &sessions {
+            streams.push((*name, open(session.clone()).await));
+        }
+
+        let run = uuid::Uuid::new_v4().to_string();
+        let tag = |case: &str| format!("{run}:{case}");
+        let pubsub = get_global_pubsub().await;
+        for (case, topic, audience, _) in &cases {
+            let event = Event::new(*topic, audience.clone(), json_case(&tag(case)));
+            for (name, session) in &sessions {
+                let expected = cases_reaching(&cases, case).contains(name);
+                assert_eq!(session.may_receive(&event), expected, "{case} → {name}");
+            }
+            pubsub.publish_event(event);
+        }
+        let fence = tag("fence");
+        let fence_event = Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            json_case(&fence),
+        );
+        pubsub.publish_event(fence_event);
+
+        for (name, stream) in &mut streams {
+            let got = delivered(stream, &run, &fence).await;
+            let expected: BTreeSet<String> = cases
+                .iter()
+                .filter(|(_, _, _, to)| to.contains(name))
+                .map(|(case, ..)| tag(case))
+                .collect();
+            assert_eq!(got, expected, "{name}");
+        }
+    }
+
+    fn json_case(tag: &str) -> serde_json::Value {
+        serde_json::json!({ "case": tag })
+    }
+
+    fn cases_reaching<'a>(
+        cases: &'a [(&str, Topic, Audience, Vec<&'a str>)],
+        case: &str,
+    ) -> &'a [&'a str] {
+        &cases.iter().find(|(c, ..)| *c == case).unwrap().3
+    }
+
+    // The socket's `events.watch` narrows typed events as it narrows string ones.
+    #[tokio::test]
+    async fn a_socket_gets_only_the_typed_events_it_watches() {
+        let session = Arc::new(Session::for_test(
+            Principal::Operator,
+            ListenerReach::Loopback,
+        ));
+        let interest = SharedInterest::default();
+        event_interest::handle_control(
+            event_interest::WATCH,
+            &serde_json::Value::Null,
+            &serde_json::json!({ "link-added": ["wanted"] }),
+            &interest,
+        );
+        let mut stream: Stream =
+            build_event_stream_for(session, interest, None, None, true, true).await;
+
+        let run = uuid::Uuid::new_v4().to_string();
+        let tag = |case: &str| format!("{run}:{case}");
+        let pubsub = get_global_pubsub().await;
+        let link = |case: &str, perspective: &str| {
+            Event::new(Topic::LinkAdded, Audience::Everyone, json_case(&tag(case)))
+                .for_perspective(perspective)
+        };
+        pubsub.publish_event(link("wanted", "wanted"));
+        pubsub.publish_event(link("other-perspective", "other"));
+        pubsub.publish_event(Event::new(
+            Topic::AgentUpdated,
+            Audience::Everyone,
+            json_case(&tag("unwatched")),
+        ));
+        // Live query updates pass without a watch, so they fence this stream.
+        let fence = tag("fence");
+        pubsub.publish_event(Event::new(
+            Topic::PerspectiveQuerySubscription,
+            Audience::Everyone,
+            json_case(&fence),
+        ));
+
+        let got = delivered(&mut stream, &run, &fence).await;
+        assert_eq!(got, BTreeSet::from([tag("wanted")]));
+    }
+
+    // The stream ends at the first event after the token stopped working, typed ones too.
+    #[tokio::test]
+    async fn a_typed_event_after_the_token_expired_ends_the_stream() {
+        let an_hour_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        let app = Principal::App {
+            token_id: TokenId("matrix-expired".into()),
+            caps: vec![],
+        };
+        let expired = Arc::new(Session::for_test_expiring(app, an_hour_ago));
+        let mut stream = open(expired).await;
+        get_global_pubsub().await.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            json_case("expired"),
+        ));
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream must answer, not hang");
+        assert!(next.is_none(), "an expired session got {next:?}");
+    }
+}
+
+#[cfg(test)]
 mod token_expiry_tests {
     use super::*;
     use crate::agent::session::{Principal, TokenId};
@@ -1787,8 +2192,14 @@ mod token_expiry_tests {
 
     /// Builds a user's event stream, publishes one event and returns what the stream yields.
     async fn next_event(session: Session) -> Option<String> {
-        let mut stream =
-            build_event_stream(Arc::new(session), Some(USER.to_string()), false, false).await;
+        let mut stream = build_event_stream(
+            Arc::new(session),
+            event_interest::watching_all(),
+            Some(USER.to_string()),
+            false,
+            false,
+        )
+        .await;
         get_global_pubsub()
             .await
             .publish(

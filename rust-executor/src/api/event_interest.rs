@@ -13,12 +13,12 @@
 //!   socket keeps getting the updates of its owner's live queries without a
 //!   watch.
 
-use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use super::ws_handler::ParamExt;
+use crate::events::{Event, Topic};
 
 pub const WATCH: &str = "events.watch";
 pub const UNWATCH: &str = "events.unwatch";
@@ -72,8 +72,31 @@ fn parse(params: &Value) -> Result<EventInterest, String> {
         .collect()
 }
 
-/// Should this socket forward `event_json`?
-pub fn wants(interest: &SharedInterest, event_json: &str) -> bool {
+/// Should this socket forward `event`? Reads its topic and perspective; parses nothing.
+pub(crate) fn wants(interest: &SharedInterest, event: &Event) -> bool {
+    if event.topic == Topic::PerspectiveQuerySubscription {
+        return true;
+    }
+    let event_type = event.topic.as_str();
+    match interest
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(event_type)
+    {
+        None => false,
+        Some(None) => true,
+        Some(Some(wanted)) => {
+            SCOPED.contains(event_type)
+                && event
+                    .perspective
+                    .as_deref()
+                    .is_some_and(|p| wanted.contains(p))
+        }
+    }
+}
+
+/// Should this socket forward `event_json`, a message from a string topic?
+pub fn wants_json(interest: &SharedInterest, event_json: &str) -> bool {
     let Ok(event) = serde_json::from_str::<Value>(event_json) else {
         return false;
     };
@@ -94,12 +117,11 @@ pub fn wants(interest: &SharedInterest, event_json: &str) -> bool {
     }
 }
 
-/// `stream` minus the events this socket did not ask for.
-pub fn filter_stream<S>(stream: S, interest: SharedInterest) -> impl Stream<Item = String>
-where
-    S: Stream<Item = String>,
-{
-    stream.filter(move |event| futures::future::ready(wants(&interest, event)))
+/// An interest in every event, every perspective.
+#[cfg(test)]
+pub fn watching_all() -> SharedInterest {
+    let all = super::events_ws::events::ALL.map(|t| (t.to_string(), None));
+    Arc::new(RwLock::new(all.into_iter().collect()))
 }
 
 /// Handle `events.watch` / `events.unwatch`. Returns `None` for any other
@@ -146,9 +168,9 @@ mod tests {
     fn without_watch_no_event_passes_but_query_updates_do() {
         let i = SharedInterest::default();
         for e in [LINK_A, LINK_B, UPDATED_B, AGENT] {
-            assert!(!wants(&i, e), "{e}");
+            assert!(!wants_json(&i, e), "{e}");
         }
-        assert!(wants(&i, QUERY_A));
+        assert!(wants_json(&i, QUERY_A));
     }
 
     #[test]
@@ -159,11 +181,11 @@ mod tests {
             json!({ "link-added": ["A"], "perspective-updated": null, "agent-updated": ["A"] }),
         );
         assert_eq!(reply, json!({ "id": "1", "result": true }));
-        assert!(wants(&i, LINK_A));
-        assert!(!wants(&i, LINK_B), "other perspective");
-        assert!(wants(&i, UPDATED_B), "null: every perspective");
+        assert!(wants_json(&i, LINK_A));
+        assert!(!wants_json(&i, LINK_B), "other perspective");
+        assert!(wants_json(&i, UPDATED_B), "null: every perspective");
         assert!(
-            !wants(&i, AGENT),
+            !wants_json(&i, AGENT),
             "a list excludes events without a perspective"
         );
     }
@@ -173,14 +195,14 @@ mod tests {
         let i = SharedInterest::default();
         watch(&i, json!({ "agent-updated": null }));
         watch(&i, json!({ "link-added": null }));
-        assert!(!wants(&i, AGENT));
-        assert!(wants(&i, LINK_B));
+        assert!(!wants_json(&i, AGENT));
+        assert!(wants_json(&i, LINK_B));
         let reply = handle_control(UNWATCH, &json!("2"), &json!({}), &i).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&reply).unwrap(),
             json!({ "id": "2", "result": true })
         );
-        assert!(!wants(&i, LINK_B));
+        assert!(!wants_json(&i, LINK_B));
     }
 
     #[test]
@@ -194,7 +216,45 @@ mod tests {
         ] {
             assert_eq!(watch(&i, bad)["error"]["code"], 400);
         }
-        assert!(wants(&i, AGENT));
+        assert!(wants_json(&i, AGENT));
+    }
+
+    /// A typed event passes exactly when its wire message would: every topic, with and
+    /// without a perspective, under every kind of watch.
+    #[test]
+    fn a_typed_event_is_narrowed_as_its_wire_message_is() {
+        use crate::events::Audience;
+        for topic in Topic::ALL {
+            let t = topic.as_str();
+            let watches = [
+                json!({}),
+                json!({ t: null }),
+                json!({ t: ["A"] }),
+                json!({ t: ["B", "A"] }),
+                json!({ "link-added": ["A"], "agent-updated": null }),
+            ];
+            for payload in [json!({ "perspectiveUuid": "A" }), json!({ "x": 1 })] {
+                let event = Event::new(topic, Audience::Everyone, &payload);
+                let wire = super::super::events_ws::wire_message(&event);
+                for params in &watches {
+                    let i = SharedInterest::default();
+                    watch(&i, params.clone());
+                    assert_eq!(
+                        wants(&i, &event),
+                        wants_json(&i, &wire),
+                        "{wire} under {params}"
+                    );
+                }
+            }
+        }
+        let i = SharedInterest::default();
+        watch(&i, json!({ "link-added": ["A"] }));
+        let unnamed = Event::new(Topic::LinkAdded, Audience::Everyone, json!({}));
+        assert!(
+            !wants(&i, &unnamed),
+            "a list excludes an event without a perspective"
+        );
+        assert!(wants(&i, &unnamed.for_perspective("A")));
     }
 
     #[test]
@@ -240,7 +300,7 @@ mod tests {
                 .to_string();
             let i = SharedInterest::default();
             watch(&i, json!({ t: ["P"] }));
-            assert_eq!(wants(&i, event), scoped, "{event}");
+            assert_eq!(wants_json(&i, event), scoped, "{event}");
         }
     }
 }

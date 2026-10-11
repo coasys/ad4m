@@ -1,3 +1,4 @@
+use crate::events::Event;
 use crate::types::domain::GetFilter;
 use crate::types::domain::GetValue;
 use futures::Stream;
@@ -19,6 +20,8 @@ type Message = String;
 pub struct PubSub {
     subscribers: Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
     subscribers_sync: std::sync::Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
+    /// Typed events, every topic on one channel: each socket decides per event.
+    events: broadcast::Sender<Arc<Event>>,
 }
 
 impl PubSub {
@@ -26,7 +29,20 @@ impl PubSub {
         Self {
             subscribers: Mutex::new(HashMap::new()),
             subscribers_sync: std::sync::Mutex::new(HashMap::new()),
+            events: broadcast::channel(10000).0,
         }
+    }
+
+    /// Sends `event` to every event stream. Takes no lock and needs no runtime, so sync
+    /// and async publishers call the same function.
+    #[allow(dead_code, reason = "publishers move to typed events from 20-3b")]
+    pub fn publish_event(&self, event: Event) {
+        let _ = self.events.send(Arc::new(event)); // Ignore if no receivers
+    }
+
+    /// Every typed event published from now on.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<Event>> {
+        self.events.subscribe()
     }
 
     pub async fn subscribe(&self, topic: &Topic) -> broadcast::Receiver<Message> {
@@ -166,4 +182,29 @@ pub async fn get_global_pubsub() -> Arc<PubSub> {
 
 pub fn get_global_pubsub_sync() -> Arc<PubSub> {
     GLOBAL_PUB_SUB.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{Audience, Topic};
+
+    #[test]
+    fn a_typed_event_reaches_every_subscriber_once_without_a_runtime() {
+        let pubsub = PubSub::new();
+        let mut first = pubsub.subscribe_events();
+        let mut second = pubsub.subscribe_events();
+        let payload = serde_json::json!({ "model": "m" });
+        pubsub.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            &payload,
+        ));
+        for rx in [&mut first, &mut second] {
+            let event = rx.try_recv().expect("the event arrives");
+            assert_eq!(event.topic, Topic::AiModelLoadingStatus);
+            assert_eq!(event.payload, payload);
+            assert!(rx.try_recv().is_err(), "exactly once");
+        }
+    }
 }

@@ -163,6 +163,7 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let (mut ws_sink, ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
+    let conn = Connection::new(handler_map, ctx.clone(), tx);
     // A socket without a token gets no events: a stream that never yields.
     let events: EventStream = if may_receive_events(&ctx) {
         // Capability requests, app changes and notification install requests go
@@ -171,6 +172,7 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
             check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
         super::events_ws::build_event_stream(
             ctx.session.clone(),
+            conn.interest(),
             ctx.user_email().map(str::to_string),
             ctx.is_operator(),
             can_approve_apps,
@@ -179,7 +181,6 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     } else {
         Box::pin(futures::stream::pending())
     };
-    let conn = Connection::new(handler_map, ctx, tx);
 
     // ── Writer task ─────────────────────────────────────────────────────
     let writer_session_over = conn.session_over.clone();
@@ -274,6 +275,11 @@ impl Connection {
             interest: Default::default(),
             _registered: registered,
         }
+    }
+
+    /// The events this connection asked for with `events.watch`: its event stream reads it.
+    pub(crate) fn interest(&self) -> event_interest::SharedInterest {
+        self.interest.clone()
     }
 
     /// Handle one text message from the client.
@@ -444,19 +450,17 @@ impl Connection {
 }
 
 /// Serve one connection until `incoming` ends or the token stops working:
-/// answer each client message and forward `events` that match the
-/// connection's interest. When the client is gone the event task stops;
-/// calls still in flight finish on their own and reply to `tx`.
-pub(crate) async fn serve<S>(conn: Connection, incoming: S, events: EventStream)
+/// answer each client message and forward `events`, a stream built with the
+/// connection's [`Connection::interest`]. When the client is gone the event
+/// task stops; calls still in flight finish on their own and reply to `tx`.
+pub(crate) async fn serve<S>(conn: Connection, incoming: S, mut events: EventStream)
 where
     S: futures::Stream<Item = String>,
 {
     let tx_events = conn.tx.clone();
     let event_session_over = conn.session_over.clone();
-    let event_stream = event_interest::filter_stream(events, conn.interest.clone());
     let event_task = tokio::spawn(async move {
-        tokio::pin!(event_stream);
-        while let Some(msg) = event_stream.next().await {
+        while let Some(msg) = events.next().await {
             if tx_events.send(msg).is_err() {
                 return;
             }
@@ -615,6 +619,19 @@ mod event_gate_tests {
         }
     }
 
+    /// `Audience::Authenticated` reaches exactly the sockets that get an event stream.
+    fn gets_events(ctx: &RequestContext) -> bool {
+        use crate::events::{Audience, Event, Topic};
+        let event = Event::new(
+            Topic::RuntimeMessageReceived,
+            Audience::Authenticated,
+            serde_json::json!({}),
+        );
+        let gated = may_receive_events(ctx);
+        assert_eq!(ctx.session.may_receive(&event), gated);
+        gated
+    }
+
     // On a node with an admin credential, a socket with no token gets only these
     // capabilities. It used to receive the main agent's event stream all the same.
     #[test]
@@ -625,7 +642,7 @@ mod event_gate_tests {
                 RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
             ],
         });
-        assert!(!may_receive_events(&unauthenticated));
+        assert!(!gets_events(&unauthenticated));
     }
 
     // Apps with narrow capabilities still need their query-subscription and link events.
@@ -637,13 +654,15 @@ mod event_gate_tests {
                 "some-uuid".to_string()
             ])]),
         );
-        assert!(may_receive_events(&narrow_app));
-        assert!(may_receive_events(&with_token(
+        assert!(gets_events(&narrow_app));
+        assert!(gets_events(&with_token(
             "user-jwt",
             RequestContext::app_for_test(get_user_default_capabilities())
         )));
         let admin = with_token("the-admin-credential", RequestContext::operator_for_test());
-        assert!(may_receive_events(&admin));
+        assert!(gets_events(&admin));
+        // No token on a loopback listener of a node without an admin credential (#1059).
+        assert!(gets_events(&RequestContext::operator_for_test()));
     }
 }
 

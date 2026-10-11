@@ -19,6 +19,8 @@ use super::capabilities::{
 };
 use super::revoked::{RevokedSet, SessionCutoffs};
 use super::AgentService;
+use crate::events::{Audience, Event};
+use std::sync::OnceLock;
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. Revocation by id needs no
 /// change to the token format.
@@ -105,6 +107,9 @@ pub struct Session {
     /// When the token was issued (Unix seconds): a user's session cutoff revokes the tokens
     /// issued at or before it. 0 for the operator and anonymous callers.
     issued_at: u64,
+    /// The main agent's DID, for the operator and apps. Read once it exists (a socket can
+    /// open before `agent.generate()`), then fixed for the session's lifetime.
+    main_did: OnceLock<String>,
 }
 
 impl Session {
@@ -119,6 +124,7 @@ impl Session {
             reach,
             expires_at,
             issued_at,
+            main_did: OnceLock::new(),
         };
 
         if is_admin_credential_token_on(token, admin_credential, reach) {
@@ -246,6 +252,41 @@ impl Session {
         }
     }
 
+    /// The DID of [`Session::acts_as`]: a user's own DID, the main agent's for the operator
+    /// and apps. `None` for an anonymous caller, and for the operator and apps while the
+    /// main agent has no DID yet. Reads the agent service only until the DID exists.
+    pub fn acts_as_did(&self) -> Option<&str> {
+        match &self.principal {
+            Principal::User { did, .. } => Some(did),
+            Principal::Anonymous { .. } => None,
+            Principal::Operator | Principal::App { .. } => {
+                if self.main_did.get().is_none() {
+                    let did = AgentService::global_instance()
+                        .lock()
+                        .ok()
+                        .and_then(|agent| agent.as_ref().and_then(|a| a.did.clone()));
+                    if let Some(did) = did {
+                        let _ = self.main_did.set(did);
+                    }
+                }
+                self.main_did.get().map(String::as_str)
+            }
+        }
+    }
+
+    /// Whether this session's event stream delivers `event`. Reads the audience only: the
+    /// stream itself ends once [`Session::check`] fails.
+    pub(crate) fn may_receive(&self, event: &Event) -> bool {
+        match &event.audience {
+            Audience::Everyone => true,
+            Audience::Authenticated => !matches!(self.principal, Principal::Anonymous { .. }),
+            Audience::Operator => self.is_operator(),
+            Audience::Dids(dids) => self
+                .acts_as_did()
+                .is_some_and(|did| dids.iter().any(|d| d == did)),
+        }
+    }
+
     /// A session for `principal` that never expires.
     #[cfg(test)]
     pub(crate) fn for_test(principal: Principal, reach: ListenerReach) -> Session {
@@ -254,6 +295,7 @@ impl Session {
             reach,
             expires_at: None,
             issued_at: 0,
+            main_did: OnceLock::new(),
         }
     }
 

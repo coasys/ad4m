@@ -48,9 +48,17 @@ impl Socket {
     async fn open_with(did: &str, ctx: Arc<RequestContext>) -> Self {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        // The socket holds every capability, so it can approve apps.
-        let events = build_event_stream_for(unending(), Some(did.into()), None, false, true).await;
         let conn = Connection::new(Arc::new(build_handler_map()), ctx, tx);
+        // The socket holds every capability, so it can approve apps.
+        let events = build_event_stream_for(
+            unending(),
+            conn.interest(),
+            Some(did.into()),
+            None,
+            false,
+            true,
+        )
+        .await;
         let served = tokio::spawn(serve(conn, UnboundedReceiverStream::new(incoming), events));
         Self {
             input: Some(input),

@@ -26,6 +26,7 @@ pub mod billing;
 mod dapp_server;
 pub mod db;
 pub mod db_backend;
+mod events;
 pub mod init;
 pub mod languages;
 pub mod logging;
