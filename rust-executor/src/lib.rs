@@ -549,7 +549,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             })
             .expect("App data path not set in Ad4mConfig"),
     );
-    agent::revoked::load_at_start();
+    agent::revoked::load_at_start().expect("Failed to load revoked tokens");
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).

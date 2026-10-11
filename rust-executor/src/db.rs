@@ -101,7 +101,7 @@ impl Ad4mDb {
         AD4M_DB_INSTANCE.clone()
     }
 
-    fn new(db_path: &str) -> Ad4mDbResult<Self> {
+    pub(crate) fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
 
         // Create tables if they don't exist
@@ -302,6 +302,15 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        // Revoked token ids with their tokens' expiry (Unix seconds): see agent::revoked.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS revoked_tokens (
+                token_id TEXT PRIMARY KEY,
+                expires_at INTEGER NOT NULL
              )",
             [],
         )?;
@@ -3854,6 +3863,36 @@ impl Ad4mDb {
             }
             Err(_) => Ok(false),
         }
+    }
+
+    /// Records a revoked token id. Revoking it again keeps one row.
+    pub fn add_revoked_token(&self, token_id: &str, expires_at: u64) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO revoked_tokens (token_id, expires_at) VALUES (?1, ?2)",
+            params![token_id, i64::try_from(expires_at).unwrap_or(i64::MAX)],
+        )?;
+        Ok(())
+    }
+
+    /// Every revoked token id with its token's expiry.
+    pub fn revoked_tokens(&self) -> Ad4mDbResult<Vec<(String, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT token_id, expires_at FROM revoked_tokens")?;
+        let rows = stmt.query_map([], |row| {
+            let expires_at: i64 = row.get(1)?;
+            Ok((row.get(0)?, u64::try_from(expires_at).unwrap_or(0)))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Deletes the revoked token ids whose tokens expired before `cutoff` (Unix seconds).
+    pub fn delete_revoked_tokens_expired_before(&self, cutoff: u64) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM revoked_tokens WHERE expires_at < ?1",
+            params![i64::try_from(cutoff).unwrap_or(i64::MAX)],
+        )?;
+        Ok(())
     }
 
     /// Removes all expired verification codes

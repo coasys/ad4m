@@ -116,10 +116,12 @@ pub fn revoke_app(token_or_request_id: &str) -> Result<(), RevokeError> {
         return Err(RevokeError::NotFound);
     };
     app.revoked = true;
-    if let Some((id, expires_at)) = super::token::read_stored_token_id(&app.token) {
-        crate::agent::revoked::revoke(id, expires_at);
-    }
-    persist_apps_to_file(&apps).map_err(|e| RevokeError::Store(e.to_string()))
+    let saved = match super::token::read_stored_token_id(&app.token) {
+        Some((id, expires_at)) => crate::agent::revoked::revoke(id, expires_at),
+        None => Ok(()),
+    };
+    let persisted = persist_apps_to_file(&apps).map_err(|e| e.to_string());
+    saved.and(persisted).map_err(RevokeError::Store)
 }
 
 /// The ids and expiries of the tokens of revoked apps. Apps revoked before the revoked set

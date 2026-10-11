@@ -3,9 +3,14 @@
 //! A revoked token stays revoked whatever happens to its app record afterwards: `removeApp`
 //! deletes the record, not the revocation (#396). Each id keeps its token's expiry, so
 //! [`RevokedSet::prune`] can drop an id once its token would fail the expiry check anyway.
+//!
+//! The table `revoked_tokens` keeps the set across restarts. [`revoke`] writes through to it,
+//! and [`load_at_start`] reads it back. Both drop the ids of expired tokens, in memory and in
+//! the table.
 
 use super::capabilities::TOKEN_EXPIRY_LEEWAY_SECONDS;
 use super::session::TokenId;
+use crate::db::{Ad4mDb, Ad4mDbResult};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -46,7 +51,23 @@ impl RevokedSet {
             Ok(ids) => ids,
             Err(poisoned) => poisoned.into_inner(),
         };
-        ids.retain(|_, expires_at| expires_at.saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS) >= now);
+        ids.retain(|_, expires_at| *expires_at >= prune_cutoff(now));
+    }
+
+    /// The set that `db` holds at `now`. Deletes the rows of expired tokens first.
+    pub fn load(db: &Ad4mDb, now: u64) -> Ad4mDbResult<RevokedSet> {
+        let set = RevokedSet::default();
+        set.add_from(db, now)?;
+        Ok(set)
+    }
+
+    /// Adds the ids that `db` holds at `now`, after it deletes the rows of expired tokens.
+    fn add_from(&self, db: &Ad4mDb, now: u64) -> Ad4mDbResult<()> {
+        db.delete_revoked_tokens_expired_before(prune_cutoff(now))?;
+        for (id, expires_at) in db.revoked_tokens()? {
+            self.revoke(TokenId(id), expires_at);
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -55,21 +76,39 @@ impl RevokedSet {
     }
 }
 
-/// Fills the executor's set at start-up, before the API serves: the apps the registry file
-/// marks revoked. Call it after the registry's file path is set.
-pub fn load_at_start() {
-    let set = RevokedSet::global();
-    for (id, expires_at) in super::capabilities::apps_map::revoked_token_ids() {
-        set.revoke(id, expires_at);
-    }
-    set.prune(now());
+/// An id whose token expired before this, leeway included, can go.
+fn prune_cutoff(now: u64) -> u64 {
+    now.saturating_sub(TOKEN_EXPIRY_LEEWAY_SECONDS)
 }
 
-/// Revokes a token in the executor's set, and drops the ids whose tokens have expired.
-pub fn revoke(id: TokenId, expires_at: u64) {
+/// Fills the executor's set at start-up, after the database opens and before the API serves:
+/// the table's rows, and the apps the registry file marks revoked. Apps revoked before the
+/// table existed are in the file only; this writes them to the table, so they stay revoked
+/// after `removeApp`. Call it after the registry's file path is set.
+pub fn load_at_start() -> Result<(), String> {
+    Ad4mDb::with_global_instance(|db| RevokedSet::global().add_from(db, now()))
+        .map_err(|e| e.to_string())?;
+    for (id, expires_at) in super::capabilities::apps_map::revoked_token_ids() {
+        revoke(id, expires_at)?;
+    }
+    Ok(())
+}
+
+/// Revokes a token in the executor's set and in the database, and drops the ids whose tokens
+/// have expired from both. The set takes the id even when the database write fails, so the
+/// token stays revoked until a restart.
+pub fn revoke(id: TokenId, expires_at: u64) -> Result<(), String> {
+    let now = now();
     let set = RevokedSet::global();
-    set.prune(now());
-    set.revoke(id, expires_at);
+    set.prune(now);
+    set.revoke(id.clone(), expires_at);
+
+    let db = Ad4mDb::global_instance();
+    let db = db.lock().map_err(|e| e.to_string())?;
+    let db = db.as_ref().ok_or("the database is not open")?;
+    db.delete_revoked_tokens_expired_before(prune_cutoff(now))
+        .and_then(|_| db.add_revoked_token(&id.0, expires_at))
+        .map_err(|e| e.to_string())
 }
 
 /// Seconds since the Unix epoch.
@@ -111,9 +150,67 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
-    // Apps revoked before the set existed are in the registry file only; start-up reads them.
+    // A restart builds a fresh set from the database: the revocation must be in it.
     #[test]
-    fn start_up_reads_the_revoked_apps_of_the_registry() {
+    fn a_revocation_survives_a_reload_from_the_database() {
+        crate::test_utils::use_test_apps_file();
+        let revoked = id(&uuid::Uuid::new_v4().to_string());
+        revoke(revoked.clone(), now() + 3600).unwrap();
+
+        let reloaded = Ad4mDb::with_global_instance(|db| RevokedSet::load(db, now())).unwrap();
+        assert!(reloaded.contains(&revoked));
+        assert!(!reloaded.contains(&id("never-revoked")));
+    }
+
+    #[test]
+    fn a_reopened_database_file_keeps_its_revocations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.sqlite");
+        let path = path.to_str().unwrap();
+        Ad4mDb::new(path)
+            .unwrap()
+            .add_revoked_token("kept", now() + 3600)
+            .unwrap();
+
+        let reopened = Ad4mDb::new(path).unwrap();
+        assert!(RevokedSet::load(&reopened, now())
+            .unwrap()
+            .contains(&id("kept")));
+    }
+
+    #[test]
+    fn loading_drops_the_rows_of_expired_tokens() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let now = 10_000;
+        db.add_revoked_token("expired", now - TOKEN_EXPIRY_LEEWAY_SECONDS - 1)
+            .unwrap();
+        db.add_revoked_token("inside-leeway", now - TOKEN_EXPIRY_LEEWAY_SECONDS)
+            .unwrap();
+        db.add_revoked_token("live", now + 3600).unwrap();
+
+        let set = RevokedSet::load(&db, now).unwrap();
+        assert!(!set.contains(&id("expired")));
+        assert!(set.contains(&id("inside-leeway")));
+        assert!(set.contains(&id("live")));
+
+        let mut rows: Vec<String> = db
+            .revoked_tokens()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            ["inside-leeway", "live"],
+            "the expired row is deleted"
+        );
+    }
+
+    // Apps revoked before the table existed are in the registry file only; start-up reads
+    // them and writes them to the table, so they stay revoked after `removeApp`.
+    #[test]
+    fn start_up_moves_the_revoked_apps_of_the_registry_into_the_table() {
         use crate::agent::capabilities::{
             apps_map, generate_jwt, read_stored_token_id, AuthInfo, AuthInfoExtended,
         };
@@ -141,6 +238,14 @@ mod tests {
             .collect();
         assert!(ids.contains(&revoked_id));
         assert!(!ids.contains(&live_id));
+
+        // An executor from before the table: the revocation is in the registry file only.
+        Ad4mDb::with_global_instance(|db| db.delete_revoked_tokens_expired_before(u64::MAX))
+            .unwrap();
+        load_at_start().unwrap();
+        let table = Ad4mDb::with_global_instance(|db| RevokedSet::load(db, now())).unwrap();
+        assert!(table.contains(&revoked_id));
+        assert!(!table.contains(&live_id));
         apps_map::remove_app(&revoked_app).unwrap();
         apps_map::remove_app(&live_app).unwrap();
     }

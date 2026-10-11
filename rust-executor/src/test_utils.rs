@@ -136,7 +136,16 @@ pub fn expired_user_token(email: &str) -> String {
 /// Points the app registry at one temp file for the whole test process. Tests that insert
 /// apps call this and use their own unique keys: a temp dir per test would race when tests
 /// run in parallel, because the registry's file path is global.
+/// Points the app registry at a temporary file, and opens an in-memory database for the
+/// revoked tokens when no test has opened one.
 pub fn use_test_apps_file() {
+    {
+        let db = crate::db::Ad4mDb::global_instance();
+        let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if db.is_none() {
+            *db = Some(crate::db::Ad4mDb::new(":memory:").expect("an in-memory database"));
+        }
+    }
     static APPS_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     let dir =
         APPS_DIR.get_or_init(|| tempfile::tempdir().expect("a temp dir for the app registry"));
