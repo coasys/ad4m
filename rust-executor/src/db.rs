@@ -24,6 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
+mod session_cutoffs;
+
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
     perspective: String,
@@ -397,6 +399,9 @@ impl Ad4mDb {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hot_wallet_address ON users(hot_wallet_address) WHERE hot_wallet_address IS NOT NULL",
         )?;
         alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
+        // A user's tokens issued at or before this time (Unix seconds) are revoked:
+        // `user.revokeAllSessions`, see agent::revoked. NULL: none are.
+        alter_add_column("ALTER TABLE users ADD COLUMN sessions_valid_after INTEGER")?;
 
         // Optional per-model context-window ceiling for API models (see
         // ModelApi::max_num_ctx). Appended last so its SELECT * position is

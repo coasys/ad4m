@@ -130,11 +130,14 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
     })
 }
 
-/// Refuses a decoded token whose id the operator revoked. For MCP, which resolves its tokens
-/// without a `Session`; `Session` reads the same set.
+/// Refuses a decoded token that is revoked: by its id, or for a user token by the user's
+/// session cutoff. For MCP, which resolves its tokens without a `Session`; `Session` reads
+/// the same state.
 pub fn check_not_revoked(claims: &Claims) -> Result<(), String> {
+    use crate::agent::revoked::{RevokedSet, SessionCutoffs};
     let id = crate::agent::session::TokenId(claims.nonce().to_string());
-    if crate::agent::revoked::RevokedSet::global().contains(&id) {
+    let cut_off = |email: &str| SessionCutoffs::global().refuses(email, claims.issued_at());
+    if RevokedSet::global().contains(&id) || claims.sub.as_deref().is_some_and(cut_off) {
         return Err("Unauthorized access".to_string());
     }
     Ok(())

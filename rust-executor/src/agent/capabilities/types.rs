@@ -120,4 +120,19 @@ impl Claims {
     pub fn expires_at(&self) -> u64 {
         self.exp
     }
+
+    /// Unix time (seconds) at which the token was issued.
+    pub fn issued_at(&self) -> u64 {
+        self.iat
+    }
+
+    /// Moves the issue time to `earliest` when it is earlier, and the expiry with it, so the
+    /// token keeps its validity period.
+    pub(crate) fn issued_no_earlier_than(mut self, earliest: u64) -> Self {
+        if self.iat < earliest {
+            self.exp += earliest - self.iat;
+            self.iat = earliest;
+        }
+        self
+    }
 }

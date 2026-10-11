@@ -222,6 +222,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'user.create': { success: true, did: 'did:test:new-user' },
     'user.login': 'login-jwt-token',
     'user.verifyEmail': 'verified-token',
+    'user.logout': true,
+    'user.revokeAllSessions': true,
     'user.requestVerification': { success: true, message: 'Verification email sent', requiresPassword: false, isExistingUser: true },
     'user.list': [{ email: 'user@test.com', credits: 100, freeAccess: false }],
     'user.multiUserEnabled': false,
@@ -1213,6 +1215,21 @@ describe('User and Auth', () => {
     test('verifyEmailCode() returns token', async () => {
         const token = await ad4m.agent.verifyEmailCode('test@test.com', '123456', 'login');
         expect(token).toBe('verified-token');
+    });
+
+    test('logout() revokes the session token', async () => {
+        expect(await ad4m.agent.logout()).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.logout', params: {} });
+    });
+
+    test('revokeAllSessions() revokes the caller\'s sessions when no email is given', async () => {
+        expect(await ad4m.agent.revokeAllSessions()).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.revokeAllSessions', params: {} });
+    });
+
+    test('revokeAllSessions(email) names the user', async () => {
+        expect(await ad4m.agent.revokeAllSessions('test@test.com')).toBe(true);
+        expect(lastRpcCall).toEqual({ type: 'user.revokeAllSessions', params: { email: 'test@test.com' } });
     });
 
     test('hostingUserInfo() returns user info', async () => {

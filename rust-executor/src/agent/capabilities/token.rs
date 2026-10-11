@@ -14,6 +14,18 @@ pub fn generate_jwt(
     expiration_time: u64,
     capabilities: AuthInfo,
 ) -> Result<String, AnyError> {
+    generate_jwt_issued_from(audience, expiration_time, capabilities, 0)
+}
+
+/// [`generate_jwt`] with an issue time (`iat`) of `earliest` at the soonest (Unix seconds).
+/// A user's tokens are issued after the user's session cutoff this way, even within the
+/// second of a `user.revokeAllSessions`.
+pub fn generate_jwt_issued_from(
+    audience: String,
+    expiration_time: u64,
+    capabilities: AuthInfo,
+    earliest: u64,
+) -> Result<String, AnyError> {
     let backend = wallet_backend();
     let name = signing_key_name();
 
@@ -34,7 +46,8 @@ pub fn generate_jwt(
         name
     ))?;
 
-    let payload = Claims::new(did_document.id, audience, expiration_time, capabilities);
+    let payload = Claims::new(did_document.id, audience, expiration_time, capabilities)
+        .issued_no_earlier_than(earliest);
 
     let token = encode(
         &Header::default(),

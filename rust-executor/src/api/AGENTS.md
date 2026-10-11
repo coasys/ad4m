@@ -53,6 +53,14 @@ re-derive it from the token: a token that stops decoding must not turn into the 
 - Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
   an open connection. Tests build sessions with `Session::for_test` / `for_test_expiring`.
+- App and user sockets also register in `agent::session_registry` while open (an RAII guard).
+  `revoked::revoke` and `revoked::revoke_all_sessions` cancel their token, and the socket closes
+  at once with `ws_rpc::token_ended_frame()` (1008), the same frame a failed check sends. Only
+  the socket's own task writes the close frame. The RPC socket first delivers in-flight replies
+  for up to `REPLY_GRACE`, so `user.logout` gets its answer. A new socket type must register too.
+- User revocation: `user.logout` revokes the caller's token id; `user.revokeAllSessions` sets a
+  per-user cutoff (`users.sessions_valid_after`, cached in `revoked::SessionCutoffs`) that refuses
+  every token with `iat` at or before it. `generate_user_jwt` issues later tokens after the cutoff.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

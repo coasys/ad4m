@@ -659,13 +659,28 @@ async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     refuse_app_management_by_users(&ctx)?;
 
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
-    // and a value that names no app answers 404 instead of a silent success (#1060).
+    // and so does a user's JWT. A value that names no app and is no user token answers 404
+    // instead of a silent success (#1060).
     let token = params.require_str("token")?;
-    apps_map::revoke_app(&token).map_err(|e| match e {
-        apps_map::RevokeError::NotFound => WsRpcError::not_found(e.to_string()),
-        apps_map::RevokeError::Store(_) => WsRpcError::internal(e.to_string()),
-    })?;
+    match apps_map::revoke_app(&token) {
+        Ok(()) => {}
+        Err(apps_map::RevokeError::NotFound) => revoke_user_token(&token)?,
+        Err(e @ apps_map::RevokeError::Store(_)) => {
+            return Err(WsRpcError::internal(e.to_string()))
+        }
+    }
     Ok(serde_json::to_value(apps_map::client_view())?)
+}
+
+/// Revokes `token` by its id when it is a valid user token this node issued.
+fn revoke_user_token(token: &str) -> Result<(), WsRpcError> {
+    let not_found = || WsRpcError::not_found(apps_map::RevokeError::NotFound.to_string());
+    let claims = decode_jwt(token.to_string()).map_err(|_| not_found())?;
+    if claims.sub.is_none() {
+        return Err(not_found());
+    }
+    let id = crate::agent::session::TokenId(claims.nonce().to_string());
+    crate::agent::revoked::revoke(id, claims.expires_at()).map_err(WsRpcError::internal)
 }
 
 // ── Status ──

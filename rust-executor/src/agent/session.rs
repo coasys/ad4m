@@ -17,7 +17,7 @@ use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
     Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
-use super::revoked::RevokedSet;
+use super::revoked::{RevokedSet, SessionCutoffs};
 use super::AgentService;
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. Revocation by id needs no
@@ -83,6 +83,9 @@ pub struct Session {
     pub reach: ListenerReach,
     /// `None` for the operator and anonymous callers: they have no token that expires.
     expires_at: Option<u64>,
+    /// When the token was issued (Unix seconds): a user's session cutoff revokes the tokens
+    /// issued at or before it. 0 for the operator and anonymous callers.
+    issued_at: u64,
 }
 
 impl Session {
@@ -92,18 +95,19 @@ impl Session {
         admin_credential: &Option<String>,
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
-        let session = |principal, expires_at| Session {
+        let session = |principal, expires_at, issued_at| Session {
             principal,
             reach,
             expires_at,
+            issued_at,
         };
 
         if is_admin_credential_token_on(token, admin_credential, reach) {
-            return Ok(session(Principal::Operator, None));
+            return Ok(session(Principal::Operator, None, 0));
         }
         if token.is_empty() {
             let caps = anonymous_capabilities();
-            return Ok(session(Principal::Anonymous { caps }, None));
+            return Ok(session(Principal::Anonymous { caps }, None, 0));
         }
 
         let claims = decode_jwt(token.to_string()).map_err(|e| {
@@ -117,7 +121,9 @@ impl Session {
         })?;
 
         let token_id = TokenId(claims.nonce().to_string());
-        if RevokedSet::global().contains(&token_id) {
+        let issued_at = claims.issued_at();
+        let cut_off = |email: &str| SessionCutoffs::global().refuses(email, issued_at);
+        if RevokedSet::global().contains(&token_id) || claims.sub.as_deref().is_some_and(cut_off) {
             return Err(AuthError::Revoked);
         }
         let expires_at = Some(claims.expires_at());
@@ -138,17 +144,22 @@ impl Session {
             }
             None => Principal::App { token_id, caps },
         };
-        Ok(session(principal, expires_at))
+        Ok(session(principal, expires_at, issued_at))
     }
 
-    /// Fails once the token is revoked or past its expiry. Needs no wallet: the signature was
-    /// checked in [`Session::open`].
+    /// Fails once the token is revoked (by id, or for a user by the user's session cutoff)
+    /// or past its expiry. Needs no wallet: the signature was checked in [`Session::open`].
     pub fn check(&self) -> Result<(), AuthError> {
-        let token_id = match &self.principal {
+        let (token_id, user) = match &self.principal {
             Principal::Operator | Principal::Anonymous { .. } => return Ok(()),
-            Principal::App { token_id, .. } | Principal::User { token_id, .. } => token_id,
+            Principal::App { token_id, .. } => (token_id, None),
+            Principal::User {
+                token_id, email, ..
+            } => (token_id, Some(email)),
         };
-        if RevokedSet::global().contains(token_id) {
+        if RevokedSet::global().contains(token_id)
+            || user.is_some_and(|email| SessionCutoffs::global().refuses(email, self.issued_at))
+        {
             return Err(AuthError::Revoked);
         }
         let now = super::revoked::now();
@@ -185,6 +196,15 @@ impl Session {
         }
     }
 
+    /// A user session's token id and the token's expiry (Unix seconds): what `user.logout`
+    /// revokes.
+    pub fn user_token(&self) -> Option<(&TokenId, u64)> {
+        match (&self.principal, self.expires_at) {
+            (Principal::User { token_id, .. }, Some(expires_at)) => Some((token_id, expires_at)),
+            _ => None,
+        }
+    }
+
     /// A user session's email and DID.
     pub fn user(&self) -> Option<(&str, &str)> {
         match &self.principal {
@@ -209,6 +229,7 @@ impl Session {
             principal,
             reach,
             expires_at: None,
+            issued_at: 0,
         }
     }
 

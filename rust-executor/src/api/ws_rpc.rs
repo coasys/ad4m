@@ -98,8 +98,9 @@ pub(crate) fn may_receive_events(ctx: &RequestContext) -> bool {
 /// "policy violation"). Clients read it as "log in again".
 pub(crate) const CLOSE_TOKEN_ENDED: u16 = 1008;
 
-/// The close frame of a session whose token stopped working: expired, or revoked. Every
-/// socket sends the same frame, so clients handle each case alike.
+/// The close frame of a session whose token stopped working: expired, or revoked by id,
+/// by `user.logout` or by `user.revokeAllSessions`. Every socket sends the same frame,
+/// so clients handle each case alike.
 pub(crate) fn token_ended_frame() -> CloseFrame {
     CloseFrame {
         code: CLOSE_TOKEN_ENDED,
@@ -108,7 +109,8 @@ pub(crate) fn token_ended_frame() -> CloseFrame {
 }
 
 /// How long a connection whose token stopped working still waits for the replies of calls
-/// in flight before it closes. A call that ends its own session gets its reply this way.
+/// in flight before it closes. The call that ended the session (`user.logout`) gets its
+/// reply this way.
 const REPLY_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Closes a socket whose token opened no session, before anything else runs on it.
@@ -811,6 +813,92 @@ mod socket_tests {
             "closed sockets leave the registry"
         );
         apps_map::remove_app(&request_key).unwrap();
+    }
+
+    /// Waits until `count` connections of `token`'s id are registered.
+    async fn registered(token: &str, count: usize) {
+        use crate::agent::session_registry::SessionRegistry;
+        let (token_id, _) = read_stored_token_id(token).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while SessionRegistry::global().connections_of(&token_id) < count {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the sockets register");
+    }
+
+    async fn events_socket(addr: std::net::SocketAddr, token: &str) -> Client {
+        let url = format!("ws://{addr}/api/v1/ws/events?token={token}");
+        tokio_tungstenite::connect_async(url).await.unwrap().0
+    }
+
+    // #1370: a user could not end their own session.
+    #[tokio::test]
+    async fn logout_answers_then_closes_that_tokens_sockets_only() {
+        let addr = start_server().await;
+        let email = crate::test_utils::managed_user("socket-logout");
+        let token = crate::user_management::generate_user_jwt(&email, "test").unwrap();
+        let other = crate::user_management::generate_user_jwt(&email, "test").unwrap();
+
+        let mut ws = connect(addr, &token).await;
+        let mut events = events_socket(addr, &token).await;
+        let mut other_ws = connect(addr, &other).await;
+        registered(&token, 2).await;
+        registered(&other, 1).await;
+
+        let reply = call(&mut ws, "1", "user.logout").await;
+        assert_eq!(reply["result"], true, "the caller gets the reply: {reply}");
+        for (name, socket) in [("rpc", &mut ws), ("events", &mut events)] {
+            let close = close_within(socket, Duration::from_secs(3)).await;
+            assert_eq!(close.map(|c| c.0), Some(CLOSE_TOKEN_ENDED), "{name}");
+        }
+        assert_eq!(
+            close_within(&mut other_ws, Duration::from_millis(500)).await,
+            None,
+            "the user's other token keeps its socket"
+        );
+        let after = call(&mut other_ws, "2", "agent.status").await;
+        assert_ne!(after["error"]["code"], 401, "{after}");
+    }
+
+    #[tokio::test]
+    async fn revoking_all_sessions_closes_every_socket_of_the_user() {
+        let addr = start_server().await;
+        let email = crate::test_utils::managed_user("socket-revoke-all");
+        let bystander = crate::test_utils::managed_user("socket-bystander");
+        let laptop = crate::user_management::generate_user_jwt(&email, "test").unwrap();
+        let phone = crate::user_management::generate_user_jwt(&email, "test").unwrap();
+        let theirs = crate::user_management::generate_user_jwt(&bystander, "test").unwrap();
+
+        let mut sockets = vec![
+            ("laptop rpc", connect(addr, &laptop).await),
+            ("laptop events", events_socket(addr, &laptop).await),
+            ("phone rpc", connect(addr, &phone).await),
+        ];
+        let mut bystander_ws = connect(addr, &theirs).await;
+        registered(&laptop, 2).await;
+        registered(&phone, 1).await;
+        registered(&theirs, 1).await;
+
+        let mut operator = connect(addr, ADMIN).await;
+        let reply = call_with(
+            &mut operator,
+            "revoke-all",
+            "user.revokeAllSessions",
+            json!({ "email": email }),
+        )
+        .await;
+        assert_eq!(reply["result"], true, "{reply}");
+        for (name, socket) in &mut sockets {
+            let close = close_within(socket, Duration::from_secs(3)).await;
+            assert_eq!(close.map(|c| c.0), Some(CLOSE_TOKEN_ENDED), "{name}");
+        }
+        assert_eq!(
+            close_within(&mut bystander_ws, Duration::from_millis(500)).await,
+            None,
+            "another user's socket stays open"
+        );
     }
 
     // Revoking one app leaves another app's socket open.

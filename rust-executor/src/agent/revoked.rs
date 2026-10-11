@@ -1,4 +1,4 @@
-//! Revoked tokens, by token id.
+//! Revoked tokens, by token id, and per user by issue time ([`SessionCutoffs`]).
 //!
 //! A revoked token stays revoked whatever happens to its app record afterwards: `removeApp`
 //! deletes the record, not the revocation (#396). Each id keeps its token's expiry, so
@@ -17,6 +17,105 @@ use std::sync::RwLock;
 
 lazy_static! {
     static ref REVOKED: RevokedSet = RevokedSet::default();
+    static ref CUTOFFS: SessionCutoffs = SessionCutoffs::default();
+}
+
+/// Per user, the time (Unix seconds) at or before which the user's tokens are revoked:
+/// `user.revokeAllSessions`. The `users` table keeps it across restarts.
+#[derive(Default)]
+pub struct SessionCutoffs(RwLock<HashMap<String, u64>>);
+
+impl SessionCutoffs {
+    /// The executor's cutoffs: every user session check reads them.
+    pub fn global() -> &'static SessionCutoffs {
+        &CUTOFFS
+    }
+
+    /// The user's cutoff, if the user revoked their sessions.
+    pub fn get(&self, email: &str) -> Option<u64> {
+        match self.0.read() {
+            Ok(cutoffs) => cutoffs.get(email).copied(),
+            Err(poisoned) => poisoned.into_inner().get(email).copied(),
+        }
+    }
+
+    /// Whether a token of `email` issued at `issued_at` is revoked. A poisoned lock reads as
+    /// revoked: fail closed.
+    pub fn refuses(&self, email: &str, issued_at: u64) -> bool {
+        self.0
+            .read()
+            .map(|cutoffs| {
+                cutoffs
+                    .get(email)
+                    .is_some_and(|cutoff| issued_at <= *cutoff)
+            })
+            .unwrap_or(true)
+    }
+
+    /// Sets the user's cutoff. A cutoff never moves back: tokens it revoked stay revoked.
+    pub fn set(&self, email: &str, cutoff: u64) {
+        let mut cutoffs = match self.0.write() {
+            Ok(cutoffs) => cutoffs,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let entry = cutoffs.entry(email.to_string()).or_insert(cutoff);
+        *entry = (*entry).max(cutoff);
+    }
+
+    /// The cutoffs that `db` holds.
+    pub fn load(db: &Ad4mDb) -> Ad4mDbResult<SessionCutoffs> {
+        let cutoffs = SessionCutoffs::default();
+        cutoffs.add_from(db)?;
+        Ok(cutoffs)
+    }
+
+    fn add_from(&self, db: &Ad4mDb) -> Ad4mDbResult<()> {
+        for (email, cutoff) in db.user_session_cutoffs()? {
+            self.set(&email, cutoff);
+        }
+        Ok(())
+    }
+}
+
+/// Why `revoke_all_sessions` failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RevokeAllError {
+    /// No user has this email.
+    NoSuchUser,
+    /// The cutoff holds in memory, but the database did not take it, so a restart would
+    /// drop it.
+    Store(String),
+}
+
+impl std::fmt::Display for RevokeAllError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RevokeAllError::NoSuchUser => write!(f, "No user has this email"),
+            RevokeAllError::Store(e) => write!(f, "Revoked until restart, but not saved: {e}"),
+        }
+    }
+}
+
+/// Revokes every token of the user `email` issued up to now, and closes their open
+/// connections. Tokens issued later work: `generate_user_jwt` issues them after the cutoff.
+pub fn revoke_all_sessions(email: &str) -> Result<(), RevokeAllError> {
+    let cutoff = now();
+    let saved = Ad4mDb::global_instance()
+        .lock()
+        .map_err(|e| e.to_string())
+        .and_then(|db| {
+            let db = db.as_ref().ok_or("the database is not open")?;
+            db.set_user_sessions_valid_after(email, cutoff)
+                .map_err(|e| e.to_string())
+        });
+    if saved == Ok(false) {
+        return Err(RevokeAllError::NoSuchUser);
+    }
+    // The cutoff holds in memory even when the database write failed: fail closed.
+    SessionCutoffs::global().set(email, cutoff);
+    // After the cutoff is set: a connection that registers later fails its own check.
+    SessionRegistry::global().end_user(email);
+    saved.map(|_| ()).map_err(RevokeAllError::Store)
 }
 
 /// Token ids the operator revoked, each with its token's expiry (Unix seconds).
@@ -83,12 +182,16 @@ fn prune_cutoff(now: u64) -> u64 {
 }
 
 /// Fills the executor's set at start-up, after the database opens and before the API serves:
-/// the table's rows, and the apps the registry file marks revoked. Apps revoked before the
-/// table existed are in the file only; this writes them to the table, so they stay revoked
-/// after `removeApp`. Call it after the registry's file path is set.
+/// the table's rows, the users' session cutoffs, and the apps the registry file marks
+/// revoked. Apps revoked before the table existed are in the file only; this writes them to
+/// the table, so they stay revoked after `removeApp`. Call it after the registry's file path
+/// is set.
 pub fn load_at_start() -> Result<(), String> {
-    Ad4mDb::with_global_instance(|db| RevokedSet::global().add_from(db, now()))
-        .map_err(|e| e.to_string())?;
+    Ad4mDb::with_global_instance(|db| {
+        RevokedSet::global().add_from(db, now())?;
+        SessionCutoffs::global().add_from(db)
+    })
+    .map_err(|e| e.to_string())?;
     for (id, expires_at) in super::capabilities::apps_map::revoked_token_ids() {
         revoke(id, expires_at)?;
     }

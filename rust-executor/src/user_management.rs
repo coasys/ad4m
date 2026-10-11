@@ -3,9 +3,10 @@
 //! Extracted to avoid code duplication between MCP tools and REST handlers.
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, token::generate_jwt as generate_jwt_token, AuthInfo,
+    get_user_default_capabilities, token::generate_jwt_issued_from, AuthInfo,
     DEFAULT_TOKEN_VALID_PERIOD,
 };
+use crate::agent::revoked::SessionCutoffs;
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::wallet::wallet_backend;
@@ -169,7 +170,8 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     Ok(did)
 }
 
-/// Generate a JWT token for a user with default capabilities.
+/// Generate a JWT token for a user with default capabilities. The token is issued after the
+/// user's session cutoff, so a login right after `user.revokeAllSessions` works.
 pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> {
     let auth_info = AuthInfo {
         app_name: app_name.to_string(),
@@ -181,10 +183,14 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
         user_email: Some(email.to_string()),
     };
 
-    generate_jwt_token(
+    let after_cutoff = SessionCutoffs::global()
+        .get(email)
+        .map_or(0, |cutoff| cutoff + 1);
+    generate_jwt_issued_from(
         auth_info.app_name.clone(),
         DEFAULT_TOKEN_VALID_PERIOD,
         auth_info,
+        after_cutoff,
     )
     .map_err(|e| format!("Failed to generate token: {}", e))
 }

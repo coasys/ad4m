@@ -105,6 +105,17 @@ impl Drop for MultiUserMode {
     }
 }
 
+/// A new managed user with a unique email: a wallet key and a row in the open database.
+/// Needs `setup_wallet()`, `setup_agent()` and an open database first.
+pub fn managed_user(name: &str) -> String {
+    let email = format!("{name}-{}@example.org", uuid::Uuid::new_v4().simple());
+    crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
+    let did = crate::agent::AgentService::get_user_did_by_email(&email).unwrap();
+    crate::db::Ad4mDb::with_global_instance(|db| db.add_user_prehashed(&email, &did, "unused"))
+        .unwrap();
+    email
+}
+
 /// A user token the node signed, with its expiry one hour in the past.
 /// Needs `setup_wallet()` and `setup_agent()` first.
 pub fn expired_user_token(email: &str) -> String {
