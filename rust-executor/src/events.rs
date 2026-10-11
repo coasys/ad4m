@@ -109,10 +109,6 @@ impl std::fmt::Display for Topic {
 /// When live queries belong to a connection (#1207), `Connection(id)` joins these for
 /// `perspective-query-subscription`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "publishers move to typed events from 20-3b; tests build every variant"
-)]
 pub enum Audience {
     /// Every session that has an event stream: nothing in the payload is private.
     Everyone,
@@ -170,7 +166,6 @@ pub struct Event {
     pub payload: Value,
 }
 
-#[allow(dead_code, reason = "publishers move to typed events from 20-3b")]
 impl Event {
     /// An event of `topic` for `audience`. There is no default audience.
     ///
@@ -228,6 +223,7 @@ impl Event {
     }
 
     /// The event is about perspective `uuid`, whatever the payload says.
+    #[cfg(test)]
     pub fn for_perspective(mut self, uuid: impl Into<String>) -> Event {
         self.perspective = Some(uuid.into());
         self
