@@ -131,6 +131,18 @@ pub fn get_app(request_key: &str) -> Result<Option<App>, String> {
     Ok(apps.get(request_key).cloned())
 }
 
+/// The app list as clients see it: every field but the token. A token goes only to the app
+/// that redeemed its code (`agent.generateJwt`); anyone who read it could act as that app.
+pub fn client_view() -> Vec<crate::types::Apps> {
+    get_apps()
+        .into_iter()
+        .map(|app| crate::types::Apps {
+            token: String::new(),
+            ..app
+        })
+        .collect()
+}
+
 /// Whether the operator revoked the app that holds this token. Scans in place, without
 /// copying the app list, because connections call it on every request and event.
 pub fn is_revoked(token: &str) -> bool {
@@ -142,6 +154,7 @@ pub fn is_revoked(token: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// The app list with tokens, for the executor's own revocation checks. Never send it to a client.
 pub fn get_apps() -> Vec<crate::types::Apps> {
     let apps = APPS.lock().unwrap();
     apps.iter()
