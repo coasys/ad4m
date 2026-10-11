@@ -62,20 +62,20 @@ async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
 /// filling in the form and wants the list to pick from, before there is
 /// anything to list. Answers the provider's own model ids.
 ///
-/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this node's,
+/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this executor's,
 /// but it makes an outbound request to an arbitrary URL with an
 /// arbitrary key, which is the same authority adding a model carries and more
 /// than reading the models already configured.
 ///
 /// That includes the failure body. `list_models` puts the upstream response
 /// verbatim into its error, so a caller can point `baseUrl` at a host this
-/// node can reach and read what it answers. Deliberate, on two grounds: a
+/// executor can reach and read what it answers. Deliberate, on two grounds: a
 /// holder of AI_CREATE can already name an arbitrary URL and send it
 /// credentials, so this widens reach and not authority; and the body is the
 /// reason the endpoint is worth having, because a status alone does not
 /// separate a bad key from a bad model name from a host that is not an LLM.
 /// The default user capabilities include AI_CREATE, so the guard also refuses
-/// user sessions: the node sends a request to a URL the caller chooses, a cleaner
+/// user sessions: the executor sends a request to a URL the caller chooses, a cleaner
 /// read primitive than `addModel` plus a prompt, needing no model and no completion.
 async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let base_url = params.require_str("baseUrl")?;
@@ -425,25 +425,25 @@ async fn close_transcription_stream(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    // The node's models (without keys), which users read too.
+    // The executor's models (without keys), which users read too.
     map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
         .read()
         .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
     // The provider's own model ids.
     map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
         .read()
-        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
-    // Node-wide settings: every user's prompts go to the models and keys set here.
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // Executor-wide settings: every user's prompts go to the models and keys set here.
     // The new model's id.
     map.method::<AiAddModelParams, String>("ai.addModel", add_model)
         .long()
-        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model)
-        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiIdParams, bool>("ai.removeModel", remove_model)
-        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model)
-        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiGetDefaultModelParams, Option<ModelView>>(
         "ai.getDefaultModel",
         get_default_model,

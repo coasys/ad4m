@@ -1,4 +1,4 @@
-//! AI tasks on a multi-user node.
+//! AI tasks on a multi-user executor.
 //!
 //! Users hold AI_READ, AI_CREATE and AI_PROMPT, and a task's system prompt and model shape
 //! every prompt run through it. A user must neither read another user's task nor rewrite,
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::multi_user::{expect_code, Node, Session};
+use super::multi_user::{expect_code, Executor, Session};
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::perspectives::interpretation::{
@@ -59,20 +59,27 @@ async fn serve_unreachable_llm() -> String {
     panic!("the model worker never reported ready");
 }
 
-async fn add_task(node: &Node, session: &Session, name: &str, model: &str, prompt: &str) -> Value {
+async fn add_task(
+    executor: &Executor,
+    session: &Session,
+    name: &str,
+    model: &str,
+    prompt: &str,
+) -> Value {
     let task = json!({
         "name": name,
         "modelId": model,
         "systemPrompt": prompt,
         "promptExamples": [],
     });
-    node.call("ai.addTask", json!({ "task": task }), session)
+    executor
+        .call("ai.addTask", json!({ "task": task }), session)
         .await
         .unwrap_or_else(|e| panic!("add task {name}: {e}"))
 }
 
-async fn task_ids(node: &Node, session: &Session) -> Vec<String> {
-    let tasks = node
+async fn task_ids(executor: &Executor, session: &Session) -> Vec<String> {
+    let tasks = executor
         .call("ai.tasks", json!({}), session)
         .await
         .expect("list tasks");
@@ -102,12 +109,12 @@ fn stored_prompt(task_id: &str) -> Option<String> {
 
 #[tokio::test]
 async fn a_user_reaches_only_their_own_ai_tasks() {
-    let node = Node::start().await;
+    let executor = Executor::start().await;
     let model = serve_unreachable_llm().await;
-    let alice = node.user("alice");
-    let bob = node.user("bob");
+    let alice = executor.user("alice");
+    let bob = executor.user("bob");
     let hers = add_task(
-        &node,
+        &executor,
         &alice.session,
         "summarise",
         &model,
@@ -115,7 +122,7 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
     )
     .await;
     let his = add_task(
-        &node,
+        &executor,
         &bob.session,
         "translate",
         &model,
@@ -124,8 +131,11 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
     .await;
     let hers_id = id_of(&hers);
 
-    assert_eq!(task_ids(&node, &bob.session).await, vec![id_of(&his)]);
-    assert_eq!(task_ids(&node, &alice.session).await, vec![hers_id.clone()]);
+    assert_eq!(task_ids(&executor, &bob.session).await, vec![id_of(&his)]);
+    assert_eq!(
+        task_ids(&executor, &alice.session).await,
+        vec![hers_id.clone()]
+    );
 
     // Another user's task answers like a missing one.
     for (op, params) in [
@@ -141,7 +151,7 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
         ),
     ] {
         let err = expect_code(
-            node.call(op, params, &bob.session).await,
+            executor.call(op, params, &bob.session).await,
             404,
             &format!("bob calling {op} on alice's task"),
         );
@@ -154,17 +164,18 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
 
     // Alice keeps full use of her own task.
     let err = expect_code(
-        node.call(
-            "ai.prompt",
-            json!({ "taskId": hers_id, "prompt": "Hello" }),
-            &alice.session,
-        )
-        .await,
+        executor
+            .call(
+                "ai.prompt",
+                json!({ "taskId": hers_id, "prompt": "Hello" }),
+                &alice.session,
+            )
+            .await,
         500,
         "alice prompting her own task reaches the (unreachable) model",
     );
     assert!(!err.message.contains("not found"), "{}", err.message);
-    let updated = node
+    let updated = executor
         .call(
             "ai.updateTask",
             with_prompt(&hers, "alice's new instructions"),
@@ -173,7 +184,8 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
         .await
         .expect("alice rewrites her own task");
     assert_eq!(updated["systemPrompt"], "alice's new instructions");
-    node.call("ai.removeTask", json!({ "id": hers_id }), &alice.session)
+    executor
+        .call("ai.removeTask", json!({ "id": hers_id }), &alice.session)
         .await
         .expect("alice deletes her own task");
     assert_eq!(stored_prompt(&hers_id), None);
@@ -181,54 +193,69 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
 
 #[tokio::test]
 async fn the_operator_and_apps_keep_access_to_every_ai_task() {
-    let node = Node::start().await;
+    let executor = Executor::start().await;
     let model = serve_unreachable_llm().await;
-    let alice = node.user("alice");
-    let bob = node.user("bob");
-    let admin = node.admin();
-    let app = node.main_agent_app();
+    let alice = executor.user("alice");
+    let bob = executor.user("bob");
+    let admin = executor.admin();
+    let app = executor.main_agent_app();
     let hers = add_task(
-        &node,
+        &executor,
         &alice.session,
         "summarise",
         &model,
         "alice's instructions",
     )
     .await;
-    let operators = add_task(&node, &admin, "classify", &model, "operator's instructions").await;
-    let apps = add_task(&node, &app, "tag", &model, "app's instructions").await;
+    let operators = add_task(
+        &executor,
+        &admin,
+        "classify",
+        &model,
+        "operator's instructions",
+    )
+    .await;
+    let apps = add_task(&executor, &app, "tag", &model, "app's instructions").await;
     let hers_id = id_of(&hers);
 
     for session in [&admin, &app] {
-        let all = task_ids(&node, session).await;
+        let all = task_ids(&executor, session).await;
         for task in [&hers, &operators, &apps] {
             assert!(all.contains(&id_of(task)), "{all:?}");
         }
     }
     // Operator and app tasks belong to no user.
-    assert_eq!(task_ids(&node, &alice.session).await, vec![hers_id.clone()]);
-    assert!(task_ids(&node, &bob.session).await.is_empty());
+    assert_eq!(
+        task_ids(&executor, &alice.session).await,
+        vec![hers_id.clone()]
+    );
+    assert!(task_ids(&executor, &bob.session).await.is_empty());
     expect_code(
-        node.call(
-            "ai.updateTask",
-            with_prompt(&operators, "injected by alice"),
-            &alice.session,
-        )
-        .await,
+        executor
+            .call(
+                "ai.updateTask",
+                with_prompt(&operators, "injected by alice"),
+                &alice.session,
+            )
+            .await,
         404,
         "alice rewriting an operator task",
     );
 
-    let updated = node
+    let updated = executor
         .call("ai.updateTask", with_prompt(&hers, "set by an app"), &app)
         .await
         .expect("an app rewrites a user's task");
     assert_eq!(updated["systemPrompt"], "set by an app");
     // The rewrite does not move the task away from its owner.
-    assert_eq!(task_ids(&node, &alice.session).await, vec![hers_id.clone()]);
-    assert!(task_ids(&node, &bob.session).await.is_empty());
+    assert_eq!(
+        task_ids(&executor, &alice.session).await,
+        vec![hers_id.clone()]
+    );
+    assert!(task_ids(&executor, &bob.session).await.is_empty());
 
-    node.call("ai.removeTask", json!({ "id": hers_id }), &admin)
+    executor
+        .call("ai.removeTask", json!({ "id": hers_id }), &admin)
         .await
         .expect("the operator deletes a user's task");
     assert_eq!(stored_prompt(&hers_id), None);
@@ -239,14 +266,14 @@ async fn the_operator_and_apps_keep_access_to_every_ai_task() {
 /// prompt.
 #[tokio::test]
 async fn a_users_task_cannot_stand_in_for_the_interpretation_task() {
-    let node = Node::start().await;
+    let executor = Executor::start().await;
     let model = serve_unreachable_llm().await;
-    let bob = node.user("bob");
+    let bob = executor.user("bob");
 
     for model_id in [None, Some(model.as_str())] {
         let name = interpretation_task_name_for_model(model_id);
         let squatter = add_task(
-            &node,
+            &executor,
             &bob.session,
             &name,
             &model,

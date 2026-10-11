@@ -31,7 +31,7 @@ pub struct RequestContext {
 
 impl RequestContext {
     /// The agent a request acts as: a user acts as that user, every other caller as the
-    /// node's main agent.
+    /// executor's main agent.
     pub fn acts_as(&self) -> crate::agent::AgentContext {
         self.session.acts_as()
     }
@@ -46,8 +46,8 @@ impl RequestContext {
         self.session.user().map(|(_, did)| did)
     }
 
-    /// Whether the caller is the node's operator: the admin credential, or no token on a
-    /// loopback listener of a node without one. An app token never is, whatever its
+    /// Whether the caller is the executor's operator: the admin credential, or no token on a
+    /// loopback listener of an executor without one. An app token never is, whatever its
     /// capabilities.
     pub fn is_operator(&self) -> bool {
         self.session.is_operator()

@@ -149,9 +149,9 @@ mod tests {
     /// locked wallet must surface as the operator-facing "Executor is locked"
     /// message generate_jwt already uses — not as the internal "key not found".
     /// A remote multi-user agent hit exactly this in the 2026-09-15 wake test:
-    /// after a node restart, the waker's subscribe 403'd with
+    /// after an executor restart, the waker's subscribe 403'd with
     /// "main key not found. call createMainKey() first", which reads like a
-    /// broken installation instead of "ask the node's operator to unlock".
+    /// broken installation instead of "ask the executor's operator to unlock".
     // Revocation reads a stored token's id without the wallet, so the operator can revoke
     // while it is locked.
     #[test]

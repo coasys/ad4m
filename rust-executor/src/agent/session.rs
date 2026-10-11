@@ -2,7 +2,7 @@
 //!
 //! [`Session::open`] is the one place that turns a token into an identity:
 //!
-//! - The admin credential is the operator. A node without one treats no token on a loopback
+//! - The admin credential is the operator. An executor without one treats no token on a loopback
 //!   listener as the operator (#1059).
 //! - Any other caller without a token is anonymous.
 //! - A token that is revoked, past its expiry or does not decode opens no session.
@@ -33,15 +33,17 @@ pub struct TokenId(pub String);
 /// The kind of caller behind a connection.
 #[derive(Clone, Debug)]
 pub enum Principal {
-    /// The admin credential, or no token on a loopback listener of a node without one (#1059).
+    /// The admin credential, or no token on a loopback listener of an executor without one
+    /// (#1059).
     Operator,
-    /// A token without a user: an approved app. It acts as the node's agent, limited to `caps`.
+    /// A token without a user: an approved app. It acts as the executor's main agent, limited to
+    /// `caps`.
     App {
         token_id: TokenId,
         caps: Vec<Capability>,
     },
     /// A token that names a managed user. It acts as `did`, limited to `caps`, whatever the
-    /// multi-user setting says: a user token never acts as the node.
+    /// multi-user setting says: a user token never acts as the main agent.
     User {
         token_id: TokenId,
         email: String,
@@ -64,8 +66,9 @@ pub enum AuthError {
     Invalid(String),
     /// The token names a user whose DID does not load.
     NoIdentity(String),
-    /// The node's wallet is locked, so no token can be checked yet. A state of the node, not
-    /// of the token: the token may be good, and the caller should try again after the unlock.
+    /// The executor's wallet is locked, so no token can be checked yet. A state of the
+    /// executor, not of the token: the token may be good, and the caller should try again
+    /// after the unlock.
     Locked,
 }
 
@@ -214,7 +217,7 @@ impl Session {
         }
     }
 
-    /// The one test for "is this the node's owner?".
+    /// The one test for "is this the executor's operator?".
     pub fn is_operator(&self) -> bool {
         matches!(self.principal, Principal::Operator)
     }
@@ -253,7 +256,7 @@ impl Session {
     }
 
     /// The agent the session acts as: a user acts as that user, every other caller as the
-    /// node's main agent.
+    /// executor's main agent.
     pub fn acts_as(&self) -> super::AgentContext {
         match &self.principal {
             Principal::User { email, .. } => super::AgentContext::for_user_email(email.clone()),
@@ -405,7 +408,7 @@ mod resolution_tests {
     }
 
     #[test]
-    fn no_token_on_a_node_with_a_credential_is_anonymous() {
+    fn no_token_on_an_executor_with_a_credential_is_anonymous() {
         ensure_db();
         for reach in [ListenerReach::Loopback, ListenerReach::Network] {
             let session = Session::open("", &admin(), reach).unwrap();
@@ -466,7 +469,7 @@ mod resolution_tests {
     }
 
     #[test]
-    fn a_token_without_a_user_is_an_app_limited_to_its_capabilities_on_any_node() {
+    fn a_token_without_a_user_is_an_app_limited_to_its_capabilities_on_any_executor() {
         let token = app_token(Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
         for credential in [None, admin()] {
             for reach in [ListenerReach::Loopback, ListenerReach::Network] {
@@ -560,10 +563,10 @@ mod resolution_tests {
         assert!(matches!(err, AuthError::Invalid(_)), "{err:?}");
     }
 
-    // On a node without an admin credential, a string that is not a JWT is garbage, even
-    // the one another node uses as its credential.
+    // On an executor without an admin credential, a string that is not a JWT is garbage,
+    // even the one another executor uses as its credential.
     #[test]
-    fn a_credential_on_a_node_without_one_opens_no_session() {
+    fn a_credential_on_an_executor_without_one_opens_no_session() {
         setup_wallet();
         setup_agent();
         for reach in [ListenerReach::Loopback, ListenerReach::Network] {
@@ -584,7 +587,7 @@ mod resolution_tests {
             .unlock("session-locked-test")
             .expect("restore the shared wallet");
 
-        // A locked wallet is a state of the node, not of the token: its own outcome, with a
+        // A locked wallet is a state of the executor, not of the token: its own outcome, with a
         // close code that clients do not read as "log in again".
         let err = locked.unwrap_err();
         assert_eq!(err, AuthError::Locked);

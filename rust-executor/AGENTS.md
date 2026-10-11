@@ -57,7 +57,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
   `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every JS runtime is a
   language runtime, so third-party language code reaches every op: an op that signs must sign as
-  `get_runtime_agent_context()`, never as the node directly.
+  `get_runtime_agent_context()`, never as the main agent directly.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
 - **Capabilities**: every WS method declares a guard where it registers (`api/guards.rs`); the
   dispatcher checks its capability (`agent/capabilities/defs.rs`) and ownership rule before the

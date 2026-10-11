@@ -1,7 +1,7 @@
-//! A multi-user node for handler-level isolation tests.
+//! A multi-user executor for handler-level isolation tests.
 //!
 //! Requests go through the real handler map, guards included. User and app sessions open from
-//! tokens the node signs, the way the WS upgrade opens them (`AuthContext::open`). Users sign
+//! tokens the executor signs, the way the WS upgrade opens them (`AuthContext::open`). Users sign
 //! up through `user_management`, so they hold exactly the default user capabilities.
 
 use std::sync::Arc;
@@ -28,19 +28,19 @@ pub(crate) struct User {
     pub session: Session,
 }
 
-/// A node with multi-user mode on, until dropped.
-pub(crate) struct Node {
+/// An executor with multi-user mode on, until dropped.
+pub(crate) struct Executor {
     handlers: HandlerMap,
     _multi_user: MultiUserMode,
 }
 
-impl Node {
+impl Executor {
     pub(crate) async fn start() -> Self {
         let multi_user = MultiUserMode::on();
         setup_wallet();
         setup_agent();
         crate::prolog_service::init_prolog_service().await;
-        Node {
+        Executor {
             handlers: build_handler_map(),
             _multi_user: multi_user,
         }

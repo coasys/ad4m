@@ -219,7 +219,7 @@ async fn verify_signature(params: Value, _ctx: Arc<RequestContext>) -> Result<Va
 }
 
 // ── Friends & Messages ──
-// The friend list and the outbox belong to the node's main agent; a user session has
+// The friend list and the outbox belong to the executor's main agent; a user session has
 // neither of its own here, so it may not read or change them.
 
 async fn list_friends(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -693,20 +693,20 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read()
         .guard(Guard::Open);
     map.method::<NoParams, bool>("runtime.quit", quit_runtime)
-        .guard(Guard::Node(RUNTIME_QUIT_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_QUIT_CAPABILITY.clone()));
     // Always errors: status updates have no implementation yet. The contract
     // is the SDK's call.
     map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status)
         .guard(Guard::SelfAgent(
             RUNTIME_MY_STATUS_UPDATE_CAPABILITY.clone(),
         ));
-    // Opens a browser on the node's host.
+    // Opens a browser on the executor's host.
     map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link)
         .guard(Guard::Operator);
-    // Read or write any path on the host and the whole node database. A perspective export
+    // Read or write any path on the host and the whole executor database. A perspective export
     // also checks the perspective's owner in the handler.
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     // An import writes rows as they are in the file: notifications with their `granted` flag
     // and `owner_did`, users with their password hashes. Only the operator imports, as only
     // the operator grants notifications.
@@ -732,11 +732,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Friends & messages: the friend list and the outbox belong to the main agent.
     map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
         .read()
-        .guard(Guard::Node(RUNTIME_FRIENDS_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_FRIENDS_READ_CAPABILITY.clone()));
     map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends)
-        .guard(Guard::Node(RUNTIME_FRIENDS_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_FRIENDS_CREATE_CAPABILITY.clone()));
     map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends)
-        .guard(Guard::Node(RUNTIME_FRIENDS_DELETE_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_FRIENDS_DELETE_CAPABILITY.clone()));
     // Always errors: friend status has no implementation yet. Users get the 501 too.
     map.method::<RuntimeFriendStatusParams, Option<PerspectiveExpression>>(
         "runtime.friendStatus",
@@ -750,14 +750,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "runtime.sendFriendMessage",
         send_friend_message,
     )
-    .guard(Guard::Node(RUNTIME_MESSAGES_CREATE_CAPABILITY.clone()));
+    .guard(Guard::Executor(RUNTIME_MESSAGES_CREATE_CAPABILITY.clone()));
     // Always empty: the inbox has no implementation yet. Users get the empty list too.
     map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
         .read()
         .guard(Guard::SelfAgent(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
     map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
         .read()
-        .guard(Guard::Node(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
     // Notifications: each caller's own (`notification_dids`); the handlers check the
     // perspectives a notification names and who may change a stored one.
     map.method::<NoParams, Vec<NotificationView>>("runtime.notifications", list_notifications)
@@ -782,7 +782,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         delete_notification,
     )
     .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
-    // Link language templates. The node's list, which users read too.
+    // Link language templates. The executor's list, which users read too.
     map.method::<NoParams, Vec<String>>(
         "runtime.linkLanguageTemplates",
         get_link_language_templates,
@@ -791,19 +791,19 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(Guard::SelfAgent(
         RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY.clone(),
     ));
-    // The node's templates, offered to every user.
+    // The executor's templates, offered to every user.
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.addLinkLanguageTemplates",
         add_link_language_templates,
     )
-    .guard(Guard::Node(
+    .guard(Guard::Executor(
         RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY.clone(),
     ));
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.removeLinkLanguageTemplates",
         remove_link_language_templates,
     )
-    .guard(Guard::Node(
+    .guard(Guard::Executor(
         RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY.clone(),
     ));
     // Holochain. The conductor's peer records and metrics, which users read too.
@@ -812,9 +812,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::SelfAgent(
             RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone(),
         ));
-    // Injects peer records into the node's Holochain conductor.
+    // Injects peer records into the executor's Holochain conductor.
     map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos)
-        .guard(Guard::Node(RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(
+            RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY.clone(),
+        ));
     map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
         .read()
         .guard(Guard::SelfAgent(
@@ -828,10 +830,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "runtime.setFreeHostingEnabled",
         set_free_hosting_enabled,
     )
-    // A billing decision for the whole node: the admin credential only, like
+    // A billing decision for the whole executor: the admin credential only, like
     // `user.setMultiUserEnabled` (#1328).
-    .guard(Guard::Node(ALL_CAPABILITY.clone()));
-    // The node's rates and Unyt version, which users read too.
+    .guard(Guard::Executor(ALL_CAPABILITY.clone()));
+    // The executor's rates and Unyt version, which users read too.
     map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
         .read()
         .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));

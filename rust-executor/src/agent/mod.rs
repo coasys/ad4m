@@ -2252,7 +2252,7 @@ mod agent_context_tests {
         setup_agent();
     }
 
-    // A token that no longer decoded used to act as the node's main agent.
+    // A token that no longer decoded used to act as the executor's main agent.
     #[test]
     fn an_expired_user_token_acts_as_nobody() {
         setup();
@@ -2288,7 +2288,7 @@ mod agent_context_tests {
         assert!(empty.unwrap().is_main_agent);
     }
 
-    // A user token used to act as the node's main agent once multi-user mode read as off
+    // A user token used to act as the executor's main agent once multi-user mode read as off
     // (switched off, or a failed read of the setting).
     #[test]
     fn a_user_token_acts_as_its_user_when_multi_user_mode_is_off() {

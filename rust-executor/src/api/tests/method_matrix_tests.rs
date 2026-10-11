@@ -51,7 +51,7 @@ enum Caller {
 enum Target {
     /// Owned by [`Caller::User`].
     UsersOwn,
-    /// Owned by the node's main agent.
+    /// Owned by the executor's main agent.
     MainAgents,
     Unowned,
     /// No such perspective.
@@ -95,7 +95,7 @@ fn resource_rows(guard: &Guard) -> &'static [(Caller, Expect)] {
             (User, Granted),
             (Anonymous, Granted),
         ],
-        Guard::Node(_) => &[
+        Guard::Executor(_) => &[
             (Operator, Granted),
             (AppWithout, Forbidden),
             (AppWith, Granted),
@@ -169,7 +169,7 @@ const TARGET: &str = "@target";
 const EXTRA_PARAMS: &[ExtraParams] = &[
     ("test.perspective.hidden", || json!({ "note": "fixture" })),
     ("test.task", || json!({ "taskId": TARGET })),
-    // Guard::Node. `admit` runs no handler, so no path, key or proof here is used.
+    // Guard::Executor. `admit` runs no handler, so no path, key or proof here is used.
     ("agent.generate", || json!({ "passphrase": "p" })),
     ("agent.lock", || json!({ "passphrase": "p" })),
     (
@@ -783,8 +783,8 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
     };
     map.method::<NoParams, bool>("test.anonymous", handler())
         .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
-    map.method::<NoParams, bool>("test.node", handler())
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    map.method::<NoParams, bool>("test.executor", handler())
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NoParams, bool>("test.self", handler())
         .read()
         .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
@@ -854,6 +854,7 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "runtime.unytSendHot",
             "runtime.unytWalletBalance",
             "runtime.unytWalletHistory",
+            "user.credits",
             "user.freeAccess",
             "user.setMultiUserEnabled",
         ]
@@ -905,7 +906,7 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     // Then the capability, then the owner rule; the handler never runs.
     assert_eq!(
         call(
-            "test.node",
+            "test.executor",
             json!({}),
             Caller::AppWithout,
             &AGENT_UPDATE_CAPABILITY
@@ -915,7 +916,7 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     );
     assert_eq!(
         call(
-            "test.node",
+            "test.executor",
             json!({}),
             Caller::User,
             &AGENT_UPDATE_CAPABILITY
@@ -977,7 +978,7 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     );
     assert_eq!(
         call(
-            "test.node",
+            "test.executor",
             json!({}),
             Caller::Operator,
             &AGENT_UPDATE_CAPABILITY
@@ -1017,7 +1018,6 @@ fn only_methods_that_check_no_capability_are_open() {
             "runtime.freeHostingEnabled",
             "runtime.info",
             "runtime.tlsDomain",
-            "user.credits",
             "user.logout",
             "user.revokeAllSessions",
         ]
@@ -1104,8 +1104,8 @@ fn a_method_takes_one_guard() {
     map.method::<NoParams, bool>("test.twice", |_: Value, _: Arc<RequestContext>| async {
         Ok::<_, WsRpcError>(json!(true))
     })
-    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()))
-    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()))
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
 }
 
 #[test]

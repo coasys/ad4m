@@ -3077,20 +3077,23 @@ mod stream_ownership_tests {
         let anonymous = RequestContext::for_test(Principal::Anonymous { caps: vec![] });
 
         let alices = stream_of(Some("alice@example.org"));
-        let nodes = stream_of(None);
+        let main_agents = stream_of(None);
         let reaches = |stream, caller| AIService::verify_stream_ownership(stream, caller).is_ok();
 
         assert!(reaches(&alices, &alice), "a user reaches their own stream");
         assert!(!reaches(&alices, &bob), "not another user's");
-        assert!(!reaches(&nodes, &bob), "nor the node's");
+        assert!(!reaches(&main_agents, &bob), "nor the main agent's");
         assert!(
             reaches(&alices, &operator),
             "the operator reaches any stream"
         );
-        assert!(reaches(&nodes, &operator));
-        assert!(reaches(&alices, &app), "an app acts as the node, as before");
+        assert!(reaches(&main_agents, &operator));
         assert!(
-            !reaches(&nodes, &anonymous),
+            reaches(&alices, &app),
+            "an app acts as the main agent, as before"
+        );
+        assert!(
+            !reaches(&main_agents, &anonymous),
             "an anonymous caller reaches none"
         );
     }
@@ -3114,7 +3117,7 @@ mod transcription_owner_tests {
     }
 
     #[test]
-    fn a_user_owns_their_stream_and_the_operator_owns_as_the_node() {
+    fn a_user_owns_their_stream_and_the_operator_owns_as_the_main_agent() {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();

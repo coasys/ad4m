@@ -1,6 +1,6 @@
 //! The secret-leak test (Plan 20 §8.3): no seeded secret reaches a response or an event.
 //!
-//! The test seeds the node with one known value of each kind of secret: the admin
+//! The test seeds the executor with one known value of each kind of secret: the admin
 //! credential, an app token, a user's token and password, a webhook credential and an AI
 //! provider API key. It then calls every read method of the handler map as each principal
 //! (operator, app, user, anonymous), and captures every event on the operator's and the
@@ -64,7 +64,7 @@ const READ_ONLY_UNFLAGGED: &[&str] = &[
 /// Read methods left out by design.
 const EXCLUDED: &[(&str, &str)] = &[(
     "runtime.exportData",
-    "an operator backup: it writes the node's data, secrets included, to a file the operator \
+    "an operator backup: it writes the executor's data, secrets included, to a file the operator \
      names, by design",
 )];
 

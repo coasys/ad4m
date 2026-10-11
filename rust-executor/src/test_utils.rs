@@ -116,7 +116,7 @@ pub fn managed_user(name: &str) -> String {
     email
 }
 
-/// A user token the node signed, with its expiry one hour in the past.
+/// A user token the executor signed, with its expiry one hour in the past.
 /// Needs `setup_wallet()` and `setup_agent()` first.
 pub fn expired_user_token(email: &str) -> String {
     use base64::Engine;
@@ -170,8 +170,8 @@ pub fn insert_app_with_token(
     info: crate::agent::capabilities::AuthInfoExtended,
     token: &str,
 ) {
-    let (id, expires_at) =
-        crate::agent::capabilities::read_stored_token_id(token).expect("a token this node issued");
+    let (id, expires_at) = crate::agent::capabilities::read_stored_token_id(token)
+        .expect("a token this executor issued");
     crate::agent::capabilities::apps_map::insert_app(request_id, info, id, expires_at)
         .expect("the app registry takes the app");
 }

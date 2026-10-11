@@ -50,7 +50,7 @@ map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>("perspective.get"
     .read()
     .guard(Guard::perspective_or_null(perspective_query_capability));
 map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
-    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
 ```
 
 `Guard::perspective(cap)` and `Guard::perspective_or_null(cap)` build `Guard::Perspective` on
@@ -64,9 +64,9 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | Guard | Rule after the capability |
 |---|---|
 | `Open` | no capability and no rule: every caller, anonymous included, reaches the handler, which decides |
-| `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of a node without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
+| `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Anonymous(cap)` | none; `cap` must be one anonymous callers hold |
-| `Node(cap)` | no user session: 403 naming the method, whatever the user's capabilities; the operator, apps and anonymous callers pass |
+| `Executor(cap)` | no user session: 403 naming the method, whatever the user's capabilities; the operator, apps and anonymous callers pass |
 | `SelfAgent(cap)` | an authenticated session; the handler acts on `ctx.acts_as()` |
 | `Perspective { .. }` | `get_perspective_with_access`: the operator reaches all; a user its own; an app the unowned and the main agent's; 404 when missing |
 | `Task { .. }` | an authenticated session; a user reaches only its own AI tasks (`tasks.user_email`), and gets 404 for any other id, its own missing or not; the operator and apps reach every task |
@@ -84,14 +84,14 @@ a call that fails both gets the access answer.
 Which guard each method has:
 
 - `Open`: the methods that check no capability: `agent.isLocked`, `runtime.info`,
-  `runtime.tlsDomain`, `runtime.freeHostingEnabled`, `user.credits` (501), `user.logout` and
+  `runtime.tlsDomain`, `runtime.freeHostingEnabled`, `user.logout` and
   `user.revokeAllSessions` (their handlers check the session's principal).
 - `Operator`: `runtime.openLink`, `runtime.restartHolochain`, `runtime.setHostRates`,
   `runtime.setUnytMembraneProof`, `runtime.importData` (it writes rows as they are in the
   file, granted notifications and password hashes included), `runtime.grantNotification`,
-  `user.setMultiUserEnabled`, `user.freeAccess`, and the `runtime.unyt*` stubs (501 to the
-  operator) until each gets a handler and its real guard.
-- `Node`: the node-wide methods that refuse user sessions (agent keys, apps, trust list and
+  `user.setMultiUserEnabled`, `user.freeAccess`, and the stubs `user.credits` and
+  `runtime.unyt*` (501 to the operator) until each gets a handler and its real guard.
+- `Executor`: the executor-wide methods that refuse user sessions (agent keys, apps, trust list and
   entanglement writes, `agent.permitCapability`, AI models, hosting wallet, language
   publish/remove/settings, `runtime.exportData`, friends and outbox, link-language template writes,
   `runtime.addHcAgentInfos`, `runtime.setFreeHostingEnabled`, `runtime.quit`, `user.list`,
@@ -107,9 +107,9 @@ Which guard each method has:
   refuses a session without a user). `perspective.all` lists the caller's own perspectives
   (every one to the operator).
   `ai.tasks` lists a user's own tasks, and every task to the operator and apps.
-  Some read node-wide data that users read today: `agent.getApps`,
+  Some read executor-wide data that users read today: `agent.getApps`,
   `agent.getTrustedAgents`, `ai.models`, `language.*` reads, link-language templates,
-  `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Node` would refuse
+  `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
   users there, a behaviour change.
 - `Perspective`: every `perspective.*` method that names one perspective, and every
   `neighbourhood.*` method that names one (`publish` by `perspectiveUuid`, the others by
@@ -223,7 +223,8 @@ grammar, used by `perspectives/interpretation/run.rs`. They move to `agentic/`
 ## Tests
 
 `tests/` (`types_tests.rs`, `shacl_ws_tests.rs`) and `openai_compat/tests.rs`.
-`tests/multi_user.rs` starts a multi-user node and opens sessions from tokens the node signs,
+`tests/multi_user.rs` starts a multi-user executor and opens sessions from tokens the executor
+signs,
 as the WS upgrade does; the `*_access_tests.rs` files drive `build_handler_map().dispatch` as
 different users with it. Behaviour changes to any handler also need the JS integration suite (`pnpm run
 test-main` at repo root).

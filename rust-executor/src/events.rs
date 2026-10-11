@@ -163,14 +163,14 @@ impl std::fmt::Display for Topic {
 pub enum Audience {
     /// Every session: the payload names no agent.
     Everyone,
-    /// The node's operator only.
+    /// The executor's operator only.
     Operator,
     /// The sessions that may approve apps: the operator, and any app or user whose token
     /// holds `AGENT_PERMIT`. App approvals and notification install requests go here: these
     /// sessions answer them.
     Approvers,
     /// The sessions that act as one of these DIDs. A user acts as their own DID; the
-    /// operator and apps act as the node's main agent.
+    /// operator and apps act as the executor's main agent.
     Dids(Vec<String>),
     /// The operator, and the sessions that act as one of these DIDs: for the auto-processor
     /// topics, which the operator sees on every perspective, other sessions only on theirs.

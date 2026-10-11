@@ -1,4 +1,4 @@
-//! `neighbourhood.*` methods on a multi-user node.
+//! `neighbourhood.*` methods on a multi-user executor.
 //!
 //! The perspective that holds a neighbourhood decides who may use it (`Guard::Perspective`),
 //! by the rule the `perspective.*` methods apply. Knowing another user's perspective uuid must
@@ -8,7 +8,7 @@
 use serde_json::{json, Value};
 use tokio::sync::broadcast::Receiver;
 
-use super::multi_user::{expect_code, Node, RegisteredPerspective};
+use super::multi_user::{expect_code, Executor, RegisteredPerspective};
 use crate::db::Ad4mDb;
 use crate::events::{Event, Topic};
 use crate::pubsub::get_global_pubsub;
@@ -43,9 +43,9 @@ fn delivered_signals(
 
 #[tokio::test]
 async fn a_user_cannot_signal_or_broadcast_through_another_users_neighbourhood() {
-    let node = Node::start().await;
-    let alice = node.user("alice");
-    let bob = node.user("bob");
+    let executor = Executor::start().await;
+    let alice = executor.user("alice");
+    let bob = executor.user("bob");
     let hers = RegisteredPerspective::neighbourhood(Some(vec![alice.did.clone()]));
     let mut signals = get_global_pubsub().await.subscribe_events();
 
@@ -55,19 +55,21 @@ async fn a_user_cannot_signal_or_broadcast_through_another_users_neighbourhood()
         "payload": empty_perspective(),
     });
     expect_code(
-        node.call("neighbourhood.sendSignal", signal.clone(), &bob.session)
+        executor
+            .call("neighbourhood.sendSignal", signal.clone(), &bob.session)
             .await,
         403,
         "bob signalling alice through her neighbourhood",
     );
     let broadcast = json!({ "uuid": hers.uuid, "payload": empty_perspective() });
     expect_code(
-        node.call(
-            "neighbourhood.sendBroadcast",
-            broadcast.clone(),
-            &bob.session,
-        )
-        .await,
+        executor
+            .call(
+                "neighbourhood.sendBroadcast",
+                broadcast.clone(),
+                &bob.session,
+            )
+            .await,
         403,
         "bob broadcasting into alice's neighbourhood",
     );
@@ -78,7 +80,7 @@ async fn a_user_cannot_signal_or_broadcast_through_another_users_neighbourhood()
     );
 
     // Alice still reaches her own neighbourhood.
-    let sent = node
+    let sent = executor
         .call("neighbourhood.sendSignal", signal, &alice.session)
         .await
         .expect("alice signals through her own neighbourhood");
@@ -90,7 +92,8 @@ async fn a_user_cannot_signal_or_broadcast_through_another_users_neighbourhood()
     );
     // With no link language running, a broadcast gets as far as the network hop.
     let err = expect_code(
-        node.call("neighbourhood.sendBroadcast", broadcast, &alice.session)
+        executor
+            .call("neighbourhood.sendBroadcast", broadcast, &alice.session)
             .await,
         500,
         "alice broadcasting into her own neighbourhood",
@@ -104,9 +107,9 @@ async fn a_user_cannot_signal_or_broadcast_through_another_users_neighbourhood()
 
 #[tokio::test]
 async fn a_user_cannot_set_status_or_read_presence_in_another_users_neighbourhood() {
-    let node = Node::start().await;
-    let alice = node.user("alice");
-    let bob = node.user("bob");
+    let executor = Executor::start().await;
+    let alice = executor.user("alice");
+    let bob = executor.user("bob");
     mark_online(&alice.email);
     let hers = RegisteredPerspective::neighbourhood(Some(vec![alice.did.clone()]));
     let uuid = json!({ "uuid": hers.uuid });
@@ -119,14 +122,14 @@ async fn a_user_cannot_set_status_or_read_presence_in_another_users_neighbourhoo
         ("neighbourhood.otherAgents", uuid.clone()),
     ] {
         expect_code(
-            node.call(op, params, &bob.session).await,
+            executor.call(op, params, &bob.session).await,
             403,
             &format!("bob calling {op} on alice's neighbourhood"),
         );
     }
 
     // Alice still reaches all of it.
-    let online = node
+    let online = executor
         .call("neighbourhood.onlineAgents", uuid.clone(), &alice.session)
         .await
         .expect("alice reads presence in her own neighbourhood");
@@ -138,13 +141,14 @@ async fn a_user_cannot_set_status_or_read_presence_in_another_users_neighbourhoo
         .collect();
     assert_eq!(online, vec![alice.did.as_str()]);
     assert_eq!(
-        node.call(
-            "neighbourhood.hasTelepresence",
-            uuid.clone(),
-            &alice.session
-        )
-        .await
-        .expect("alice probes her own neighbourhood"),
+        executor
+            .call(
+                "neighbourhood.hasTelepresence",
+                uuid.clone(),
+                &alice.session
+            )
+            .await
+            .expect("alice probes her own neighbourhood"),
         json!(false)
     );
     // The status and member list both live in the link language, which is not running:
@@ -153,7 +157,7 @@ async fn a_user_cannot_set_status_or_read_presence_in_another_users_neighbourhoo
         ("neighbourhood.setOnlineStatus", status),
         ("neighbourhood.otherAgents", uuid),
     ] {
-        let err = expect_code(node.call(op, params, &alice.session).await, 500, op);
+        let err = expect_code(executor.call(op, params, &alice.session).await, 500, op);
         assert!(
             err.message.contains("no link language installed"),
             "{op}: {}",
@@ -164,9 +168,9 @@ async fn a_user_cannot_set_status_or_read_presence_in_another_users_neighbourhoo
 
 #[tokio::test]
 async fn a_user_cannot_publish_another_users_perspective_and_become_its_owner() {
-    let node = Node::start().await;
-    let alice = node.user("alice");
-    let bob = node.user("bob");
+    let executor = Executor::start().await;
+    let alice = executor.user("alice");
+    let bob = executor.user("bob");
     let hers = RegisteredPerspective::private(Some(vec![alice.did.clone()]));
     let publish = json!({
         "perspectiveUUID": hers.uuid,
@@ -177,7 +181,8 @@ async fn a_user_cannot_publish_another_users_perspective_and_become_its_owner() 
     });
 
     expect_code(
-        node.call("neighbourhood.publish", publish.clone(), &bob.session)
+        executor
+            .call("neighbourhood.publish", publish.clone(), &bob.session)
             .await,
         403,
         "bob publishing alice's perspective",
@@ -185,7 +190,8 @@ async fn a_user_cannot_publish_another_users_perspective_and_become_its_owner() 
     assert_eq!(hers.owners().await, Some(vec![alice.did.clone()]));
 
     let err = expect_code(
-        node.call("neighbourhood.publish", publish, &alice.session)
+        executor
+            .call("neighbourhood.publish", publish, &alice.session)
             .await,
         500,
         "alice publishing her own perspective",
@@ -202,19 +208,21 @@ async fn a_user_cannot_publish_another_users_perspective_and_become_its_owner() 
 /// only when an owners list existed, so any user could list the members of those.
 #[tokio::test]
 async fn a_user_cannot_list_members_of_the_main_agents_unowned_neighbourhood() {
-    let node = Node::start().await;
-    let bob = node.user("bob");
+    let executor = Executor::start().await;
+    let bob = executor.user("bob");
     let legacy = RegisteredPerspective::neighbourhood(None);
     let uuid = json!({ "uuid": legacy.uuid });
 
     expect_code(
-        node.call("neighbourhood.otherAgents", uuid.clone(), &bob.session)
+        executor
+            .call("neighbourhood.otherAgents", uuid.clone(), &bob.session)
             .await,
         403,
         "bob listing members of the main agent's neighbourhood",
     );
     let err = expect_code(
-        node.call("neighbourhood.otherAgents", uuid, &node.admin())
+        executor
+            .call("neighbourhood.otherAgents", uuid, &executor.admin())
             .await,
         500,
         "the operator listing members of the main agent's neighbourhood",
@@ -230,15 +238,15 @@ async fn a_user_cannot_list_members_of_the_main_agents_unowned_neighbourhood() {
 /// reaches every perspective; a main-agent app the main agent's, but not a user's.
 #[tokio::test]
 async fn operators_and_apps_keep_their_perspective_access() {
-    let node = Node::start().await;
-    let alice = node.user("alice");
+    let executor = Executor::start().await;
+    let alice = executor.user("alice");
     mark_online(&alice.email);
     let hers = RegisteredPerspective::neighbourhood(Some(vec![alice.did.clone()]));
-    let main_agents = RegisteredPerspective::neighbourhood(Some(vec![node.main_agent_did()]));
+    let main_agents = RegisteredPerspective::neighbourhood(Some(vec![executor.main_agent_did()]));
     let mut signals = get_global_pubsub().await.subscribe_events();
-    let admin = node.admin();
+    let admin = executor.admin();
 
-    let sent = node
+    let sent = executor
         .call(
             "neighbourhood.sendSignal",
             json!({ "uuid": hers.uuid, "remoteAgentDid": alice.did, "payload": empty_perspective() }),
@@ -248,7 +256,7 @@ async fn operators_and_apps_keep_their_perspective_access() {
         .expect("the operator signals through a user's neighbourhood");
     assert_eq!(sent, json!(true));
     assert_eq!(delivered_signals(&mut signals, &hers.uuid).len(), 1);
-    let online = node
+    let online = executor
         .call(
             "neighbourhood.onlineAgents",
             json!({ "uuid": hers.uuid }),
@@ -258,25 +266,27 @@ async fn operators_and_apps_keep_their_perspective_access() {
         .expect("the operator reads presence in a user's neighbourhood");
     assert_eq!(online.as_array().map(Vec::len), Some(1));
 
-    let app = node.main_agent_app();
+    let app = executor.main_agent_app();
     assert_eq!(
-        node.call(
-            "neighbourhood.hasTelepresence",
-            json!({ "uuid": main_agents.uuid }),
-            &app
-        )
-        .await
-        .expect("a main-agent app probes the main agent's neighbourhood"),
+        executor
+            .call(
+                "neighbourhood.hasTelepresence",
+                json!({ "uuid": main_agents.uuid }),
+                &app
+            )
+            .await
+            .expect("a main-agent app probes the main agent's neighbourhood"),
         json!(false)
     );
     // The answer `perspective.queryLinks` gives this app for her perspective.
     expect_code(
-        node.call(
-            "neighbourhood.hasTelepresence",
-            json!({ "uuid": hers.uuid }),
-            &app,
-        )
-        .await,
+        executor
+            .call(
+                "neighbourhood.hasTelepresence",
+                json!({ "uuid": hers.uuid }),
+                &app,
+            )
+            .await,
         403,
         "a main-agent app probing a user's neighbourhood",
     );

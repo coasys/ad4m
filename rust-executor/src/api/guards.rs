@@ -1,9 +1,9 @@
 //! Who may call a method, on whose data.
 //!
-//! On a multi-user node, a user session (a JWT whose `sub` names a user) acts for that
-//! user only. Calls that change or use the node's own identity, wallet, files or
-//! node-wide settings belong to the node's operator: the admin credential, or an app the
-//! operator approved. Those calls refuse user sessions, whatever capabilities the user
+//! On a multi-user executor, a user session (a JWT whose `sub` names a user) acts for that
+//! user only. Calls that change or use the executor's own identity, wallet, files or
+//! executor-wide settings belong to the executor's operator: the admin credential, or an app
+//! the operator approved. Those calls refuse user sessions, whatever capabilities the user
 //! token carries, because the default user capabilities overlap the ones these calls
 //! check.
 //!
@@ -25,21 +25,20 @@ use serde_json::Value;
 #[derive(Clone, Debug)]
 pub enum Guard {
     /// No check: every caller reaches the handler, anonymous ones included, and the handler
-    /// decides. For the methods that check no capability: public node facts
-    /// (`runtime.info`), calls on the caller's own session (`user.logout`), stubs that answer
-    /// every caller alike.
+    /// decides. For the methods that check no capability: public executor facts
+    /// (`runtime.info`) and calls on the caller's own session (`user.logout`).
     Open,
-    /// The node's operator only ([`RequestContext::is_operator`]: the admin credential, or no
-    /// token on a loopback listener of a node without one). Every other caller gets 403
+    /// The executor's operator only ([`RequestContext::is_operator`]: the admin credential, or
+    /// no token on a loopback listener of an executor without one). Every other caller gets 403
     /// "Admin credential required", whatever its capabilities: no app token is the operator.
     Operator,
     /// Callers without a token too: requesting a capability, signing up, logging in. The
     /// capability must be one that anonymous callers hold (`anonymous_capabilities`).
     Anonymous(Capability),
-    /// Acts on the node itself. The operator, an app or an anonymous caller that holds the
+    /// Acts on the executor itself. The operator, an app or an anonymous caller that holds the
     /// capability; never a user session, whatever its capabilities: the default user
     /// capabilities overlap the ones these methods check.
-    Node(Capability),
+    Executor(Capability),
     /// Acts on the caller's own agent or user record, which the handler takes from
     /// `ctx.acts_as()`. An anonymous caller has no agent of its own, so it gets 403.
     SelfAgent(Capability),
@@ -112,7 +111,9 @@ impl Guard {
     pub fn capability(&self, uuid: &str) -> Option<Capability> {
         match self {
             Guard::Open | Guard::Operator => None,
-            Guard::Anonymous(cap) | Guard::Node(cap) | Guard::SelfAgent(cap) => Some(cap.clone()),
+            Guard::Anonymous(cap) | Guard::Executor(cap) | Guard::SelfAgent(cap) => {
+                Some(cap.clone())
+            }
             Guard::Task { capability, .. } => Some(capability.clone()),
             Guard::Perspective { capability, .. } => Some(capability(vec![uuid.to_string()])),
         }
@@ -149,10 +150,10 @@ impl Guard {
                     return Err(WsRpcError::forbidden(OPERATOR_ONLY));
                 }
             }
-            Guard::Node(_) => {
+            Guard::Executor(_) => {
                 if ctx.user_email().is_some() {
                     return Err(WsRpcError::forbidden(format!(
-                        "{method} acts on the node itself, so a user session may not call it"
+                        "{method} acts on the executor itself, so a user session may not call it"
                     )));
                 }
             }
@@ -197,7 +198,7 @@ impl Guard {
 }
 
 /// The agent a session signs and publishes as: the user of a user session, otherwise the
-/// node's main agent.
+/// executor's main agent.
 pub fn session_agent_context(ctx: &RequestContext) -> AgentContext {
     ctx.acts_as()
 }
@@ -215,9 +216,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_node_guard_refuses_user_sessions_and_names_the_method() {
+    async fn an_executor_guard_refuses_user_sessions_and_names_the_method() {
         let update = crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone();
-        let lock = Guard::Node(update.clone());
+        let lock = Guard::Executor(update.clone());
         let user = RequestContext::user_for_test(
             "alice@example.org",
             "did:key:alice",
@@ -227,8 +228,13 @@ mod tests {
             .admit("agent.lock", &Value::Null, &user)
             .await
             .unwrap_err();
-        assert_eq!(err.code, 403);
-        assert!(err.message.contains("agent.lock"), "{}", err.message);
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (
+                403,
+                "agent.lock acts on the executor itself, so a user session may not call it"
+            )
+        );
 
         let app = RequestContext::app_for_test(vec![update]);
         assert_eq!(

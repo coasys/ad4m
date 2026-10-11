@@ -112,7 +112,7 @@ pub(crate) fn token_ended_frame() -> CloseFrame {
 /// reply this way.
 const REPLY_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Close code for a connection refused because the node's wallet is locked (RFC 6455 "try
+/// Close code for a connection refused because the executor's wallet is locked (RFC 6455 "try
 /// again later"). Clients keep their token and reconnect.
 pub(crate) const CLOSE_TRY_AGAIN_LATER: u16 = 1013;
 
@@ -160,8 +160,8 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
     let conn = Connection::new(handler_map, ctx.clone(), tx);
-    // An anonymous socket (no token, for example on a node that has an admin credential) gets
-    // no events: a stream that never yields.
+    // An anonymous socket (no token, for example on an executor that has an admin credential)
+    // gets no events: a stream that never yields.
     let events: EventStream = if ctx.session.is_authenticated() {
         super::events_ws::build_event_stream(
             ctx.session.clone(),
@@ -602,7 +602,7 @@ mod event_gate_tests {
             .is_authenticated()
     }
 
-    // On a node with an admin credential, a socket with no token gets only the anonymous
+    // On an executor with an admin credential, a socket with no token gets only the anonymous
     // capabilities. It used to receive the main agent's event stream all the same.
     #[test]
     fn an_unauthenticated_socket_receives_no_events() {
@@ -633,7 +633,7 @@ mod event_gate_tests {
         let user = RequestContext::user_for_test("u@example.org", "did:key:u", vec![]);
         assert!(user.session.is_authenticated());
         assert!(gets_events(ADMIN, Some(ADMIN), ListenerReach::Network));
-        // No token on a loopback listener of a node without an admin credential (#1059).
+        // No token on a loopback listener of an executor without an admin credential (#1059).
         assert!(gets_events("", None, ListenerReach::Loopback));
     }
 }

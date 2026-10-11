@@ -373,7 +373,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Every user's record: the default user capabilities leave this capability out.
     map.method::<NoParams, Vec<UserStatistics>>("user.list", list_users)
         .read()
-        .guard(Guard::Node(RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(
+            RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone(),
+        ));
     map.method::<NoParams, bool>("user.multiUserEnabled", get_multi_user_enabled)
         .read()
         .guard(Guard::Anonymous(
@@ -383,16 +385,20 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Operator);
     map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access)
         .guard(Guard::Operator);
-    // Always answers 501, to every caller; the contract is the SDK's call.
+    // Always errors: setting credits has no implementation yet. The operator gets the 501,
+    // every other caller the guard's 403. The contract is the SDK's call.
+    // Operator until implemented: set the real guard with the handler.
     map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits)
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     // Any user's hot-wallet address, named by email (404 when none).
     map.method::<UsersEmailParams, String>("user.wallet", get_user_wallet)
         .read()
-        .guard(Guard::Node(RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone()));
-    // Test hooks of the email service, for the node's own test runs.
+        .guard(Guard::Executor(
+            RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone(),
+        ));
+    // Test hooks of the email service, for the executor's own test runs.
     map.method::<UsersEmailTestParams, UsersEmailTestResult>("user.emailTest", email_test)
-        .guard(Guard::Node(ALL_CAPABILITY.clone()));
+        .guard(Guard::Executor(ALL_CAPABILITY.clone()));
     map.method::<UsersRequestVerificationParams, VerificationRequestResult>(
         "user.requestVerification",
         request_verification,
@@ -522,7 +528,7 @@ mod operator_tests {
     // Only the admin credential: an app that holds every capability is refused too, before
     // the handler reads the params or the DB.
     #[tokio::test]
-    async fn node_wide_user_settings_refuse_an_app_holding_every_capability_and_users() {
+    async fn executor_wide_user_settings_refuse_an_app_holding_every_capability_and_users() {
         let mut map = HandlerMap::new();
         super::register_ws_handlers(&mut map);
         let callers = [
@@ -539,6 +545,10 @@ mod operator_tests {
                 "user.freeAccess",
                 json!({ "email": "a@example.org", "enabled": true }),
             ),
+            (
+                "user.credits",
+                json!({ "email": "a@example.org", "amount": 1.0 }),
+            ),
         ] {
             for ctx in &callers {
                 let err = map
@@ -549,6 +559,23 @@ mod operator_tests {
                 assert_eq!(err.message, "Admin credential required", "{method}");
             }
         }
+    }
+
+    // `user.credits` has no implementation yet: the operator reaches the handler and gets
+    // its 501.
+    #[tokio::test]
+    async fn user_credits_answers_the_operator_not_implemented() {
+        let mut map = HandlerMap::new();
+        super::register_ws_handlers(&mut map);
+        let err = map
+            .dispatch(
+                "user.credits",
+                json!({ "email": "a@example.org", "amount": 1.0 }),
+                Arc::new(RequestContext::operator_for_test()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, 501, "{}", err.message);
     }
 }
 

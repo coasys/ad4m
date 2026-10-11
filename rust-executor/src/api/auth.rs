@@ -47,7 +47,7 @@ impl AuthContext {
         self.session.user().map(|(email, _)| email)
     }
 
-    /// Whether the caller is the node's operator. See [`RequestContext::is_operator`].
+    /// Whether the caller is the executor's operator. See [`RequestContext::is_operator`].
     pub fn is_operator(&self) -> bool {
         self.session.is_operator()
     }

@@ -532,7 +532,7 @@ impl Ad4mMcpHandler {
     /// header-only clients too.
     ///
     /// The check holds only on an executor with an admin credential. Without one, the empty
-    /// token holds ALL_CAPABILITY, so every caller passes, on a multi-user node also a user
+    /// token holds ALL_CAPABILITY, so every caller passes, on a multi-user executor also a user
     /// who drops their token (#1059).
     pub(crate) async fn caller_can_permit(&self) -> bool {
         match self.get_capabilities().await {
@@ -840,7 +840,7 @@ mod agent_context_tests {
         })
     }
 
-    // MCP tools used to act as the node's main agent once a session token stopped decoding.
+    // MCP tools used to act as the executor's main agent once a session token stopped decoding.
     #[tokio::test]
     async fn an_expired_session_token_acts_as_nobody() {
         setup_wallet();
@@ -860,7 +860,7 @@ mod agent_context_tests {
         assert!(context.is_main_agent);
     }
 
-    // Profile tools answered with the node's DID once a session token stopped decoding.
+    // Profile tools answered with the main agent's DID once a session token stopped decoding.
     #[tokio::test]
     async fn a_profile_tool_with_an_expired_token_does_not_answer_as_the_node() {
         setup_wallet();

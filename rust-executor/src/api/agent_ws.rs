@@ -176,7 +176,7 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: UpdateProfileRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // A user session updates the user's own profile, never the node's main agent.
+    // A user session updates the user's own profile, never the executor's main agent.
     if let Some(user_email) = ctx.user_email().map(str::to_string) {
         let agent = update_user_profile(user_email, body).await?;
         publish_agent_updated(&agent).await;
@@ -477,7 +477,7 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let body: SignMessageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // A user session signs as the user, never as the node's main agent.
+    // A user session signs as the user, never as the executor's main agent.
     let sig = InternalAgentSignature::from_message_for_context(
         body.message,
         &session_agent_context(&ctx),
@@ -589,7 +589,7 @@ async fn revoke_token(params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
     Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
-/// Revokes `token` by its id when it is a valid user token this node issued.
+/// Revokes `token` by its id when it is a valid user token this executor issued.
 fn revoke_user_token(token: &str) -> Result<(), WsRpcError> {
     let not_found = || WsRpcError::not_found(apps_map::RevokeError::NotFound.to_string());
     let claims = decode_jwt(token.to_string()).map_err(|_| not_found())?;
@@ -813,7 +813,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Agent>("agent.get", get_agent)
         .read()
         .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
-    // The node's approved apps (without tokens). Users read the list too.
+    // The executor's approved apps (without tokens). Users read the list too.
     map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
         .read()
         .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
@@ -824,22 +824,22 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long()
-        .guard(Guard::Node(AGENT_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_CREATE_CAPABILITY.clone()));
     // Always fails (not implemented); the result type is the SDK's `AgentStatus`. Users get
     // the 501 too.
     map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent)
         .guard(Guard::SelfAgent(AGENT_CREATE_CAPABILITY.clone()));
     map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
         .long()
-        .guard(Guard::Node(AGENT_SIGN_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message)
         .guard(Guard::SelfAgent(AGENT_SIGN_CAPABILITY.clone()));
-    // Approved apps belong to the node's operator. The default user capabilities include
+    // Approved apps belong to the executor's operator. The default user capabilities include
     // AGENT_UPDATE, so without the guard a user session could remove or revoke them.
     map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     // An app without a token asks for one.
     map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability)
         .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
@@ -848,11 +848,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "agent.permitCapability",
         permit_capability_handler,
     )
-    .guard(Guard::Node(AGENT_PERMIT_CAPABILITY.clone()));
+    .guard(Guard::Executor(AGENT_PERMIT_CAPABILITY.clone()));
     map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt)
         .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
     map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
         .read()
         .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
@@ -860,44 +860,44 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, bool>("agent.isLocked", is_locked)
         .read()
         .guard(Guard::Open);
-    // The node's trust list, which users read too.
+    // The executor's trust list, which users read too.
     map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
         .read()
         .guard(Guard::SelfAgent(
             RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY.clone(),
         ));
-    // The node's trust list decides whose languages this node installs and runs.
+    // The executor's trust list decides whose languages this executor installs and runs.
     map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents)
-        .guard(Guard::Node(
+        .guard(Guard::Executor(
             RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY.clone(),
         ));
     map.method::<TrustedAgentsWrapper, Vec<String>>(
         "agent.deleteTrustedAgents",
         delete_trusted_agents,
     )
-    .guard(Guard::Node(
+    .guard(Guard::Executor(
         RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY.clone(),
     ));
-    // The proofs belong to the node's main agent.
+    // The proofs belong to the executor's main agent.
     map.method::<NoParams, Vec<EntanglementProof>>("agent.getEntanglementProofs", get_entanglement)
         .read()
-        .guard(Guard::Node(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_READ_CAPABILITY.clone()));
     map.method::<AgentAddEntanglementProofsParams, Vec<EntanglementProof>>(
         "agent.addEntanglementProofs",
         add_entanglement,
     )
-    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<EntanglementProofsWrapper, Vec<EntanglementProof>>(
         "agent.deleteEntanglementProofs",
         delete_entanglement,
     )
-    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<EntanglementProofPreflightRequest, EntanglementProof>(
         "agent.entanglementProofPreflight",
         entanglement_proof_preflight,
     )
     .read()
-    .guard(Guard::Node(AGENT_READ_CAPABILITY.clone()));
+    .guard(Guard::Executor(AGENT_READ_CAPABILITY.clone()));
 }
 
 // ── Contracts ───────────────────────────────────────────────────────────────
@@ -1081,7 +1081,7 @@ mod revoke_token_tests {
     }
 
     fn is_revoked(token: &str) -> bool {
-        let (id, _) = read_stored_token_id(token).expect("a token this node issued");
+        let (id, _) = read_stored_token_id(token).expect("a token this executor issued");
         crate::agent::revoked::RevokedSet::global().contains(&id)
     }
 

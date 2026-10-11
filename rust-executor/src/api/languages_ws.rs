@@ -229,7 +229,7 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::internal(format!("Failed to serialize language input: {}", e)))?;
 
     // Users template link languages to create neighbourhoods, so this call stays open to
-    // them. A user session publishes as the user, never as the node's main agent.
+    // them. A user session publishes as the user, never as the executor's main agent.
     controller
         .expression_create(
             &language_language_address,
@@ -296,7 +296,7 @@ async fn write_settings(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    // The node's installed languages, which users read too.
+    // The executor's installed languages, which users read too.
     map.method::<LanguageListParams, Vec<LanguageHandle>>("language.all", list_languages)
         .read()
         .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
@@ -310,18 +310,18 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read()
         .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
     // Reads `languagePath` from any path on the host and publishes the file signed by the
-    // node's main agent.
+    // executor's main agent.
     map.method::<PublishLanguageRequest, LanguageMeta>("language.publish", publish_language)
         .long()
-        .guard(Guard::Node(LANGUAGE_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(LANGUAGE_CREATE_CAPABILITY.clone()));
     map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
         .long()
         .guard(Guard::SelfAgent(LANGUAGE_CREATE_CAPABILITY.clone()));
-    // Installed languages and their settings are shared by every user of the node.
+    // Installed languages and their settings are shared by every user of the executor.
     map.method::<LanguageAddressParams, bool>("language.remove", remove_language)
-        .guard(Guard::Node(LANGUAGE_DELETE_CAPABILITY.clone()));
+        .guard(Guard::Executor(LANGUAGE_DELETE_CAPABILITY.clone()));
     map.method::<LanguageWriteSettingsParams, bool>("language.writeSettings", write_settings)
-        .guard(Guard::Node(LANGUAGE_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(LANGUAGE_UPDATE_CAPABILITY.clone()));
 }
 
 // ── Contracts ──
