@@ -3082,10 +3082,10 @@ mod transcription_owner_tests {
         assert_eq!(admin_did, crate::agent::did());
     }
 
-    // An expired token opens no session and gets no capabilities, so the transcription
-    // handlers refuse it before a stream has an owner.
+    // An expired token opens no session, so the caller is refused before a transcription
+    // handler runs and before a stream has an owner.
     #[test]
-    fn a_caller_whose_token_expired_gets_no_capabilities() {
+    fn a_caller_whose_token_expired_is_refused() {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
@@ -3096,7 +3096,6 @@ mod transcription_owner_tests {
             false,
             crate::agent::capabilities::ListenerReach::Network,
         );
-        assert!(auth.session.is_none());
-        assert!(auth.to_request_context().capabilities.is_err());
+        assert_eq!(auth.err(), Some(crate::agent::session::AuthError::Expired));
     }
 }

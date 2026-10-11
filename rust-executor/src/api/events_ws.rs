@@ -46,7 +46,7 @@ use axum::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::IntoResponse,
+    response::Response,
 };
 use futures::stream::StreamExt;
 use std::pin::Pin;
@@ -242,11 +242,21 @@ pub fn event_specs() -> Vec<EventSpec> {
 ///
 /// Authentication is via `token` query parameter or `Authorization` header.
 /// All event types are multiplexed over a single WebSocket connection.
+///
+/// A token that opens no session gets the upgrade, then a close with 1008 at once: a browser
+/// cannot read the HTTP status of a refused upgrade.
 pub async fn events_ws(
     ws: WebSocketUpgrade,
     State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<impl IntoResponse, ApiError> {
+    auth: Result<AuthContext, ApiError>,
+) -> Result<Response, ApiError> {
+    let auth = match auth {
+        Ok(auth) => auth,
+        Err(ApiError::Unauthorized(reason)) => {
+            return Ok(ws.on_upgrade(move |socket| super::ws_rpc::close_refused(socket, reason)))
+        }
+        Err(e) => return Err(e),
+    };
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
@@ -735,7 +745,7 @@ async fn handle_events_ws(
                     // The stream ends when the token stops working.
                     None => {
                         let close = CloseFrame {
-                            code: 1008,
+                            code: super::ws_rpc::CLOSE_TOKEN_ENDED,
                             reason: "token expired or revoked".into(),
                         };
                         let _ = socket.send(Message::Close(Some(close))).await;

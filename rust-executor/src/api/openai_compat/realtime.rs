@@ -28,7 +28,7 @@
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use base64::Engine;
 use futures::SinkExt;
@@ -39,10 +39,20 @@ use super::model_selector::resolve_model;
 use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
+use crate::api::errors::ApiError;
 use crate::types::ModelType;
 
-pub async fn realtime_ws(auth: AuthContext, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(auth, socket))
+/// A token that opens no session gets the upgrade, an `unauthorized` error event and a close
+/// with 1008, before any work: a browser cannot read the HTTP status of a refused upgrade.
+pub async fn realtime_ws(auth: Result<AuthContext, ApiError>, ws: WebSocketUpgrade) -> Response {
+    match auth {
+        Ok(auth) => ws.on_upgrade(move |socket| handle_socket(auth, socket)),
+        Err(ApiError::Unauthorized(reason)) => ws.on_upgrade(move |mut socket| async move {
+            let _ = send_error(&mut socket, "unauthorized", &reason).await;
+            crate::api::ws_rpc::close_refused(socket, reason).await;
+        }),
+        Err(e) => e.into_response(),
+    }
 }
 
 async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {

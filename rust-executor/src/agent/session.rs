@@ -2,7 +2,8 @@
 //!
 //! [`Session::open`] is the one place that turns a token into an identity. It reproduces
 //! the rules of `capabilities_on`, `is_admin_credential_token_on`, `user_email_from_token`
-//! and `resolve_user_session`. Those remain for a token that opens no session, and for MCP.
+//! and `resolve_user_session`. Those remain for MCP. A token that opens no session is
+//! refused where it arrives.
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, check_token_revoked, decode_jwt,
