@@ -188,11 +188,7 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = crate::agent::capabilities::check_capability(
-            &capabilities,
-            &PERSPECTIVE_CREATE_CAPABILITY,
-        ) {
+        if let Err(e) = self.require(&PERSPECTIVE_CREATE_CAPABILITY).await {
             return format!("Capability error: {}", e);
         }
 

@@ -140,25 +140,31 @@ wins over the default.
 
 ### Authentication
 
-`auth_status()` reports on the **session** token — the one `generate_jwt` /
-`login_email` store. It and the other auth tools need no authentication
+`auth_status()` reports on the session every other tool uses: the token in
+your `Authorization` header, or the one `generate_jwt` / `login_email` /
+`verify_email_code` stored. `authenticated: true` means a tool call would
+pass; the answer also names the `principal` (`operator`, `app` or `user`),
+the `did` you act as and your `capabilities`. A token that stopped working
+(revoked, expired, logged out) answers `authenticated: false` with the
+reason in `error`. It and the other auth tools need no authentication
 themselves.
 
 - **Admin credential** — if the executor was started with
-  `AD4M_ADMIN_CREDENTIAL` / `--admin-credential`, the session still starts
-  with no token: send the credential as an `Authorization: Bearer <credential>`
-  header on your calls. The first protected call that carries a matching
-  header stores it in the session, and everything after that is authenticated.
-  Until then `auth_status()` answers `authenticated: false` — it does not
-  check the header, so treat that answer as "no *session* token yet", not as
-  "your credential is wrong".
+  `AD4M_ADMIN_CREDENTIAL` / `--admin-credential`, send the credential as an
+  `Authorization: Bearer <credential>` header. It authenticates you as the
+  node's operator, with every capability, exactly as on the executor's RPC
+  API. The first call that carries it stores it in the session.
+- **No admin credential** — on an executor started without one, a caller
+  with no token on the executor's own machine is the operator; nothing to do.
 - **Multi-user node** — `signup(email, password)` once, then
   `login_email(email, password)` returns a JWT that authenticates the rest of
   the session. `verify_email_code` is only needed if the node enforces email
   verification; try `login_email` first rather than assuming it does.
 - **Capability flow** (one shared node identity, not a per-agent account) —
-  `request_capability(app_name, app_desc)` auto-permits the request and
-  returns `request_id` and `code`; pass both to `generate_jwt`, which stores
+  `request_capability(app_name, app_desc)` returns a `request_id`. When your
+  session may grant capabilities (the operator), it also auto-permits the
+  request and returns the `code`; otherwise the node's operator approves the
+  request and gives you the code. Pass both to `generate_jwt`, which stores
   the resulting JWT in the session for every later call.
 
 Both JWT paths need an unlocked executor: right after a restart the node's

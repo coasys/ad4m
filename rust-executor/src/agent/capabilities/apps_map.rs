@@ -190,6 +190,14 @@ pub fn revoked_token_ids() -> Vec<(TokenId, u64)> {
         .collect()
 }
 
+/// The name of the approved app whose token has this id, if the registry holds it.
+pub fn app_name_of(token_id: &TokenId) -> Option<String> {
+    let apps = APPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    apps.values()
+        .find(|app| &app.token_id == token_id)
+        .map(|app| app.auth_info_extended.auth.app_name.clone())
+}
+
 pub fn remove_app(request_key: &str) -> Result<(), String> {
     let mut apps = APPS.lock().map_err(|e| e.to_string())?;
     if apps.remove(request_key).is_some() {

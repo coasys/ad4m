@@ -1404,78 +1404,9 @@ impl Ad4mMcpHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
-    // Test-only struct that mirrors McpContext for test isolation
-    struct TestAuthContext {
-        admin_credential: Option<String>,
-        auth_token: Arc<RwLock<Option<String>>>,
-    }
-
-    impl TestAuthContext {
-        fn new(admin_credential: Option<String>) -> Self {
-            Self {
-                admin_credential,
-                auth_token: Arc::new(RwLock::new(None)),
-            }
-        }
-
-        async fn get_auth_token(&self) -> Option<String> {
-            self.auth_token.read().await.clone()
-        }
-    }
-
-    // `test_auth_status_unauthenticated` used to live here. It re-implemented the
-    // match inside the test body and asserted against its own copy, so no change to
-    // the real tool could ever fail it. The real answer function is now tested
-    // directly in `mcp::tools::auth::auth_status_tests`.
-
-    #[tokio::test]
-    async fn test_auth_token_stores_value() {
-        let ctx = TestAuthContext::new(None);
-
-        // Simulate token storage logic
-        {
-            let mut token_guard = ctx.auth_token.write().await;
-            *token_guard = Some("test-token".to_string());
-        }
-
-        let token = ctx.get_auth_token().await;
-        assert_eq!(token, Some("test-token".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_admin_credential_check() {
-        let ctx = TestAuthContext::new(Some("my-admin-secret".to_string()));
-
-        // Set admin credential as token
-        {
-            let mut token_guard = ctx.auth_token.write().await;
-            *token_guard = Some("my-admin-secret".to_string());
-        }
-
-        let token = ctx.get_auth_token().await;
-        let is_admin = token.as_ref() == ctx.admin_credential.as_ref();
-
-        assert!(is_admin);
-    }
-
-    #[tokio::test]
-    async fn test_invalid_admin_credential() {
-        let ctx = TestAuthContext::new(Some("my-admin-secret".to_string()));
-
-        // Set wrong credential
-        {
-            let mut token_guard = ctx.auth_token.write().await;
-            *token_guard = Some("wrong-secret".to_string());
-        }
-
-        let token = ctx.get_auth_token().await;
-        let is_admin = token.as_ref() == ctx.admin_credential.as_ref();
-
-        assert!(!is_admin);
-    }
+    // The MCP session's caller is tested in `mcp::caller` and `mcp::tools`
+    // (`agent_context_tests`), and `auth_status` in `mcp::tools::auth`.
 
     #[test]
     fn test_escape_prolog_string() {

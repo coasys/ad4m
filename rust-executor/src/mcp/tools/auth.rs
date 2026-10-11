@@ -2,11 +2,12 @@
 //!
 //! Tools for JWT auth, capability tokens, multi-user signup/login.
 
-use super::Ad4mMcpHandler;
+use super::{Ad4mMcpHandler, RequestAuth};
 use crate::agent::capabilities::{
-    defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
-    request_capability as cap_request_capability, token::decode_jwt, AuthInfo, AuthInfoExtended,
+    apps_map, defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
+    request_capability as cap_request_capability, AuthInfo, AuthInfoExtended,
 };
+use crate::agent::session::{AuthError, Principal, Session};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -113,23 +114,20 @@ impl Ad4mMcpHandler {
     ) -> String {
         // `request_capability` is in AUTH_TOOLS, so `call_tool` never rejects it —
         // it must stay reachable to *create* a request.
-        self.request_capability_with_header(super::bearer_credential(&context), params.0)
+        self.request_capability_as(RequestAuth::of(&context), params.0)
             .await
     }
 
-    /// Context-free body of [`Self::request_capability`], split out for the same reason as
-    /// `check_auth_with_header`: tests cannot build an rmcp `RequestContext`. Creating the
-    /// request needs only that the tool stay reachable; auto-permitting it (the inline code
-    /// that generate_jwt mints into an ALL_CAPABILITY token) needs the PERMIT capability,
-    /// which a multi-user user token does not hold. A valid header credential joins the
-    /// session first, as `call_tool` does for the other auth tools.
-    pub(crate) async fn request_capability_with_header(
+    /// Context-free body of [`Self::request_capability`]: tests cannot build an rmcp
+    /// `RequestContext`. Creating the request needs only that the tool stay reachable;
+    /// auto-permitting it (the inline code that generate_jwt mints into an ALL_CAPABILITY
+    /// token) needs the PERMIT capability, which a multi-user user token does not hold.
+    pub(crate) async fn request_capability_as(
         &self,
-        header_token: Option<String>,
+        request: RequestAuth,
         params: RequestCapabilityParams,
     ) -> String {
-        self.adopt_credential(header_token).await;
-        let caller_can_permit = self.caller_can_permit().await;
+        let caller_can_permit = self.caller_can_permit(request).await;
         self.handle_capability_request(params, caller_can_permit)
             .await
     }
@@ -148,12 +146,11 @@ impl Ad4mMcpHandler {
     /// to any caller that could reach the MCP port made `--admin-credential`
     /// decorative (issue #851, sub-problem 3).
     ///
-    /// Scope: this gate protects executors that SET an admin credential.
-    /// Without one, the empty token holds ALL_CAPABILITY, PERMIT included, so
-    /// any caller that reaches the MCP port still gets the inline code. On a
-    /// multi-user node that includes a user who drops their token or opens a
-    /// new session (#1059). The MCP server binds 0.0.0.0 by default; making
-    /// no-credential mode loopback-only is #1033.
+    /// Scope: without an admin credential, a caller with no token on a loopback
+    /// listener is the operator, so it still gets the inline code. On a multi-user
+    /// node that includes a user who drops their token or opens a new session
+    /// (#1059). Such a server binds loopback only (#1033); on a listener beyond
+    /// loopback (an explicit `MCP_HOST`) that caller is anonymous and gets no code.
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
@@ -307,42 +304,39 @@ impl Ad4mMcpHandler {
     }
 
     /// Check current authentication status
-    #[tool(description = "Check the current authentication status of the MCP session.")]
-    pub async fn auth_status(&self, _params: Parameters<AuthStatusParams>) -> String {
-        let token = self.context.auth_token.read().await;
-        let session = match token.as_deref() {
-            Some(t) if !t.is_empty() => match decode_jwt(t.to_string()) {
-                Ok(claims) => SessionToken::Valid {
-                    app_name: claims.capabilities.app_name,
-                    user_email: claims.capabilities.user_email,
-                    has_capabilities: claims.capabilities.capabilities.is_some(),
-                },
-                Err(_) => SessionToken::Undecodable,
+    #[tool(
+        description = "Check the current authentication status of the MCP session: whether its token (the Authorization header, or the one a login tool set) works, who it acts as and which capabilities it holds."
+    )]
+    pub async fn auth_status(
+        &self,
+        _params: Parameters<AuthStatusParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> String {
+        self.auth_status_as(RequestAuth::of(&context)).await
+    }
+
+    /// Context-free body of [`Self::auth_status`]: the same session every other tool call
+    /// resolves, so `authenticated` is true exactly when a tool call would pass (#851 1).
+    pub(crate) async fn auth_status_as(&self, request: RequestAuth) -> String {
+        let caller = self.caller(request).await;
+        let app_name = match &caller {
+            Ok(session) => match &session.principal {
+                Principal::App { token_id, .. } => apps_map::app_name_of(token_id),
+                _ => None,
             },
-            _ => SessionToken::Absent,
+            Err(_) => None,
         };
-        auth_status_json(session, crate::user_management::executor_is_unlocked())
+        auth_status_json(
+            caller.as_deref(),
+            app_name,
+            crate::user_management::executor_is_unlocked(),
+        )
     }
 }
 
-/// What the session's stored token turned out to be.
-///
-/// Decoding happens in the tool method, not in `auth_status_json`, because `decode_jwt`
-/// reaches into the wallet — the very subsystem whose lock state is under test. Keeping
-/// the decode outside is what lets the tests below drive the real answer function.
-#[derive(Debug, PartialEq, Eq)]
-enum SessionToken {
-    Absent,
-    Undecodable,
-    Valid {
-        app_name: String,
-        user_email: Option<String>,
-        has_capabilities: bool,
-    },
-}
-
-/// Build the `auth_status` answer from the two things that decide it: what the session's
-/// token is, and whether the executor's wallet is unlocked.
+/// Build the `auth_status` answer from what decides it: the caller's session (or why its
+/// token opens none), the app's name for an app token, and whether the executor's wallet
+/// is unlocked.
 ///
 /// A locked executor is the case worth care. Nothing authenticates until the operator
 /// calls `unlockAgent`, so reporting a bare `authenticated: false` sends the agent to
@@ -350,47 +344,63 @@ enum SessionToken {
 /// mode is a re-auth loop, or an agent that abandons the tools and hand-rolls HTTP.
 /// `executor_locked` is therefore reported in every branch, and when it is set the
 /// message names the operator action instead of an agent action.
-fn auth_status_json(session: SessionToken, unlocked: bool) -> String {
+fn auth_status_json(
+    caller: Result<&Session, &AuthError>,
+    app_name: Option<String>,
+    unlocked: bool,
+) -> String {
     const LOCKED_MESSAGE: &str = "Executor is locked: its admin has not unlocked the agent yet \
          (keys are held in memory only, so this happens after every restart). No login can \
          succeed until the executor operator calls unlockAgent. Ask them, then retry.";
+    let message = |unlocked_message: String| {
+        if unlocked {
+            json!(unlocked_message)
+        } else {
+            json!(LOCKED_MESSAGE)
+        }
+    };
 
-    match session {
-        // `authenticated` describes the session's credential, which a lock does not
-        // invalidate. `executor_locked` describes the node. Both are reported rather
-        // than folded together, because the caller's next action differs: wait for
-        // the operator, versus obtain a token.
-        SessionToken::Valid {
-            app_name,
-            user_email,
-            has_capabilities,
-        } => json!({
-            "authenticated": true,
-            "executor_locked": !unlocked,
-            "app_name": app_name,
-            "user_email": user_email,
-            "has_capabilities": has_capabilities,
-            "message": if unlocked { serde_json::Value::Null } else { json!(LOCKED_MESSAGE) },
-        })
-        .to_string(),
-        SessionToken::Undecodable => json!({
+    match caller {
+        // `authenticated` describes the session, which a lock does not end. `executor_locked`
+        // describes the node. Both are reported rather than folded together, because the
+        // caller's next action differs: wait for the operator, versus obtain a token.
+        Ok(session) if session.is_authenticated() => {
+            let principal = match session.principal {
+                Principal::Operator => "operator",
+                Principal::App { .. } => "app",
+                Principal::User { .. } => "user",
+                Principal::Anonymous { .. } => unreachable!("an authenticated session"),
+            };
+            json!({
+                "authenticated": true,
+                "executor_locked": !unlocked,
+                "principal": principal,
+                "app_name": app_name,
+                "user_email": session.user().map(|(email, _)| email),
+                "did": session.acts_as_did(),
+                "capabilities": session.capabilities(),
+                "message": if unlocked { serde_json::Value::Null } else { json!(LOCKED_MESSAGE) },
+            })
+            .to_string()
+        }
+        Ok(_) => json!({
             "authenticated": false,
             "executor_locked": !unlocked,
-            "token_type": "unknown",
-            "message": if unlocked {
-                "Token set but invalid - could not decode"
-            } else {
-                LOCKED_MESSAGE
-            },
+            "principal": "anonymous",
+            "message": message(format!("Not authenticated. {}", super::AUTHENTICATE_HINT)),
         })
         .to_string(),
-        SessionToken::Absent => json!({
+        Err(e) => json!({
             "authenticated": false,
             "executor_locked": !unlocked,
-            "message": if unlocked {
-                "Not authenticated. Use request_capability + generate_jwt, login_email, or signup + verify_email_code to authenticate."
+            "error": e.to_string(),
+            "message": if *e == AuthError::Locked {
+                json!(LOCKED_MESSAGE)
             } else {
-                LOCKED_MESSAGE
+                message(format!(
+                    "Token set but not accepted: {e}. {}",
+                    super::AUTHENTICATE_HINT
+                ))
             },
         })
         .to_string(),
@@ -399,32 +409,45 @@ fn auth_status_json(session: SessionToken, unlocked: bool) -> String {
 
 #[cfg(test)]
 mod auth_status_tests {
-    use super::{auth_status_json, SessionToken};
+    use super::*;
+    use crate::agent::capabilities::{ListenerReach, ALL_CAPABILITY};
+    use crate::agent::session::TokenId;
     use serde_json::Value;
 
-    fn parse(session: SessionToken, unlocked: bool) -> Value {
-        serde_json::from_str(&auth_status_json(session, unlocked)).expect("valid JSON")
+    fn parse(caller: Result<&Session, &AuthError>, unlocked: bool) -> Value {
+        let json = auth_status_json(caller, Some("mcp-agent".to_string()), unlocked);
+        serde_json::from_str(&json).expect("valid JSON")
     }
 
-    fn valid() -> SessionToken {
-        SessionToken::Valid {
-            app_name: "mcp-agent".to_string(),
-            user_email: Some("agent@example.org".to_string()),
-            has_capabilities: true,
-        }
+    fn session(principal: Principal) -> Session {
+        Session::for_test(principal, ListenerReach::Network)
+    }
+
+    fn anonymous() -> Session {
+        session(Principal::Anonymous { caps: vec![] })
+    }
+
+    fn user() -> Session {
+        session(Principal::User {
+            token_id: TokenId("t".into()),
+            email: "agent@example.org".into(),
+            did: "did:key:agent".into(),
+            caps: vec![ALL_CAPABILITY.clone()],
+        })
     }
 
     #[test]
     fn no_token_on_an_unlocked_executor_tells_the_agent_to_authenticate() {
-        let v = parse(SessionToken::Absent, true);
+        let v = parse(Ok(&anonymous()), true);
         assert_eq!(v["authenticated"], false);
         assert_eq!(v["executor_locked"], false);
+        assert_eq!(v["principal"], "anonymous");
         assert!(v["message"].as_str().unwrap().contains("login_email"));
     }
 
     #[test]
     fn no_token_on_a_locked_executor_names_the_operator_action_instead() {
-        let v = parse(SessionToken::Absent, false);
+        let v = parse(Ok(&anonymous()), false);
         assert_eq!(v["executor_locked"], true);
         let msg = v["message"].as_str().unwrap();
         assert!(msg.contains("unlockAgent"), "message was: {msg}");
@@ -433,32 +456,45 @@ mod auth_status_tests {
     }
 
     #[test]
-    fn an_undecodable_token_on_a_locked_executor_reports_the_lock_not_the_token() {
-        let v = parse(SessionToken::Undecodable, false);
-        assert_eq!(v["authenticated"], false);
-        assert_eq!(v["executor_locked"], true);
-        assert!(v["message"].as_str().unwrap().contains("unlockAgent"));
+    fn a_token_on_a_locked_executor_reports_the_lock_not_the_token() {
+        for e in [AuthError::Locked, AuthError::Invalid("bad".into())] {
+            let v = parse(Err(&e), false);
+            assert_eq!(v["authenticated"], false);
+            assert_eq!(v["executor_locked"], true);
+            assert!(v["message"].as_str().unwrap().contains("unlockAgent"));
+        }
     }
 
     #[test]
-    fn an_undecodable_token_on_an_unlocked_executor_still_reports_the_token() {
-        let v = parse(SessionToken::Undecodable, true);
-        assert_eq!(v["executor_locked"], false);
-        assert!(v["message"].as_str().unwrap().contains("could not decode"));
+    fn a_token_that_does_not_work_on_an_unlocked_executor_says_why() {
+        for (e, why) in [
+            (AuthError::Invalid("InvalidToken".into()), "InvalidToken"),
+            (AuthError::Expired, "expired"),
+            (AuthError::Revoked, "Unauthorized access"),
+        ] {
+            let v = parse(Err(&e), true);
+            assert_eq!(v["authenticated"], false);
+            assert_eq!(v["executor_locked"], false);
+            let msg = v["message"].as_str().unwrap();
+            assert!(msg.contains("not accepted") && msg.contains(why), "{msg}");
+        }
     }
 
     #[test]
-    fn a_valid_token_on_an_unlocked_executor_is_the_ordinary_answer() {
-        let v = parse(valid(), true);
+    fn a_working_session_on_an_unlocked_executor_is_the_ordinary_answer() {
+        let v = parse(Ok(&user()), true);
         assert_eq!(v["authenticated"], true);
         assert_eq!(v["executor_locked"], false);
-        assert_eq!(v["app_name"], "mcp-agent");
+        assert_eq!(v["principal"], "user");
+        assert_eq!(v["user_email"], "agent@example.org");
+        assert_eq!(v["did"], "did:key:agent");
+        assert_eq!(v["capabilities"].as_array().unwrap().len(), 1);
         assert!(v["message"].is_null());
     }
 
     #[test]
-    fn a_valid_token_on_a_locked_executor_stays_authenticated_and_says_why_nothing_works() {
-        let v = parse(valid(), false);
+    fn a_working_session_on_a_locked_executor_stays_authenticated_and_says_why_nothing_works() {
+        let v = parse(Ok(&user()), false);
         assert_eq!(
             v["authenticated"], true,
             "a lock does not invalidate a token"
@@ -468,19 +504,142 @@ mod auth_status_tests {
     }
 }
 
+/// `auth_status` through the handler: it reports the session the tools use (#851).
+#[cfg(test)]
+mod auth_status_session_tests {
+    use super::*;
+    use crate::agent::capabilities::{ListenerReach, ALL_CAPABILITY};
+    use crate::mcp::server::McpContext;
+    use crate::test_utils::{ensure_db, setup_agent, setup_wallet};
+    use serde_json::Value;
+
+    const ADMIN: &str = "auth-status-admin";
+
+    fn handler(reach: ListenerReach, admin: Option<&str>) -> Ad4mMcpHandler {
+        Ad4mMcpHandler::new(McpContext::new(admin.map(Into::into), reach, false))
+    }
+
+    async fn status(handler: &Ad4mMcpHandler, header: Option<&str>) -> Value {
+        let request = RequestAuth {
+            header: header.map(str::to_string),
+            reach: None,
+        };
+        serde_json::from_str(&handler.auth_status_as(request).await).unwrap()
+    }
+
+    // #851 1 + 2: the admin credential authenticates every tool, but auth_status decoded
+    // it as a JWT and answered "could not decode".
+    #[tokio::test]
+    async fn the_admin_credential_reports_the_operator() {
+        setup_wallet();
+        setup_agent();
+        let handler = handler(ListenerReach::Network, Some(ADMIN));
+        let v = status(&handler, Some(ADMIN)).await;
+        assert_eq!(v["authenticated"], true, "{v}");
+        assert_eq!(v["principal"], "operator");
+        assert_eq!(v["did"], crate::agent::did());
+        // The header joined the MCP session: a later call without it still reports it.
+        assert_eq!(status(&handler, None).await["principal"], "operator");
+    }
+
+    // #851 1: no token on the loopback listener of a node without a credential passes every
+    // tool as the operator, but auth_status answered "Not authenticated".
+    #[tokio::test]
+    async fn no_token_on_a_local_node_without_a_credential_reports_the_operator() {
+        ensure_db();
+        let v = status(&handler(ListenerReach::Loopback, None), None).await;
+        assert_eq!(v["authenticated"], true, "{v}");
+        assert_eq!(v["principal"], "operator");
+    }
+
+    #[tokio::test]
+    async fn an_app_token_reports_the_app_and_its_capabilities() {
+        setup_wallet();
+        setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let token = crate::agent::capabilities::token::generate_jwt(
+            "auth-status-app".to_string(),
+            3600,
+            crate::agent::capabilities::AuthInfo {
+                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let request_id = format!("auth-status-{}", uuid::Uuid::new_v4());
+        let app = crate::agent::capabilities::AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: crate::agent::capabilities::AuthInfo {
+                app_name: "auth-status-app".to_string(),
+                ..Default::default()
+            },
+        };
+        crate::test_utils::insert_app_with_token(request_id.clone(), app, &token);
+
+        let handler = handler(ListenerReach::Network, Some(ADMIN));
+        let v = status(&handler, Some(&token)).await;
+        assert_eq!(v["authenticated"], true, "{v}");
+        assert_eq!(v["principal"], "app");
+        assert_eq!(v["app_name"], "auth-status-app");
+        assert_eq!(v["capabilities"].as_array().unwrap().len(), 1);
+
+        // #851 1, the other direction: a revoked token decoded fine, so auth_status said
+        // `authenticated: true` while every tool refused it.
+        crate::agent::capabilities::apps_map::revoke_app(&request_id).unwrap();
+        let v = status(&handler, None).await;
+        assert_eq!(v["authenticated"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("Unauthorized access"));
+        crate::agent::capabilities::apps_map::remove_app(&request_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_user_token_reports_the_user() {
+        setup_wallet();
+        setup_agent();
+        let email = "auth.status.user@example.org";
+        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let v = status(&handler(ListenerReach::Network, Some(ADMIN)), Some(&token)).await;
+        assert_eq!(v["authenticated"], true, "{v}");
+        assert_eq!(v["principal"], "user");
+        assert_eq!(v["user_email"], email);
+        assert_eq!(
+            v["did"],
+            crate::agent::AgentService::get_user_did_by_email(email).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_reports_why() {
+        setup_wallet();
+        setup_agent();
+        let token = crate::test_utils::expired_user_token("auth.status.expired@example.org");
+        let v = status(&handler(ListenerReach::Network, Some(ADMIN)), Some(&token)).await;
+        assert_eq!(v["authenticated"], false);
+        assert!(v["error"].as_str().unwrap().contains("expired"), "{v}");
+    }
+
+    #[tokio::test]
+    async fn no_token_on_a_node_with_a_credential_is_anonymous() {
+        ensure_db();
+        let v = status(&handler(ListenerReach::Loopback, Some(ADMIN)), None).await;
+        assert_eq!(v["authenticated"], false);
+        assert_eq!(v["principal"], "anonymous");
+    }
+}
+
 #[cfg(test)]
 mod capability_mint_tests {
     use super::*;
+    use crate::agent::capabilities::ListenerReach;
     use crate::mcp::server::McpContext;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     fn handler_with_admin_credential() -> Ad4mMcpHandler {
-        Ad4mMcpHandler::new(McpContext {
-            admin_credential: Some("test-admin-credential".into()),
-            auth_token: Arc::new(RwLock::new(None)),
-            dynamic_class_tools: false,
-        })
+        Ad4mMcpHandler::new(McpContext::new(
+            Some("test-admin-credential".into()),
+            ListenerReach::Network,
+            false,
+        ))
     }
 
     fn mint_params() -> RequestCapabilityParams {
@@ -539,27 +698,29 @@ mod capability_mint_tests {
     }
 
     /// The no-credential convenience must survive the gate: on an executor
-    /// started WITHOUT --admin-credential, the empty token holds ALL_CAPABILITY,
-    /// so a bare caller (no session token, no Authorization header) still gets
-    /// the auto-permit and the inline code. Note that this is NOT
-    /// localhost-scoped: with the default 0.0.0.0 bind any LAN caller gets the
-    /// same treatment — see #1033 and #1059. Runs the tool's real path,
-    /// `request_capability_with_header`, with no header.
+    /// started WITHOUT --admin-credential, a bare caller (no session token, no
+    /// Authorization header) on a loopback listener is the operator, so it still
+    /// gets the auto-permit and the inline code. On a network listener (an
+    /// explicit MCP_HOST) the same caller is anonymous and does not (#1059).
+    /// Runs the tool's real path, `request_capability_as`, with no header.
     #[tokio::test]
-    async fn without_admin_credential_an_unauthenticated_caller_is_still_auto_permitted() {
-        let handler = Ad4mMcpHandler::new(McpContext {
-            admin_credential: None,
-            auth_token: Arc::new(RwLock::new(None)),
-            dynamic_class_tools: false,
-        });
-
-        let resp = handler
-            .request_capability_with_header(None, mint_params())
-            .await;
-        let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+    async fn without_admin_credential_a_local_caller_is_still_auto_permitted() {
+        crate::test_utils::ensure_db();
+        let gets_code = |reach| async move {
+            let handler = Ad4mMcpHandler::new(McpContext::new(None, reach, false));
+            let resp = handler
+                .request_capability_as(RequestAuth::default(), mint_params())
+                .await;
+            let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+            v["code"].as_str().is_some()
+        };
         assert!(
-            v["code"].as_str().is_some(),
-            "no-credential flow should still return the code inline: {resp}"
+            gets_code(ListenerReach::Loopback).await,
+            "no-credential flow on loopback should still return the code inline"
+        );
+        assert!(
+            !gets_code(ListenerReach::Network).await,
+            "#1059: no operator over the network"
         );
     }
 
@@ -596,7 +757,13 @@ mod capability_mint_tests {
         // the permit check decides. Returns whether the reply carries a mint code.
         let gets_code = |header: String| async move {
             let resp = handler_with_admin_credential()
-                .request_capability_with_header(Some(header), mint_params())
+                .request_capability_as(
+                    RequestAuth {
+                        header: Some(header),
+                        reach: None,
+                    },
+                    mint_params(),
+                )
                 .await;
             let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
             v.get("code").is_some()

@@ -1,7 +1,7 @@
 //! Language tools — introspect installed languages and their metadata.
 
 use super::Ad4mMcpHandler;
-use crate::agent::capabilities::{check_capability, defs::LANGUAGE_READ_CAPABILITY};
+use crate::agent::capabilities::defs::LANGUAGE_READ_CAPABILITY;
 use crate::languages::LanguageController;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -31,8 +31,7 @@ impl Ad4mMcpHandler {
     pub async fn language_meta(&self, params: Parameters<LanguageMetaParams>) -> String {
         let p = &params.0;
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &LANGUAGE_READ_CAPABILITY) {
+        if let Err(e) = self.require(&LANGUAGE_READ_CAPABILITY).await {
             return format!("Capability error: {}", e);
         }
 

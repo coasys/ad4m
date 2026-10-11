@@ -770,11 +770,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 tls: mcp_tls,
                 ..Default::default()
             };
-            if let Err(e) = runtime.block_on(mcp::start_mcp_server(
-                admin_credential,
-                None, // No pre-set auth token
-                mcp_config,
-            )) {
+            if let Err(e) = runtime.block_on(mcp::start_mcp_server(admin_credential, mcp_config)) {
                 error!("MCP server error: {:?}", e);
             }
         });

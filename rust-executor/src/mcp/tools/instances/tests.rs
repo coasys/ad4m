@@ -6,7 +6,16 @@ use crate::mcp::server::McpContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::register_perspective;
 use rmcp::handler::server::wrapper::Parameters;
-use tokio::sync::RwLock;
+
+/// A context whose MCP session presented the admin credential: the operator.
+fn admin_context(dynamic_class_tools: bool) -> McpContext {
+    McpContext::new(
+        Some("test-admin".into()),
+        crate::agent::capabilities::ListenerReach::Loopback,
+        dynamic_class_tools,
+    )
+    .with_token("test-admin")
+}
 
 /// Flux-shaped Channel: string / boolean / integer scalars, one
 /// `has_child` collection, class + property interpretation hints.
@@ -123,11 +132,7 @@ async fn setup_with(
     let (perspective, _shapes, _ctx) = setup_perspective_no_llm(classes).await;
     let uuid = perspective.persisted.lock().await.uuid.clone();
     register_perspective(uuid.clone(), perspective);
-    let handler = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".into()),
-        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
-        dynamic_class_tools,
-    });
+    let handler = Ad4mMcpHandler::new(admin_context(dynamic_class_tools));
     let guard = PerspectiveGuard(uuid.clone());
     (handler, uuid, guard)
 }
@@ -1327,11 +1332,7 @@ async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     assert!(text.contains("dynamicClassTools"));
 
     // Same perspective, flag on: both surfaces are advertised.
-    let shown = Ad4mMcpHandler::new(McpContext {
-        admin_credential: Some("test-admin".into()),
-        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
-        dynamic_class_tools: true,
-    });
+    let shown = Ad4mMcpHandler::new(admin_context(true));
     let names: Vec<String> = shown
         .exposed_tools()
         .await

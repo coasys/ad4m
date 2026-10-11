@@ -338,14 +338,12 @@ mod tests {
     async fn every_registered_static_tool_has_a_side_effect_row() {
         use crate::mcp::server::McpContext;
         use crate::mcp::tools::Ad4mMcpHandler;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
 
-        let handler = Ad4mMcpHandler::new(McpContext {
-            admin_credential: None,
-            auth_token: Arc::new(RwLock::new(None)),
-            dynamic_class_tools: false,
-        });
+        let handler = Ad4mMcpHandler::new(McpContext::new(
+            None,
+            crate::agent::capabilities::ListenerReach::Loopback,
+            false,
+        ));
 
         let table_names: std::collections::BTreeSet<&str> =
             STATIC_TOOL_SIDE_EFFECTS.iter().map(|(n, _)| *n).collect();
@@ -372,14 +370,12 @@ mod tests {
     async fn every_side_effect_row_matches_a_registered_static_tool() {
         use crate::mcp::server::McpContext;
         use crate::mcp::tools::Ad4mMcpHandler;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
 
-        let handler = Ad4mMcpHandler::new(McpContext {
-            admin_credential: None,
-            auth_token: Arc::new(RwLock::new(None)),
-            dynamic_class_tools: false,
-        });
+        let handler = Ad4mMcpHandler::new(McpContext::new(
+            None,
+            crate::agent::capabilities::ListenerReach::Loopback,
+            false,
+        ));
 
         let registered: std::collections::BTreeSet<String> = handler
             .tool_router

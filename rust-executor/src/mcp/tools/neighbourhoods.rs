@@ -4,12 +4,9 @@
 //! templates; the system handles cloning and unique instance creation automatically.
 
 use super::Ad4mMcpHandler;
-use crate::agent::capabilities::{
-    check_capability,
-    defs::{
-        NEIGHBOURHOOD_CREATE_CAPABILITY, NEIGHBOURHOOD_READ_CAPABILITY,
-        RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
-    },
+use crate::agent::capabilities::defs::{
+    NEIGHBOURHOOD_CREATE_CAPABILITY, NEIGHBOURHOOD_READ_CAPABILITY,
+    RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
 };
 use crate::agent::AgentContext;
 use crate::languages::LanguageController;
@@ -62,9 +59,9 @@ impl Ad4mMcpHandler {
         description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language` when calling `neighbourhood_publish_from_perspective`."
     )]
     pub async fn list_link_language_templates(&self) -> String {
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) =
-            check_capability(&capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
+        if let Err(e) = self
+            .require(&RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
+            .await
         {
             return format!("Capability error: {}", e);
         }
@@ -131,8 +128,7 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY) {
+        if let Err(e) = self.require(&NEIGHBOURHOOD_CREATE_CAPABILITY).await {
             return format!("Capability error: {}", e);
         }
 
@@ -197,8 +193,7 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Authentication error: {}", e),
         };
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &NEIGHBOURHOOD_READ_CAPABILITY) {
+        if let Err(e) = self.require(&NEIGHBOURHOOD_READ_CAPABILITY).await {
             return format!("Capability error: {}", e);
         }
 

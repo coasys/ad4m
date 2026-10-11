@@ -173,11 +173,7 @@ impl Ad4mMcpHandler {
         description = "Get the DID (Decentralized Identifier) of the current agent. Use this to identify your own messages when filtering — compare the 'author' field in message data against your DID."
     )]
     pub async fn get_my_did(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        let token = match self.get_auth_token().await {
-            Some(t) => t,
-            None => return json!({"error": "Failed to get auth token"}).to_string(),
-        };
-        let context = match self.agent_context_for(&token) {
+        let context = match self.get_agent_context().await {
             Ok(context) => context,
             Err(e) => return json!({"error": e}).to_string(),
         };
@@ -195,8 +191,7 @@ impl Ad4mMcpHandler {
         description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and human users see in neighbourhoods."
     )]
     pub async fn get_agent_profile(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        let token = self.get_auth_token().await.unwrap_or_default();
-        let context = match self.agent_context_for(&token) {
+        let context = match self.get_agent_context().await {
             Ok(context) => context,
             Err(e) => return json!({"error": e}).to_string(),
         };
@@ -240,15 +235,9 @@ impl Ad4mMcpHandler {
         description = "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and to the human users of whichever app renders the neighbourhood. Only provided fields are updated; omitted fields keep their current values."
     )]
     pub async fn set_agent_profile(&self, params: Parameters<SetAgentProfileParams>) -> String {
-        let _capabilities = match self.get_capabilities().await {
-            Ok(c) => c,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let token = self.get_auth_token().await.unwrap_or_default();
-        let context = match self.agent_context_for(&token) {
+        let context = match self.get_agent_context().await {
             Ok(context) => context,
-            Err(e) => return json!({"error": e}).to_string(),
+            Err(e) => return format!("Authentication error: {}", e),
         };
 
         let agent = match get_current_agent(&context) {
@@ -343,15 +332,9 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<SetAgentProfilePictureParams>,
     ) -> String {
-        let _capabilities = match self.get_capabilities().await {
-            Ok(c) => c,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let token = self.get_auth_token().await.unwrap_or_default();
-        let context = match self.agent_context_for(&token) {
+        let context = match self.get_agent_context().await {
             Ok(context) => context,
-            Err(e) => return json!({"error": e}).to_string(),
+            Err(e) => return format!("Authentication error: {}", e),
         };
         let mime = params.0.mime_type.as_deref().unwrap_or("image/png");
 
@@ -464,8 +447,6 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<GetAgentPublicPerspectiveParams>,
     ) -> String {
-        let token = self.get_auth_token().await.unwrap_or_default();
-
         if let Some(did) = &params.0.did {
             // Look up another agent by DID via the agent language
             let controller = LanguageController::global_instance();
@@ -498,7 +479,7 @@ impl Ad4mMcpHandler {
             }
         } else {
             // Get own agent
-            let context = match self.agent_context_for(&token) {
+            let context = match self.get_agent_context().await {
                 Ok(context) => context,
                 Err(e) => return json!({"error": e}).to_string(),
             };

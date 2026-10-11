@@ -4,13 +4,14 @@
 //! AI agents connect via HTTP to interact with AD4M perspectives, models,
 //! and neighbourhoods using the Model Context Protocol.
 //!
-//! Authentication: clients authenticate via MCP tools (`request_capability` + `login_email`).
-//! Bearer header auth is not yet supported for multi-session setups — each session gets
-//! its own isolated token state, so a shared HTTP middleware cannot route tokens correctly.
+//! Authentication: each MCP session opens one `Session` ([`super::caller`]) from the
+//! `Authorization` header or from the token a login tool (`login_email`,
+//! `verify_email_code`, `generate_jwt`) sets, the same way RPC does. Each MCP session has
+//! its own [`Caller`], so no token crosses from one MCP session to another.
 //!
-//! What the server binds follows from that: a node with no admin credential
-//! authenticates every caller, so it is reachable from the node itself and
-//! nowhere else. See [`resolve_host`].
+//! What the server binds follows from that: on a node with no admin credential a
+//! caller without a token on a loopback listener is the operator, so the server is
+//! reachable from the node itself and nowhere else. See [`resolve_host`].
 //!
 //! When the executor is configured for TLS, MCP is also served over HTTPS on
 //! `mcp_port + 1`, using the same certificate as the RPC port — see
@@ -18,7 +19,9 @@
 //! clients such as `mcporter`, and narrows to loopback so that it serves only
 //! them: wide TLS, local plain — see [`resolve_plain_host`].
 
+use super::caller::Caller;
 use super::tools::Ad4mMcpHandler;
+use crate::agent::capabilities::ListenerReach;
 use crate::config::TlsConfig;
 use crate::secret::Secret;
 use anyhow::Result;
@@ -28,13 +31,16 @@ use rmcp::transport::streamable_http_server::{
 };
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
-/// MCP Server context, similar to REST's RequestContext
+/// One MCP session's context: the node's admin credential, the listener's reach and the
+/// session's caller.
 #[derive(Clone)]
 pub struct McpContext {
     pub admin_credential: Option<Secret>,
-    pub auth_token: Arc<RwLock<Option<String>>>,
+    /// Who can connect to the listener: decides what a caller without a token is (#1059).
+    pub reach: ListenerReach,
+    /// The session this MCP session's token opened.
+    pub caller: Caller,
     /// Whether the dynamic per-class SHACL tools are exposed over this MCP
     /// transport (listed by `tools/list`, callable by `tools/call`). Off by
     /// default so external clients see a stable, DNA-independent tool set;
@@ -43,6 +49,29 @@ pub struct McpContext {
     /// (`list_tool_schemas` / `call_tool_by_name`) always includes the
     /// dynamic tools.
     pub dynamic_class_tools: bool,
+}
+
+impl McpContext {
+    /// A context whose caller has no token yet.
+    pub fn new(
+        admin_credential: Option<Secret>,
+        reach: ListenerReach,
+        dynamic_class_tools: bool,
+    ) -> Self {
+        Self {
+            admin_credential,
+            reach,
+            caller: Caller::default(),
+            dynamic_class_tools,
+        }
+    }
+
+    /// The same context with a caller that starts from `token`: for a session whose token
+    /// is known before any call, as in the in-process interpretation harness.
+    pub fn with_token(mut self, token: &str) -> Self {
+        self.caller = Caller::from_token(token, &self.admin_credential, self.reach);
+        self
+    }
 }
 
 /// Configuration for the MCP HTTP server
@@ -117,40 +146,31 @@ fn resolve_tls_port(plain_port: u16, rpc_tls_port: u16) -> TlsPort {
 
 /// Where to bind, given whether anything gates access.
 ///
-/// Without an admin credential every caller is authenticated —
-/// `check_auth`'s last step is the single-user local trust model the REST
-/// server uses, and it grants `request_capability`, which mints
-/// `ALL_CAPABILITY`. That premise is true on loopback and false anywhere
-/// else, so an ungated server binds loopback and nothing else. Configure a
-/// credential and the default widens back to `0.0.0.0`, where a sibling
-/// container on the same Docker network can reach it.
-///
-/// `has_credential` therefore has to mean exactly what that last step tests:
-/// `admin_cred.is_none() && session_token.is_empty() && !header_present`
-/// (`mcp::tools::check_auth`, step 4). The two are the same question asked
-/// from opposite ends — *is anything gating this port?* — and only the
-/// credential half of it is knowable at bind time, before any request has a
-/// token or a header to present. If they ever drift, the failure is silent in
-/// one of two directions: a wide bind on a node where every caller is
-/// authenticated, or a loopback-only bind on a node that does gate access and
-/// wanted to be reachable. Change one, change the other.
+/// Without an admin credential a caller with no token on a loopback listener
+/// is the operator (`Session::open`, the single-user local trust model RPC
+/// uses), and the operator may run `request_capability`, which mints
+/// `ALL_CAPABILITY`. So an ungated server binds loopback and nothing else.
+/// Configure a credential and the default widens back to `0.0.0.0`, where a
+/// sibling container on the same Docker network can reach it.
 ///
 /// A multi-user node is **not** gated by having user accounts. A login JWT
-/// authenticates a user to the API; it is not an admin credential, and step 4
-/// does not consult the user table. `--enable-multi-user` without
-/// `--admin-credential` is an ungated node and binds loopback here.
+/// authenticates a user; it is not an admin credential. `--enable-multi-user`
+/// without `--admin-credential` is an ungated node and binds loopback here.
 ///
 /// `MCP_HOST` is the operator saying it outright and is honoured either way.
-/// Saying it on an ungated node hands every tool to whoever can route to the
-/// address, so that combination warns rather than passing quietly.
+/// On an ungated node a non-loopback bind makes the listener a network one,
+/// so a caller there without a token is anonymous, not the operator (#1059),
+/// and every caller on it, local ones included, must present a token. That
+/// combination warns rather than passing quietly.
 fn resolve_host(requested: Option<&str>, has_credential: bool) -> String {
     match requested {
         Some(host) => {
             if !has_credential && !is_loopback(host) {
                 warn!(
                     "MCP: MCP_HOST={host} binds beyond loopback with no --admin-credential set. \
-                     Every caller that can reach this address is authenticated and may mint \
-                     ALL_CAPABILITY. Set an admin credential, or bind 127.0.0.1."
+                     Callers without a token are anonymous on it, local ones included, so \
+                     they must log in or present a capability token. Set an admin \
+                     credential, or bind 127.0.0.1."
                 );
             }
             host.to_string()
@@ -230,15 +250,12 @@ fn is_loopback(host: &str) -> bool {
 /// AI agents can connect via HTTP to interact with AD4M.
 pub async fn start_mcp_server(
     admin_credential: Option<Secret>,
-    auth_token: Option<String>,
     config: McpServerConfig,
 ) -> Result<()> {
     let requested = config
         .host
         .clone()
         .or_else(|| std::env::var("MCP_HOST").ok());
-
-    let initial_token = auth_token;
 
     if config.dynamic_class_tools {
         info!("MCP: dynamic per-class SHACL tools are exposed (dynamicClassTools=true)");
@@ -247,19 +264,13 @@ pub async fn start_mcp_server(
     }
 
     let has_credential = admin_credential.is_some();
-    let context = McpContext {
-        admin_credential,
-        auth_token: Arc::new(RwLock::new(initial_token.clone())),
-        dynamic_class_tools: config.dynamic_class_tools,
-    };
 
     let tls_listening = match config.tls.clone() {
         Some(tls) => {
             start_tls_listener(
-                &context,
-                initial_token.clone(),
+                &admin_credential,
+                config.dynamic_class_tools,
                 config.port,
-                has_credential,
                 tls,
             )
             .await?
@@ -275,10 +286,9 @@ pub async fn start_mcp_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("MCP HTTP server listening on {}", addr);
 
-    // NOTE: Bearer header auth removed — the per-session token isolation means an HTTP
-    // middleware can't route tokens to the correct session without a session ID registry.
-    // Clients authenticate via MCP tools (request_capability + login_email) instead.
-    axum::serve(listener, mcp_router(&context, initial_token)).await?;
+    let reach = ListenerReach::of(&listener.local_addr()?);
+    let context = McpContext::new(admin_credential, reach, config.dynamic_class_tools);
+    axum::serve(listener, mcp_router(context)).await?;
 
     Ok(())
 }
@@ -287,20 +297,24 @@ pub async fn start_mcp_server(
 ///
 /// Built per listener rather than shared, because a session id is a bearer
 /// credential — a session opened over HTTPS must not be resumable by anyone who
-/// guesses or intercepts its id on the plaintext port.
-fn mcp_router(context: &McpContext, initial_token: Option<String>) -> axum::Router {
-    let context = context.clone();
+/// guesses or intercepts its id on the plaintext port. The listener's reach rides
+/// each request as an extension, as on the API (`api::listener_router`), so
+/// `api::auth::listener_reach` also reads a proxied request as a network one.
+fn mcp_router(context: McpContext) -> axum::Router {
+    let reach = context.reach;
     let service = StreamableHttpService::new(
         move || {
+            // Each MCP session gets its own caller: no token crosses between sessions.
             let mut ctx = context.clone();
-            // Per-session auth token — prevents cross-session token leaking
-            ctx.auth_token = Arc::new(RwLock::new(initial_token.clone()));
+            ctx.caller = Caller::default();
             Ok(Ad4mMcpHandler::new(ctx))
         },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
-    axum::Router::new().fallback_service(service)
+    axum::Router::new()
+        .fallback_service(service)
+        .layer(axum::Extension(reach))
 }
 
 /// Serve MCP over HTTPS as well, on `mcp_port + 1`, using the RPC port's cert.
@@ -335,13 +349,12 @@ fn mcp_router(context: &McpContext, initial_token: Option<String>) -> axum::Rout
 /// task, with no remote MCP surface left at all. Binding first turns that
 /// outcome into `false` — no HTTPS, cleartext stays reachable, loud warning.
 async fn start_tls_listener(
-    context: &McpContext,
-    initial_token: Option<String>,
+    admin_credential: &Option<Secret>,
+    dynamic_class_tools: bool,
     plain_port: u16,
-    has_credential: bool,
     tls: TlsConfig,
 ) -> Result<bool> {
-    if !has_credential {
+    if admin_credential.is_none() {
         warn!(
             "MCP: TLS is configured but no --admin-credential is set, so the HTTPS MCP listener \
              is not started. An unauthenticated HTTPS endpoint would publish every AD4M tool to \
@@ -396,7 +409,12 @@ async fn start_tls_listener(
     .await
     .map_err(|e| anyhow::anyhow!("MCP TLS config error: {}", e))?;
 
-    let router = mcp_router(context, initial_token);
+    let context = McpContext::new(
+        admin_credential.clone(),
+        ListenerReach::of(&addr),
+        dynamic_class_tools,
+    );
+    let router = mcp_router(context);
     info!("Starting AD4M MCP server (HTTPS) on https://{}", addr);
     tokio::spawn(async move {
         axum_server::from_tcp_rustls(std_listener, rustls_config)
@@ -428,8 +446,8 @@ mod tests {
 
     #[test]
     fn an_ungated_server_binds_loopback() {
-        // check_auth's last step authenticates any caller when no admin
-        // credential is configured. Loopback is the only place that is true.
+        // With no admin credential, a caller without a token on a loopback
+        // listener is the operator. Loopback is the only place that is safe.
         assert_eq!(resolve_host(None, false), "127.0.0.1");
     }
 
@@ -534,18 +552,13 @@ mod tests {
         let plain_port = held_port.wrapping_sub(1);
         let rpc_tls_port = held_port.wrapping_add(1);
 
-        let context = McpContext {
-            admin_credential: Some("cred".into()),
-            auth_token: Arc::new(RwLock::new(None)),
-            dynamic_class_tools: false,
-        };
         let tls = TlsConfig {
             cert_file_path: "/nonexistent/cert.pem".to_string(),
             key_file_path: "/nonexistent/key.pem".to_string(),
             tls_port: rpc_tls_port,
         };
 
-        let result = start_tls_listener(&context, None, plain_port, true, tls).await;
+        let result = start_tls_listener(&Some("cred".into()), false, plain_port, tls).await;
         assert_eq!(
             result.unwrap(),
             false,
@@ -657,11 +670,7 @@ mod tests {
                 tls_port: plain_port - 1,
             }),
         };
-        tokio::spawn(start_mcp_server(
-            Some("test-admin-cred".into()),
-            None,
-            config,
-        ));
+        tokio::spawn(start_mcp_server(Some("test-admin-cred".into()), config));
         wait_until_listening(tls_port).await;
         wait_until_listening(plain_port).await;
 
@@ -789,14 +798,137 @@ mod tests {
                 tls_port: plain_port - 1,
             }),
         };
-        tokio::spawn(start_mcp_server(
-            Some("test-admin-cred".into()),
-            None,
-            config,
-        ));
+        tokio::spawn(start_mcp_server(Some("test-admin-cred".into()), config));
         wait_until_listening(plain_port).await;
         tokio::net::TcpStream::connect(("127.0.0.2", plain_port))
             .await
             .expect("with no HTTPS listener, the credentialed plain listener stays on 0.0.0.0");
+    }
+
+    /// A plain MCP server on 127.0.0.1 and an initialized MCP session on it.
+    async fn local_server_session(admin_credential: Option<Secret>) -> (String, String) {
+        crate::test_utils::ensure_db();
+        let (port, _) = free_adjacent_ports();
+        let config = McpServerConfig {
+            port,
+            host: Some("127.0.0.1".to_string()),
+            dynamic_class_tools: false,
+            tls: None,
+        };
+        tokio::spawn(start_mcp_server(admin_credential, config));
+        wait_until_listening(port).await;
+
+        let url = format!("http://127.0.0.1:{port}/mcp");
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "mcp-session-test", "version": "0" }
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize");
+        let session_id = resp.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        read_jsonrpc_response(resp, 1).await;
+        client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", &session_id)
+            .json(&serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .send()
+            .await
+            .expect("initialized notification");
+        (url, session_id)
+    }
+
+    /// Calls `tool` over HTTP with `headers`, and returns the text of its result.
+    async fn call(
+        url: &str,
+        session: &str,
+        id: u64,
+        tool: &str,
+        headers: &[(&str, &str)],
+    ) -> String {
+        let mut request = reqwest::Client::new()
+            .post(url)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", session);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let resp = request
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": {} }
+            }))
+            .send()
+            .await
+            .expect("tools/call");
+        let answer = read_jsonrpc_response(resp, id).await;
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no text in {answer}"))
+            .to_string()
+    }
+
+    fn json(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap_or_else(|_| panic!("not JSON: {text}"))
+    }
+
+    // #851 1 + 2 over the real transport: the admin credential in the header is the
+    // operator, auth_status says so, and the MCP session remembers it.
+    #[tokio::test]
+    async fn the_admin_credential_header_is_the_operator_over_http() {
+        let (url, session) = local_server_session(Some("http-admin".into())).await;
+
+        let refused = call(&url, &session, 2, "get_my_did", &[]).await;
+        assert!(refused.contains("Authentication required."), "{refused}");
+        let anonymous = json(&call(&url, &session, 3, "auth_status", &[]).await);
+        assert_eq!(anonymous["authenticated"], false, "{anonymous}");
+
+        let wrong = call(
+            &url,
+            &session,
+            4,
+            "get_my_did",
+            &[("authorization", "wrong")],
+        )
+        .await;
+        assert!(wrong.contains("Authentication required:"), "{wrong}");
+
+        let bearer = [("authorization", "Bearer http-admin")];
+        let status = json(&call(&url, &session, 5, "auth_status", &bearer).await);
+        assert_eq!(status["authenticated"], true, "{status}");
+        assert_eq!(status["principal"], "operator");
+        let remembered = json(&call(&url, &session, 6, "auth_status", &[]).await);
+        assert_eq!(remembered["principal"], "operator", "{remembered}");
+    }
+
+    // Without a credential, a caller with no token on a loopback listener is the operator,
+    // unless the request came through a proxy (#1059), as on RPC.
+    #[tokio::test]
+    async fn no_token_on_a_local_listener_is_the_operator_unless_proxied() {
+        let (url, session) = local_server_session(None).await;
+        let local = json(&call(&url, &session, 2, "auth_status", &[]).await);
+        assert_eq!(local["principal"], "operator", "{local}");
+
+        let forwarded = [("x-forwarded-for", "203.0.113.9")];
+        let proxied = json(&call(&url, &session, 3, "auth_status", &forwarded).await);
+        assert_eq!(proxied["authenticated"], false, "{proxied}");
+        let refused = call(&url, &session, 4, "get_my_did", &forwarded).await;
+        assert!(refused.contains("Authentication required."), "{refused}");
     }
 }

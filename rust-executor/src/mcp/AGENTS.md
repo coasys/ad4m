@@ -1,8 +1,31 @@
 # mcp/ — agent guide
 
-Model Context Protocol server exposing AD4M to LLM agents (`rmcp`). Transport +
-auth in `server.rs`; `Ad4mMcpHandler` in `tools/mod.rs` implements `list_tools` /
+Model Context Protocol server exposing AD4M to LLM agents (`rmcp`). Transport in
+`server.rs`; `Ad4mMcpHandler` in `tools/mod.rs` implements `list_tools` /
 `call_tool`.
+
+## Auth: one `Session` per MCP session (`caller.rs`)
+
+- Each MCP session has a `Caller` (in `McpContext`), which holds the
+  `agent::session::Session` its token opened with `Session::open` — the same
+  function RPC uses. The token comes from the `Authorization` header (`Bearer x`
+  or raw `x`) or from a login tool (`login_email`, `verify_email_code`,
+  `generate_jwt` → `store_token_and_respond`). A remembered session wins over a
+  later header; a header replaces a session that stopped working.
+- No token: `Session::open("")` again on every call — the operator on a loopback
+  listener of a node without an admin credential, anonymous otherwise. The
+  listener's `ListenerReach` comes from the bound socket (`mcp_router` adds it as
+  an extension); a request with a forwarding header reads as `Network`, as on RPC.
+- `call_tool` resolves the caller on every call and refuses non-`AUTH_TOOLS`
+  calls unless the session works and is not anonymous. Tools read it through
+  `session()` / `require(cap)` / `get_agent_context()`, which run
+  `Session::check` again, so a revoked, expired or logged-out token is refused
+  mid-session. The in-process harness (`harness_bridge.rs`) skips `call_tool`, so
+  these helpers are the check there.
+- Never resolve tokens in a tool (`decode_jwt`, `capabilities_on`,
+  `AgentContext::from_auth_token`): ask the `Session`.
+- `auth_status` reports the same resolved session (principal, did, capabilities,
+  or the `AuthError`), so `authenticated` is true exactly when a tool call passes.
 
 ## Tool files (`tools/`)
 
@@ -26,7 +49,7 @@ is a second, raw-link parser slated for deletion.
 ## Rules
 
 - MCP does **not** go through `api/` handlers; it calls `PerspectiveInstance` directly.
-  Keep semantics aligned with the WS handlers (same capability, same `AgentContext`).
+  Keep semantics aligned with the WS handlers (same capability, same `Session::acts_as`).
 - Permission denial returns a 404-shaped JSON string (not 403) by design: don't leak
   perspective existence.
 - Multi-step writes must use `create_batch` … `commit_batch` so partial state is never

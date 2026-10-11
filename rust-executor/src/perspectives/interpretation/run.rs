@@ -1094,18 +1094,20 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // The AD4M MCP handler is the read-tool surface. Constructed here with a
     // pass-scoped McpContext — the admin credential of `harness_admin_credential`
-    // + a fresh per-pass auth-token slot. Every existing MCP tool (`query_*`,
-    // `get_*`, subject/perspective tools) becomes visible to the LLM through
-    // `Ad4mToolProvider`.
-    let mcp_context = crate::mcp::server::McpContext {
-        admin_credential: harness_admin_credential(&auth_token),
-        auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
+    // + a per-pass session opened from the caller's token. Every existing MCP tool
+    // (`query_*`, `get_*`, subject/perspective tools) becomes visible to the LLM
+    // through `Ad4mToolProvider`. The pass runs in-process, so the reach is
+    // loopback: a pass without a caller token acts as the operator.
+    let mcp_context = crate::mcp::server::McpContext::new(
+        harness_admin_credential(&auth_token),
+        crate::agent::capabilities::ListenerReach::Loopback,
         // The harness reaches tools through `list_tool_schemas` /
         // `call_tool_by_name`, which always include the dynamic per-class
         // tools regardless of this flag (it only gates the MCP transport).
         // Set explicitly so the intent is visible at the construction site.
-        dynamic_class_tools: true,
-    };
+        true,
+    )
+    .with_token(auth_token.as_deref().unwrap_or_default());
     let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
         mcp_handler,

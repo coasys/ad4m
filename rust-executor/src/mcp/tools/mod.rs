@@ -39,11 +39,12 @@ pub mod provider_impl;
 pub(crate) mod side_effects;
 pub mod subscriptions;
 
+use super::caller::Opened;
 use super::server::McpContext;
 use crate::agent::capabilities::{
-    capabilities_from_token, check_capability, defs::AGENT_PERMIT_CAPABILITY,
-    defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
+    defs::AGENT_PERMIT_CAPABILITY, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability, ListenerReach,
 };
+use crate::agent::session::{AuthError, Session};
 use crate::agent::AgentContext;
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -59,21 +60,52 @@ use rmcp::{
 };
 
 use serde_json::json;
+use std::sync::Arc;
 
 // HTTP request parts injected by rmcp's streamable-HTTP transport into each request's extensions.
-// Used to extract the Authorization header for admin-credential bypass.
 use axum::http::request::Parts as HttpRequestParts;
+
+/// What a refused caller is told: how to authenticate.
+const AUTHENTICATE_HINT: &str = "Use request_capability + generate_jwt, login_email, or signup + \
+     verify_email_code to authenticate.";
+
+/// The refusal for a caller without a working session: anonymous (`None`), or a token that
+/// opens none or stopped working (`Some`). Every refusal starts "Authentication required".
+pub(crate) fn authentication_required(why: Option<&AuthError>) -> String {
+    match why {
+        None => format!("Authentication required. {AUTHENTICATE_HINT}"),
+        Some(e) => format!("Authentication required: {e}. {AUTHENTICATE_HINT}"),
+    }
+}
+
+/// What one HTTP request contributes to authentication: its `Authorization` credential and
+/// the reach of the listener it arrived on. Calls that do not come over HTTP (the
+/// interpretation harness, tests) contribute nothing.
+#[derive(Default)]
+pub(crate) struct RequestAuth {
+    pub header: Option<String>,
+    pub reach: Option<ListenerReach>,
+}
+
+impl RequestAuth {
+    pub(crate) fn of(context: &RequestContext<RoleServer>) -> Self {
+        let parts = context.extensions.get::<HttpRequestParts>();
+        RequestAuth {
+            header: parts.and_then(bearer_credential),
+            reach: parts.map(crate::api::auth::listener_reach),
+        }
+    }
+}
 
 /// The credential carried by this request's `Authorization` header, if any.
 ///
 /// A `Bearer <value>` header yields `<value>`; any other scheme yields the whole header
 /// verbatim, because an admin credential may be sent raw. Returns `None` when the header
 /// is absent — which callers must distinguish from an empty or unusable one.
-fn bearer_credential(context: &RequestContext<RoleServer>) -> Option<String> {
-    context
-        .extensions
-        .get::<HttpRequestParts>()
-        .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
+fn bearer_credential(parts: &HttpRequestParts) -> Option<String> {
+    parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .map(|h| {
             let mut parts = h.splitn(2, char::is_whitespace);
@@ -118,9 +150,9 @@ to read, instance_create to write.";
 /// These are the auth bootstrapping tools for multi-user mode, plus the
 /// documentation (which is what tells a cold agent how to authenticate).
 ///
-/// Being listed here only means `call_tool` does not reject the call outright.
-/// `request_capability` additionally adopts a header credential and withholds the
-/// auto-permit (and the mint code) from any session without the PERMIT capability — see
+/// Being listed here only means `call_tool` does not refuse an anonymous caller or a
+/// token that does not work. `request_capability` still withholds the auto-permit (and
+/// the mint code) from any session without the PERMIT capability — see
 /// `handle_capability_request` in auth.rs (issue #851, sub-problem 3).
 pub(crate) const AUTH_TOOLS: &[&str] = &[
     "get_documentation",
@@ -175,20 +207,29 @@ impl ServerHandler for Ad4mMcpHandler {
     ) -> Result<CallToolResult, ErrorData> {
         let tool_name = request.name.to_string();
 
-        // Check if tool requires authentication
-        if AUTH_TOOLS.contains(&tool_name.as_str()) {
-            // The auth tools run without a credential by design, but they still need to
-            // *see* one: `auth_status` reports the session token, and a header-only
-            // client has none until something adopts it. Result ignored — absence is
-            // not an error here.
-            self.adopt_header_credential(&context).await;
-        } else if !self.check_auth(&tool_name, &context).await {
-            return Ok(CallToolResult::error(vec![Content::text(
-                json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
-            )]));
+        // Every call resolves its caller, so a header token opens (and the MCP session
+        // remembers) a session before any tool runs, auth tools included: `auth_status`
+        // then reports the session the other tools use. The auth tools run whatever the
+        // outcome; every other tool needs a working, authenticated session.
+        let caller = self.caller(RequestAuth::of(&context)).await;
+        if !AUTH_TOOLS.contains(&tool_name.as_str()) {
+            if let Err(refusal) = authenticated(caller) {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({ "error": refusal }).to_string(),
+                )]));
+            }
         }
 
         self.dispatch_tool(request, context).await
+    }
+}
+
+/// `opened` if it is a working session that is not anonymous, else the refusal.
+fn authenticated(opened: Opened) -> Result<Arc<Session>, String> {
+    match opened {
+        Ok(session) if session.is_authenticated() => Ok(session),
+        Ok(_) => Err(authentication_required(None)),
+        Err(e) => Err(authentication_required(Some(&e))),
     }
 }
 
@@ -200,113 +241,39 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Unified authentication check for MCP tool calls.
-    ///
-    /// Different MCP clients provide credentials in different ways:
-    /// - Some store the JWT/credential in the MCP session (via generate_jwt/login_email)
-    /// - Some send it per-request in the HTTP Authorization header (mcporter, .mcp.json headers)
-    /// - Some do both
-    ///
-    /// This method checks all sources and stores the token in the session if found
-    /// via HTTP header, so downstream helpers (get_agent_context, get_capabilities) work.
-    async fn check_auth(&self, _tool_name: &str, context: &RequestContext<RoleServer>) -> bool {
-        // The context contributes exactly one input to the verdict: the bearer
-        // header. Everything after extraction lives in `check_auth_with_header`,
-        // which tests can drive — a `RequestContext<RoleServer>` cannot be
-        // fabricated outside rmcp (its `Peer` constructor is `pub(crate)`).
-        self.check_auth_with_header(bearer_credential(context))
+    /// The caller of one call: the MCP session's [`Session`], opened from the request's
+    /// header token or a login tool's token and checked again now. See
+    /// [`crate::mcp::caller::Caller::resolve`].
+    pub(crate) async fn caller(&self, request: RequestAuth) -> Opened {
+        self.context
+            .caller
+            .resolve(
+                request.header.as_deref(),
+                &self.context.admin_credential,
+                request.reach.unwrap_or(self.context.reach),
+            )
             .await
     }
 
-    /// Context-free body of [`Self::check_auth`]: decides the verdict from the
-    /// session token, the configured admin credential, and the (already
-    /// extracted) bearer header.
-    async fn check_auth_with_header(&self, header_token: Option<String>) -> bool {
-        let session_token = self
-            .context
-            .auth_token
-            .read()
-            .await
-            .clone()
-            .unwrap_or_default();
-
-        let admin_cred = &self.context.admin_credential;
-
-        // 1. Session token matches admin credential → pass
-        if let Some(cred) = admin_cred {
-            if !session_token.is_empty() && cred.expose_for_compare(&session_token) {
-                return true;
-            }
-        }
-
-        // 2. Session token is a valid JWT → pass
-        if !session_token.is_empty() {
-            let caps = capabilities_from_token(session_token.clone(), admin_cred);
-            if caps.is_ok() {
-                return true;
-            }
-        }
-
-        // 3. Try HTTP Authorization header (for clients like mcporter that send
-        //    credentials per-request rather than using the MCP session)
-        let header_present = header_token.is_some();
-        if self.adopt_credential(header_token).await {
-            return true;
-        }
-
-        // 4. No admin credential configured and no token → single-user local mode
-        //    (mirrors REST localhost trust model)
-        if admin_cred.is_none() && session_token.is_empty() && !header_present {
-            return true;
-        }
-
-        // Everything else → reject
-        false
+    /// The caller of a tool call, which must hold a working session that is not anonymous.
+    /// `call_tool` resolved it with the request's header already, so this reads what the
+    /// MCP session remembers, checked again. The in-process harness reaches tools without
+    /// `call_tool`, so the check here is what refuses its dead or anonymous callers.
+    pub(crate) async fn session(&self) -> Result<Arc<Session>, String> {
+        authenticated(self.caller(RequestAuth::default()).await)
     }
 
-    /// Store a valid `Authorization` credential from this request into the session.
-    ///
-    /// Returns whether one was adopted. Called for every tool, including the ones that
-    /// skip [`Self::check_auth`]: a client that authenticates purely by header (mcporter,
-    /// the OpenClaw plugin, any `.mcp.json` `headers` entry) otherwise leaves the session
-    /// token empty, and `auth_status` — which reads only the session — answers
-    /// "not authenticated" to a caller whose every other tool call succeeds. That reading
-    /// is what sends an agent back through a login it does not need.
-    ///
-    /// Only a credential that already passes validation is stored, so this widens where
-    /// an accepted credential is remembered, never which credentials are accepted.
-    async fn adopt_header_credential(&self, context: &RequestContext<RoleServer>) -> bool {
-        self.adopt_credential(bearer_credential(context)).await
-    }
-
-    /// Context-free body of [`Self::adopt_header_credential`], split out for the
-    /// same reason as [`Self::check_auth_with_header`].
-    async fn adopt_credential(&self, header_token: Option<String>) -> bool {
-        let Some(header_token) = header_token else {
-            return false;
-        };
-        let admin_cred = &self.context.admin_credential;
-
-        // Header matches admin credential → store & pass. The header's value is the
-        // credential, so the secret itself is never read out.
-        if let Some(cred) = admin_cred {
-            if cred.expose_for_compare(&header_token) {
-                let mut guard = self.context.auth_token.write().await;
-                *guard = Some(header_token);
-                return true;
-            }
+    /// The caller's session if it holds `capability`.
+    pub(crate) async fn require(&self, capability: &Capability) -> Result<Arc<Session>, String> {
+        let session = self.session().await?;
+        if !session.may(capability) {
+            return Err(format!(
+                "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
+                session.capabilities(),
+                capability
+            ));
         }
-
-        // Header is a valid JWT → store & pass
-        if !header_token.is_empty()
-            && capabilities_from_token(header_token.clone(), admin_cred).is_ok()
-        {
-            let mut guard = self.context.auth_token.write().await;
-            *guard = Some(header_token);
-            return true;
-        }
-
-        false
+        Ok(session)
     }
 
     /// Build the tool router manually, registering all tools from domain modules.
@@ -490,66 +457,42 @@ impl Ad4mMcpHandler {
     // Shared Helpers
     // ========================================================================
 
-    /// Get auth token from context
-    pub(crate) async fn get_auth_token(&self) -> Option<String> {
-        self.context.auth_token.read().await.clone()
-    }
-
-    /// Get agent context, requiring authentication
+    /// The agent the caller acts as: a user as that user, the operator and apps as the
+    /// node's main agent ([`Session::acts_as`]).
     pub(crate) async fn get_agent_context(&self) -> Result<AgentContext, String> {
-        match self.get_auth_token().await {
-            Some(token) if !token.is_empty() => self.agent_context_for(&token),
-            _ => Err("Authentication required. Use request_capability + generate_jwt, login_email, or signup + verify_email_code first.".to_string()),
-        }
+        Ok(self.session().await?.acts_as())
     }
 
-    /// The agent a token acts as in this session. See [`AgentContext::from_auth_token`].
-    pub(crate) fn agent_context_for(&self, token: &str) -> Result<AgentContext, String> {
-        let is_admin = crate::agent::capabilities::is_admin_credential_token(
-            token,
-            &self.context.admin_credential,
-        );
-        AgentContext::from_auth_token(token.to_string(), is_admin)
-            .map_err(|e| format!("Unauthorized: {}", e))
-    }
-
-    /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
-    pub(crate) async fn get_capabilities(&self) -> Result<Vec<Capability>, String> {
-        let token = self.get_auth_token().await;
-        capabilities_from_token(token.unwrap_or_default(), &self.context.admin_credential)
-    }
-
-    /// Whether the current caller may auto-permit a capability request.
+    /// Whether the caller may auto-permit a capability request.
     ///
-    /// Authentication alone is not enough: a multi-user user token authenticates
-    /// (it decodes to a valid session), but it holds no PERMIT capability, so it may
-    /// only *create* a request for the admin to approve out of band. Auto-permit hands
-    /// back the inline code, which `generate_jwt` turns into an ALL_CAPABILITY token; a
-    /// caller without PERMIT must never receive it (issue #851, sub-problem 3). The
-    /// admin credential decodes to ALL_CAPABILITY, which contains PERMIT, so the admin
-    /// still auto-permits. `request_capability_with_header` adopts a valid header
-    /// credential into the session before this runs, so reading the session token covers
-    /// header-only clients too.
+    /// Authentication alone is not enough: a multi-user user token authenticates, but it
+    /// holds no PERMIT capability, so it may only *create* a request for the admin to
+    /// approve out of band. Auto-permit hands back the inline code, which `generate_jwt`
+    /// turns into an ALL_CAPABILITY token; a caller without PERMIT must never receive it
+    /// (issue #851, sub-problem 3). The operator may do anything, so the admin credential
+    /// still auto-permits.
     ///
-    /// The check holds only on an executor with an admin credential. Without one, the empty
-    /// token holds ALL_CAPABILITY, so every caller passes, on a multi-user node also a user
-    /// who drops their token (#1059).
-    pub(crate) async fn caller_can_permit(&self) -> bool {
-        match self.get_capabilities().await {
-            Ok(caps) => check_capability(&Ok(caps), &AGENT_PERMIT_CAPABILITY).is_ok(),
-            Err(_) => false,
-        }
+    /// On a node without an admin credential a caller without a token on a loopback
+    /// listener is the operator and passes, on a multi-user node also a user who drops
+    /// their token (#1059). On a network listener that caller is anonymous and does not.
+    pub(crate) async fn caller_can_permit(&self, request: RequestAuth) -> bool {
+        self.caller(request)
+            .await
+            .is_ok_and(|session| session.may(&AGENT_PERMIT_CAPABILITY))
     }
 
-    /// Store an auth token in the session and return a success JSON response
+    /// Open the MCP session's session from a login tool's token and return a success JSON
+    /// response.
     pub(crate) async fn store_token_and_respond(
         &self,
         token: String,
         email: Option<&str>,
         message: &str,
     ) -> String {
-        let mut token_guard = self.context.auth_token.write().await;
-        *token_guard = Some(token.clone());
+        self.context
+            .caller
+            .sign_in(&token, &self.context.admin_credential, self.context.reach)
+            .await;
 
         let mut resp = json!({
             "success": true,
@@ -566,9 +509,9 @@ impl Ad4mMcpHandler {
     /// In multi-user mode, only perspectives owned by the user (or unowned) are accessible.
     /// In single-user mode, all perspectives are accessible.
     pub(crate) async fn can_access_perspective(&self, perspective: &PerspectiveHandle) -> bool {
-        // A token that no longer works reaches nothing, not the main agent's perspectives.
-        let token = self.get_auth_token().await.unwrap_or_default();
-        match self.agent_context_for(&token) {
+        // A token that no longer works, or none, reaches nothing, not the main agent's
+        // perspectives.
+        match self.get_agent_context().await {
             Ok(context) => crate::helpers::can_access_perspective(&context.user_email, perspective),
             Err(_) => false,
         }
@@ -576,8 +519,8 @@ impl Ad4mMcpHandler {
 
     /// Get a perspective by ID, verifying the agent is authenticated, has the required capability,
     /// and has access to this perspective (multi-user isolation).
-    /// This is the standard entry point for tool handlers — DRYs out the repeated
-    /// get_perspective + get_agent_context + check_capability + ownership check pattern.
+    /// This is the standard entry point for tool handlers: the perspective, the caller's
+    /// session, its ownership check and its capability check in one place.
     pub(crate) async fn get_perspective_with_auth(
         &self,
         perspective_id: &str,
@@ -597,8 +540,7 @@ impl Ad4mMcpHandler {
             );
         }
 
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, required_capability) {
+        if let Err(e) = self.require(required_capability).await {
             return Err(format!("Capability error: {}", e));
         }
 
@@ -607,32 +549,25 @@ impl Ad4mMcpHandler {
 
     /// Convenience wrapper for read operations — checks perspective access but no write capability.
     ///
-    /// In multi-user mode (admin_credential is set), authentication is required before checking
-    /// perspective ownership. This prevents unauthenticated clients from reading main-agent
-    /// perspectives by exploiting the "no JWT → main agent context" fallback.
-    ///
-    /// In single-user mode (no admin_credential), behaviour mirrors the rest of the executor's
-    /// public API: local trust model, unauthenticated access is allowed (same as the WS-RPC
-    /// localhost behaviour).
+    /// The caller needs a working session that is not anonymous: the operator (the admin
+    /// credential, or no token on a loopback listener of a node without one), an app or a
+    /// user. `call_tool` refuses everyone else already; the in-process harness does not go
+    /// through `call_tool`, so the check runs here too.
     pub(crate) async fn get_readable_perspective(
         &self,
         perspective_id: &str,
     ) -> Result<PerspectiveInstance, String> {
-        // Defense in depth: in multi-user/admin mode, require a valid auth token before
-        // checking perspective ownership. call_tool() should already have blocked
-        // unauthenticated requests, but we enforce this here too to be safe.
-        if self.context.admin_credential.is_some() {
-            self.get_agent_context()
-                .await
-                .map_err(|e| json!({"error": e}).to_string())?;
-        }
+        let agent_context = self
+            .get_agent_context()
+            .await
+            .map_err(|e| json!({"error": e}).to_string())?;
 
         let perspective = get_perspective(perspective_id).ok_or_else(|| {
             json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
         })?;
 
         let handle = perspective.persisted.lock().await.clone();
-        if !self.can_access_perspective(&handle).await {
+        if !crate::helpers::can_access_perspective(&agent_context.user_email, &handle) {
             return Err(
                 json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string(),
             );
@@ -828,16 +763,15 @@ impl Ad4mMcpHandler {
 #[cfg(test)]
 mod agent_context_tests {
     use super::*;
-    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+    use crate::test_utils::{
+        ensure_db, expired_user_token, setup_agent, setup_wallet, MultiUserMode,
+    };
 
     fn handler(session_token: &str) -> Ad4mMcpHandler {
-        Ad4mMcpHandler::new(McpContext {
-            admin_credential: Some("test-admin".into()),
-            auth_token: std::sync::Arc::new(tokio::sync::RwLock::new(Some(
-                session_token.to_string(),
-            ))),
-            dynamic_class_tools: false,
-        })
+        Ad4mMcpHandler::new(
+            McpContext::new(Some("test-admin".into()), ListenerReach::Network, false)
+                .with_token(session_token),
+        )
     }
 
     // MCP tools used to act as the node's main agent once a session token stopped decoding.
@@ -881,9 +815,167 @@ mod agent_context_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let token =
-            crate::user_management::generate_user_jwt("mcp.user@example.org", "test").unwrap();
-        let context = handler(&token).get_agent_context().await.unwrap();
-        assert_eq!(context.user_email.as_deref(), Some("mcp.user@example.org"));
+        let email = "mcp.user@example.org";
+        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let handler = handler(&token);
+        let context = handler.get_agent_context().await.unwrap();
+        assert_eq!(context.user_email.as_deref(), Some(email));
+        // A user never acts as the node: its own DID, not the main agent's.
+        let did = handler.get_my_did(profile_params()).await;
+        assert_eq!(
+            did,
+            crate::agent::AgentService::get_user_did_by_email(email).unwrap()
+        );
+        assert_ne!(did, crate::agent::did());
+    }
+
+    fn profile_params(
+    ) -> rmcp::handler::server::wrapper::Parameters<super::profiles::GetAgentProfileParams> {
+        rmcp::handler::server::wrapper::Parameters(super::profiles::GetAgentProfileParams {})
+    }
+
+    fn app_token(capabilities: Vec<Capability>) -> String {
+        setup_wallet();
+        setup_agent();
+        crate::agent::capabilities::token::generate_jwt(
+            "mcp session test".to_string(),
+            3600,
+            crate::agent::capabilities::AuthInfo {
+                capabilities: Some(capabilities),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    // #851 2: the admin credential authenticates as the operator, as on RPC.
+    #[tokio::test]
+    async fn the_admin_credential_is_the_operator_with_every_capability() {
+        setup_wallet();
+        setup_agent();
+        let session = handler("test-admin").session().await.unwrap();
+        assert!(session.is_operator());
+        assert!(handler("test-admin")
+            .require(&crate::agent::capabilities::ALL_CAPABILITY)
+            .await
+            .is_ok());
+        assert_eq!(
+            handler("test-admin").get_my_did(profile_params()).await,
+            crate::agent::did()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_token_is_limited_to_its_capabilities_and_acts_as_the_node() {
+        let token = app_token(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]);
+        let handler = handler(&token);
+        assert!(handler
+            .require(&PERSPECTIVE_CREATE_CAPABILITY)
+            .await
+            .is_ok());
+        let err = handler
+            .require(&crate::agent::capabilities::LANGUAGE_READ_CAPABILITY)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Capability is not matched"), "{err}");
+        assert!(handler.get_agent_context().await.unwrap().is_main_agent);
+        assert!(!handler.caller_can_permit(RequestAuth::default()).await);
+    }
+
+    #[tokio::test]
+    async fn a_token_revoked_mid_session_is_refused_by_every_tool() {
+        let token = app_token(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
+        let handler = handler(&token);
+        let session = handler.session().await.unwrap();
+        let crate::agent::session::Principal::App { token_id, .. } = &session.principal else {
+            panic!("expected an app session");
+        };
+        crate::agent::revoked::RevokedSet::global().revoke(token_id.clone(), u64::MAX);
+
+        let err = handler.session().await.unwrap_err();
+        assert!(err.starts_with("Authentication required"), "{err}");
+        let did = handler.get_my_did(profile_params()).await;
+        assert!(did.contains("Unauthorized access"), "{did}");
+        let listed = handler
+            .list_perspectives(rmcp::handler::server::wrapper::Parameters(
+                super::perspectives::ListPerspectivesParams {},
+            ))
+            .await;
+        assert!(listed.contains("Authentication required"), "{listed}");
+    }
+
+    // A user who logs out (their session cutoff moves past the token) loses the MCP session.
+    #[tokio::test]
+    async fn a_user_session_ends_at_the_users_cutoff() {
+        setup_wallet();
+        setup_agent();
+        let email = "mcp.cutoff@example.org";
+        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let handler = handler(&token);
+        assert!(handler.session().await.is_ok());
+
+        crate::agent::revoked::SessionCutoffs::global().set(email, u64::MAX);
+        let err = handler.get_agent_context().await.unwrap_err();
+        assert!(err.contains("Unauthorized access"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn without_a_credential_no_token_is_the_operator_only_on_loopback() {
+        ensure_db();
+        let local = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
+        assert!(local.session().await.unwrap().is_operator());
+        assert!(local.caller_can_permit(RequestAuth::default()).await);
+
+        // #1059: an MCP_HOST bind beyond loopback makes no-token callers anonymous.
+        let remote = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Network, false));
+        let err = remote.session().await.unwrap_err();
+        assert!(err.starts_with("Authentication required."), "{err}");
+        assert!(!remote.caller_can_permit(RequestAuth::default()).await);
+    }
+
+    // A proxied request reads as a network one, as on the API: no operator through a proxy.
+    #[tokio::test]
+    async fn a_forwarded_request_without_a_token_is_anonymous() {
+        ensure_db();
+        let handler = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
+        let request = axum::http::Request::builder()
+            .header("x-forwarded-for", "203.0.113.9")
+            .extension(ListenerReach::Loopback)
+            .body(())
+            .unwrap();
+        let (parts, _) = request.into_parts();
+        let auth = RequestAuth {
+            header: bearer_credential(&parts),
+            reach: Some(crate::api::auth::listener_reach(&parts)),
+        };
+        assert!(!handler.caller(auth).await.unwrap().is_authenticated());
+    }
+
+    #[test]
+    fn the_bearer_scheme_is_stripped_and_a_raw_credential_kept() {
+        let parts = |value: &str| {
+            let request = axum::http::Request::builder()
+                .header("authorization", value)
+                .body(())
+                .unwrap();
+            request.into_parts().0
+        };
+        assert_eq!(
+            bearer_credential(&parts("Bearer abc")).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            bearer_credential(&parts("bearer abc")).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(bearer_credential(&parts("abc")).as_deref(), Some("abc"));
+        let none = axum::http::Request::builder()
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert_eq!(bearer_credential(&none), None);
     }
 }

@@ -87,6 +87,16 @@ pub fn setup_agent() {
         .create_new_keys();
 }
 
+/// Opens an in-memory database when no test has opened one, so it does not wipe one another
+/// test is using.
+pub fn ensure_db() {
+    let db = crate::db::Ad4mDb::global_instance();
+    let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if db.is_none() {
+        *db = Some(crate::db::Ad4mDb::new(":memory:").expect("an in-memory database"));
+    }
+}
+
 /// Turns multi-user mode on, on a fresh in-memory database, and off again when dropped,
 /// even if the test panics.
 pub struct MultiUserMode;
@@ -149,13 +159,7 @@ pub fn expired_user_token(email: &str) -> String {
 /// run in parallel, because the registry's file path is global. Also opens an in-memory
 /// database for the revoked tokens when no test has opened one.
 pub fn use_test_apps_file() {
-    {
-        let db = crate::db::Ad4mDb::global_instance();
-        let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if db.is_none() {
-            *db = Some(crate::db::Ad4mDb::new(":memory:").expect("an in-memory database"));
-        }
-    }
+    ensure_db();
     static APPS_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     let dir =
         APPS_DIR.get_or_init(|| tempfile::tempdir().expect("a temp dir for the app registry"));

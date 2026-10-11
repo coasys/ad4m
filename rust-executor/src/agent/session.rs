@@ -10,8 +10,8 @@
 //!   token is an app. Both are limited to the token's capabilities.
 //!
 //! A token that opens no session is refused where it arrives. [`Session::check`] runs again
-//! on every request and every delivered event. MCP still resolves its tokens itself
-//! (`capabilities_from_token`, `AgentContext::from_auth_token`).
+//! on every request and every delivered event. MCP opens one per MCP session the same way
+//! (`mcp::caller`) and checks it on every tool call.
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
