@@ -1,15 +1,17 @@
 pub mod apps_map;
 pub mod defs;
-pub mod requests_map;
+pub mod pending;
 pub mod token;
 pub mod types;
 
 pub use defs::*;
-use requests_map::{get_request, insert_request, remove_request};
+use pending::PendingApprovals;
+pub use pending::MAX_CODE_ATTEMPTS;
 pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
+use crate::agent::revoked::now;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use crate::secret::Secret;
@@ -20,16 +22,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in seconds
-
-/// Wrong codes a capability request may receive before it stops accepting any code.
-/// The code has six digits, so without a limit anyone who learned a request id could
-/// try every code.
-pub const MAX_CODE_ATTEMPTS: u32 = 5;
-
-lazy_static! {
-    static ref FAILED_CODE_ATTEMPTS: std::sync::Mutex<HashMap<String, u32>> =
-        std::sync::Mutex::new(HashMap::new());
-}
 
 // Cache for last_seen timestamps to avoid repeated database lookups
 // Maps user_email -> (last_checked_timestamp, last_seen_value)
@@ -362,6 +354,7 @@ pub async fn request_capability(auth_info: AuthInfo) -> String {
         addon: Some(serde_json::to_string(&auth_extended).unwrap()),
     };
 
+    PendingApprovals::global().request(request_id.clone(), auth_extended.auth, now());
     get_global_pubsub()
         .await
         .publish_event(Event::exception(&exception_info));
@@ -369,54 +362,39 @@ pub async fn request_capability(auth_info: AuthInfo) -> String {
     request_id
 }
 
+/// The operator approves a pending request: returns the code the app redeems, for the
+/// operator only.
 pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
-    let rand = gen_random_digits();
-    let request_key = gen_request_key(&auth_info_extended.request_id, &rand);
-    insert_request(request_key.clone(), auth_info_extended.auth.clone())?;
-    Ok(rand)
+    let code = gen_random_digits();
+    PendingApprovals::global().approve(
+        &auth_info_extended.request_id,
+        auth_info_extended.auth,
+        code.clone(),
+        now(),
+    )?;
+    Ok(code)
 }
 
 /// Redeems a permitted request's code for the app's token. The token goes only to the
 /// caller: the app registry keeps its id.
 pub async fn generate_capability_token(request_id: String, rand: String) -> Result<Secret, String> {
-    let auth_key = gen_request_key(&request_id, &rand);
+    let pending = PendingApprovals::global();
+    let approval = pending
+        .redeem(&request_id, &rand, now())
+        .map_err(|e| e.to_string())?;
+    let auth = approval.auth().clone();
 
-    let auth = {
-        let mut attempts = FAILED_CODE_ATTEMPTS.lock().map_err(|e| e.to_string())?;
-        match get_request(&auth_key)? {
-            Some(auth) => {
-                attempts.remove(&request_id);
-                auth
-            }
-            // Callers without a token reach this, so only ids with a permitted request get an
-            // entry, and the entry goes when the request does. A made-up id records nothing.
-            None if !requests_map::has_requests_for(&request_id)? => {
-                attempts.remove(&request_id);
-                return Err("Can't find permitted request".to_string());
-            }
-            None => {
-                let count = attempts.entry(request_id.clone()).or_insert(0);
-                *count += 1;
-                if *count >= MAX_CODE_ATTEMPTS {
-                    requests_map::remove_requests_for(&request_id)?;
-                    attempts.remove(&request_id);
-                    return Err(
-                        "Too many wrong codes for this request; request access again".to_string(),
-                    );
-                }
-                return Err("Can't find permitted request".to_string());
-            }
-        }
-    };
-
-    let issued = token::issue_jwt(
+    let issued = match token::issue_jwt(
         auth.app_name.clone(),
         DEFAULT_TOKEN_VALID_PERIOD,
         auth.clone(),
-    )
-    .map_err(|e| e.to_string())?;
-
-    remove_request(&auth_key)?;
+    ) {
+        Ok(issued) => issued,
+        Err(e) => {
+            pending.restore(request_id, approval);
+            return Err(e.to_string());
+        }
+    };
 
     let auth_for_publish = auth.clone();
 
@@ -450,10 +428,6 @@ pub fn gen_random_digits() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     rng.gen_range(100000..1000000).to_string()
-}
-
-pub fn gen_request_key(request_id: &str, rand: &str) -> String {
-    format!("{}-{}", request_id, rand)
 }
 
 #[cfg(test)]
@@ -584,12 +558,6 @@ mod tests {
     fn gen_random_digits_returns_a_6_digit_string() {
         let rand = gen_random_digits();
         assert!(rand.len() == 6 && rand.chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn gen_request_key_joins_the_request_id_and_rand() {
-        let key = gen_request_key("my-request-id", "123456");
-        assert_eq!(key, "my-request-id-123456");
     }
 
     #[test]
@@ -739,35 +707,32 @@ mod app_token_tests {
     // `agent.generateJwt` needs no token, so anyone can send made-up request ids. They must
     // not leave entries behind, or repeated calls fill memory.
     #[tokio::test]
-    async fn made_up_request_ids_leave_no_attempt_entries() {
-        for i in 0..10_000 {
-            let _ = generate_capability_token(format!("made-up-{}", i), "100000".to_string()).await;
+    async fn made_up_request_ids_leave_no_entries() {
+        let ids: Vec<String> = (0..10_000).map(|i| format!("made-up-{i}")).collect();
+        for id in &ids {
+            let err = generate_capability_token(id.clone(), "100000".to_string())
+                .await
+                .unwrap_err();
+            assert_eq!(err, "Can't find permitted request");
         }
-        let left = FAILED_CODE_ATTEMPTS
-            .lock()
-            .unwrap()
-            .keys()
-            .filter(|id| id.starts_with("made-up-"))
-            .count();
-        assert_eq!(left, 0);
+        assert!(!ids.iter().any(|id| PendingApprovals::global().contains(id)));
     }
 
-    // The entry for a real request goes once its codes are gone.
+    // The request goes once it runs out of code attempts.
     #[tokio::test]
-    async fn a_locked_out_request_leaves_no_attempt_entry() {
+    async fn a_locked_out_request_is_deleted() {
         let (request_id, code) = permitted_request().await;
+        assert!(PendingApprovals::global().contains(&request_id));
         let wrong = if code == "100000" { "100001" } else { "100000" };
         for _ in 0..MAX_CODE_ATTEMPTS {
             let _ = generate_capability_token(request_id.clone(), wrong.to_string()).await;
         }
-        assert!(!FAILED_CODE_ATTEMPTS
-            .lock()
-            .unwrap()
-            .contains_key(&request_id));
+        assert!(!PendingApprovals::global().contains(&request_id));
     }
 
-    // Request ids are UUIDs, which contain dashes, and the stored keys are `{id}-{code}`.
-    // Wrong codes sent for only the start of someone else's id must not lock that request out.
+    // Request ids are UUIDs, which contain dashes; requests used to be stored under
+    // `{id}-{code}`. Wrong codes sent for only the start of someone else's id must not lock
+    // that request out.
     #[tokio::test]
     async fn wrong_codes_for_a_prefix_of_an_id_leave_that_request_alone() {
         crate::test_utils::setup_wallet();
@@ -797,6 +762,37 @@ mod app_token_tests {
             );
         }
         assert!(generate_capability_token(request_id, code).await.is_ok());
+    }
+
+    // A code redeems once. A token that cannot be issued (a locked wallet) uses up nothing:
+    // the app retries with the same code.
+    #[tokio::test]
+    async fn a_code_redeems_once_and_a_locked_wallet_keeps_the_request() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let (request_id, code) = permitted_request().await;
+
+        let backend = crate::wallet::wallet_backend();
+        backend.lock("pending-locked-test");
+        let locked = generate_capability_token(request_id.clone(), code.clone()).await;
+        backend
+            .unlock("pending-locked-test")
+            .expect("restore the shared wallet");
+        assert!(locked.unwrap_err().contains("Executor is locked"));
+        assert!(PendingApprovals::global().contains(&request_id));
+
+        assert!(generate_capability_token(request_id.clone(), code.clone())
+            .await
+            .is_ok());
+        assert!(!PendingApprovals::global().contains(&request_id));
+        assert_eq!(
+            generate_capability_token(request_id.clone(), code)
+                .await
+                .unwrap_err(),
+            "Can't find permitted request"
+        );
+        apps_map::remove_app(&request_id).unwrap();
     }
 
     // The `apps-changed` event and the app list reach sessions other than the app, so

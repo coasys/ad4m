@@ -521,7 +521,7 @@ mod capability_mint_tests {
 
     #[tokio::test]
     async fn an_authenticated_caller_still_gets_a_permitted_code() {
-        use crate::agent::capabilities::{gen_request_key, requests_map};
+        use crate::agent::capabilities::pending::PendingApprovals;
 
         let handler = handler_with_admin_credential();
         let resp = handler.handle_capability_request(mint_params(), true).await;
@@ -532,11 +532,8 @@ mod capability_mint_tests {
             .expect("authenticated caller should receive the code inline");
         // Not just an inline code: the permit must actually be registered,
         // i.e. generate_jwt with this pair would succeed.
-        let key = gen_request_key(request_id, code);
         assert!(
-            requests_map::get_request(&key)
-                .expect("requests map readable")
-                .is_some(),
+            PendingApprovals::global().has_code(request_id, code),
             "permit was not registered for the returned request_id/code"
         );
     }
