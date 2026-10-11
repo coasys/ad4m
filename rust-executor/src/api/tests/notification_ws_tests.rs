@@ -735,9 +735,9 @@ async fn triggered_event_reaches_only_the_owners_stream() {
         ))
     };
     let all = crate::api::event_interest::watching_all;
-    let mut alice = build_event_stream(check(), all(), Some(ALICE.to_string()), false, false).await;
-    let mut bob = build_event_stream(check(), all(), Some(BOB.to_string()), false, false).await;
-    let mut main = build_event_stream(check(), all(), None, true, true).await;
+    let mut alice = build_event_stream(check(), all(), Some(ALICE.to_string()), false).await;
+    let mut bob = build_event_stream(check(), all(), Some(BOB.to_string()), false).await;
+    let mut main = build_event_stream(check(), all(), None, true).await;
     let pubsub = get_global_pubsub().await;
 
     pubsub

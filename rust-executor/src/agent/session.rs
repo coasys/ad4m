@@ -15,7 +15,8 @@
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
-    Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
+    Capability, ListenerReach, AGENT_AUTH_CAPABILITY, AGENT_PERMIT_CAPABILITY, ALL_CAPABILITY,
+    TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::revoked::{RevokedSet, SessionCutoffs};
 use super::AgentService;
@@ -281,6 +282,7 @@ impl Session {
             Audience::Everyone => true,
             Audience::Authenticated => !matches!(self.principal, Principal::Anonymous { .. }),
             Audience::Operator => self.is_operator(),
+            Audience::Approvers => self.may(&AGENT_PERMIT_CAPABILITY),
             Audience::Dids(dids) => self
                 .acts_as_did()
                 .is_some_and(|did| dids.iter().any(|d| d == did)),

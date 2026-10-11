@@ -24,7 +24,8 @@ pub struct BootstrapSeed {
 
 use serde::{Deserialize, Serialize};
 
-use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
+use crate::events::Event;
+use crate::pubsub::get_global_pubsub;
 use crate::types::{ExceptionInfo, ExceptionType, NotificationInput};
 use crate::{agent::did, db::Ad4mDb, types::SentMessage};
 
@@ -204,11 +205,7 @@ impl RuntimeService {
 
             get_global_pubsub()
                 .await
-                .publish(
-                    &EXCEPTION_OCCURRED_TOPIC,
-                    &serde_json::to_string(&exception_info).unwrap(),
-                )
-                .await;
+                .publish_event(Event::exception(&exception_info));
         }
 
         Ok(notification_id)

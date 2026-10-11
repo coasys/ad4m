@@ -6,6 +6,7 @@
 //! both hold. The payload is serialized once, here, not once per socket.
 
 use crate::api::events_ws::events as names;
+use crate::types::{Agent, AgentStatus, ExceptionInfo, ExceptionType};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -119,9 +120,39 @@ pub enum Audience {
     Authenticated,
     /// The node's operator only.
     Operator,
+    /// The sessions that may approve apps: the operator, and any app or user whose token
+    /// holds `AGENT_PERMIT`. App approvals and notification install requests go here: these
+    /// sessions answer them.
+    Approvers,
     /// The sessions that act as one of these DIDs. A user acts as their own DID; the
     /// operator and apps act as the node's main agent.
     Dids(Vec<String>),
+}
+
+impl Audience {
+    /// The sessions of the agent `did`. An agent status without a DID (before
+    /// `agent.generate()`) names no agent, so it goes to every session.
+    pub fn agent(did: Option<&str>) -> Audience {
+        match did {
+            Some(did) => Audience::Dids(vec![did.to_string()]),
+            None => Audience::Everyone,
+        }
+    }
+
+    /// Who sees an exception of type `kind`. A capability request carries the request id
+    /// that `agent.generateJwt` redeems, and a notification install request carries the
+    /// webhook's credentials, so they go to approvers. The other types go to every session.
+    pub fn for_exception(kind: &ExceptionType) -> Audience {
+        // No `_` arm: a new exception type does not compile until someone decides who sees it.
+        match kind {
+            ExceptionType::LanguageIsNotLoaded
+            | ExceptionType::ExpressionIsNotVerified
+            | ExceptionType::AgentIsUntrusted => Audience::Everyone,
+            ExceptionType::CapabilityRequested | ExceptionType::InstallNotificationRequest => {
+                Audience::Approvers
+            }
+        }
+    }
 }
 
 /// An event and the sessions that may receive it.
@@ -159,6 +190,24 @@ impl Event {
         }
     }
 
+    /// `agent-status-changed` for `status`, to the agent it names.
+    pub fn agent_status(status: &AgentStatus) -> Event {
+        let audience = Audience::agent(status.did.as_deref());
+        Event::new(Topic::AgentStatusChanged, audience, status)
+    }
+
+    /// `agent-updated` for `agent`'s profile, to that agent.
+    pub fn agent_updated(agent: &Agent) -> Event {
+        let audience = Audience::agent(Some(&agent.did));
+        Event::new(Topic::AgentUpdated, audience, agent)
+    }
+
+    /// `exception-occurred` for `exception`, to the audience of its type.
+    pub fn exception(exception: &ExceptionInfo) -> Event {
+        let audience = Audience::for_exception(&exception.r#type);
+        Event::new(Topic::ExceptionOccurred, audience, exception)
+    }
+
     /// The event is about perspective `uuid`, whatever the payload says.
     pub fn for_perspective(mut self, uuid: impl Into<String>) -> Event {
         self.perspective = Some(uuid.into());
@@ -180,6 +229,39 @@ mod tests {
             assert_eq!(topic.to_string(), topic.as_str());
         }
         assert_eq!(Topic::from_wire("link-added-topic"), None);
+    }
+
+    // The rule `exception_visible` applied per socket before exceptions named their audience.
+    #[test]
+    fn approval_requests_go_to_approvers_and_other_exceptions_to_everyone() {
+        use ExceptionType::*;
+        for (kind, audience) in [
+            (LanguageIsNotLoaded, Audience::Everyone),
+            (ExpressionIsNotVerified, Audience::Everyone),
+            (AgentIsUntrusted, Audience::Everyone),
+            (CapabilityRequested, Audience::Approvers),
+            (InstallNotificationRequest, Audience::Approvers),
+        ] {
+            let info = ExceptionInfo {
+                title: "t".into(),
+                message: "m".into(),
+                r#type: kind,
+                addon: Some("a".into()),
+            };
+            let e = Event::exception(&info);
+            assert_eq!(e.topic, Topic::ExceptionOccurred);
+            assert_eq!(e.audience, audience, "{:?}", info.r#type);
+            assert_eq!(e.payload, serde_json::to_value(&info).unwrap());
+        }
+    }
+
+    #[test]
+    fn an_agent_event_without_a_did_goes_to_everyone() {
+        assert_eq!(
+            Audience::agent(Some("did:x")),
+            Audience::Dids(vec!["did:x".into()])
+        );
+        assert_eq!(Audience::agent(None), Audience::Everyone);
     }
 
     #[test]

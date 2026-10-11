@@ -17,9 +17,9 @@
 //!
 //! | Type                          | Payload key   | Filtering              | Description                          |
 //! |-------------------------------|---------------|------------------------|--------------------------------------|
-//! | `agent-status-changed`        | `agent`       | DID                    | Agent status changed                 |
-//! | `agent-updated`               | `agent`       | DID                    | Agent profile updated                |
-//! | `apps-changed`                | (inline)      | `AGENT_PERMIT` holders | Installed apps changed (no token)    |
+//! | `agent-status-changed`        | `agent`       | typed: the agent's DID | Agent status changed                 |
+//! | `agent-updated`               | `agent`       | typed: the agent's DID | Agent profile updated                |
+//! | `apps-changed`                | (inline)      | typed: approvers       | Installed apps changed (no token)    |
 //! | `hosting-user-info-changed`   | (inline)      | email                  | Hosting user info changed            |
 //! | `perspective-added`           | (inline)      | typed: `owner` only    | New perspective created              |
 //! | `perspective-removed`         | (inline)      | typed: `owner` only    | Perspective deleted                  |
@@ -31,7 +31,7 @@
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
 //! | `notification-triggered`      | `notification` + `perspectiveUuid` | notification owner DID | Notification triggered |
-//! | `exception-occurred`          | `exception`   | per type, see [`exception_visible`] | Exception occurred      |
+//! | `exception-occurred`          | `exception`   | typed: per type, see `Audience::for_exception` | Exception occurred |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
 //! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
@@ -104,9 +104,8 @@ impl LazyDid {
     }
 }
 use crate::pubsub::{
-    get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
-    AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
-    AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC,
+    get_global_pubsub, AI_MODEL_LOADING_STATUS, AI_TRANSCRIPTION_TEXT_TOPIC,
+    AUTO_PROCESSOR_EVENT_TOPIC, AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC,
     HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC,
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, RUNTIME_MESSAGED_RECEIVED_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
@@ -283,13 +282,9 @@ pub async fn events_ws(
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
     let is_admin = context.is_operator();
-    let can_approve_apps =
-        check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
     let session = context.session.clone();
 
-    Ok(ws.on_upgrade(move |socket| {
-        handle_events_ws(socket, session, user_email, is_admin, can_approve_apps)
-    }))
+    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, session, user_email, is_admin)))
 }
 
 /// Build the merged event stream for a given user.
@@ -302,7 +297,6 @@ pub(crate) async fn build_event_stream(
     interest: SharedInterest,
     user_email: Option<String>,
     is_admin: bool,
-    can_approve_apps: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     // The session's own agent, taken from the session: a token that stops decoding cannot
     // turn it into the main agent. Resolve the DID once at subscription time — avoids
@@ -310,15 +304,7 @@ pub(crate) async fn build_event_stream(
     // before `agent.generate()` completed this returns `None`; the per-DID filters below
     // fail closed on `None` until re-resolution succeeds.
     let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
-    build_event_stream_for(
-        session,
-        interest,
-        resolved_did,
-        user_email,
-        is_admin,
-        can_approve_apps,
-    )
-    .await
+    build_event_stream_for(session, interest, resolved_did, user_email, is_admin).await
 }
 
 /// [`build_event_stream`] with the session DID already resolved (tests
@@ -329,7 +315,6 @@ pub(crate) async fn build_event_stream_for(
     resolved_did: Option<String>,
     user_email: Option<String>,
     is_admin: bool,
-    can_approve_apps: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
@@ -337,8 +322,6 @@ pub(crate) async fn build_event_stream_for(
     let session_context = AgentContext::for_session(user_email.clone());
 
     // Clone the pre-resolved DID for each filter closure
-    let d_agent_status = resolved_did.clone();
-    let d_agent_updated = resolved_did.clone();
     let d_trans = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
 
@@ -392,24 +375,6 @@ pub(crate) async fn build_event_stream_for(
         };
     }
 
-    macro_rules! did_stream_nested {
-        ($rx:expr, $ty:expr, $key:expr, $did:expr, $filter_fn:expr) => {
-            BroadcastStream::new($rx)
-                .filter_map(|r| async { handle_broadcast_result(r) })
-                .filter_map(move |result| {
-                    let current_did = $did.clone();
-                    async move {
-                        match result {
-                            Ok(ref msg) if $filter_fn(msg, current_did.as_deref()) => {
-                                Some(wrap_event_nested($ty, $key, msg))
-                            }
-                            _ => None,
-                        }
-                    }
-                })
-        };
-    }
-
     macro_rules! broadcast_stream {
         ($rx:expr, $ty:expr) => {
             BroadcastStream::new($rx)
@@ -435,31 +400,6 @@ pub(crate) async fn build_event_stream_for(
                 })
         };
     }
-
-    // ── Agent events ──
-    let s_status = did_stream_nested!(
-        pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await,
-        events::AGENT_STATUS_CHANGED,
-        "agent",
-        d_agent_status,
-        matches_agent_did
-    );
-    let s_agent_updated = did_stream_nested!(
-        pubsub.subscribe(&AGENT_UPDATED_TOPIC).await,
-        events::AGENT_UPDATED,
-        "agent",
-        d_agent_updated,
-        matches_agent_did
-    );
-    // Apps belong to the node owner: only sessions that can approve apps see their changes.
-    let s_apps = BroadcastStream::new(pubsub.subscribe(&APPS_CHANGED).await)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| async move {
-            match result {
-                Ok(msg) if can_approve_apps => Some(wrap_event(events::APPS_CHANGED_EVENT, &msg)),
-                _ => None,
-            }
-        });
 
     let s_hosting = {
         let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
@@ -530,17 +470,6 @@ pub(crate) async fn build_event_stream_for(
                 }
             })
     };
-    let s_exc =
-        BroadcastStream::new(pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await)
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| async move {
-                match result {
-                    Ok(msg) if exception_visible(&msg, can_approve_apps) => Some(
-                        wrap_event_nested(events::EXCEPTION_OCCURRED, "exception", &msg),
-                    ),
-                    _ => None,
-                }
-            });
 
     // ── AI events ──
     let s_trans = did_stream!(
@@ -629,11 +558,7 @@ pub(crate) async fn build_event_stream_for(
     };
 
     // ── Merge all streams ──
-    let agent = stream::select(
-        stream::select(s_status, s_apps),
-        stream::select(s_agent_updated, s_hosting),
-    );
-    let runtime = stream::select(s_msg, stream::select(s_notif, s_exc));
+    let runtime = stream::select(s_msg, s_notif);
     let ai = stream::select(
         s_trans,
         stream::select(
@@ -645,7 +570,10 @@ pub(crate) async fn build_event_stream_for(
         ),
     );
 
-    let top = stream::select(agent, stream::select(s_signal, stream::select(runtime, ai)));
+    let top = stream::select(
+        s_hosting,
+        stream::select(s_signal, stream::select(runtime, ai)),
+    );
 
     // ── Typed events: the session decides who ──
     let typed = {
@@ -732,7 +660,6 @@ async fn handle_events_ws(
     session: Arc<Session>,
     user_email: Option<String>,
     is_admin: bool,
-    can_approve_apps: bool,
 ) {
     log::info!("Events WebSocket connected");
 
@@ -741,14 +668,8 @@ async fn handle_events_ws(
     let _registered = SessionRegistry::global().register(&session, revoked.clone());
 
     let interest = SharedInterest::default();
-    let mut event_stream = build_event_stream(
-        session,
-        interest.clone(),
-        user_email,
-        is_admin,
-        can_approve_apps,
-    )
-    .await;
+    let mut event_stream =
+        build_event_stream(session, interest.clone(), user_email, is_admin).await;
 
     loop {
         tokio::select! {
@@ -871,41 +792,6 @@ pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> 
         },
         Err(_) => true,
         _ => false,
-    }
-}
-
-pub(crate) fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(agent_did)) = map.get("did") {
-                    return agent_did == did;
-                }
-            }
-            true
-        }
-    }
-}
-
-/// A capability request carries the request id that `agent.generateJwt` redeems, and a
-/// notification install request carries the webhook's credentials, so only sessions that can
-/// approve apps receive them. The listed kinds go to every session; anything unreadable goes
-/// only to approvers.
-pub(crate) fn exception_visible(msg: &str, can_approve_apps: bool) -> bool {
-    use crate::types::ExceptionType;
-    if can_approve_apps {
-        return true;
-    }
-    let Ok(exception) = serde_json::from_str::<ExceptionInfo>(msg) else {
-        return false;
-    };
-    // No `_` arm: a new exception type does not compile until someone decides who sees it.
-    match exception.r#type {
-        ExceptionType::LanguageIsNotLoaded
-        | ExceptionType::ExpressionIsNotVerified
-        | ExceptionType::AgentIsUntrusted => true,
-        ExceptionType::CapabilityRequested | ExceptionType::InstallNotificationRequest => false,
     }
 }
 
@@ -1574,108 +1460,135 @@ mod events_socket_message_tests {
 #[cfg(test)]
 mod app_approval_event_tests {
     use super::*;
-    use crate::agent::session::Principal;
-    use crate::types::{ExceptionInfo, ExceptionType};
+    use crate::agent::session::{Principal, TokenId};
+    use crate::events::Audience;
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
-    /// A session whose check never fails: no token, nothing to revoke or expire.
-    fn unending() -> Arc<Session> {
-        let anonymous = Principal::Anonymous { caps: vec![] };
-        Arc::new(Session::for_test(anonymous, ListenerReach::Network))
+    fn app(name: &str, caps: Vec<Capability>) -> Arc<Session> {
+        let token_id = TokenId(format!("approval-{name}"));
+        let app = Principal::App { token_id, caps };
+        Arc::new(Session::for_test(app, ListenerReach::Network))
     }
 
-    fn exception(kind: ExceptionType) -> String {
-        serde_json::to_string(&ExceptionInfo {
-            title: "title".to_string(),
-            message: "message".to_string(),
-            r#type: kind,
-            addon: Some("{\"requestId\":\"request-1\"}".to_string()),
+    /// The event types `stream` delivers that mention `request_id`, until the fence (a
+    /// message with `fence` and the id).
+    async fn types_for(
+        stream: &mut Pin<Box<dyn futures::stream::Stream<Item = String> + Send>>,
+        request_id: &str,
+    ) -> BTreeSet<String> {
+        let mut types = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = stream.next().await.expect("the stream stays open");
+                if !msg.contains(request_id) {
+                    continue; // another test's event
+                }
+                if msg.contains("\"fence\"") {
+                    return;
+                }
+                let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+                types.insert(v["type"].as_str().unwrap().to_string());
+            }
         })
-        .unwrap()
-    }
-
-    #[test]
-    fn capability_requests_reach_only_sessions_that_can_approve_apps() {
-        let request = exception(ExceptionType::CapabilityRequested);
-        assert!(exception_visible(&request, true));
-        assert!(!exception_visible(&request, false));
-    }
-
-    // Notification install requests carry the webhook's credentials.
-    #[test]
-    fn notification_install_requests_reach_only_sessions_that_can_approve_apps() {
-        let request = exception(ExceptionType::InstallNotificationRequest);
-        assert!(exception_visible(&request, true));
-        assert!(!exception_visible(&request, false));
-    }
-
-    #[test]
-    fn other_exceptions_reach_every_session() {
-        let untrusted = exception(ExceptionType::AgentIsUntrusted);
-        assert!(exception_visible(&untrusted, false));
-        assert!(exception_visible(&untrusted, true));
-    }
-
-    #[test]
-    fn unreadable_exceptions_reach_only_sessions_that_can_approve_apps() {
-        assert!(!exception_visible("not json", false));
-        assert!(exception_visible("not json", true));
+        .await
+        .unwrap_or_else(|_| panic!("the fence never arrived; got {types:?}"));
+        types
     }
 
     // An app token used to reach every connected socket through `apps-changed`, including
-    // sockets that never authenticated. Only sessions that can approve apps get the event now.
+    // sockets that never authenticated. The real publishers of an app approval: the
+    // capability request (`exception-occurred`) and the approval (`apps-changed`) reach the
+    // sessions that may approve apps (`AGENT_PERMIT`, the rule of `can_approve_apps`), and no
+    // other session.
     #[tokio::test]
-    async fn sessions_that_cannot_approve_apps_never_see_app_events() {
+    async fn app_approval_events_reach_only_sessions_that_can_approve_apps() {
+        use crate::agent::capabilities::{
+            generate_capability_token, permit_capability, request_capability, AuthInfo,
+            AuthInfoExtended,
+        };
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        let pubsub = get_global_pubsub().await;
-        let all = event_interest::watching_all;
-        let mut other = build_event_stream(unending(), all(), None, false, false).await;
-        let mut approver = build_event_stream(unending(), all(), None, false, true).await;
-
-        pubsub
-            .publish(&APPS_CHANGED, &"{\"requestId\":\"request-1\"}".to_string())
-            .await;
-        pubsub
-            .publish(
-                &EXCEPTION_OCCURRED_TOPIC,
-                &exception(ExceptionType::CapabilityRequested),
-            )
-            .await;
-
-        let mut seen = Vec::new();
-        for _ in 0..2 {
-            let event = tokio::time::timeout(Duration::from_secs(5), approver.next())
-                .await
-                .expect("the approver receives both events")
-                .expect("the stream stays open");
-            seen.push(event);
+        crate::test_utils::use_test_apps_file();
+        let operator = Arc::new(Session::for_test(
+            Principal::Operator,
+            ListenerReach::Loopback,
+        ));
+        let user = Principal::User {
+            token_id: TokenId("approval-user".into()),
+            email: "approval.user@example.org".into(),
+            did: "did:key:approval-user".into(),
+            caps: crate::agent::capabilities::get_user_default_capabilities(),
+        };
+        let anonymous = Principal::Anonymous { caps: vec![] };
+        let sessions = [
+            ("operator", operator, true),
+            (
+                "permit app",
+                app("permit", vec![ALL_CAPABILITY.clone()]),
+                true,
+            ),
+            (
+                "reader app",
+                app("reader", vec![AGENT_READ_CAPABILITY.clone()]),
+                false,
+            ),
+            (
+                "user",
+                Arc::new(Session::for_test(user, ListenerReach::Network)),
+                false,
+            ),
+            (
+                "anonymous",
+                Arc::new(Session::for_test(anonymous, ListenerReach::Network)),
+                false,
+            ),
+        ];
+        let mut streams = Vec::new();
+        for (name, session, approver) in sessions {
+            let all = event_interest::watching_all();
+            streams.push((
+                name,
+                approver,
+                build_event_stream(session, all, None, false).await,
+            ));
         }
-        assert!(
-            seen.iter().any(|e| e.contains("apps-changed")),
-            "{:?}",
-            seen
-        );
-        assert!(
-            seen.iter().any(|e| e.contains("exception-occurred")),
-            "{:?}",
-            seen
-        );
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(500), other.next())
-                .await
-                .is_err(),
-            "a session that cannot approve apps received an app event"
-        );
-    }
+        let auth = AuthInfo {
+            app_name: "Approval test app".into(),
+            app_desc: String::new(),
+            app_domain: None,
+            app_url: None,
+            app_icon_path: None,
+            capabilities: Some(vec![AGENT_READ_CAPABILITY.clone()]),
+            user_email: None,
+        };
+        let request_id = request_capability(auth.clone()).await;
+        let code = permit_capability(AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth,
+        })
+        .unwrap();
+        generate_capability_token(request_id.clone(), code)
+            .await
+            .unwrap();
+        get_global_pubsub().await.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            serde_json::json!({ "fence": request_id }),
+        ));
 
-    // A type this build does not know may carry anything, so it goes to approvers only.
-    #[test]
-    fn exceptions_of_an_unknown_type_reach_only_sessions_that_can_approve_apps() {
-        let unknown = r#"{"title":"t","message":"m","type":"SOME_NEW_TYPE","addon":"secret"}"#;
-        assert!(!exception_visible(unknown, false));
-        assert!(exception_visible(unknown, true));
+        let approval: BTreeSet<String> = [events::EXCEPTION_OCCURRED, events::APPS_CHANGED_EVENT]
+            .map(String::from)
+            .into();
+        for (name, approver, stream) in &mut streams {
+            let expected = if *approver {
+                approval.clone()
+            } else {
+                BTreeSet::new()
+            };
+            assert_eq!(types_for(stream, &request_id).await, expected, "{name}");
+        }
     }
 
     // Goes through `build_event_stream`, so a sync-state stream that keeps the DID it saw at
@@ -1683,7 +1596,6 @@ mod app_approval_event_tests {
     // as the launcher's does on first run.
     #[tokio::test]
     async fn sync_state_reaches_a_socket_opened_before_the_did_resolved() {
-        use crate::events::Audience;
         use crate::types::{PerspectiveHandle, PerspectiveState, PerspectiveStateFilter};
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
@@ -1695,7 +1607,7 @@ mod app_approval_event_tests {
             Principal::Operator,
             ListenerReach::Loopback,
         ));
-        let mut stream = build_event_stream(operator, all, None, true, true).await;
+        let mut stream = build_event_stream(operator, all, None, true).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -1812,9 +1724,15 @@ mod audience_matrix_tests {
             token_id: TokenId("matrix-app".into()),
             caps: vec![],
         };
+        // An app whose token may approve apps (`AGENT_PERMIT`, here through `ALL`).
+        let permit_app = Principal::App {
+            token_id: TokenId("matrix-permit-app".into()),
+            caps: vec![ALL_CAPABILITY.clone()],
+        };
         [
             ("operator", Principal::Operator, ListenerReach::Loopback),
             ("app", app, ListenerReach::Network),
+            ("permit app", permit_app, ListenerReach::Network),
             ("user A", user("a", A), ListenerReach::Network),
             ("user B", user("b", B), ListenerReach::Network),
             (
@@ -1832,15 +1750,7 @@ mod audience_matrix_tests {
 
     /// A stream that watches every event, as a socket that asked for all of them.
     async fn open(session: Arc<Session>) -> Stream {
-        build_event_stream_for(
-            session,
-            event_interest::watching_all(),
-            None,
-            None,
-            false,
-            false,
-        )
-        .await
+        build_event_stream_for(session, event_interest::watching_all(), None, None, false).await
     }
 
     /// The tags of this run's events that `stream` delivers before `fence`. Events reach a
@@ -1877,7 +1787,17 @@ mod audience_matrix_tests {
         let main = main.to_string();
         assert_eq!(sessions[1].1.acts_as_did(), Some(main.as_str()), "app");
 
-        let all = ["operator", "app", "user A", "user B", "anonymous"];
+        let all = [
+            "operator",
+            "app",
+            "permit app",
+            "user A",
+            "user B",
+            "anonymous",
+        ];
+        // The operator and apps act as the main agent.
+        let main_agent = ["operator", "app", "permit app"];
+        let approvers = ["operator", "permit app"];
         let mut cases: Vec<(String, Topic, Audience, Vec<&str>)> = vec![
             (
                 "everyone".into(),
@@ -1889,13 +1809,19 @@ mod audience_matrix_tests {
                 "authenticated".into(),
                 Topic::RuntimeMessageReceived,
                 Audience::Authenticated,
-                vec!["operator", "app", "user A", "user B"],
+                vec!["operator", "app", "permit app", "user A", "user B"],
             ),
             (
                 "operator".into(),
                 Topic::AppsChanged,
                 Audience::Operator,
                 vec!["operator"],
+            ),
+            (
+                "approvers".into(),
+                Topic::AppsChanged,
+                Audience::Approvers,
+                approvers.to_vec(),
             ),
             (
                 "user-a".into(),
@@ -1913,7 +1839,7 @@ mod audience_matrix_tests {
                 "main-agent".into(),
                 Topic::PerspectiveUpdated,
                 Audience::Dids(vec![main.clone()]),
-                vec!["operator", "app"],
+                main_agent.to_vec(),
             ),
             (
                 "no-did".into(),
@@ -1922,6 +1848,41 @@ mod audience_matrix_tests {
                 vec![],
             ),
         ];
+        // Agent topics go to the agent the payload names (`matches_agent_did` before), or to
+        // every session while the status names no agent (before `agent.generate()`).
+        for topic in [Topic::AgentStatusChanged, Topic::AgentUpdated] {
+            for (name, did, to) in [
+                ("user-a", Some(A), vec!["user A"]),
+                ("main-agent", Some(main.as_str()), main_agent.to_vec()),
+                ("no-agent-yet", None, all.to_vec()),
+            ] {
+                cases.push((format!("{topic}-{name}"), topic, Audience::agent(did), to));
+            }
+        }
+        // Exceptions go per type (`exception_visible` before): approval requests to the
+        // sessions that may approve apps, the others to every session.
+        {
+            use crate::types::{ExceptionInfo, ExceptionType::*};
+            for kind in [
+                LanguageIsNotLoaded,
+                ExpressionIsNotVerified,
+                AgentIsUntrusted,
+                CapabilityRequested,
+                InstallNotificationRequest,
+            ] {
+                let to = match kind {
+                    CapabilityRequested | InstallNotificationRequest => approvers.to_vec(),
+                    _ => all.to_vec(),
+                };
+                let name = format!("exception-{kind:?}");
+                let info = ExceptionInfo {
+                    r#type: kind,
+                    ..Default::default()
+                };
+                let audience = Event::exception(&info).audience;
+                cases.push((name, Topic::ExceptionOccurred, audience, to));
+            }
+        }
         // Perspective topics name the perspective's owners, or the main agent for an
         // unowned perspective: the rule the string filters applied before (`owner` equal to
         // the session's DID, which is the main agent's for the operator and apps).
@@ -1935,7 +1896,6 @@ mod audience_matrix_tests {
         let recipients = crate::perspectives::event_recipients;
         let owned_by_a = handle(Some(vec![A]));
         let owned_by_a_b = handle(Some(vec![A, B]));
-        let main_agent = ["operator", "app"];
         for topic in [
             Topic::PerspectiveAdded,
             Topic::PerspectiveRemoved,
@@ -2130,7 +2090,7 @@ mod audience_matrix_tests {
             let got = perspective_events(stream, &run, &fence).await;
             let expected = match *name {
                 "user A" => lifecycle(&owned.uuid, A, true),
-                "operator" | "app" => lifecycle(&unowned.uuid, &main, false),
+                "operator" | "app" | "permit app" => lifecycle(&unowned.uuid, &main, false),
                 _ => vec![],
             };
             assert_eq!(got, expected, "{name}");
@@ -2205,7 +2165,7 @@ mod audience_matrix_tests {
             let expected = match *name {
                 "user A" => expect(&changes, &shared_uuid, A),
                 "user B" => expect(&changes, &shared_uuid, B),
-                "operator" | "app" => expect(&changes, &unowned_uuid, &main_did),
+                "operator" | "app" | "permit app" => expect(&changes, &unowned_uuid, &main_did),
                 _ => vec![],
             };
             assert_eq!(got, expected, "{name}");
@@ -2226,8 +2186,7 @@ mod audience_matrix_tests {
             &serde_json::json!({ "link-added": ["wanted"] }),
             &interest,
         );
-        let mut stream: Stream =
-            build_event_stream_for(session, interest, None, None, true, true).await;
+        let mut stream: Stream = build_event_stream_for(session, interest, None, None, true).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
@@ -2296,7 +2255,6 @@ mod token_expiry_tests {
             Arc::new(session),
             event_interest::watching_all(),
             Some(USER.to_string()),
-            false,
             false,
         )
         .await;

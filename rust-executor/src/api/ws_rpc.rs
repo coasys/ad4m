@@ -166,16 +166,11 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let conn = Connection::new(handler_map, ctx.clone(), tx);
     // A socket without a token gets no events: a stream that never yields.
     let events: EventStream = if may_receive_events(&ctx) {
-        // Capability requests, app changes and notification install requests go
-        // only to sessions that can approve apps.
-        let can_approve_apps =
-            check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
         super::events_ws::build_event_stream(
             ctx.session.clone(),
             conn.interest(),
             ctx.user_email().map(str::to_string),
             ctx.is_operator(),
-            can_approve_apps,
         )
         .await
     } else {

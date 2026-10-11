@@ -14,9 +14,10 @@ use crate::agent::{
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
+use crate::events::Event;
 use crate::holochain_service::conductor_startup::spawn_conductor_startup;
 use crate::languages::LanguageController;
-use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
@@ -293,19 +294,11 @@ async fn update_user_profile(
     Ok(agent)
 }
 
-/// Announces a changed profile on `agent-updated`. The event stream filters the event by
-/// the DID in the payload.
+/// Announces a changed profile on `agent-updated`, to the agent whose profile it is.
 async fn publish_agent_updated(agent: &Agent) {
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_UPDATED_TOPIC,
-            &serde_json::to_string(agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_updated(agent));
 }
 
 /// Publishes the main agent to the agent language without holding up the caller.
@@ -380,14 +373,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_status(&agent));
 
     log::info!("AD4M init complete");
     Ok(serde_json::to_value(agent)?)
@@ -409,14 +395,7 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_status(&agent));
 
     Ok(serde_json::to_value(agent)?)
 }
@@ -512,14 +491,7 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
     get_global_pubsub()
         .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
-                log::error!("Failed to serialize agent for pubsub: {e}");
-                String::new()
-            }),
-        )
-        .await;
+        .publish_event(Event::agent_status(&agent));
 
     Ok(agent)
 }

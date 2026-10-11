@@ -10,7 +10,8 @@ pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
-use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub;
 use crate::types::*;
 use crate::utils::constant_time_eq;
 
@@ -363,11 +364,7 @@ pub async fn request_capability(auth_info: AuthInfo) -> String {
 
     get_global_pubsub()
         .await
-        .publish(
-            &EXCEPTION_OCCURRED_TOPIC,
-            &serde_json::to_string(&exception_info).unwrap(),
-        )
-        .await;
+        .publish_event(Event::exception(&exception_info));
 
     request_id
 }
@@ -437,13 +434,11 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         revoked: Some(false),
         token: String::new(),
     };
-    get_global_pubsub()
-        .await
-        .publish(
-            &APPS_CHANGED,
-            &serde_json::to_string(&Some(apps_changed)).unwrap_or_else(|_| "null".to_string()),
-        )
-        .await;
+    get_global_pubsub().await.publish_event(Event::new(
+        Topic::AppsChanged,
+        Audience::Approvers,
+        Some(apps_changed),
+    ));
 
     Ok(cap_token)
 }
@@ -803,7 +798,7 @@ mod app_token_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::use_test_apps_file();
-        let mut events = get_global_pubsub().await.subscribe(&APPS_CHANGED).await;
+        let mut events = get_global_pubsub().await.subscribe_events();
 
         let (request_id, code) = permitted_request().await;
         let token = generate_capability_token(request_id.clone(), code)
@@ -812,11 +807,15 @@ mod app_token_tests {
         assert!(!token.is_empty());
 
         let event = loop {
-            let msg = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
                 .await
                 .expect("an apps-changed event arrives")
                 .unwrap();
-            if let Ok(Some(app)) = serde_json::from_str::<Option<Apps>>(&msg) {
+            if event.topic != Topic::AppsChanged {
+                continue;
+            }
+            assert_eq!(event.audience, Audience::Approvers);
+            if let Ok(Some(app)) = serde_json::from_value::<Option<Apps>>(event.payload.clone()) {
                 if app.request_id == request_id {
                     break app;
                 }
