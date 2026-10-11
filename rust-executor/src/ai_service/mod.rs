@@ -2393,15 +2393,16 @@ impl AIService {
             return Ok(());
         }
 
-        // If caller has no email, they must still have a valid token (admin/main user)
+        // A caller without a user acts as the main agent. The session already resolved and
+        // checked it: the operator and an app may reach any stream, an anonymous caller none.
         let Some(caller_email) = caller.user_email() else {
-            if crate::agent::capabilities::decode_jwt(caller.auth_token.clone()).is_err() {
-                return Err(anyhow!(
-                    "Authorization error: valid token required in multi-user mode"
-                ));
-            }
-            // Admin user (valid token, no email) — allow access to any stream
-            return Ok(());
+            return match caller.session.principal {
+                crate::agent::session::Principal::Operator
+                | crate::agent::session::Principal::App { .. } => Ok(()),
+                _ => Err(anyhow!(
+                    "Authorization error: caller does not own this transcription stream"
+                )),
+            };
         };
 
         // Session must also have an owner email to enforce ownership
@@ -3041,6 +3042,57 @@ mod tests {
         assert!(0.32 < 0.33, "Below threshold should be rejected");
         assert!(!(0.33 < 0.33), "At threshold should pass");
         assert!(!(0.50 < 0.33), "Above threshold should pass");
+    }
+}
+
+#[cfg(test)]
+mod stream_ownership_tests {
+    use super::*;
+    use crate::agent::session::Principal;
+    use crate::test_utils::MultiUserMode;
+
+    fn stream_of(owner: Option<&str>) -> TranscriptionSession {
+        let (samples_tx, _) = futures_channel::mpsc::unbounded();
+        let (drop_tx, _) = oneshot::channel();
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
+        TranscriptionSession {
+            samples_tx,
+            drop_tx,
+            last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+            text_broadcast_tx,
+            model_id: "m".to_string(),
+            user_email: owner.map(str::to_string),
+        }
+    }
+
+    // The operator's admin credential is not a JWT, so the old token decode refused it: in
+    // multi-user mode it could open a stream but not feed or close it.
+    #[test]
+    fn in_multi_user_mode_the_session_decides_who_reaches_a_stream() {
+        let _multi_user = MultiUserMode::on();
+        let alice = RequestContext::user_for_test("alice@example.org", "did:key:alice", vec![]);
+        let bob = RequestContext::user_for_test("bob@example.org", "did:key:bob", vec![]);
+        let operator = RequestContext::operator_for_test();
+        let app = RequestContext::app_for_test(vec![]);
+        let anonymous = RequestContext::for_test(Principal::Anonymous { caps: vec![] });
+
+        let alices = stream_of(Some("alice@example.org"));
+        let nodes = stream_of(None);
+        let reaches = |stream, caller| AIService::verify_stream_ownership(stream, caller).is_ok();
+
+        assert!(reaches(&alices, &alice), "a user reaches their own stream");
+        assert!(!reaches(&alices, &bob), "not another user's");
+        assert!(!reaches(&nodes, &bob), "nor the node's");
+        assert!(
+            reaches(&alices, &operator),
+            "the operator reaches any stream"
+        );
+        assert!(reaches(&nodes, &operator));
+        assert!(reaches(&alices, &app), "an app acts as the node, as before");
+        assert!(
+            !reaches(&nodes, &anonymous),
+            "an anonymous caller reaches none"
+        );
     }
 }
 
