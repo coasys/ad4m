@@ -4826,12 +4826,13 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        // Notifications with the same trigger share one query result.
-        let mut trigger_cache: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        // A trigger reads as its notification's owner, so only notifications
+        // with the same trigger AND owner share one query result.
+        let mut trigger_cache: HashMap<(String, String), Vec<serde_json::Value>> = HashMap::new();
 
         for n in notifications {
             //log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
-            let cache_key = n.trigger.clone();
+            let cache_key = (n.trigger.clone(), n.owner_did.clone());
             if let Some(cached_matches) = trigger_cache.get(&cache_key) {
                 //log::info!("🔔 NOTIFICATIONS: Using cached matches for notification for perspective {}: {}", uuid, n.trigger);
                 result_map.insert(n.clone(), cached_matches.clone());
