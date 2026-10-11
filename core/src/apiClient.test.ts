@@ -378,6 +378,22 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(TestSocket.instances).toHaveLength(1)
     })
 
+    it('rejects a waiting watchApplied() with 401 when the socket closes 1008 before it opens', async () => {
+        open()
+        const applied = client.watchApplied()
+        socket(0).drop(1008, REASON)
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+    })
+
+    it('rejects a waiting watchApplied() with the reason when the socket closes 1013 before it opens', async () => {
+        const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
+        open()
+        const applied = client.watchApplied()
+        socket(0).drop(1013, LOCKED)
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 503, body: LOCKED })
+        expect(authFailed).not.toHaveBeenCalled()
+    })
+
     it('fails every later call with 401 without opening a socket', async () => {
         open()
         socket(0).drop(1008, REASON)
