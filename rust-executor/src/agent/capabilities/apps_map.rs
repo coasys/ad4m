@@ -115,7 +115,9 @@ lazy_static! {
     };
 }
 
-/// Registers an approved app under the id and expiry of the token it received.
+/// Registers an approved app under the id and expiry of the token it received. If the
+/// registry file does not take the app, the registry stays as it was: the caller then does
+/// not deliver the token, so no record may name it.
 pub fn insert_app(
     request_key: String,
     auth_info_extended: AuthInfoExtended,
@@ -129,9 +131,14 @@ pub fn insert_app(
         token_id,
         token_expires_at,
     };
-    apps.insert(request_key, app);
-    persist_apps_to_file(&apps).map_err(|e| e.to_string())?;
-    Ok(())
+    let previous = apps.insert(request_key.clone(), app);
+    persist_apps_to_file(&apps).map_err(|e| {
+        match previous {
+            Some(previous) => apps.insert(request_key, previous),
+            None => apps.remove(&request_key),
+        };
+        e.to_string()
+    })
 }
 
 /// Why `revoke_app` failed.
@@ -308,6 +315,27 @@ mod tests {
         assert!(!opens(&live_token));
         remove_app(&live).unwrap();
         remove_app(&revoked).unwrap();
+    }
+
+    // The registry and its file agree after a failed write: a replaced record comes back, a
+    // new one goes.
+    #[test]
+    fn an_insert_the_file_does_not_take_leaves_the_registry_unchanged() {
+        crate::test_utils::use_test_apps_file();
+        let request_id = format!("unsaved-{}", uuid::Uuid::new_v4());
+        let id = |n: &str| TokenId(n.to_string());
+        insert_app(request_id.clone(), info(&request_id), id("first"), 1).unwrap();
+
+        set_data_file_path("/nonexistent-dir-for-insert-test/apps.json".to_string());
+        let other = format!("unsaved-new-{}", uuid::Uuid::new_v4());
+        let replaced = insert_app(request_id.clone(), info(&request_id), id("second"), 2);
+        let added = insert_app(other.clone(), info(&other), id("third"), 3);
+        crate::test_utils::use_test_apps_file();
+
+        assert!(replaced.is_err() && added.is_err());
+        assert_eq!(get_app(&request_id).unwrap().unwrap().token_id, id("first"));
+        assert!(get_app(&other).unwrap().is_none());
+        remove_app(&request_id).unwrap();
     }
 
     #[test]

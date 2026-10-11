@@ -497,6 +497,25 @@ impl Notification {
         }
     }
 
+    /// The webhook credential after an update that moves the notification to `webhook_url`
+    /// and sends `sent`: a sent value (`""` clears it) replaces the stored one; without one
+    /// the stored credential stays, unless it is set and the URL changes.
+    pub fn webhook_auth_after_update(
+        &self,
+        webhook_url: &str,
+        sent: Option<Secret>,
+    ) -> Result<Secret, WebhookAuthNotResent> {
+        match sent {
+            Some(sent) => Ok(sent),
+            None if self.webhook_auth.is_empty()
+                || same_endpoint(&self.webhook_url, webhook_url) =>
+            {
+                Ok(self.webhook_auth.clone())
+            }
+            None => Err(WebhookAuthNotResent),
+        }
+    }
+
     /// Every field, the credential included, for equality and ordering: the fire path
     /// keys its trigger matches by notification, and an edited credential is another
     /// notification there, as it was before the credential became a [`Secret`]. The
@@ -536,6 +555,34 @@ impl PartialOrd for Notification {
 impl Ord for Notification {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.ordering_key().cmp(&other.ordering_key())
+    }
+}
+
+/// `runtime.updateNotification` was asked to keep a stored webhook credential while moving
+/// the notification to another webhook URL. The credential goes only to the webhook it was
+/// set for, so the caller sends it again (or an empty one) with the new URL. A caller's
+/// mistake: a bad request.
+#[derive(Debug)]
+pub struct WebhookAuthNotResent;
+
+impl std::fmt::Display for WebhookAuthNotResent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "The notification has a stored webhook credential and the webhook URL changed: \
+             send webhookAuth again (an empty string for none) to move the notification to \
+             another webhook",
+        )
+    }
+}
+
+impl std::error::Error for WebhookAuthNotResent {}
+
+/// Whether `sent` names the same endpoint as `stored`: equal as parsed URLs, or as strings
+/// when either does not parse.
+pub(crate) fn same_endpoint(stored: &str, sent: &str) -> bool {
+    match (Url::parse(stored), Url::parse(sent)) {
+        (Ok(stored), Ok(sent)) => stored == sent,
+        _ => stored == sent,
     }
 }
 

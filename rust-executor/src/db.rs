@@ -2056,10 +2056,9 @@ impl Ad4mDb {
         if stored_key.is_empty() {
             return Ok(stored_key);
         }
-        let same_endpoint = match (stored_url.as_deref().map(Url::parse), Url::parse(base_url)) {
-            (Some(Ok(stored)), Ok(sent)) => stored == sent,
-            _ => stored_url.as_deref() == Some(base_url),
-        };
+        let same_endpoint = stored_url
+            .as_deref()
+            .is_some_and(|stored| crate::types::same_endpoint(stored, base_url));
         if !same_endpoint {
             return Err(ApiKeyNotResent.into());
         }

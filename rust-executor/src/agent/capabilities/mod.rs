@@ -345,7 +345,9 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
 
     let auth_for_publish = auth.clone();
 
-    apps_map::insert_app(
+    // A registry that does not take the app leaves no record of it; the token is dropped
+    // undelivered, and the app retries with the same code.
+    if let Err(e) = apps_map::insert_app(
         request_id.clone(),
         AuthInfoExtended {
             request_id: request_id.clone(),
@@ -353,7 +355,10 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         },
         issued.id,
         issued.expires_at,
-    )?;
+    ) {
+        pending.restore(request_id, approval);
+        return Err(e);
+    }
 
     // The event reaches every session that can approve apps; the token goes only to the caller.
     let apps_changed = Apps {
@@ -716,6 +721,32 @@ mod app_token_tests {
                 .unwrap_err(),
             "Can't find permitted request"
         );
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    // A registry file that does not take the app: the token is never delivered, so no record
+    // may name it, and the app retries with the same code.
+    #[tokio::test]
+    async fn a_registry_that_cannot_be_saved_keeps_the_request_and_no_app() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let (request_id, code) = permitted_request().await;
+
+        apps_map::set_data_file_path("/nonexistent-dir-for-insert-test/apps.json".to_string());
+        let unsaved = generate_capability_token(request_id.clone(), code.clone()).await;
+        crate::test_utils::use_test_apps_file();
+
+        assert!(unsaved.is_err());
+        assert!(apps_map::get_app(&request_id).unwrap().is_none());
+        assert!(PendingApprovals::global().has_code(&request_id, &code));
+
+        let token = generate_capability_token(request_id.clone(), code)
+            .await
+            .expect("the same code redeems once the registry saves")
+            .expose_once();
+        assert!(apps_map::get_app(&request_id).unwrap().is_some());
+        assert!(capabilities_from_token(token, &None).is_ok());
         apps_map::remove_app(&request_id).unwrap();
     }
 
