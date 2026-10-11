@@ -120,8 +120,9 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
-        // `neighbourhood.publish` decides who may publish this perspective. Its guard runs
-        // first, so a refused caller clones no link language.
+        // `neighbourhood.publish` decides who may publish this perspective, and
+        // `language.applyTemplate` who may clone and publish a language, the work of
+        // `clone_link_language`. Both guards run first, so a refused caller clones nothing.
         let publish = |link_language: &str| {
             json!({
                 "perspectiveUuid": p.perspective_uuid,
@@ -134,6 +135,16 @@ impl Ad4mMcpHandler {
             .await
         {
             return perspective_error(&p.perspective_uuid, e);
+        }
+        let apply_template = json!({
+            "sourceLanguageHash": p.link_language,
+            "templateData": json!({ "name": p.name }).to_string(),
+        });
+        if let Err(e) = self
+            .admit_method("language.applyTemplate", &apply_template)
+            .await
+        {
+            return method_error(e);
         }
         let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
@@ -353,8 +364,8 @@ fn build_clone_template_map(
 mod guard_tests {
     use super::*;
     use crate::agent::capabilities::{
-        ALL_CAPABILITY, NEIGHBOURHOOD_CREATE_CAPABILITY, NEIGHBOURHOOD_READ_CAPABILITY,
-        RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
+        ALL_CAPABILITY, LANGUAGE_CREATE_CAPABILITY, NEIGHBOURHOOD_CREATE_CAPABILITY,
+        NEIGHBOURHOOD_READ_CAPABILITY, RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
     };
     use crate::agent::session::Principal;
     use crate::mcp::tools::test_support::{
@@ -398,13 +409,34 @@ mod guard_tests {
             user(
                 "publisher@example.org",
                 owner_did,
-                vec![NEIGHBOURHOOD_CREATE_CAPABILITY.clone()],
+                vec![
+                    NEIGHBOURHOOD_CREATE_CAPABILITY.clone(),
+                    LANGUAGE_CREATE_CAPABILITY.clone(),
+                ],
             ),
         ] {
             let answer = publish(&handler_as(principal), &uuid).await;
             assert_eq!(status(&answer), None, "{answer}");
             assert!(answer.contains("error"), "{answer}");
         }
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
+
+    // Cloning applies a template and publishes a language: `language.applyTemplate`'s work,
+    // which needs LANGUAGE_CREATE. Publishing the perspective alone did not check it.
+    #[tokio::test]
+    async fn publishing_needs_the_language_create_capability_before_any_clone() {
+        setup();
+        let owner_did = "did:key:mcp-publisher-without-language";
+        let uuid = perspective(Some(vec![owner_did.into()])).await;
+        let owner = handler_as(user(
+            "publisher.without.language@example.org",
+            owner_did,
+            vec![NEIGHBOURHOOD_CREATE_CAPABILITY.clone()],
+        ));
+        let refused = publish(&owner, &uuid).await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+        assert!(!refused.contains("template"), "no clone ran: {refused}");
         crate::perspectives::remove_perspective(&uuid).await;
     }
 

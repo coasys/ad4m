@@ -360,10 +360,16 @@ fn tools() -> Vec<Tool> {
         tool(
             "neighbourhood_publish_from_perspective",
             AsCaller,
-            vec![m(
-                "neighbourhood.publish",
-                |uuid| json!({ "perspectiveUuid": uuid, "linkLanguage": "QmMatrix", "meta": { "links": [] } }),
-            )],
+            vec![
+                m(
+                    "neighbourhood.publish",
+                    |uuid| json!({ "perspectiveUuid": uuid, "linkLanguage": "QmMatrix", "meta": { "links": [] } }),
+                ),
+                m(
+                    "language.applyTemplate",
+                    |_| json!({ "sourceLanguageHash": "QmMatrix", "templateData": r#"{"name":"matrix"}"# }),
+                ),
+            ],
             |h, uuid| {
                 Box::pin(async move {
                     h.neighbourhood_publish_from_perspective(Parameters(
