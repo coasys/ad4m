@@ -110,10 +110,15 @@ async fn handle_ws(
 
     // A socket without a valid token gets no events: a stream that never yields.
     let events: EventStream = if may_receive_events(&ctx) {
+        // Capability requests, app changes and notification install requests go
+        // only to sessions that can approve apps.
+        let can_approve_apps =
+            check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
         super::events_ws::build_event_stream(
             token_check.clone(),
             ctx.user_email.clone(),
             ctx.is_admin_credential,
+            can_approve_apps,
         )
         .await
     } else {

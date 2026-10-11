@@ -751,9 +751,9 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     let alice_did = user(ALICE);
     user(BOB);
     let check = || TokenCheck::new("", true);
-    let mut alice = build_event_stream(check(), Some(ALICE.to_string()), false).await;
-    let mut bob = build_event_stream(check(), Some(BOB.to_string()), false).await;
-    let mut main = build_event_stream(check(), None, true).await;
+    let mut alice = build_event_stream(check(), Some(ALICE.to_string()), false, false).await;
+    let mut bob = build_event_stream(check(), Some(BOB.to_string()), false, false).await;
+    let mut main = build_event_stream(check(), None, true, true).await;
     let pubsub = get_global_pubsub().await;
 
     pubsub
