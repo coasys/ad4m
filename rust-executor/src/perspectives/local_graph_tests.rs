@@ -717,15 +717,15 @@ async fn a_subscription_update_reaches_only_its_subscriber() {
         "the update carries Alice's Local row: {update}"
     );
     assert!(
-        matches_query_subscription_owner(&update, Some(&alice_did), false),
+        matches_query_subscription_owner(&update, Some(&alice_did), false).await,
         "Alice's session gets her update"
     );
     assert!(
-        !matches_query_subscription_owner(&update, Some(&bob_did), false),
+        !matches_query_subscription_owner(&update, Some(&bob_did), false).await,
         "Bob co-owns the perspective but didn't subscribe: {update}"
     );
     assert!(
-        !matches_query_subscription_owner(&update, None, false),
+        !matches_query_subscription_owner(&update, None, false).await,
         "a session whose DID hasn't resolved gets nothing"
     );
     super::unregister_perspective(&p.uuid);
@@ -887,9 +887,7 @@ async fn children_of_a_local_instance_stay_local() {
 /// A notification trigger reads as the agent the notification belongs to.
 #[tokio::test]
 async fn a_notification_trigger_does_not_read_another_agents_local_graph() {
-    let (p, _, _) = two_users_and_shared_links().await;
-    let bob_email = format!("bob.{}@example.org", Uuid::new_v4());
-    AgentService::ensure_user_key_exists(&bob_email).unwrap();
+    let (p, _, bob_did) = two_users_and_shared_links().await;
     Ad4mDb::with_global_instance(|db| {
         db.add_notification(
             crate::types::NotificationInput {
@@ -902,7 +900,8 @@ async fn a_notification_trigger_does_not_read_another_agents_local_graph() {
                 webhook_url: String::new(),
                 webhook_auth: String::new(),
             },
-            Some(bob_email),
+            &bob_did,
+            true,
         )
     })
     .unwrap();
@@ -910,7 +909,10 @@ async fn a_notification_trigger_does_not_read_another_agents_local_graph() {
     let (_, rows) = matches.into_iter().next().unwrap();
     let mut seen: Vec<&str> = rows.iter().filter_map(|r| r["s"].as_str()).collect();
     seen.sort();
-    assert_eq!(seen, vec!["ad4m://s/default", "ad4m://s/shared"]);
+    assert_eq!(
+        seen,
+        vec!["ad4m://s/bob", "ad4m://s/default", "ad4m://s/shared"]
+    );
 }
 
 /// The auto-processor reads as the agent it runs for: Bob's Local draft never
@@ -1730,7 +1732,7 @@ async fn a_triggered_notification_reaches_only_its_owner() {
         perspective_ids: vec![p.uuid.clone()],
         webhook_url: String::new(),
         webhook_auth: String::new(),
-        user_email: alice.user_email.clone(),
+        owner_did: alice_did.clone(),
     };
 
     let mut events = get_global_pubsub()
@@ -1756,15 +1758,15 @@ async fn a_triggered_notification_reaches_only_its_owner() {
         }
     };
     assert!(
-        matches_notification_owner(&msg, Some(&alice_did), false),
+        matches_notification_owner(&msg, Some(&alice_did)),
         "Alice's session gets her notification: {msg}"
     );
     assert!(
-        !matches_notification_owner(&msg, Some(&bob_did), false),
+        !matches_notification_owner(&msg, Some(&bob_did)),
         "Bob co-owns the perspective but the notification is Alice's: {msg}"
     );
     assert!(
-        !matches_notification_owner(&msg, None, false),
+        !matches_notification_owner(&msg, None),
         "a session whose DID hasn't resolved gets nothing"
     );
     super::unregister_perspective(&p.uuid);

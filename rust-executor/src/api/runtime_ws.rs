@@ -11,11 +11,16 @@ use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
 use crate::holochain_service::get_holochain_service;
+use crate::runtime_service::notification_access::{
+    caller_may_manage, granted_after_update, owner_may_read,
+};
 use crate::runtime_service::RuntimeService;
 use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
+use super::guards::refuse_user_session;
+use super::perspectives_ws::get_perspective_or_404;
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
     LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
@@ -118,6 +123,8 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.exportData")?;
 
     let body: ExportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -170,6 +177,18 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.importData")?;
+
+    // An import writes rows as they are in the file: notifications with their `granted` flag
+    // and `owner_did`, and users with their password hashes. With AGENT_UPDATE alone, an app
+    // token or a managed user could import a granted notification on someone else's
+    // perspectives. Only the operator imports, as only the operator grants notifications.
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden(
+            "Permission denied: only the node operator (admin credential) can import data",
+        ));
+    }
 
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -180,8 +199,11 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             let json_data: serde_json::Value =
                 serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-            let result = Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            let main_agent_did = AgentService::with_global_instance(|a| a.did.clone());
+            let result = Ad4mDb::with_global_instance(|db| {
+                db.import_from_json(json_data, main_agent_did.as_deref())
+            })
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
             Ok(serde_json::to_value(result).map_err(|e| WsRpcError::internal(e.to_string()))?)
         }
         "perspective" => {
@@ -233,10 +255,13 @@ async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 // ── Friends & Messages ──
+// The friend list and the outbox belong to the node's main agent; a user session has
+// neither of its own here, so it may not read or change them.
 
 async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.friends")?;
 
     let friends = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
@@ -255,6 +280,7 @@ async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.addFriends")?;
 
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -269,6 +295,7 @@ async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.removeFriends")?;
 
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -286,6 +313,8 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The main agent's friends and outbox: a user session has neither of its own here.
+    refuse_user_session(&ctx, "runtime.sendFriendMessage")?;
     let _: RuntimeSendFriendMessageParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     Err(WsRpcError::not_implemented(
@@ -302,20 +331,86 @@ async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.outbox")?;
 
     let outbox = RuntimeService::with_global_instance(|runtime| runtime.get_outbox());
     Ok(serde_json::to_value(outbox).unwrap_or_default())
 }
 
 // ── Notifications ──
+//
+// Grant, update and delivery rules: `runtime_service::notification_access`.
+
+/// The caller's DID and the main agent's. A managed user's session acts as
+/// the user; every other session acts as the main agent (the operator).
+struct Dids {
+    caller: String,
+    main_agent: String,
+}
+
+fn notification_dids(ctx: &RequestContext) -> Result<Dids, WsRpcError> {
+    let main_agent = AgentService::with_global_instance(|a| a.did.clone())
+        .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
+    let caller = match &ctx.user_email {
+        Some(_) => ctx
+            .user_did
+            .clone()
+            .ok_or_else(|| WsRpcError::forbidden("Managed user has no DID"))?,
+        None => main_agent.clone(),
+    };
+    Ok(Dids { caller, main_agent })
+}
+
+/// Refuses a perspective the caller may not query, or `owner_did` may not
+/// read.
+async fn check_notification_perspectives(
+    perspective_ids: &[String],
+    owner_did: &str,
+    dids: &Dids,
+    ctx: &RequestContext,
+) -> Result<(), WsRpcError> {
+    for uuid in perspective_ids {
+        check_capability(
+            &ctx.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+        let perspective = match get_perspective_or_404(uuid).await {
+            Ok(perspective) => perspective,
+            // A missing perspective holds no data, and delivery checks access
+            // again when it fires. The operator still sees every id before
+            // approving a main-agent notification.
+            Err(e) if e.code == 404 && owner_did == dids.main_agent => continue,
+            Err(e) => return Err(e),
+        };
+        let handle = perspective.persisted.lock().await.clone();
+        if !owner_may_read(owner_did, &dids.main_agent, &handle) {
+            return Err(WsRpcError::forbidden(format!(
+                "Access denied: the notification owner cannot read perspective {}",
+                uuid
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The stored notification `id`, if the caller may update or delete it.
+/// Another user's notification reads as not found.
+fn notification_for_caller(id: &str, dids: &Dids) -> Result<Notification, WsRpcError> {
+    Ad4mDb::with_global_instance(|db| db.get_notification(id.to_string()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .filter(|notification| caller_may_manage(notification, &dids.caller, &dids.main_agent))
+        .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))
+}
 
 async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let user_email = ctx.user_email.clone();
+    let dids = notification_dids(&ctx)?;
     let notifications =
-        Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email))
+        Ad4mDb::with_global_instance(|db| db.get_notifications_for_owner(&dids.caller))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(notifications)?)
@@ -327,6 +422,8 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let body: NotificationInput = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let dids = notification_dids(&ctx)?;
+    check_notification_perspectives(&body.perspective_ids, &dids.caller, &dids, &ctx).await?;
 
     let domain_input = crate::types::domain::NotificationInput {
         description: body.description,
@@ -339,8 +436,8 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         webhook_auth: body.webhook_auth,
     };
 
-    let user_email = ctx.user_email.clone();
-    let id = RuntimeService::request_install_notification(domain_input, user_email)
+    let managed_user = dids.caller != dids.main_agent;
+    let id = RuntimeService::request_install_notification(domain_input, dids.caller, managed_user)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -354,6 +451,9 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
     let id = params.require_str("id")?;
     let body: NotificationInput = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let dids = notification_dids(&ctx)?;
+    let stored = notification_for_caller(&id, &dids)?;
+    check_notification_perspectives(&body.perspective_ids, &stored.owner_did, &dids, &ctx).await?;
 
     let notification = Notification {
         id: id.clone(),
@@ -365,8 +465,8 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         perspective_ids: body.perspective_ids,
         webhook_url: body.webhook_url,
         webhook_auth: body.webhook_auth,
-        granted: body.granted.unwrap_or(false),
-        user_email: None,
+        granted: granted_after_update(&stored, &dids.caller, &dids.main_agent),
+        owner_did: stored.owner_did,
     };
 
     Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
@@ -379,9 +479,12 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    if ctx.user_email.is_some() {
+    // Only the operator approves notifications: the launcher holds the admin credential. An
+    // app token with AGENT_UPDATE must not approve the notification it created, and managed
+    // users hold no admin credential either.
+    if !ctx.is_admin_credential {
         return Err(WsRpcError::forbidden(
-            "Permission denied: managed users cannot call grantNotification",
+            "Permission denied: only the node operator (admin credential) can grant notifications",
         ));
     }
 
@@ -389,15 +492,9 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let body: NotificationGrantRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let notifications = Ad4mDb::with_global_instance(|db| db.get_notifications())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let existing = notifications
-        .iter()
-        .find(|n| n.id == id)
+    let mut updated = Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found(format!("Notification {} not found", id)))?;
-
-    let mut updated = existing.clone();
     updated.granted = body.granted;
 
     Ad4mDb::with_global_instance(|db| db.update_notification(id, &updated))
@@ -411,6 +508,7 @@ async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
+    notification_for_caller(&id, &notification_dids(&ctx)?)?;
     Ad4mDb::with_global_instance(|db| db.remove_notification(id))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -444,6 +542,8 @@ async fn add_link_language_templates(
         &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node's list of link-language templates, offered to every user.
+    refuse_user_session(&ctx, "runtime.addLinkLanguageTemplates")?;
 
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -464,6 +564,7 @@ async fn remove_link_language_templates(
         &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "runtime.removeLinkLanguageTemplates")?;
 
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -499,6 +600,8 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
 async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Injects peer records into the node's Holochain conductor.
+    refuse_user_session(&ctx, "runtime.addHcAgentInfos")?;
 
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
@@ -575,11 +678,7 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let user_email = params
-        .opt_str("userEmail")
-        .or_else(|| ctx.user_email.clone());
-
-    let email = user_email.unwrap_or_default();
+    let email = compute_log_email(params.opt_str("userEmail"), &ctx)?;
     let since = params.opt_str("since");
     let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
 
@@ -588,6 +687,21 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(logs).unwrap_or_default())
+}
+
+/// Whose compute log a `runtime.computeLog` call reads. A user session reads only its own
+/// log, and an omitted `userEmail` means its own. The operator may read any user's log.
+fn compute_log_email(
+    requested: Option<String>,
+    ctx: &RequestContext,
+) -> Result<String, WsRpcError> {
+    match (ctx.user_email.clone(), requested) {
+        (Some(own), Some(requested)) if requested != own => Err(WsRpcError::forbidden(
+            "A user session may read only its own compute log",
+        )),
+        (Some(own), _) => Ok(own),
+        (None, requested) => Ok(requested.unwrap_or_default()),
+    }
 }
 
 async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
