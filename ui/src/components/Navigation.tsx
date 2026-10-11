@@ -1,4 +1,5 @@
-import { useContext, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useContext, useEffect, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import PackageInfo from "../../package.json";
 import { Ad4minContext } from "../context/Ad4minContext";
@@ -20,6 +21,15 @@ const Navigation = ({ did, opened, setOpened }: Props) => {
   let navigate = useNavigate();
   let location = useLocation();
 
+  // The commit this launcher build is from (short hash, `-dirty` for an
+  // unclean tree, `unknown` without git), shown next to the version.
+  const [buildCommit, setBuildCommit] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<string>("get_build_commit")
+      .then(setBuildCommit)
+      .catch((e) => console.warn("get_build_commit failed:", e));
+  }, []);
+
   useEffect(() => {
     if (!connected && !connectedLoading) {
       navigate("/connect");
@@ -36,7 +46,10 @@ const Navigation = ({ did, opened, setOpened }: Props) => {
             <a href="https://ad4m.dev" target="_blank">
               <Logo style={{ height: 40, width: 40 }} />
             </a>
-            <j-text variant="caption">v{PackageInfo.version}</j-text>
+            <j-text variant="caption">
+              v{PackageInfo.version}
+              {buildCommit ? ` (${buildCommit})` : ""}
+            </j-text>
           </j-flex>
           <AgentProvider>
             <Profile />
