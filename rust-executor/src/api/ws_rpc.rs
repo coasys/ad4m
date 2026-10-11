@@ -112,10 +112,15 @@ async fn handle_ws(
     // A socket without a valid token gets no event stream at all; a pending
     // stream keeps `serve` from reading its end as a failed token.
     let events = if may_receive_events(&conn.ctx) {
+        // Capability requests, app changes and notification install requests go
+        // only to sessions that can approve apps.
+        let can_approve_apps =
+            check_capability(&conn.ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
         super::events_ws::build_event_stream(
             conn.token_check.clone(),
             conn.ctx.user_email.clone(),
             conn.ctx.is_admin_credential,
+            can_approve_apps,
             conn.ctx.connection_id.clone(),
         )
         .await
