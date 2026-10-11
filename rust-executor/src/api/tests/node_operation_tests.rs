@@ -166,6 +166,9 @@ async fn user_sessions_cannot_call_node_operations() {
         ("runtime.outbox", json!({})),
         ("hosting.wallet", json!({})),
         ("hosting.walletHistory", json!({})),
+        // Approved apps belong to the operator.
+        ("agent.removeApp", json!({ "id": "some-request-id" })),
+        ("agent.revokeToken", json!({ "token": "some-request-id" })),
     ];
     let mut not_refused = Vec::new();
     for (op, params) in calls {

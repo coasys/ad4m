@@ -9,7 +9,7 @@ use crate::agent::capabilities::*;
 use crate::db::Ad4mDb;
 use crate::types::RequestContext;
 
-use super::guards::refuse_user_session;
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 
@@ -55,12 +55,10 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
     })?)
 }
 
-async fn get_hosting_wallet(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node's own ledger: reading it can also create the node's ledger key.
-    refuse_user_session(&ctx, "hosting.wallet")?;
-
+async fn get_hosting_wallet(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let balance = match crate::unyt_service::get_ledger().await {
         Ok(ledger) => Some(ledger),
         Err(e) => {
@@ -79,12 +77,8 @@ async fn get_hosting_wallet(_params: Value, ctx: Arc<RequestContext>) -> Result<
 
 async fn get_hosting_wallet_history(
     _params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "hosting.walletHistory")?;
-
     let history = crate::unyt_service::get_history(None, 50)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -126,11 +120,14 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, HostingInfoResult>("hosting.info", get_hosting_info)
         .read();
+    // The node's own ledger: reading it can also create the node's ledger key.
     map.method::<NoParams, HostingWalletResult>("hosting.wallet", get_hosting_wallet)
-        .read();
+        .read()
+        .guard(Guard::Node(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
     // The Unyt zome's `get_history` output, passed through unparsed.
     map.method::<NoParams, Value>("hosting.walletHistory", get_hosting_wallet_history)
-        .read();
+        .read()
+        .guard(Guard::Node(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
     map.method::<RequestPaymentRequest, HostingRequestPaymentResult>(
         "hosting.requestPayment",
         request_payment,

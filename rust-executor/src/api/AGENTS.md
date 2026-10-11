@@ -65,7 +65,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | Guard | Rule after the capability |
 |---|---|
 | `Anonymous(cap)` | none; `cap` must be one anonymous callers hold |
-| `Node(cap)` | no user session (`refuse_user_session`); the operator, apps and anonymous callers pass |
+| `Node(cap)` | no user session: 403 naming the method, whatever the user's capabilities; the operator, apps and anonymous callers pass |
 | `SelfAgent(cap)` | an authenticated session; the handler acts on `ctx.acts_as()` |
 | `Perspective { .. }` | `get_perspective_with_access`: the operator reaches all; a user its own; an app the unowned and the main agent's; 404 when missing |
 

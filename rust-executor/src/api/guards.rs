@@ -25,7 +25,8 @@ pub enum Guard {
     /// capability must be one that anonymous callers hold (`anonymous_capabilities`).
     Anonymous(Capability),
     /// Acts on the node itself. The operator, an app or an anonymous caller that holds the
-    /// capability; never a user session, whatever its capabilities ([`refuse_user_session`]).
+    /// capability; never a user session, whatever its capabilities: the default user
+    /// capabilities overlap the ones these methods check.
     Node(Capability),
     /// Acts on the caller's own agent or user record, which the handler takes from
     /// `ctx.acts_as()`. An anonymous caller has no agent of its own, so it gets 403.
@@ -88,7 +89,13 @@ impl Guard {
 
         match self {
             Guard::Anonymous(_) => {}
-            Guard::Node(_) => refuse_user_session(ctx, method)?,
+            Guard::Node(_) => {
+                if ctx.user_email().is_some() {
+                    return Err(WsRpcError::forbidden(format!(
+                        "{method} acts on the node itself, so a user session may not call it"
+                    )));
+                }
+            }
             Guard::SelfAgent(_) => {
                 if !ctx.session.is_authenticated() {
                     return Err(WsRpcError::forbidden(format!(
@@ -113,16 +120,6 @@ impl Guard {
     }
 }
 
-/// Refuses the call for a multi-user user session. `what` names the call in the error.
-pub fn refuse_user_session(ctx: &RequestContext, what: &str) -> Result<(), WsRpcError> {
-    if ctx.user_email().is_some() {
-        return Err(WsRpcError::forbidden(format!(
-            "{what} acts on the node itself, so a user session may not call it"
-        )));
-    }
-    Ok(())
-}
-
 /// The agent a session signs and publishes as: the user of a user session, otherwise the
 /// node's main agent.
 pub fn session_agent_context(ctx: &RequestContext) -> AgentContext {
@@ -141,16 +138,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn user_sessions_get_refused() {
-        let err = refuse_user_session(&ctx(Some("alice@example.org")), "agent.lock").unwrap_err();
+    #[tokio::test]
+    async fn a_node_guard_refuses_user_sessions_and_names_the_method() {
+        let update = crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone();
+        let lock = Guard::Node(update.clone());
+        let user = RequestContext::user_for_test(
+            "alice@example.org",
+            "did:key:alice",
+            vec![update.clone()],
+        );
+        let err = lock
+            .admit("agent.lock", &Value::Null, &user)
+            .await
+            .unwrap_err();
         assert_eq!(err.code, 403);
-        assert!(err.message.contains("agent.lock"));
-    }
+        assert!(err.message.contains("agent.lock"), "{}", err.message);
 
-    #[test]
-    fn operator_sessions_pass() {
-        assert!(refuse_user_session(&ctx(None), "agent.lock").is_ok());
+        let app = RequestContext::app_for_test(vec![update]);
+        assert_eq!(
+            lock.admit("agent.lock", &Value::Null, &app).await.unwrap(),
+            Admission::Granted
+        );
     }
 
     #[test]

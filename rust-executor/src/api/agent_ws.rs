@@ -21,7 +21,7 @@ use crate::pubsub::get_global_pubsub;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::{refuse_user_session, session_agent_context};
+use super::guards::{session_agent_context, Guard};
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -316,11 +316,7 @@ fn spawn_main_agent_publish() {
 }
 
 /// agent.generate — generate agent identity
-async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.generate")?;
-
+async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GenerateAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -380,11 +376,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 /// agent.lock — lock agent
-async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.lock")?;
-
+async fn lock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: LockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -401,11 +393,7 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 /// agent.unlock — unlock agent
-async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.unlock")?;
-
+async fn unlock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UnlockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -516,25 +504,10 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 /// agent.removeApp — remove app
-async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_app_management_by_users(&ctx)?;
-
+async fn remove_app(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let request_id = params.require_str("id")?;
     apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
     Ok(serde_json::to_value(apps_map::client_view())?)
-}
-
-/// Approved apps belong to the node's operator. The default user capabilities include
-/// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
-fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
-    if ctx.user_email().is_some() {
-        return Err(WsRpcError::forbidden(
-            "Apps belong to the node's operator; a user session may not remove or revoke them",
-        ));
-    }
-    Ok(())
 }
 
 // ── Auth ──
@@ -625,11 +598,7 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 /// agent.revokeToken — revoke token
-async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_app_management_by_users(&ctx)?;
-
+async fn revoke_token(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
     // and so does a user's JWT. A value that names no app and is no user token answers 404
     // instead of a silent success (#1060).
@@ -717,12 +686,7 @@ async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 /// agent.addTrustedAgents — add trusted agents
-async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node's trust list decides whose languages this node installs and runs.
-    refuse_user_session(&ctx, "agent.addTrustedAgents")?;
-
+async fn add_trusted_agents(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -739,12 +703,8 @@ async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<V
 /// agent.deleteTrustedAgents — remove trusted agents
 async fn delete_trusted_agents(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.deleteTrustedAgents")?;
-
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -761,12 +721,7 @@ async fn delete_trusted_agents(
 // ── Entanglement ──
 
 /// agent.getEntanglementProofs — list
-async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The proofs belong to the node's main agent.
-    refuse_user_session(&ctx, "agent.getEntanglementProofs")?;
-
+async fn get_entanglement(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let proofs = get_entanglement_proofs();
     Ok(serde_json::to_value(
         proofs
@@ -777,11 +732,7 @@ async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 /// agent.addEntanglementProofs — add
-async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.addEntanglementProofs")?;
-
+async fn add_entanglement(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: AgentAddEntanglementProofsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -827,11 +778,10 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 /// agent.deleteEntanglementProofs — delete
-async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.deleteEntanglementProofs")?;
-
+async fn delete_entanglement(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let body: EntanglementProofsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -874,12 +824,8 @@ async fn import_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 /// agent.entanglementProofPreflight — pre-flight check
 async fn entanglement_proof_preflight(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.entanglementProofPreflight")?;
-
     let body: EntanglementProofPreflightRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -900,47 +846,66 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read();
     map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
-        .long();
+        .long()
+        .guard(Guard::Node(AGENT_CREATE_CAPABILITY.clone()));
     // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
     map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent);
-    map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent);
+    map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
+        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
-        .long();
+        .long()
+        .guard(Guard::Node(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message);
-    map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app);
+    // Approved apps belong to the node's operator. The default user capabilities include
+    // AGENT_UPDATE, so without the guard a user session could remove or revoke them.
+    map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
+        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability);
     map.method::<PermitCapabilityRequest, String>(
         "agent.permitCapability",
         permit_capability_handler,
     );
     map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt);
-    map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token);
+    map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
+        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
         .read();
     map.method::<NoParams, bool>("agent.isLocked", is_locked)
         .read();
     map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
         .read();
-    map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents);
+    // The node's trust list decides whose languages this node installs and runs.
+    map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents)
+        .guard(Guard::Node(
+            RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY.clone(),
+        ));
     map.method::<TrustedAgentsWrapper, Vec<String>>(
         "agent.deleteTrustedAgents",
         delete_trusted_agents,
-    );
+    )
+    .guard(Guard::Node(
+        RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY.clone(),
+    ));
+    // The proofs belong to the node's main agent.
     map.method::<NoParams, Vec<EntanglementProof>>("agent.getEntanglementProofs", get_entanglement)
-        .read();
+        .read()
+        .guard(Guard::Node(AGENT_READ_CAPABILITY.clone()));
     map.method::<AgentAddEntanglementProofsParams, Vec<EntanglementProof>>(
         "agent.addEntanglementProofs",
         add_entanglement,
-    );
+    )
+    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<EntanglementProofsWrapper, Vec<EntanglementProof>>(
         "agent.deleteEntanglementProofs",
         delete_entanglement,
-    );
+    )
+    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<EntanglementProofPreflightRequest, EntanglementProof>(
         "agent.entanglementProofPreflight",
         entanglement_proof_preflight,
     )
-    .read();
+    .read()
+    .guard(Guard::Node(AGENT_READ_CAPABILITY.clone()));
 }
 
 // ── Contracts ───────────────────────────────────────────────────────────────
@@ -1086,36 +1051,6 @@ mod tests {
             link_expression_input_to_decorated(&input).status,
             Some(LinkStatus::Shared)
         );
-    }
-}
-
-#[cfg(test)]
-mod app_management_tests {
-    use crate::agent::capabilities::get_user_default_capabilities;
-    use crate::api::ws_handler::build_handler_map;
-    use crate::types::RequestContext;
-    use serde_json::json;
-    use std::sync::Arc;
-
-    // The default user capabilities include AGENT_UPDATE, which these calls check, so a user
-    // session could remove or revoke the operator's apps.
-    #[tokio::test]
-    async fn user_sessions_cannot_remove_or_revoke_apps() {
-        let user = Arc::new(RequestContext::user_for_test(
-            "apps.user@example.org",
-            "did:key:apps-user",
-            get_user_default_capabilities(),
-        ));
-        for (op, params) in [
-            ("agent.removeApp", json!({ "id": "some-request-id" })),
-            ("agent.revokeToken", json!({ "token": "some-request-id" })),
-        ] {
-            let err = build_handler_map()
-                .dispatch(op, params, user.clone())
-                .await
-                .expect_err(op);
-            assert_eq!(err.code, 403, "{op}: {}", err.message);
-        }
     }
 }
 

@@ -120,8 +120,98 @@ fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
 /// A method and the params it needs beyond the perspective's uuid.
 type ExtraParams = (&'static str, fn() -> Value);
 
-const EXTRA_PARAMS: &[ExtraParams] =
-    &[("test.perspective.hidden", || json!({ "note": "fixture" }))];
+const EXTRA_PARAMS: &[ExtraParams] = &[
+    ("test.perspective.hidden", || json!({ "note": "fixture" })),
+    // Guard::Node. `admit` runs no handler, so no path, key or proof here is used.
+    ("agent.generate", || json!({ "passphrase": "p" })),
+    ("agent.lock", || json!({ "passphrase": "p" })),
+    (
+        "agent.unlock",
+        || json!({ "passphrase": "p", "holochain": false }),
+    ),
+    ("agent.removeApp", || json!({ "id": "request-id" })),
+    ("agent.revokeToken", || json!({ "token": "request-id" })),
+    ("agent.addTrustedAgents", || json!({ "agents": [] })),
+    ("agent.deleteTrustedAgents", || json!({ "agents": [] })),
+    (
+        "agent.addEntanglementProofs",
+        || json!({ "proofs": [entanglement_proof()] }),
+    ),
+    (
+        "agent.deleteEntanglementProofs",
+        || json!({ "proofs": [entanglement_proof()] }),
+    ),
+    (
+        "agent.entanglementProofPreflight",
+        || json!({ "deviceKey": "k", "deviceKeyType": "t" }),
+    ),
+    (
+        "ai.discoverModels",
+        || json!({ "baseUrl": "https://api.example.org/v1" }),
+    ),
+    (
+        "ai.addModel",
+        || json!({ "model": { "name": "m", "type": "LLM" } }),
+    ),
+    (
+        "ai.updateModel",
+        || json!({ "id": "m1", "model": { "name": "m", "type": "LLM" } }),
+    ),
+    ("ai.removeModel", || json!({ "id": "m1" })),
+    (
+        "ai.setDefaultModel",
+        || json!({ "id": "m1", "modelType": "LLM" }),
+    ),
+    ("language.publish", || {
+        json!({
+            "languagePath": "/nonexistent/bundle.js",
+            "languageMeta": { "name": "n", "description": "d" },
+        })
+    }),
+    ("language.remove", || json!({ "address": "QmLang" })),
+    (
+        "language.writeSettings",
+        || json!({ "address": "QmLang", "settings": {} }),
+    ),
+    (
+        "runtime.exportData",
+        || json!({ "type": "db", "filePath": "/nonexistent/dump.json" }),
+    ),
+    (
+        "runtime.importData",
+        || json!({ "type": "db", "filePath": "/nonexistent/dump.json" }),
+    ),
+    ("runtime.addFriends", || json!({ "dids": [] })),
+    ("runtime.removeFriends", || json!({ "dids": [] })),
+    (
+        "runtime.sendFriendMessage",
+        || json!({ "did": "did:key:z6Mk", "message": { "links": [] } }),
+    ),
+    (
+        "runtime.addLinkLanguageTemplates",
+        || json!({ "addresses": [] }),
+    ),
+    (
+        "runtime.removeLinkLanguageTemplates",
+        || json!({ "addresses": [] }),
+    ),
+    ("runtime.addHcAgentInfos", || json!({ "agentInfos": [] })),
+    (
+        "runtime.setFreeHostingEnabled",
+        || json!({ "enabled": true }),
+    ),
+];
+
+fn entanglement_proof() -> Value {
+    json!({
+        "deviceKey": "k",
+        "deviceKeySignedByDid": "s",
+        "deviceKeyType": "t",
+        "did": "did:key:z6Mk",
+        "didSignedByDeviceKey": "s",
+        "didSigningKeyId": "i",
+    })
+}
 
 fn params(method: &str, uuid: Option<&str>) -> Value {
     let mut params = EXTRA_PARAMS

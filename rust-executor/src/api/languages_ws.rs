@@ -9,7 +9,7 @@ use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
 use crate::types::*;
 
-use super::guards::{refuse_user_session, session_agent_context};
+use super::guards::{session_agent_context, Guard};
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -132,13 +132,7 @@ async fn get_language_source(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::String(source))
 }
 
-async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // Reads `languagePath` from any path on the host and publishes the file signed by the
-    // node's main agent.
-    refuse_user_session(&ctx, "language.publish")?;
-
+async fn publish_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: PublishLanguageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -274,12 +268,7 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     })?)
 }
 
-async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_DELETE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // Installed languages and their settings are shared by every user of the node.
-    refuse_user_session(&ctx, "language.remove")?;
-
+async fn remove_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let mut controller = LanguageController::global_instance();
     controller
@@ -290,11 +279,7 @@ async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     Ok(Value::Bool(true))
 }
 
-async fn write_settings(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "language.writeSettings")?;
-
+async fn write_settings(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let body: LanguageSettingsWrapper = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -331,12 +316,18 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read();
     map.method::<LanguageAddressParams, String>("language.source", get_language_source)
         .read();
+    // Reads `languagePath` from any path on the host and publishes the file signed by the
+    // node's main agent.
     map.method::<PublishLanguageRequest, LanguageMeta>("language.publish", publish_language)
-        .long();
+        .long()
+        .guard(Guard::Node(LANGUAGE_CREATE_CAPABILITY.clone()));
     map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
         .long();
-    map.method::<LanguageAddressParams, bool>("language.remove", remove_language);
-    map.method::<LanguageWriteSettingsParams, bool>("language.writeSettings", write_settings);
+    // Installed languages and their settings are shared by every user of the node.
+    map.method::<LanguageAddressParams, bool>("language.remove", remove_language)
+        .guard(Guard::Node(LANGUAGE_DELETE_CAPABILITY.clone()));
+    map.method::<LanguageWriteSettingsParams, bool>("language.writeSettings", write_settings)
+        .guard(Guard::Node(LANGUAGE_UPDATE_CAPABILITY.clone()));
 }
 
 // ── Contracts ──

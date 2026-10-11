@@ -77,6 +77,27 @@ async fn host_rate_and_membrane_proof_setters_refuse_invalid_params() {
     }
 }
 
+// Free hosting is a billing decision for the whole node: an app approved for "quit" may not
+// switch it (#1328). The refusal comes before the handler, so the shared DB stays untouched.
+#[tokio::test]
+async fn set_free_hosting_enabled_needs_the_admin_credential() {
+    use crate::agent::capabilities::RUNTIME_QUIT_CAPABILITY;
+    let mut map = HandlerMap::new();
+    register_ws_handlers(&mut map);
+    let quit_app = Arc::new(RequestContext::app_for_test(vec![
+        RUNTIME_QUIT_CAPABILITY.clone()
+    ]));
+    let err = map
+        .dispatch(
+            "runtime.setFreeHostingEnabled",
+            json!({ "enabled": true }),
+            quit_app,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, 403, "{}", err.message);
+}
+
 // Nothing delivers a friend message and the outbox has no owner, so storing one would let
 // every user read it through `runtime.outbox`.
 #[tokio::test]

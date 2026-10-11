@@ -15,7 +15,7 @@ use crate::types::{
 };
 use base64::Engine;
 
-use super::guards::refuse_user_session;
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -77,15 +77,10 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// credentials, so this widens reach and not authority; and the body is the
 /// reason the endpoint is worth having, because a status alone does not
 /// separate a bad key from a bad model name from a host that is not an LLM.
-/// The default user capabilities include AI_CREATE, so the call also refuses
-/// user sessions: the reach is a cleaner read primitive than `addModel` plus a
-/// prompt, needing no model and no completion.
-async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node sends a request to a URL the caller chooses.
-    refuse_user_session(&ctx, "ai.discoverModels")?;
-
+/// The default user capabilities include AI_CREATE, so the guard also refuses
+/// user sessions: the node sends a request to a URL the caller chooses, a cleaner
+/// read primitive than `addModel` plus a prompt, needing no model and no completion.
+async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let base_url = params.require_str("baseUrl")?;
     let base_url = url::Url::parse(&base_url)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid baseUrl: {e}")))?;
@@ -146,12 +141,7 @@ pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRp
     }
 }
 
-async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // Node-wide settings: every user's prompts go to the models and keys set here.
-    refuse_user_session(&ctx, "ai.addModel")?;
-
+async fn add_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
@@ -169,11 +159,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::String(id))
 }
 
-async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "ai.updateModel")?;
-
+async fn update_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
@@ -195,11 +181,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(Value::Bool(true))
 }
 
-async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "ai.removeModel")?;
-
+async fn remove_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
 
     let service = AIService::global_instance()
@@ -214,11 +196,7 @@ async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(Value::Bool(true))
 }
 
-async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "ai.setDefaultModel")?;
-
+async fn set_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     let body: SetDefaultModelRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -456,13 +434,19 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read();
     // The provider's own model ids.
     map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
-        .read();
+        .read()
+        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+    // Node-wide settings: every user's prompts go to the models and keys set here.
     // The new model's id.
     map.method::<AiAddModelParams, String>("ai.addModel", add_model)
-        .long();
-    map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model);
-    map.method::<AiIdParams, bool>("ai.removeModel", remove_model);
-    map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model);
+        .long()
+        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model)
+        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiIdParams, bool>("ai.removeModel", remove_model)
+        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model)
+        .guard(Guard::Node(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiGetDefaultModelParams, Option<ModelView>>(
         "ai.getDefaultModel",
         get_default_model,

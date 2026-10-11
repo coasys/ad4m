@@ -19,7 +19,7 @@ use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::{Notification, NotificationView};
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
-use super::guards::refuse_user_session;
+use super::guards::Guard;
 use super::perspectives_ws::get_perspective_or_404;
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
@@ -120,12 +120,7 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::Bool(true))
 }
 
-async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // Reads or writes any path on the host and the whole node database.
-    refuse_user_session(&ctx, "runtime.exportData")?;
-
+async fn export_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ExportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -173,11 +168,6 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // Reads or writes any path on the host and the whole node database.
-    refuse_user_session(&ctx, "runtime.importData")?;
-
     // An import writes rows as they are in the file: notifications with their `granted` flag
     // and `owner_did`, and users with their password hashes. With AGENT_UPDATE alone, an app
     // token or a managed user could import a granted notification on someone else's
@@ -256,11 +246,7 @@ async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 // The friend list and the outbox belong to the node's main agent; a user session has
 // neither of its own here, so it may not read or change them.
 
-async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "runtime.friends")?;
-
+async fn list_friends(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let friends = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
     })?;
@@ -275,11 +261,7 @@ async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Err(WsRpcError::not_implemented("Friend status not implemented"))
 }
 
-async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "runtime.addFriends")?;
-
+async fn add_friends(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -290,11 +272,7 @@ async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::to_value(friends)?)
 }
 
-async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "runtime.removeFriends")?;
-
+async fn remove_friends(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: FriendsListRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -308,11 +286,10 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 /// Not implemented: nothing delivers an outbox message, and the outbox has no owner, so every
 /// user could read every other user's messages through `runtime.outbox`. The params are still
 /// checked against the contract.
-async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The main agent's friends and outbox: a user session has neither of its own here.
-    refuse_user_session(&ctx, "runtime.sendFriendMessage")?;
+async fn send_friend_message(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let _: RuntimeSendFriendMessageParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     Err(WsRpcError::not_implemented(
@@ -326,11 +303,7 @@ async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     Ok(serde_json::json!([]))
 }
 
-async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "runtime.outbox")?;
-
+async fn get_outbox(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let outbox = RuntimeService::with_global_instance(|runtime| runtime.get_outbox());
     Ok(serde_json::to_value(outbox).unwrap_or_default())
 }
@@ -533,16 +506,8 @@ async fn get_link_language_templates(
 
 async fn add_link_language_templates(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node's list of link-language templates, offered to every user.
-    refuse_user_session(&ctx, "runtime.addLinkLanguageTemplates")?;
-
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -555,15 +520,8 @@ async fn add_link_language_templates(
 
 async fn remove_link_language_templates(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "runtime.removeLinkLanguageTemplates")?;
-
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -595,12 +553,7 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(serde_json::to_value(infos)?)
 }
 
-async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // Injects peer records into the node's Holochain conductor.
-    refuse_user_session(&ctx, "runtime.addHcAgentInfos")?;
-
+async fn add_hc_agent_infos(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let config = crate::config::get_global_config();
     if !config.run_holochain.unwrap_or(true) {
         return Err(WsRpcError::bad_request(
@@ -652,11 +605,8 @@ async fn get_free_hosting_enabled(
 
 async fn set_free_hosting_enabled(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let enabled = params
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -818,8 +768,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // is the SDK's call.
     map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status);
     map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
-    map.method::<ExportRequest, bool>("runtime.exportData", export_data);
-    map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data);
+    // Read or write any path on the host and the whole node database.
+    map.method::<ExportRequest, bool>("runtime.exportData", export_data)
+        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
+        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
         .long();
     map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
@@ -831,11 +784,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         get_compute_log,
     )
     .read();
-    // Friends & messages
+    // Friends & messages: the friend list and the outbox belong to the main agent.
     map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
-        .read();
-    map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends);
-    map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends);
+        .read()
+        .guard(Guard::Node(RUNTIME_FRIENDS_READ_CAPABILITY.clone()));
+    map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends)
+        .guard(Guard::Node(RUNTIME_FRIENDS_CREATE_CAPABILITY.clone()));
+    map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends)
+        .guard(Guard::Node(RUNTIME_FRIENDS_DELETE_CAPABILITY.clone()));
     // Always errors: friend status has no implementation yet.
     map.method::<RuntimeFriendStatusParams, Option<PerspectiveExpression>>(
         "runtime.friendStatus",
@@ -845,12 +801,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<RuntimeSendFriendMessageParams, bool>(
         "runtime.sendFriendMessage",
         send_friend_message,
-    );
+    )
+    .guard(Guard::Node(RUNTIME_MESSAGES_CREATE_CAPABILITY.clone()));
     // Always empty: the inbox has no implementation yet.
     map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
         .read();
     map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
-        .read();
+        .read()
+        .guard(Guard::Node(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
     // Notifications
     map.method::<NoParams, Vec<NotificationView>>("runtime.notifications", list_notifications)
         .read();
@@ -873,18 +831,27 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         get_link_language_templates,
     )
     .read();
+    // The node's templates, offered to every user.
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.addLinkLanguageTemplates",
         add_link_language_templates,
-    );
+    )
+    .guard(Guard::Node(
+        RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY.clone(),
+    ));
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.removeLinkLanguageTemplates",
         remove_link_language_templates,
-    );
+    )
+    .guard(Guard::Node(
+        RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY.clone(),
+    ));
     // Holochain
     map.method::<NoParams, Vec<String>>("runtime.hcAgentInfos", get_hc_agent_infos)
         .read();
-    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos);
+    // Injects peer records into the node's Holochain conductor.
+    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos)
+        .guard(Guard::Node(RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY.clone()));
     map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
         .read();
     // Hosting flags
@@ -893,7 +860,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<RuntimeSetFreeHostingEnabledParams, bool>(
         "runtime.setFreeHostingEnabled",
         set_free_hosting_enabled,
-    );
+    )
+    // A billing decision for the whole node: the admin credential only, like
+    // `user.setMultiUserEnabled` (#1328).
+    .guard(Guard::Node(ALL_CAPABILITY.clone()));
     map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
         .read();
     map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates);
