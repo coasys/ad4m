@@ -35,7 +35,6 @@ impl PubSub {
 
     /// Sends `event` to every event stream. Takes no lock and needs no runtime, so sync
     /// and async publishers call the same function.
-    #[allow(dead_code, reason = "publishers move to typed events from 20-3b")]
     pub fn publish_event(&self, event: Event) {
         let _ = self.events.send(Arc::new(event)); // Ignore if no receivers
     }
@@ -137,13 +136,9 @@ lazy_static::lazy_static! {
     pub static ref AGENT_UPDATED_TOPIC: String = "agent-updated-topic".to_owned();
     pub static ref EXCEPTION_OCCURRED_TOPIC: String = "exception-occurred-topic".to_owned();
     pub static ref NEIGHBOURHOOD_SIGNAL_TOPIC: String = "neighbourhood-signal-received-topic".to_owned();
-    pub static ref PERSPECTIVE_ADDED_TOPIC: String = "perspective-added-topic".to_owned();
     pub static ref PERSPECTIVE_LINK_ADDED_TOPIC: String = "perspective-link-added-topic".to_owned();
     pub static ref PERSPECTIVE_LINK_REMOVED_TOPIC: String = "perspective-link-removed-topic".to_owned();
     pub static ref PERSPECTIVE_LINK_UPDATED_TOPIC: String = "perspective-link-updated-topic".to_owned();
-    pub static ref PERSPECTIVE_REMOVED_TOPIC: String = "perspective-removed-topic".to_owned();
-    pub static ref PERSPECTIVE_UPDATED_TOPIC: String = "perspective-updated-topic".to_owned();
-    pub static ref PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC: String = "perspective-sync-state-change-topic".to_owned();
     pub static ref RUNTIME_MESSAGED_RECEIVED_TOPIC: String = "runtime-messaged-received-topic".to_owned();
     pub static ref RUNTIME_NOTIFICATION_TRIGGERED_TOPIC: String = "runtime-notification-triggered-topic".to_owned();
     pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();

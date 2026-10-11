@@ -7,6 +7,7 @@ use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::{AgentContext, AgentService};
+use crate::events::{Audience, Event, Topic};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
@@ -20,8 +21,7 @@ use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
-    RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
@@ -1438,18 +1438,16 @@ impl PerspectiveInstance {
 
             update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
 
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
-                    &serde_json::to_string(&PerspectiveStateFilter {
-                        perspective_uuid: handle.uuid.clone(),
-                        perspective: handle,
-                        state: state.clone(),
-                    })
-                    .unwrap(),
-                )
-                .await;
+            let audience = Audience::Dids(super::event_recipients(&handle));
+            get_global_pubsub().await.publish_event(Event::new(
+                Topic::PerspectiveSyncStateChange,
+                audience,
+                PerspectiveStateFilter {
+                    perspective_uuid: handle.uuid.clone(),
+                    perspective: handle,
+                    state: state.clone(),
+                },
+            ));
         }
         Ok(())
     }

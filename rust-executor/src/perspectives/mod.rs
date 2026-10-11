@@ -46,10 +46,8 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use crate::db::Ad4mDb;
-use crate::pubsub::{
-    get_global_pubsub, get_global_pubsub_sync, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
-    PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
-};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::{get_global_pubsub, get_global_pubsub_sync, NEIGHBOURHOOD_SIGNAL_TOPIC};
 use crate::types::{LinkExpression, PerspectiveDiff};
 
 lazy_static! {
@@ -261,40 +259,43 @@ pub async fn add_perspective(
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 
-    // Publish one event per owner so each user gets their own notification
-    let pubsub = get_global_pubsub().await;
-    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
-
-    if let Some(owners) = owners_list {
-        for owner in owners {
-            let perspective_with_owner = PerspectiveWithOwner {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle.clone(),
-                owner: owner.clone(),
-            };
-            pubsub
-                .publish(
-                    &PERSPECTIVE_ADDED_TOPIC,
-                    &serde_json::to_string(&perspective_with_owner).unwrap(),
-                )
-                .await;
-        }
-    } else {
-        // For perspectives without explicit owners (main agent), publish with main agent DID
-        let main_agent_did = crate::agent::did();
-        let perspective_with_owner = PerspectiveWithOwner {
+    publish_to_each_owner(
+        Topic::PerspectiveAdded,
+        event_recipients(&handle),
+        |owner| PerspectiveWithOwner {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
-            owner: main_agent_did,
-        };
-        pubsub
-            .publish(
-                &PERSPECTIVE_ADDED_TOPIC,
-                &serde_json::to_string(&perspective_with_owner).unwrap(),
-            )
-            .await;
-    }
+            owner,
+        },
+    );
     Ok(())
+}
+
+/// The DIDs that receive a perspective's events: its owners, or the main agent for an
+/// unowned perspective (the rule of `helpers::can_access_perspective`). Read from the
+/// handle when the event is published. Empty while the main agent has no DID.
+pub(crate) fn event_recipients(handle: &PerspectiveHandle) -> Vec<String> {
+    match handle.owners.as_ref().filter(|owners| !owners.is_empty()) {
+        Some(owners) => owners.clone(),
+        None => crate::agent::did_for_context(&crate::agent::AgentContext::main_agent())
+            .ok()
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Publishes one `topic` event per DID in `owners`, each for that DID only, with the DID
+/// as the payload's `owner`.
+fn publish_to_each_owner<T: Serialize>(
+    topic: Topic,
+    owners: Vec<String>,
+    payload: impl Fn(String) -> T,
+) {
+    let pubsub = get_global_pubsub_sync();
+    for owner in owners {
+        let audience = Audience::Dids(vec![owner.clone()]);
+        pubsub.publish_event(Event::new(topic, audience, payload(owner)));
+    }
 }
 
 pub fn all_perspectives() -> Vec<PerspectiveInstance> {
@@ -368,39 +369,15 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         }
     }
 
-    // Publish one event per owner so each user gets their own notification
-    let pubsub = get_global_pubsub().await;
-    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
-
-    if let Some(owners) = owners_list {
-        for owner in owners {
-            let perspective_with_owner = PerspectiveWithOwner {
-                perspective_uuid: handle.uuid.clone(),
-                perspective: handle.clone(),
-                owner: owner.clone(),
-            };
-            pubsub
-                .publish(
-                    &PERSPECTIVE_UPDATED_TOPIC,
-                    &serde_json::to_string(&perspective_with_owner).unwrap(),
-                )
-                .await;
-        }
-    } else {
-        // For perspectives without explicit owners (main agent), publish with main agent DID
-        let main_agent_did = crate::agent::did();
-        let perspective_with_owner = PerspectiveWithOwner {
+    publish_to_each_owner(
+        Topic::PerspectiveUpdated,
+        event_recipients(handle),
+        |owner| PerspectiveWithOwner {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
-            owner: main_agent_did,
-        };
-        pubsub
-            .publish(
-                &PERSPECTIVE_UPDATED_TOPIC,
-                &serde_json::to_string(&perspective_with_owner).unwrap(),
-            )
-            .await;
-    }
+            owner,
+        },
+    );
     Ok(())
 }
 
@@ -459,24 +436,18 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
             }
         }
 
-        // Publish one removal event per owner so each user gets their own notification
-        let handle = instance.persisted.lock().await.clone();
-        let pubsub = get_global_pubsub().await;
-        if let Some(owners) = &handle.owners {
-            for owner in owners {
-                let removed_with_owner = PerspectiveRemovedWithOwner {
-                    perspective_uuid: uuid.to_string(),
-                    uuid: uuid.to_string(),
-                    owner: owner.clone(),
-                };
-                pubsub
-                    .publish(
-                        &PERSPECTIVE_REMOVED_TOPIC,
-                        &serde_json::to_string(&removed_with_owner).unwrap(),
-                    )
-                    .await;
-            }
-        }
+        // Only the owners: unlike added and updated, an unowned perspective's removal
+        // reaches no session.
+        let owners = instance.persisted.lock().await.owners.clone();
+        publish_to_each_owner(
+            Topic::PerspectiveRemoved,
+            owners.unwrap_or_default(),
+            |owner| PerspectiveRemovedWithOwner {
+                perspective_uuid: uuid.to_string(),
+                uuid: uuid.to_string(),
+                owner,
+            },
+        );
     }
 
     removed_instance

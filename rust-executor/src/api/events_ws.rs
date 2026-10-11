@@ -21,10 +21,10 @@
 //! | `agent-updated`               | `agent`       | DID                    | Agent profile updated                |
 //! | `apps-changed`                | (inline)      | `AGENT_PERMIT` holders | Installed apps changed (no token)    |
 //! | `hosting-user-info-changed`   | (inline)      | email                  | Hosting user info changed            |
-//! | `perspective-added`           | (inline)      | owner DID              | New perspective created              |
-//! | `perspective-removed`         | (inline)      | owner DID              | Perspective deleted                  |
-//! | `perspective-updated`         | (inline)      | owner DID              | Perspective metadata updated         |
-//! | `sync-state-change`           | (inline)      | perspective owners     | Neighbourhood sync state changed     |
+//! | `perspective-added`           | (inline)      | typed: `owner` only    | New perspective created              |
+//! | `perspective-removed`         | (inline)      | typed: `owner` only    | Perspective deleted                  |
+//! | `perspective-updated`         | (inline)      | typed: `owner` only    | Perspective metadata updated         |
+//! | `sync-state-change`           | (inline)      | typed: owners          | Neighbourhood sync state changed     |
 //! | `link-added`                  | (inline)      | owner DID              | Link added to perspective            |
 //! | `link-removed`                | (inline)      | owner DID              | Link removed from perspective        |
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
@@ -107,11 +107,10 @@ use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
     AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC,
-    HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
-    PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
-    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
-    RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
+    PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
+    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, RUNTIME_MESSAGED_RECEIVED_TOPIC,
+    RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 
 use super::auth::{AppState, AuthContext};
@@ -339,13 +338,6 @@ pub(crate) async fn build_event_stream_for(
     let session_context = AgentContext::for_session(user_email.clone());
 
     // Clone the pre-resolved DID for each filter closure
-    let d_persp_added = resolved_did.clone();
-    let d_persp_removed = resolved_did.clone();
-    let d_persp_updated = resolved_did.clone();
-    // Lazy for the same reason as the auto-processor below: the launcher's socket opens
-    // before `agent.generate()` on first run, and must still get sync-state afterwards.
-    // Like the auto-processor cell, it resolves from the session, never from the token.
-    let d_sync = Arc::new(LazyDid::new(session_context.clone(), resolved_did.clone()));
     let d_link_added = resolved_did.clone();
     let d_link_removed = resolved_did.clone();
     let d_link_updated = resolved_did.clone();
@@ -507,36 +499,6 @@ pub(crate) async fn build_event_stream_for(
                 }
             })
     };
-
-    // ── Perspective lifecycle ──
-    let s_persp_added = owner_stream!(
-        pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await,
-        events::PERSPECTIVE_ADDED,
-        d_persp_added
-    );
-    let s_persp_removed = owner_stream!(
-        pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await,
-        events::PERSPECTIVE_REMOVED,
-        d_persp_removed
-    );
-    let s_persp_updated = owner_stream!(
-        pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await,
-        events::PERSPECTIVE_UPDATED,
-        d_persp_updated
-    );
-    let s_sync = BroadcastStream::new(pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await)
-        .filter_map(|r| async { handle_broadcast_result(r) })
-        .filter_map(move |result| {
-            let did_cell = d_sync.clone();
-            async move {
-                match result {
-                    Ok(ref msg) if matches_sync_state_owner(msg, did_cell.get().as_deref()) => {
-                        Some(wrap_event(events::SYNC_STATE_CHANGE, msg))
-                    }
-                    _ => None,
-                }
-            }
-        });
 
     // ── Link events ──
     let s_link_added = owner_stream!(
@@ -710,10 +672,6 @@ pub(crate) async fn build_event_stream_for(
         stream::select(s_status, s_apps),
         stream::select(s_agent_updated, s_hosting),
     );
-    let persp = stream::select(
-        stream::select(s_persp_added, s_persp_removed),
-        stream::select(s_persp_updated, s_sync),
-    );
     let links = stream::select(s_link_added, stream::select(s_link_removed, s_link_updated));
     let runtime = stream::select(s_msg, stream::select(s_notif, s_exc));
     let ai = stream::select(
@@ -728,7 +686,7 @@ pub(crate) async fn build_event_stream_for(
     );
 
     let top = stream::select(
-        stream::select(agent, persp),
+        agent,
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
@@ -1005,27 +963,6 @@ pub(crate) fn exception_visible(msg: &str, can_approve_apps: bool) -> bool {
         | ExceptionType::ExpressionIsNotVerified
         | ExceptionType::AgentIsUntrusted => true,
         ExceptionType::CapabilityRequested | ExceptionType::InstallNotificationRequest => false,
-    }
-}
-
-/// A sync-state event carries the whole perspective record (owners, neighbourhood), so it
-/// reaches only sessions that may access the perspective: its owners, and the node's main
-/// agent for an unowned one. The same rule as `helpers::can_access_perspective`.
-pub(crate) fn matches_sync_state_owner(msg: &str, current_did: Option<&str>) -> bool {
-    let Some(did) = current_did else {
-        return false;
-    };
-    let Some(handle) = serde_json::from_str::<serde_json::Value>(msg)
-        .ok()
-        .and_then(|event| event.get("perspective").cloned())
-        .and_then(|p| serde_json::from_value::<crate::types::PerspectiveHandle>(p).ok())
-    else {
-        return false;
-    };
-    if handle.is_unowned() {
-        crate::agent::AgentService::with_global_instance(|agent| agent.did.as_deref() == Some(did))
-    } else {
-        handle.is_owned_by(did)
     }
 }
 
@@ -1729,35 +1666,6 @@ mod app_approval_event_tests {
         assert!(!exception_visible(&request, false));
     }
 
-    // Sync-state events used to reach every session with the perspective's full record.
-    #[test]
-    fn sync_state_events_reach_only_the_perspectives_owners() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        let event = |owners: Option<Vec<&str>>| {
-            serde_json::json!({
-                "perspective": {
-                    "uuid": "p-1",
-                    "state": "Synced",
-                    "owners": owners,
-                },
-                "state": "\"Synced\"",
-            })
-            .to_string()
-        };
-        let owned = event(Some(vec!["did:key:alice"]));
-        assert!(matches_sync_state_owner(&owned, Some("did:key:alice")));
-        assert!(!matches_sync_state_owner(&owned, Some("did:key:bob")));
-        assert!(!matches_sync_state_owner(&owned, None));
-
-        let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
-            .expect("the test agent has a DID");
-        let unowned = event(None);
-        assert!(matches_sync_state_owner(&unowned, Some(&main_did)));
-        assert!(!matches_sync_state_owner(&unowned, Some("did:key:bob")));
-        assert!(!matches_sync_state_owner("not json", Some(&main_did)));
-    }
-
     #[test]
     fn other_exceptions_reach_every_session() {
         let untrusted = exception(ExceptionType::AgentIsUntrusted);
@@ -1827,42 +1735,48 @@ mod app_approval_event_tests {
         assert!(exception_visible(unknown, true));
     }
 
-    // Goes through `build_event_stream`, so a sync-state stream that broadcasts, or that
-    // keeps the DID it saw at connect time, fails here. The socket opens before the main
-    // agent has a DID, as the launcher's does on first run.
+    // Goes through `build_event_stream`, so a sync-state stream that keeps the DID it saw at
+    // connect time fails here. The operator's socket opens before the main agent has a DID,
+    // as the launcher's does on first run.
     #[tokio::test]
     async fn sync_state_reaches_a_socket_opened_before_the_did_resolved() {
+        use crate::events::Audience;
+        use crate::types::{PerspectiveHandle, PerspectiveState, PerspectiveStateFilter};
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
             .expect("the test agent has a DID");
         crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
         let all = event_interest::watching_all();
-        let mut stream = build_event_stream(unending(), all, None, false, false).await;
+        let operator = Arc::new(Session::for_test(
+            Principal::Operator,
+            ListenerReach::Loopback,
+        ));
+        let mut stream = build_event_stream(operator, all, None, true, true).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
 
-        let event = |uuid: &str, owner: &str| {
-            serde_json::json!({
-                "perspective": { "uuid": uuid, "state": "Synced", "owners": [owner] },
-                "state": "\"Synced\"",
-            })
-            .to_string()
+        let event = |uuid: &str, owners: Option<Vec<String>>| {
+            let perspective = PerspectiveHandle {
+                uuid: uuid.to_string(),
+                owners,
+                ..Default::default()
+            };
+            Event::new(
+                Topic::PerspectiveSyncStateChange,
+                Audience::Dids(crate::perspectives::event_recipients(&perspective)),
+                PerspectiveStateFilter {
+                    perspective_uuid: uuid.to_string(),
+                    state: PerspectiveState::Synced,
+                    perspective,
+                },
+            )
         };
         let pubsub = get_global_pubsub().await;
-        pubsub
-            .publish(
-                &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
-                &event("sync-of-another-agent", "did:key:someone-else"),
-            )
-            .await;
-        pubsub
-            .publish(
-                &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
-                &event("sync-of-the-main-agent", &main_did),
-            )
-            .await;
+        let someone_else = Some(vec!["did:key:someone-else".to_string()]);
+        pubsub.publish_event(event("sync-of-another-agent", someone_else));
+        pubsub.publish_event(event("sync-of-the-main-agent", None));
 
         let received = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -2021,50 +1935,86 @@ mod audience_matrix_tests {
         assert_eq!(sessions[1].1.acts_as_did(), Some(main.as_str()), "app");
 
         let all = ["operator", "app", "user A", "user B", "anonymous"];
-        let cases: Vec<(&str, Topic, Audience, Vec<&str>)> = vec![
+        let mut cases: Vec<(String, Topic, Audience, Vec<&str>)> = vec![
             (
-                "everyone",
+                "everyone".into(),
                 Topic::AiModelLoadingStatus,
                 Audience::Everyone,
                 all.to_vec(),
             ),
             (
-                "authenticated",
+                "authenticated".into(),
                 Topic::RuntimeMessageReceived,
                 Audience::Authenticated,
                 vec!["operator", "app", "user A", "user B"],
             ),
             (
-                "operator",
+                "operator".into(),
                 Topic::AppsChanged,
                 Audience::Operator,
                 vec!["operator"],
             ),
             (
-                "user-a",
+                "user-a".into(),
                 Topic::LinkAdded,
                 Audience::Dids(vec![A.into()]),
                 vec!["user A"],
             ),
             (
-                "users-a-b",
+                "users-a-b".into(),
                 Topic::NeighbourhoodSignal,
                 Audience::Dids(vec![A.into(), B.into()]),
                 vec!["user A", "user B"],
             ),
             (
-                "main-agent",
+                "main-agent".into(),
                 Topic::PerspectiveUpdated,
                 Audience::Dids(vec![main.clone()]),
                 vec!["operator", "app"],
             ),
             (
-                "no-did",
+                "no-did".into(),
                 Topic::AgentUpdated,
                 Audience::Dids(vec![]),
                 vec![],
             ),
         ];
+        // Perspective topics name the perspective's owners, or the main agent for an
+        // unowned perspective: the rule the string filters applied before (`owner` equal to
+        // the session's DID, which is the main agent's for the operator and apps).
+        let handle = |owners: Option<Vec<&str>>| crate::types::PerspectiveHandle {
+            owners: owners.map(|o| o.into_iter().map(String::from).collect()),
+            ..Default::default()
+        };
+        // Added, updated and removed go out once per owner, each to that owner (an unowned
+        // perspective's removal goes to nobody); sync-state goes out once, to all owners.
+        let recipients = crate::perspectives::event_recipients;
+        let owned_by_a = handle(Some(vec![A]));
+        let owned_by_a_b = handle(Some(vec![A, B]));
+        let main_agent = ["operator", "app"];
+        for topic in [
+            Topic::PerspectiveAdded,
+            Topic::PerspectiveRemoved,
+            Topic::PerspectiveUpdated,
+            Topic::PerspectiveSyncStateChange,
+        ] {
+            let mut perspectives = vec![("owned-by-a", owned_by_a.clone(), vec!["user A"])];
+            if topic != Topic::PerspectiveRemoved {
+                perspectives.push(("unowned", handle(None), main_agent.to_vec()));
+                perspectives.push(("no-owners", handle(Some(vec![])), main_agent.to_vec()));
+            }
+            if topic == Topic::PerspectiveSyncStateChange {
+                perspectives.push((
+                    "owned-by-a-b",
+                    owned_by_a_b.clone(),
+                    vec!["user A", "user B"],
+                ));
+            }
+            for (name, perspective, to) in perspectives {
+                let audience = Audience::Dids(recipients(&perspective));
+                cases.push((format!("{topic}-{name}"), topic, audience, to));
+            }
+        }
 
         let mut streams = Vec::new();
         for (name, session) in &sessions {
@@ -2074,10 +2024,10 @@ mod audience_matrix_tests {
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
         let pubsub = get_global_pubsub().await;
-        for (case, topic, audience, _) in &cases {
+        for (case, topic, audience, to) in &cases {
             let event = Event::new(*topic, audience.clone(), json_case(&tag(case)));
             for (name, session) in &sessions {
-                let expected = cases_reaching(&cases, case).contains(name);
+                let expected = to.contains(name);
                 assert_eq!(session.may_receive(&event), expected, "{case} → {name}");
             }
             pubsub.publish_event(event);
@@ -2105,11 +2055,119 @@ mod audience_matrix_tests {
         serde_json::json!({ "case": tag })
     }
 
-    fn cases_reaching<'a>(
-        cases: &'a [(&str, Topic, Audience, Vec<&'a str>)],
-        case: &str,
-    ) -> &'a [&'a str] {
-        &cases.iter().find(|(c, ..)| *c == case).unwrap().3
+    /// `(type, perspectiveUuid)` of each message `stream` delivers for a perspective of this
+    /// run, in order, until the `fence` perspective's message.
+    async fn perspective_events(
+        stream: &mut Stream,
+        run: &str,
+        fence: &str,
+    ) -> Vec<(String, String)> {
+        let mut got = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = stream.next().await.expect("the stream stays open");
+                let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+                let Some(uuid) = v["perspectiveUuid"].as_str().filter(|u| u.starts_with(run))
+                else {
+                    continue; // another test's event
+                };
+                if uuid == fence {
+                    return;
+                }
+                got.push((v["type"].as_str().unwrap().to_string(), uuid.to_string()));
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the fence never arrived; got {got:?}"));
+        got
+    }
+
+    /// An open database, for the perspective publishers. Keeps one that is already open.
+    fn database() {
+        if crate::db::Ad4mDb::global_instance()
+            .lock()
+            .unwrap()
+            .is_none()
+        {
+            crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+    }
+
+    // The real publishers: creating, renaming, syncing and removing a user's perspective
+    // reaches that user's stream only. An unowned perspective's events reach the operator
+    // and apps, except its removal, which reaches nobody (as before typed events).
+    #[tokio::test]
+    async fn perspective_lifecycle_events_reach_exactly_the_owners_streams() {
+        use crate::perspectives::{
+            add_perspective, get_perspective, remove_perspective, update_perspective,
+        };
+        use crate::types::{PerspectiveHandle, PerspectiveState};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        database();
+        let sessions = sessions();
+        let mut streams = Vec::new();
+        for (name, session) in &sessions {
+            streams.push((*name, open(session.clone()).await));
+        }
+
+        let run = uuid::Uuid::new_v4().to_string();
+        let owned = PerspectiveHandle {
+            uuid: format!("{run}-owned-by-a"),
+            owners: Some(vec![A.to_string()]),
+            ..Default::default()
+        };
+        let unowned = PerspectiveHandle {
+            uuid: format!("{run}-unowned"),
+            ..Default::default()
+        };
+        for handle in [&owned, &unowned] {
+            add_perspective(handle.clone(), None).await.unwrap();
+            let renamed = PerspectiveHandle {
+                name: Some("renamed".into()),
+                ..handle.clone()
+            };
+            update_perspective(&renamed).await.unwrap();
+            // Publishes `perspective-updated` too: the state change updates the handle.
+            get_perspective(&handle.uuid)
+                .unwrap()
+                .update_perspective_state(PerspectiveState::Synced)
+                .await
+                .unwrap();
+            assert!(remove_perspective(&handle.uuid).await.is_some());
+        }
+        let fence = format!("{run}-fence");
+        get_global_pubsub().await.publish_event(Event::new(
+            Topic::AiModelLoadingStatus,
+            Audience::Everyone,
+            serde_json::json!({ "perspectiveUuid": fence }),
+        ));
+
+        let lifecycle = |uuid: &str, removed: bool| {
+            let mut list = vec![
+                (events::PERSPECTIVE_ADDED, uuid),
+                (events::PERSPECTIVE_UPDATED, uuid),
+                (events::PERSPECTIVE_UPDATED, uuid),
+                (events::SYNC_STATE_CHANGE, uuid),
+            ];
+            if removed {
+                list.push((events::PERSPECTIVE_REMOVED, uuid));
+            }
+            list.into_iter()
+                .map(|(t, u)| (t.to_string(), u.to_string()))
+                .collect::<Vec<_>>()
+        };
+        for (name, stream) in &mut streams {
+            let mut got = perspective_events(stream, &run, &fence).await;
+            got.sort();
+            let mut expected = match *name {
+                "user A" => lifecycle(&owned.uuid, true),
+                "operator" | "app" => lifecycle(&unowned.uuid, false),
+                _ => vec![],
+            };
+            expected.sort();
+            assert_eq!(got, expected, "{name}");
+        }
     }
 
     // The socket's `events.watch` narrows typed events as it narrows string ones.

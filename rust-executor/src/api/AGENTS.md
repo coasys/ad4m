@@ -57,7 +57,10 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   `events_ws::wire_message` — the same message the string topic sends. The stream builder takes
   the socket's interest, so callers pass it (`Connection::interest()` on the RPC socket).
   `audience_matrix_tests` in `events_ws.rs` pins who receives each audience; add a case per moved
-  topic.
+  topic. Moved so far: the perspective topics. Their audience is `perspectives::event_recipients`
+  (the owners, or the main agent for an unowned perspective), read when the event is published.
+  `perspective-added/-updated/-removed` go out once per owner, each to that owner, with the
+  owner's DID in the payload's `owner`.
 - Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
   an open connection. Tests build sessions with `Session::for_test` / `for_test_expiring`.
