@@ -105,7 +105,9 @@ fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveIn
     Ok(Some(p))
 }
 
-async fn get_perspective_with_access(
+/// The perspective `uuid` if the session may reach it: 404 when it is missing, 403 when it
+/// is not the caller's. `Guard::Perspective` applies the same rule.
+pub(crate) async fn get_perspective_with_access(
     uuid: &str,
     ctx: &RequestContext,
 ) -> Result<PerspectiveInstance, WsRpcError> {

@@ -35,11 +35,51 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 }
 ```
 
-Spec item 6 replaces the first block with `register_with(name, CapSpec, typed_handler)`.
-Until then: **every new handler must check a capability** (or be registered with an
-explicit comment saying why not) and take `AgentContext` from the session
+A guard (next section) replaces the capability and access block. **Every new method
+registers a guard**, or, until its module moves to guards, checks a capability itself (or is
+registered with an explicit comment saying why not), and takes `AgentContext` from the session
 (`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
+
+## Guards (`guards.rs`)
+
+A method declares who may call it where it registers:
+
+```rust
+map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>("perspective.get", handler)
+    .read()
+    .guard(Guard::Perspective {
+        capability: perspective_query_capability,
+        uuid: uuid_param,
+        hides_existence: true,
+    });
+map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
+    .guard(Guard::Node(AGENT_READ_CAPABILITY.clone()));
+```
+
+`HandlerMap::dispatch` runs, in order: find the method (404) → params deserialize into `P`
+(400) → the guard's capability (403) → the guard's rule (403, or `null` without running the
+handler when `hides_existence` is set and the perspective is missing or not the caller's) → the
+handler. `HandlerMap::admit` runs the steps before the handler alone.
+
+| Guard | Rule after the capability |
+|---|---|
+| `Anonymous(cap)` | none; `cap` must be one anonymous callers hold |
+| `Node(cap)` | no user session (`refuse_user_session`); the operator, apps and anonymous callers pass |
+| `SelfAgent(cap)` | an authenticated session; the handler acts on `ctx.acts_as()` |
+| `Perspective { .. }` | `get_perspective_with_access`: the operator reaches all; a user its own; an app the unowned and the main agent's; 404 when missing |
+
+Capabilities stay: every guard checks one first, and the rule adds whose data the call may touch.
+A method takes at most one guard (a second panics). A method without one still dispatches,
+leaving every check to its handler; `build_handler_map` logs the unguarded methods at startup.
+A guard runs before the handler's own checks, so adding one changes nothing for callers the
+handler already refuses with the same code.
+
+`tests/method_matrix_tests.rs` walks every guarded method in `build_handler_map()` and calls
+`admit` as each kind of caller (operator, app with and without the capability, user, another
+user, anonymous) on its own, others', unowned, the main agent's and missing perspectives. A new
+guard is covered without a new test; a method whose params need more than `uuid` adds an entry
+to `EXTRA_PARAMS`.
 
 ## Protocol
 
