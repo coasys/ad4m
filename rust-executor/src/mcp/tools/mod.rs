@@ -41,9 +41,7 @@ pub mod subscriptions;
 
 use super::caller::Opened;
 use super::server::McpContext;
-use crate::agent::capabilities::{
-    defs::AGENT_PERMIT_CAPABILITY, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability, ListenerReach,
-};
+use crate::agent::capabilities::{defs::PERSPECTIVE_CREATE_CAPABILITY, Capability, ListenerReach};
 use crate::agent::session::{AuthError, Session};
 use crate::agent::AgentContext;
 use crate::api::guards::Admission;
@@ -155,7 +153,7 @@ to read, instance_create to write.";
 ///
 /// Being listed here only means `call_tool` does not refuse an anonymous caller or a
 /// token that does not work. `request_capability` still withholds the auto-permit (and
-/// the mint code) from any session without the PERMIT capability — see
+/// the mint code) from any session that `agent.permitCapability`'s guard refuses — see
 /// `handle_capability_request` in auth.rs (issue #851, sub-problem 3).
 pub(crate) const AUTH_TOOLS: &[&str] = &[
     "get_documentation",
@@ -541,24 +539,6 @@ impl Ad4mMcpHandler {
     /// node's main agent ([`Session::acts_as`]).
     pub(crate) async fn get_agent_context(&self) -> Result<AgentContext, String> {
         Ok(self.session().await?.acts_as())
-    }
-
-    /// Whether the caller may auto-permit a capability request.
-    ///
-    /// Authentication alone is not enough: a multi-user user token authenticates, but it
-    /// holds no PERMIT capability, so it may only *create* a request for the admin to
-    /// approve out of band. Auto-permit hands back the inline code, which `generate_jwt`
-    /// turns into an ALL_CAPABILITY token; a caller without PERMIT must never receive it
-    /// (issue #851, sub-problem 3). The operator may do anything, so the admin credential
-    /// still auto-permits.
-    ///
-    /// On a node without an admin credential a caller without a token on a loopback
-    /// listener is the operator and passes, on a multi-user node also a user who drops
-    /// their token (#1059). On a network listener that caller is anonymous and does not.
-    pub(crate) async fn caller_can_permit(&self, request: RequestAuth) -> bool {
-        self.caller(request)
-            .await
-            .is_ok_and(|session| session.may(&AGENT_PERMIT_CAPABILITY))
     }
 
     /// Open the MCP session's session from a login tool's token and return a success JSON
@@ -1051,7 +1031,23 @@ mod agent_context_tests {
             .unwrap_err();
         assert!(err.contains("Capability is not matched"), "{err}");
         assert!(handler.get_agent_context().await.unwrap().is_main_agent);
-        assert!(!handler.caller_can_permit(RequestAuth::default()).await);
+        assert!(!gets_mint_code(&handler).await);
+    }
+
+    /// Whether `request_capability` hands `handler`'s caller the inline mint code.
+    async fn gets_mint_code(handler: &Ad4mMcpHandler) -> bool {
+        let answer = handler
+            .request_capability_as(
+                RequestAuth::default(),
+                super::auth::RequestCapabilityParams {
+                    app_name: "mcp session test".into(),
+                    app_desc: "d".into(),
+                    app_domain: None,
+                    app_url: None,
+                },
+            )
+            .await;
+        serde_json::from_str::<Value>(&answer).expect(&answer)["code"].is_string()
     }
 
     #[tokio::test]
@@ -1097,13 +1093,13 @@ mod agent_context_tests {
         ensure_db();
         let local = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
         assert!(local.session().await.unwrap().is_operator());
-        assert!(local.caller_can_permit(RequestAuth::default()).await);
+        assert!(gets_mint_code(&local).await);
 
         // #1059: an MCP_HOST bind beyond loopback makes no-token callers anonymous.
         let remote = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Network, false));
         let err = remote.session().await.unwrap_err();
         assert!(err.starts_with("Authentication required."), "{err}");
-        assert!(!remote.caller_can_permit(RequestAuth::default()).await);
+        assert!(!gets_mint_code(&remote).await);
     }
 
     // A proxied request reads as a network one, as on the API: no operator through a proxy.

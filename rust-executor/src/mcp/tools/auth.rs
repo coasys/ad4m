@@ -1,17 +1,40 @@
 //! Authentication tools
 //!
-//! Tools for JWT auth, capability tokens, multi-user signup/login.
+//! Tools for JWT auth, capability tokens, multi-user signup/login. Each calls the RPC method
+//! that does its job through the handler map: `user.login`, `user.create`,
+//! `user.requestVerification`, `user.verifyEmail`, `agent.requestCapability`,
+//! `agent.generateJwt` as a caller without a token, and `agent.permitCapability` as the
+//! caller. `auth_status` has no RPC method: it reports the MCP session's [`Session`].
 
-use super::{Ad4mMcpHandler, RequestAuth};
-use crate::agent::capabilities::{
-    apps_map, defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
-    request_capability as cap_request_capability, AuthInfo, AuthInfoExtended,
-};
+use super::{call_method_as, Ad4mMcpHandler, RequestAuth};
+use crate::agent::capabilities::{apps_map, defs::ALL_CAPABILITY, AuthInfo, AuthInfoExtended};
 use crate::agent::session::{AuthError, Principal, Session};
+use crate::api::ws_handler::WsRpcError;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+/// The app name of the tokens the login tools obtain.
+const MCP_APP_NAME: &str = "mcp-agent";
+
+/// A login tool's answer when its user-management method refuses or fails. Callers without a
+/// token hold the user-management capabilities only while multi-user mode is on, so the
+/// guard's refusal names the mode, as the handlers do.
+fn user_management_error(e: WsRpcError) -> String {
+    let error = if e.code == 403 && !crate::user_management::is_multi_user_enabled() {
+        "Multi-user mode is not enabled".to_string()
+    } else {
+        e.message
+    };
+    json!({ "success": false, "error": error }).to_string()
+}
+
+/// The answer to a method result outside the method's contract.
+fn unexpected_result(method: &str, result: &Value) -> String {
+    json!({ "success": false, "error": format!("{method} answered {result}") }).to_string()
+}
 
 // ============================================================================
 // Parameter Types
@@ -91,15 +114,19 @@ impl Ad4mMcpHandler {
         description = "Login to a multi-user AD4M executor using email and password. Returns a JWT token on success that will be used for subsequent operations."
     )]
     pub async fn login_email(&self, params: Parameters<LoginEmailParams>) -> String {
-        use crate::user_management as um;
         let email = params.0.email.trim().to_lowercase();
-
-        match um::login_user(&email, &params.0.password, "mcp-agent") {
-            Ok(token) => {
+        let login = json!({
+            "email": email,
+            "password": params.0.password,
+            "appName": MCP_APP_NAME,
+        });
+        match self.call_without_token("user.login", login).await {
+            Ok(Value::String(token)) => {
                 self.store_token_and_respond(token, Some(&email), "Login successful.")
                     .await
             }
-            Err(e) => json!({"success": false, "error": e}).to_string(),
+            Ok(other) => unexpected_result("user.login", &other),
+            Err(e) => user_management_error(e),
         }
     }
 
@@ -127,23 +154,24 @@ impl Ad4mMcpHandler {
         request: RequestAuth,
         params: RequestCapabilityParams,
     ) -> String {
-        let caller_can_permit = self.caller_can_permit(request).await;
-        self.handle_capability_request(params, caller_can_permit)
-            .await
+        let permitter = self.caller(request).await.ok();
+        self.handle_capability_request(params, permitter).await
     }
 
     /// Body of [`Self::request_capability`], split from the transport wrapper so
-    /// tests can drive both permit verdicts: a `RequestContext<RoleServer>`
+    /// tests can drive it as any session: a `RequestContext<RoleServer>`
     /// cannot be fabricated outside rmcp (its `Peer` constructor is `pub(crate)`,
     /// see `harness_bridge.rs`), so the wrapper only adopts the header credential
-    /// and asks whether the session may permit; everything decidable lives here.
+    /// and resolves the caller; everything decidable lives here.
     ///
-    /// The request itself is always created — that publishes the capability-request
-    /// exception the ADAM Launcher listens for, which is the legitimate pairing
-    /// flow. What a caller whose session lacks PERMIT must NOT get is the auto-permit and the
-    /// inline code: the code is the mint secret (`generate_jwt` exchanges it for a
-    /// signed ALL_CAPABILITY JWT valid on every executor surface), and returning it
-    /// to any caller that could reach the MCP port made `--admin-credential`
+    /// The request itself is always created (`agent.requestCapability`, as a caller without
+    /// a token) — that publishes the capability-request exception the ADAM Launcher listens
+    /// for, which is the legitimate pairing flow. The auto-permit and the inline code are
+    /// `agent.permitCapability` as `permitter`, so its guard decides: the operator, or an app
+    /// whose token holds PERMIT; never a user or an anonymous caller, and never a caller
+    /// whose token does not work (`None`). The code is the mint secret (`generate_jwt`
+    /// exchanges it for a signed ALL_CAPABILITY JWT valid on every executor surface), and
+    /// returning it to any caller that could reach the MCP port made `--admin-credential`
     /// decorative (issue #851, sub-problem 3).
     ///
     /// Scope: without an admin credential, a caller with no token on a loopback
@@ -154,37 +182,67 @@ impl Ad4mMcpHandler {
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
-        caller_can_permit: bool,
+        permitter: Option<Arc<Session>>,
     ) -> String {
+        let app_domain = p.app_domain.clone().unwrap_or_default();
         let auth_info = AuthInfo {
             app_name: p.app_name.clone(),
             app_desc: p.app_desc.clone(),
-            app_domain: p.app_domain.clone(),
+            app_domain: Some(app_domain.clone()),
             app_url: p.app_url.clone(),
             app_icon_path: None,
             capabilities: Some(vec![ALL_CAPABILITY.clone()]),
             user_email: None,
         };
+        let request = json!({ "authInfo": {
+            "appName": p.app_name,
+            "appDesc": p.app_desc,
+            "appDomain": app_domain,
+            "appUrl": p.app_url,
+            "capabilities": [&*ALL_CAPABILITY],
+        }});
+        let request_id = match self
+            .call_without_token("agent.requestCapability", request)
+            .await
+        {
+            Ok(Value::String(request_id)) => request_id,
+            Ok(other) => return unexpected_result("agent.requestCapability", &other),
+            Err(e) => {
+                return json!({
+                    "success": false,
+                    "error": format!("Failed to request capability: {}", e.message)
+                })
+                .to_string()
+            }
+        };
 
-        let request_id = cap_request_capability(auth_info.clone()).await;
-
-        if !caller_can_permit {
-            return json!({
+        let not_permitted = || {
+            json!({
                 "request_id": request_id,
                 "message": "Capability request created but NOT auto-permitted: this session may \
                     not grant capabilities. The executor admin must approve the request (ADAM \
                     Launcher), then call generate_jwt with this request_id and the code shown \
-                    to the admin. Only the admin credential, or a token that holds the PERMIT \
-                    capability, auto-permits; a user token never does."
+                    to the admin. Only the admin credential, or an app token that holds the \
+                    PERMIT capability, auto-permits; a user token never does."
             })
-            .to_string();
-        }
-
-        match permit_capability(AuthInfoExtended {
+            .to_string()
+        };
+        let Some(permitter) = permitter else {
+            return not_permitted();
+        };
+        let permit = AuthInfoExtended {
             request_id: request_id.clone(),
             auth: auth_info,
-        }) {
-            Ok(code) => {
+        };
+        let permit = json!({ "auth": serde_json::to_string(&permit).unwrap_or_default() });
+        match call_method_as(permitter, "agent.permitCapability", permit).await {
+            Err(e) if e.code == 403 => not_permitted(),
+            Err(e) => json!({
+                "success": false,
+                "error": format!("Failed to permit capability: {}", e.message)
+            })
+            .to_string(),
+            Ok(Value::String(code)) => {
                 // Unified secret-log gate (rust-executor/LOGGING.md):
                 // AD4M_LOG_SECRETS=1 opts in to the raw capability code;
                 // otherwise redacted. Consistent with agent_ws
@@ -210,11 +268,7 @@ impl Ad4mMcpHandler {
                 })
                 .to_string()
             }
-            Err(e) => json!({
-                "success": false,
-                "error": format!("Failed to permit capability: {}", e)
-            })
-            .to_string(),
+            Ok(other) => unexpected_result("agent.permitCapability", &other),
         }
     }
 
@@ -225,18 +279,20 @@ impl Ad4mMcpHandler {
     pub async fn generate_jwt(&self, params: Parameters<GenerateJwtParams>) -> String {
         let p = &params.0;
 
-        match generate_capability_token(p.request_id.clone(), p.code.clone()).await {
-            Ok(cap_token) => {
+        let generate = json!({ "requestId": p.request_id, "rand": p.code });
+        match self.call_without_token("agent.generateJwt", generate).await {
+            Ok(Value::String(token)) => {
                 self.store_token_and_respond(
-                    cap_token.expose_once(),
+                    token,
                     None,
                     "JWT generated and stored. You are now authenticated.",
                 )
                 .await
             }
+            Ok(other) => unexpected_result("agent.generateJwt", &other),
             Err(e) => json!({
                 "success": false,
-                "error": format!("Failed to generate JWT: {}", e)
+                "error": format!("Failed to generate JWT: {}", e.message)
             })
             .to_string(),
         }
@@ -247,16 +303,18 @@ impl Ad4mMcpHandler {
         description = "Create a new user account (multi-user mode). Sends a verification email with a code. Use verify_email_code to complete signup."
     )]
     pub async fn signup(&self, params: Parameters<SignupParams>) -> String {
-        use crate::user_management as um;
-        let email = params.0.email.trim().to_lowercase();
-
-        match um::signup_user(&email, &params.0.password, Some("MCP Agent")).await {
-            Ok(did) => json!({
+        let create = json!({
+            "email": params.0.email.trim().to_lowercase(),
+            "password": params.0.password,
+        });
+        match self.call_without_token("user.create", create).await {
+            Ok(created) if created["success"] == true => json!({
                 "success": true,
-                "did": did,
+                "did": created["did"],
                 "message": "User created. Check your email for a verification code and call verify_email_code."
             }).to_string(),
-            Err(e) => json!({"success": false, "error": e}).to_string(),
+            Ok(created) => json!({"success": false, "error": created["error"]}).to_string(),
+            Err(e) => user_management_error(e),
         }
     }
 
@@ -268,16 +326,27 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<RequestLoginVerificationParams>,
     ) -> String {
-        use crate::user_management as um;
-        let email = params.0.email.trim().to_lowercase();
-
-        match um::request_login_code(&email, Some("MCP Agent")).await {
-            Ok(()) => json!({
-                "success": true,
-                "message": "Verification code sent. Use verify_email_code to complete login."
-            })
-            .to_string(),
-            Err(e) => json!({"success": false, "error": e}).to_string(),
+        let request = json!({
+            "email": params.0.email.trim().to_lowercase(),
+            "appInfo": { "appName": "MCP Agent" },
+        });
+        match self
+            .call_without_token("user.requestVerification", request)
+            .await
+        {
+            Ok(answer) => {
+                let mut result = json!({
+                    "success": answer["success"],
+                    "message": answer["message"],
+                    "requires_password": answer["requiresPassword"],
+                    "is_existing_user": answer["isExistingUser"],
+                });
+                if answer["success"] != true {
+                    result["error"] = answer["message"].clone();
+                }
+                result.to_string()
+            }
+            Err(e) => user_management_error(e),
         }
     }
 
@@ -286,12 +355,16 @@ impl Ad4mMcpHandler {
         description = "Verify an email code to complete signup or login. Returns a JWT token on success. The verification_type must be 'signup' or 'login'."
     )]
     pub async fn verify_email_code(&self, params: Parameters<VerifyEmailCodeParams>) -> String {
-        use crate::user_management as um;
         let p = &params.0;
         let email = p.email.trim().to_lowercase();
-
-        match um::verify_and_login(&email, &p.code, &p.verification_type, "mcp-agent") {
-            Ok(token) => {
+        let verify = json!({
+            "email": email,
+            "code": p.code,
+            "verificationType": p.verification_type,
+            "appName": MCP_APP_NAME,
+        });
+        match self.call_without_token("user.verifyEmail", verify).await {
+            Ok(Value::String(token)) => {
                 self.store_token_and_respond(
                     token,
                     Some(&email),
@@ -299,8 +372,20 @@ impl Ad4mMcpHandler {
                 )
                 .await
             }
-            Err(e) => json!({"success": false, "error": e}).to_string(),
+            Ok(other) => unexpected_result("user.verifyEmail", &other),
+            Err(e) => user_management_error(e),
         }
+    }
+
+    /// Call the RPC method `method` as a caller without a token on this MCP listener: the
+    /// operator on a loopback listener of a node without an admin credential, anonymous
+    /// otherwise. The login and capability-request tools call this way, whatever session
+    /// the MCP session holds: they obtain the session that replaces it, as an RPC client
+    /// does on a connection without a token.
+    async fn call_without_token(&self, method: &str, params: Value) -> Result<Value, WsRpcError> {
+        let session = Session::open("", &self.context.admin_credential, self.context.reach)
+            .map_err(|e| WsRpcError::unauthorized(e.to_string()))?;
+        call_method_as(Arc::new(session), method, params).await
     }
 
     /// Check current authentication status
@@ -660,9 +745,16 @@ mod capability_mint_tests {
     /// `"code"` and "auto-permitted".
     #[tokio::test]
     async fn an_unauthenticated_caller_gets_no_mint_code() {
+        crate::test_utils::ensure_db();
         let handler = handler_with_admin_credential();
+        let anonymous = Session::for_test(
+            Principal::Anonymous {
+                caps: crate::agent::capabilities::anonymous_capabilities_when(false),
+            },
+            ListenerReach::Network,
+        );
         let resp = handler
-            .handle_capability_request(mint_params(), false)
+            .handle_capability_request(mint_params(), Some(Arc::new(anonymous)))
             .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         assert!(
@@ -682,8 +774,12 @@ mod capability_mint_tests {
     async fn an_authenticated_caller_still_gets_a_permitted_code() {
         use crate::agent::capabilities::pending::PendingApprovals;
 
+        crate::test_utils::ensure_db();
         let handler = handler_with_admin_credential();
-        let resp = handler.handle_capability_request(mint_params(), true).await;
+        let operator = Session::for_test(Principal::Operator, ListenerReach::Network);
+        let resp = handler
+            .handle_capability_request(mint_params(), Some(Arc::new(operator)))
+            .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         let request_id = v["request_id"].as_str().expect("request_id present");
         let code = v["code"]
@@ -778,5 +874,129 @@ mod capability_mint_tests {
         assert!(gets_code(jwt_with(vec![ALL_CAPABILITY.clone()])).await);
         // The admin credential auto-permits.
         assert!(gets_code("test-admin-credential".to_string()).await);
+    }
+
+    /// `agent.permitCapability` is `Guard::Node`: a user session never permits, whatever its
+    /// capabilities. The tool checked only PERMIT, so a user token holding it got the code.
+    #[tokio::test]
+    async fn a_user_session_holding_permit_gets_no_mint_code() {
+        crate::test_utils::ensure_db();
+        let user = Session::for_test(
+            Principal::User {
+                token_id: crate::agent::session::TokenId("mint-user".into()),
+                email: "mint.user@example.org".into(),
+                did: "did:key:mint-user".into(),
+                caps: vec![ALL_CAPABILITY.clone()],
+            },
+            ListenerReach::Network,
+        );
+        let resp = handler_with_admin_credential()
+            .handle_capability_request(mint_params(), Some(Arc::new(user)))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert!(v.get("code").is_none(), "{resp}");
+        assert!(v["request_id"].is_string(), "{resp}");
+    }
+}
+
+/// The login tools call their user-management methods as a caller without a token.
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+    use crate::agent::capabilities::ListenerReach;
+    use crate::mcp::server::McpContext;
+    use crate::test_utils::{ensure_db, setup_agent, setup_wallet, MultiUserMode};
+
+    fn handler() -> Ad4mMcpHandler {
+        Ad4mMcpHandler::new(McpContext::new(
+            Some("login-admin".into()),
+            ListenerReach::Network,
+            false,
+        ))
+    }
+
+    fn parse(answer: &str) -> Value {
+        serde_json::from_str(answer).expect(answer)
+    }
+
+    // The guard refuses a caller without a token while multi-user mode is off; the answer
+    // still names the mode (`mcp-auth.test.ts` reads it).
+    #[tokio::test]
+    async fn logging_in_without_multi_user_mode_names_the_mode() {
+        ensure_db();
+        let answer = parse(
+            &handler()
+                .login_email(Parameters(LoginEmailParams {
+                    email: "nobody@example.org".into(),
+                    password: "p".into(),
+                }))
+                .await,
+        );
+        assert_eq!(answer["success"], false, "{answer}");
+        assert_eq!(answer["error"], "Multi-user mode is not enabled");
+        let signup = parse(
+            &handler()
+                .signup(Parameters(SignupParams {
+                    email: "nobody@example.org".into(),
+                    password: "p".into(),
+                }))
+                .await,
+        );
+        assert_eq!(
+            signup["error"], "Multi-user mode is not enabled",
+            "{signup}"
+        );
+    }
+
+    // An MCP session that holds a user session logs in as another user: the login runs as a
+    // caller without a token, not as the session it replaces.
+    #[tokio::test]
+    async fn a_logged_in_session_logs_in_again() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let email = &format!("mcp.login-{}@example.org", uuid::Uuid::new_v4().simple());
+        crate::user_management::create_user(email, "secret-pass").unwrap();
+        let first = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let handler = Ad4mMcpHandler::new(
+            McpContext::new(Some("login-admin".into()), ListenerReach::Network, false)
+                .with_token(&first),
+        );
+        let answer = parse(
+            &handler
+                .login_email(Parameters(LoginEmailParams {
+                    email: email.into(),
+                    password: "secret-pass".into(),
+                }))
+                .await,
+        );
+        assert_eq!(answer["success"], true, "{answer}");
+        let wrong = parse(
+            &handler
+                .login_email(Parameters(LoginEmailParams {
+                    email: email.into(),
+                    password: "wrong".into(),
+                }))
+                .await,
+        );
+        assert_eq!(wrong["success"], false, "{wrong}");
+    }
+
+    // `user.requestVerification` tells a caller without an account to sign up with a
+    // password; the tool answered "User not found".
+    #[tokio::test]
+    async fn requesting_a_code_without_an_account_asks_for_a_password() {
+        setup_wallet();
+        let _multi_user = MultiUserMode::on();
+        let answer = parse(
+            &handler()
+                .request_login_verification(Parameters(RequestLoginVerificationParams {
+                    email: "no.account@example.org".into(),
+                }))
+                .await,
+        );
+        assert_eq!(answer["success"], true, "{answer}");
+        assert_eq!(answer["requires_password"], true, "{answer}");
+        assert_eq!(answer["is_existing_user"], false, "{answer}");
     }
 }
