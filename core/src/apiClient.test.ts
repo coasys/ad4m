@@ -23,7 +23,7 @@ class TestSocket {
     onopen: (() => void) | null = null
     onmessage: ((ev: { data: string }) => void) | null = null
     onerror: ((ev: unknown) => void) | null = null
-    onclose: (() => void) | null = null
+    onclose: ((ev: { code: number; reason: string }) => void) | null = null
 
     constructor(public url: string) {
         TestSocket.instances.push(this)
@@ -39,7 +39,8 @@ class TestSocket {
         }
     }
     open() { this.readyState = 1; this.onopen?.() }
-    drop() { this.readyState = 3; this.onclose?.() }
+    /** Close from the server side; 1006 is an abnormal close with no close frame. */
+    drop(code = 1006, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }) }
     reply(msg: AnyMsg) { this.onmessage?.({ data: JSON.stringify(msg) }) }
 }
 
@@ -339,6 +340,90 @@ describe('ApiClient.onReconnect', () => {
         client.onReconnect(reconnected)
         connect(1)
         expect(reconnected).not.toHaveBeenCalled()
+    })
+})
+
+describe('ApiClient when the executor refuses the token', () => {
+    const REASON = 'token expired or revoked'
+    let authFailed: jest.Mock
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        jest.useFakeTimers()
+        authFailed = jest.fn()
+        client.onAuthFailed(authFailed)
+    })
+    afterEach(() => jest.useRealTimers())
+
+    it('rejects sent calls with 401 on close code 1008, and does not reconnect', async () => {
+        open()
+        socket(0).open()
+        const write = call('perspective.addLink', { uuid: 'u' })
+        const read = call('perspective.all')
+        socket(0).drop(1008, REASON)
+        await expect(write).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        // A read is retried after an ordinary close; a refused token gets no retry.
+        await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(authFailed).toHaveBeenCalledTimes(1)
+        expect(authFailed).toHaveBeenCalledWith(REASON)
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('rejects a call still waiting to go out with 401 when the socket closes 1008 before it opens', async () => {
+        const queued = call('agent.get')
+        socket(0).drop(1008, REASON)
+        await expect(queued).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(authFailed).toHaveBeenCalledTimes(1)
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('fails every later call with 401 without opening a socket', async () => {
+        open()
+        socket(0).drop(1008, REASON)
+        open()
+        await expect(call('agent.get')).rejects.toMatchObject({ status: 401, body: REASON })
+        await expect(client.watchApplied()).rejects.toMatchObject({ status: 401 })
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('fails every pending call on a 401 reply and stops once the executor closes the socket', async () => {
+        open()
+        socket(0).open()
+        const first = call('agent.get')
+        const second = call('perspective.addLink', { uuid: 'u' })
+        socket(0).reply({ id: socket(0).sent.find((m) => m.type === 'agent.get')!.id, error: { code: 401, message: REASON } })
+        await expect(first).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        await expect(second).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(socket(0).readyState).toBe(3)
+        socket(0).drop(1008, REASON)
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(authFailed).toHaveBeenCalledTimes(1)
+    })
+
+    it('still reconnects after an ordinary close, with 503 for an unsent write', async () => {
+        open()
+        socket(0).open()
+        const write = call('perspective.addLink', { uuid: 'u' })
+        socket(0).drop()
+        await expect(write).rejects.toMatchObject({ status: 503 })
+        jest.advanceTimersByTime(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(authFailed).not.toHaveBeenCalled()
+    })
+
+    it('leaves a new client, with a new token, free to connect', async () => {
+        open()
+        socket(0).drop(1008, REASON)
+        const fresh = new ApiClient(url, 'new-token', TestSocket as unknown as new (url: string) => WebSocket)
+        const reply = (fresh.call as UntypedCall)('agent.get', {})
+        socket(1).open()
+        expect(socket(1).url).toContain('token=new-token')
+        socket(1).reply({ id: socket(1).sent.find((m) => m.type === 'agent.get')!.id, result: { did: 'd' } })
+        await expect(reply).resolves.toEqual({ did: 'd' })
+        fresh.closeAll()
     })
 })
 

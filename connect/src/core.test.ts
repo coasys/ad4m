@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import Ad4mConnect from './core';
 import { setLocal, getLocal } from './utils';
-import { AgentStatus, Ad4mClient } from '@coasys/ad4m';
+import { AgentStatus, Ad4mClient, RpcError } from '@coasys/ad4m';
 
 const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockAgent = {
@@ -32,6 +32,7 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockClientInstance = {
     close: vi.fn(),
     on: vi.fn(),
+    onAuthFailed: vi.fn(),
     agent: mockAgent,
     runtime: mockRuntime,
   };
@@ -82,6 +83,7 @@ describe('Ad4mConnect', () => {
     mockAgent.loginUser.mockClear();
     mockAgent.createUser.mockClear();
     mockClientInstance.close.mockClear();
+    mockClientInstance.onAuthFailed.mockClear();
     (Ad4mClient as any).mockClear();
     mockRuntime.info.mockClear();
     mockRuntime.multiUserEnabled.mockClear();
@@ -235,7 +237,7 @@ describe('Ad4mConnect', () => {
 
     it('reports a locked wallet, not a bad token, when status is refused', async () => {
       // isLocked needs no capability, so it can tell the two apart where status cannot.
-      mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
+      mockAgent.status.mockRejectedValueOnce(new RpcError(403, 'InvalidSignature'));
       mockAgent.isLocked.mockResolvedValueOnce(true);
       setLocal('ad4m-token', 'kept-token');
       const conn = new Ad4mConnect(defaultOptions);
@@ -248,7 +250,7 @@ describe('Ad4mConnect', () => {
       setLocal('ad4m-url', 'http://localhost:12000');
       const { checkConnection } = await import('./utils');
       (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
-      mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
+      mockAgent.status.mockRejectedValueOnce(new RpcError(403, 'InvalidSignature'));
       setLocal('ad4m-token', 'kept-token');
       const conn = new Ad4mConnect(defaultOptions);
       const auth: string[] = [];
@@ -330,15 +332,82 @@ describe('Ad4mConnect', () => {
       expect(conn.authState).toBe('locked');
     });
 
-    it('clears token on InvalidSignature', async () => {
+    /** The client connect() ends on was built with this token. */
+    const lastClientToken = () => (Ad4mClient as any).mock.calls.at(-1)[1];
+
+    it.each([
+      ['an InvalidSignature (403)', new RpcError(403, 'InvalidSignature')],
+      ['an ExpiredSignature (403)', new RpcError(403, 'ExpiredSignature')],
+      ['a revoked token (403)', new RpcError(403, 'Unauthorized access')],
+      ['an expired or revoked token (401)', new RpcError(401, 'token expired or revoked')],
+    ])('clears the token and rebuilds the client without it on %s', async (_, refusal) => {
       mockAgent.isLocked.mockResolvedValueOnce(false);
-      mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
+      mockAgent.status.mockRejectedValueOnce(refusal);
 
       setLocal('ad4m-token', 'bad-token');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const conn = new Ad4mConnect(defaultOptions);
+      const client = await conn.connect();
+      expect(conn.token).toBe('');
+      expect(getLocal('ad4m-token')).toBeFalsy();
+      expect(Ad4mClient).toHaveBeenNthCalledWith(1, 'http://localhost:12000', 'bad-token');
+      expect(lastClientToken()).toBe('');
+      expect(client).toBe(conn.ad4mClient);
+      expect(conn.authState).toBe('unauthenticated');
+    });
+
+    it('keeps a token that only lacks the capability for agent.status (403)', async () => {
+      mockAgent.isLocked.mockResolvedValueOnce(false);
+      mockAgent.status.mockRejectedValueOnce(
+        new RpcError(403, 'Capability is not matched, you have capabilities: [], expected: agent READ'),
+      );
+      setLocal('ad4m-token', 'narrow-token');
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();
-      expect(conn.token).toBe('');
+      expect(conn.token).toBe('narrow-token');
+      expect(getLocal('ad4m-token')).toBe('narrow-token');
+      expect(Ad4mClient).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the token when status fails for another reason', async () => {
+      mockAgent.status.mockRejectedValueOnce(new RpcError(500, 'conductor not ready'));
+      setLocal('ad4m-token', 'good-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(conn.token).toBe('good-token');
+      expect(getLocal('ad4m-token')).toBe('good-token');
+      expect(Ad4mClient).toHaveBeenCalledTimes(1);
       expect(conn.authState).toBe('unauthenticated');
+    });
+
+    it('reads the locked-wallet refusal from the RpcError body', async () => {
+      mockAgent.status.mockRejectedValueOnce(
+        new RpcError(500, 'Cannot extractByTags from a ciphered wallet. You must unlock first.'),
+      );
+      setLocal('ad4m-token', 'kept-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('locked');
+      expect(conn.token).toBe('kept-token');
+    });
+
+    it('moves to unauthenticated and drops the token when the client loses auth mid-session', async () => {
+      setLocal('ad4m-token', 'live-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(conn.authState).toBe('authenticated');
+      const authStates: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => authStates.push(e.detail));
+
+      const onAuthFailed = mockClientInstance.onAuthFailed.mock.calls.at(-1)![0];
+      onAuthFailed('token expired or revoked');
+
+      expect(conn.token).toBe('');
+      expect(getLocal('ad4m-token')).toBeFalsy();
+      expect(lastClientToken()).toBe('');
+      expect(mockClientInstance.close).toHaveBeenCalled();
+      expect(authStates).toEqual(['unauthenticated']);
     });
   });
 
@@ -393,12 +462,22 @@ describe('Ad4mConnect', () => {
       expect(conn.requestId).toBe('req-123');
     });
 
-    it('clears token when invalidateToken is true', async () => {
+    it('sends the request from a client without the token when invalidateToken is true', async () => {
+      setLocal('ad4m-token', 'old-token');
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();
-      conn.token = 'old-token';
+      expect(Ad4mClient).toHaveBeenLastCalledWith('http://localhost:12000', 'old-token');
+
+      let tokenOfRequestingClient: string | undefined;
+      mockAgent.requestCapability.mockImplementationOnce(async () => {
+        tokenOfRequestingClient = (Ad4mClient as any).mock.calls.at(-1)[1];
+        return 'req-123';
+      });
       await conn.requestCapability(true);
-      // Token was cleared before calling requestCapability
+
+      expect(tokenOfRequestingClient).toBe('');
+      expect(conn.token).toBe('');
+      expect(getLocal('ad4m-token')).toBeFalsy();
       expect(conn.requestId).toBe('req-123');
     });
   });
