@@ -98,6 +98,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Duplicate agent fix [#641](https://github.com/coasys/ad4m/pull/641)
 
 ### Added
+- **Every executor, CLI and launcher build records the commit it was made from** [#1396](https://github.com/coasys/ad4m/issues/1396)
+  - `ad4m --version` and `ad4m-executor --version` print `<version> (<short commit>)`, e.g. `0.13.0 (1a2b3c4d)`; `-dirty` is appended when the tree had uncommitted changes, and `unknown` stands in for a build without git. `runtimeInfo` gains `ad4mExecutorCommit` (the full hash) next to the unchanged `ad4mExecutorVersion`, the executor logs `AD4M executor <version> (<commit>)` at startup, the REST root (`/`) answers it as `commit`, and the launcher shows it next to its version. The version string and the version comparison against `OLDEST_VERSION` are unchanged.
 - **Headless executor guide and a self-updating staging deployment** [#1215](https://github.com/coasys/ad4m/issues/1215)
   - `docs-src/headless-executor.md`: how to run `ad4m-executor` as a `systemd --user` service without the launcher: config file, secrets through `LoadCredential=`, health check, update with a copy of the data directory, rollback, secret rotation, accounts without SMTP, a reverse proxy, and moving a node off the launcher. `deploy/staging/`: `systemd --user` units and `update.sh`, which builds the head of a branch, snapshots the data directory, checks `/health` plus an unlocked agent within a time limit, rolls back on failure and writes a `status.json`. CI runs shellcheck and a stubbed test of `update.sh` (`deploy-scripts` job).
 - **`ad4m-executor run --config <file>`: a headless executor's settings in one JSON file** [#1215](https://github.com/coasys/ad4m/issues/1215)
