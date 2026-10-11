@@ -7,8 +7,12 @@
 //! session and the params the tool sends. A tool that calls several methods is allowed when
 //! every one of them is. The tools that obtain a session (the login tools, `generate_jwt`)
 //! call as a caller without a token, so their rows expect that caller's answer, whoever holds
-//! the MCP session. A tool reads as refused when it answers a status of 401, 403 or 404
-//! (`mcp::tools::method_error`); a login tool refused by the guard names the multi-user mode.
+//! the MCP session. A row compares the tool's status (401, 403 or 404,
+//! `mcp::tools::method_error`) with the status of the first method whose guard refuses, mapped
+//! as the tool maps it (`perspective_error` for a method on a perspective). A caller without an
+//! authenticated session expects 401 from every tool `call_tool` gates (not in `AUTH_TOOLS`),
+//! whatever the methods' guards say. A login tool refused by the guard names the multi-user
+//! mode, and `request_capability` withholds the code: those rows compare only the refusal.
 //!
 //! [`every_tool_is_classified`] fails for a new tool that is in neither list, so a tool that
 //! wraps an RPC method cannot skip the matrix.
@@ -18,6 +22,7 @@
 //! perspective, `Guard::perspective(perspective_query_capability | perspective_update_capability)`
 //! ([`every_perspective_tool_without_a_method_follows_the_perspective_rule`]).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -34,11 +39,11 @@ use crate::agent::capabilities::{
 };
 use crate::agent::session::{Principal, Session, TokenId};
 use crate::api::guards::{Admission, Guard};
-use crate::api::ws_handler::shared_handler_map;
+use crate::api::ws_handler::{shared_handler_map, WsRpcError};
 use crate::mcp::tools::test_support::{handler_as, status, RuntimeService};
 use crate::mcp::tools::{auth, flows, instances, languages, neighbourhoods, perspectives};
 use crate::mcp::tools::{
-    perspective_error, profiles, request_context, subscriptions, Ad4mMcpHandler,
+    perspective_error, profiles, request_context, subscriptions, Ad4mMcpHandler, AUTH_TOOLS,
 };
 
 type Answer = Pin<Box<dyn Future<Output = String>>>;
@@ -63,16 +68,18 @@ struct Tool {
     /// `false` for a tool whose allowed path needs what a unit test node lacks (a language
     /// download): only its refused rows run it; its allowed rows check its guard step.
     runs_when_allowed: bool,
-    /// Whether the answer is a refusal.
-    refused: fn(&str) -> bool,
+    /// How a row reads the tool's answer.
+    reads: Reads,
 }
 
-/// A refusal of a method that the tool called ([`crate::mcp::tools::method_error`]).
-fn by_status(answer: &str) -> bool {
-    serde_json::from_str::<Value>(answer)
-        .ok()
-        .and_then(|v| v.get("status")?.as_u64())
-        .is_some_and(|status| matches!(status, 401 | 403 | 404))
+/// How a row reads a tool's answer.
+#[derive(Clone, Copy)]
+enum Reads {
+    /// The status of a refused method ([`crate::mcp::tools::method_error`]), compared with
+    /// the status the methods' guards give ([`methods_refusal`]).
+    Status,
+    /// Only whether the tool refused: its refusal carries no status.
+    Refusal(fn(&str) -> bool),
 }
 
 /// A login tool's guard refusal: callers without a token hold the user-management
@@ -124,11 +131,11 @@ fn tools() -> Vec<Tool> {
         methods,
         run,
         runs_when_allowed: true,
-        refused: by_status,
+        reads: Reads::Status,
     };
     let login =
         |name: &'static str, method: &'static str, params: fn(&str) -> Value, run: Run| Tool {
-            refused: by_mode,
+            reads: Reads::Refusal(by_mode),
             ..tool(name, WithoutToken, vec![m(method, params)], run)
         };
     vec![
@@ -500,9 +507,9 @@ fn tools() -> Vec<Tool> {
         // The request is created as a caller without a token; the inline code is
         // `agent.permitCapability` as the caller, so only that method decides the row.
         Tool {
-            refused: |answer| {
+            reads: Reads::Refusal(|answer| {
                 serde_json::from_str::<Value>(answer).map_or(true, |v| !v["code"].is_string())
-            },
+            }),
             ..tool(
                 "request_capability",
                 AsCaller,
@@ -651,17 +658,34 @@ fn session(caller: Caller, caps: &[Capability]) -> Arc<Session> {
     Arc::new(Session::for_test(principal, ListenerReach::Network))
 }
 
-/// Whether the guards of all of `tool`'s methods admit `session` with the tool's params.
-async fn methods_admit(tool: &Tool, session: Arc<Session>, target: &str) -> bool {
+/// The status `tool` must answer `session` with on perspective `target` (`None`: it allows).
+/// A caller without an authenticated session gets 401 from a tool that `call_tool` gates.
+/// Otherwise the first of the tool's methods whose guard refuses decides, mapped as the tool
+/// maps it: a method on a perspective answers as [`perspective_error`], any other as
+/// [`crate::mcp::tools::method_error`].
+async fn methods_refusal(
+    tool: &Tool,
+    guards: &HashMap<&str, Guard>,
+    session: Arc<Session>,
+    target: &str,
+) -> Option<u64> {
+    if !AUTH_TOOLS.contains(&tool.name) && !session.is_authenticated() {
+        return Some(401);
+    }
     let map = shared_handler_map();
     let ctx = request_context(session);
     for (method, params) in &tool.methods {
-        match map.admit(method, &params(target), &ctx).await {
-            Ok(Admission::Granted) => {}
-            Ok(Admission::Hidden) | Err(_) => return false,
-        }
+        let refusal = match map.admit(method, &params(target), &ctx).await {
+            Ok(Admission::Granted) => continue,
+            Ok(Admission::Hidden) => WsRpcError::not_found(String::new()),
+            Err(e) => e,
+        };
+        return match guards[method] {
+            Guard::Perspective { .. } => status(&perspective_error(target, refusal)),
+            _ => Some(refusal.code.into()),
+        };
     }
-    true
+    None
 }
 
 /// The rows of `tool`: the perspective rows when its first method names a perspective, the
@@ -687,7 +711,7 @@ async fn every_wrapping_tool_allows_and_refuses_as_its_methods_guards_do() {
     // tools' rows expect the guard's refusal.
     crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false)).unwrap();
     let map = shared_handler_map();
-    let guards: std::collections::HashMap<&str, Guard> = map
+    let guards: HashMap<&str, Guard> = map
         .guards()
         .into_iter()
         .filter_map(|(name, guard)| Some((name, guard?.clone())))
@@ -709,10 +733,12 @@ async fn every_wrapping_tool_allows_and_refuses_as_its_methods_guards_do() {
         for (caller, target) in rows(first) {
             let uuid = target.map(|t| world.uuid(t)).unwrap_or_default();
             let session = session(caller, &caps);
-            let expected = match tool.calls {
-                Calls::AsCaller => methods_admit(&tool, session.clone(), &uuid).await,
-                Calls::WithoutToken => methods_admit(&tool, without_token.clone(), &uuid).await,
+            let calls_as = match tool.calls {
+                Calls::AsCaller => session.clone(),
+                Calls::WithoutToken => without_token.clone(),
             };
+            let refusal = methods_refusal(&tool, &guards, calls_as, &uuid).await;
+            let expected = refusal.is_none();
             let handler = handler_as(session.principal.clone());
             let allowed = if expected && !tool.runs_when_allowed {
                 // The tool's own first step: the guard of its first method.
@@ -727,14 +753,31 @@ async fn every_wrapping_tool_allows_and_refuses_as_its_methods_guards_do() {
                         created.extend(v["uuid"].as_str().map(str::to_string));
                     }
                 }
-                let refused = (tool.refused)(&answer);
-                if refused == expected {
-                    failures.push(format!(
-                        "{} as {caller:?} on {target:?}: the methods {}, the tool answered {answer}",
-                        tool.name,
-                        if expected { "allow" } else { "refuse" },
-                    ));
-                }
+                let refused = match tool.reads {
+                    Reads::Status => {
+                        let actual = status(&answer).filter(|s| matches!(s, 401 | 403 | 404));
+                        if actual != refusal {
+                            failures.push(format!(
+                                "{} as {caller:?} on {target:?}: the methods answer {refusal:?}, \
+                                 the tool {actual:?}: {answer}",
+                                tool.name,
+                            ));
+                        }
+                        actual.is_some()
+                    }
+                    Reads::Refusal(refused) => {
+                        let refused = refused(&answer);
+                        if refused == expected {
+                            failures.push(format!(
+                                "{} as {caller:?} on {target:?}: the methods {}, the tool \
+                                 answered {answer}",
+                                tool.name,
+                                if expected { "allow" } else { "refuse" },
+                            ));
+                        }
+                        refused
+                    }
+                };
                 !refused
             };
             if !tool.runs_when_allowed && expected && !allowed {
