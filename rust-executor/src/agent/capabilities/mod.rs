@@ -746,7 +746,9 @@ mod app_token_tests {
             .expect("the same code redeems once the registry saves")
             .expose_once();
         assert!(apps_map::get_app(&request_id).unwrap().is_some());
-        assert!(capabilities_from_token(token, &None).is_ok());
+        assert!(
+            crate::agent::session::Session::open(&token, &None, ListenerReach::Loopback).is_ok()
+        );
         apps_map::remove_app(&request_id).unwrap();
     }
 
