@@ -107,7 +107,9 @@ pub(crate) const CLOSE_TOKEN_ENDED: u16 = 1008;
 pub(crate) fn token_ended_frame() -> CloseFrame {
     CloseFrame {
         code: CLOSE_TOKEN_ENDED,
-        reason: "token expired or revoked".into(),
+        // Starts with the words a refused request gets (`AuthError::Revoked`), so a call
+        // that the close fails reads the same as one the check refuses.
+        reason: "Unauthorized access: the token expired or was revoked".into(),
     }
 }
 

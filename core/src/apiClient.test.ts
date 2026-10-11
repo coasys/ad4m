@@ -344,7 +344,7 @@ describe('ApiClient.onReconnect', () => {
 })
 
 describe('ApiClient when the executor refuses the token', () => {
-    const REASON = 'token expired or revoked'
+    const REASON = 'Unauthorized access: the token expired or was revoked'
     let authFailed: jest.Mock
     beforeEach(() => {
         TestSocket.autoOpen = false
