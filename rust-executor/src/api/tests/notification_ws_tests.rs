@@ -18,9 +18,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, perspective_query_capability, Capability, TokenCheck,
+    get_user_default_capabilities, perspective_query_capability, Capability, ListenerReach,
     AGENT_UPDATE_CAPABILITY, ALL_CAPABILITY,
 };
+use crate::agent::session::{Principal, Session};
 use crate::agent::AgentService;
 use crate::api::events_ws::build_event_stream;
 use crate::api::ws_handler::{build_handler_map, WsRpcError};
@@ -726,7 +727,13 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     setup();
     let alice_did = user(ALICE);
     user(BOB);
-    let check = || TokenCheck::new("", true);
+    // Only the stream's owner filter decides here: the session never ends.
+    let check = || {
+        Arc::new(Session::for_test(
+            Principal::Operator,
+            ListenerReach::Loopback,
+        ))
+    };
     let mut alice = build_event_stream(check(), Some(ALICE.to_string()), false, false).await;
     let mut bob = build_event_stream(check(), Some(BOB.to_string()), false, false).await;
     let mut main = build_event_stream(check(), None, true, true).await;

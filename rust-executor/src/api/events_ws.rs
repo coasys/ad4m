@@ -53,6 +53,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::agent::capabilities::*;
+use crate::agent::session::Session;
 use crate::agent::{did_for_context, AgentContext};
 
 /// Cached DID for a single WebSocket subscription, with lazy re-resolution.
@@ -270,19 +271,19 @@ pub async fn events_ws(
     let is_admin = context.is_operator();
     let can_approve_apps =
         check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
-    let token_check = TokenCheck::new(&context.auth_token, is_admin);
+    let session = context.session.clone();
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_events_ws(socket, token_check, user_email, is_admin, can_approve_apps)
+        handle_events_ws(socket, session, user_email, is_admin, can_approve_apps)
     }))
 }
 
 /// Build the merged event stream for a given user.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user. The stream ends at the first event after `token_check` fails.
+/// per-user. The stream ends at the first event after `session.check()` fails.
 pub(crate) async fn build_event_stream(
-    token_check: TokenCheck,
+    session: Arc<Session>,
     user_email: Option<String>,
     is_admin: bool,
     can_approve_apps: bool,
@@ -294,7 +295,7 @@ pub(crate) async fn build_event_stream(
     // fail closed on `None` until re-resolution succeeds.
     let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
     build_event_stream_for(
-        token_check,
+        session,
         resolved_did,
         user_email,
         is_admin,
@@ -306,7 +307,7 @@ pub(crate) async fn build_event_stream(
 /// [`build_event_stream`] with the session DID already resolved (tests
 /// inject one directly).
 pub(crate) async fn build_event_stream_for(
-    token_check: TokenCheck,
+    session: Arc<Session>,
     resolved_did: Option<String>,
     user_email: Option<String>,
     is_admin: bool,
@@ -712,12 +713,12 @@ pub(crate) async fn build_event_stream_for(
     );
 
     // Events end with the token: expiry and revokeToken() stop them as they stop requests.
-    Box::pin(top.take_while(move |_| futures::future::ready(token_check.check().is_ok())))
+    Box::pin(top.take_while(move |_| futures::future::ready(session.check().is_ok())))
 }
 
 async fn handle_events_ws(
     mut socket: WebSocket,
-    token_check: TokenCheck,
+    session: Arc<Session>,
     user_email: Option<String>,
     is_admin: bool,
     can_approve_apps: bool,
@@ -725,8 +726,7 @@ async fn handle_events_ws(
     log::info!("Events WebSocket connected");
 
     let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream =
-        build_event_stream(token_check, user_email, is_admin, can_approve_apps).await;
+    let event_stream = build_event_stream(session, user_email, is_admin, can_approve_apps).await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
         event_stream,
         interest.clone(),
@@ -1582,8 +1582,15 @@ mod events_socket_message_tests {
 #[cfg(test)]
 mod app_approval_event_tests {
     use super::*;
+    use crate::agent::session::Principal;
     use crate::types::{ExceptionInfo, ExceptionType};
     use std::time::Duration;
+
+    /// A session whose check never fails: no token, nothing to revoke or expire.
+    fn unending() -> Arc<Session> {
+        let anonymous = Principal::Anonymous { caps: vec![] };
+        Arc::new(Session::for_test(anonymous, ListenerReach::Network))
+    }
 
     fn exception(kind: ExceptionType) -> String {
         serde_json::to_string(&ExceptionInfo {
@@ -1659,8 +1666,8 @@ mod app_approval_event_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let pubsub = get_global_pubsub().await;
-        let mut other = build_event_stream(TokenCheck::new("", false), None, false, false).await;
-        let mut approver = build_event_stream(TokenCheck::new("", false), None, false, true).await;
+        let mut other = build_event_stream(unending(), None, false, false).await;
+        let mut approver = build_event_stream(unending(), None, false, true).await;
 
         pubsub
             .publish(&APPS_CHANGED, &"{\"requestId\":\"request-1\"}".to_string())
@@ -1717,7 +1724,7 @@ mod app_approval_event_tests {
         let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
             .expect("the test agent has a DID");
         crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
-        let mut stream = build_event_stream(TokenCheck::new("", false), None, false, false).await;
+        let mut stream = build_event_stream(unending(), None, false, false).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -1760,18 +1767,16 @@ mod app_approval_event_tests {
 #[cfg(test)]
 mod token_expiry_tests {
     use super::*;
+    use crate::agent::session::{Principal, TokenId};
     use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
     use std::time::Duration;
 
+    const USER: &str = "events.user@example.org";
+
     /// Builds a user's event stream, publishes one event and returns what the stream yields.
-    async fn next_event(token_check: TokenCheck) -> Option<String> {
-        let mut stream = build_event_stream(
-            token_check,
-            Some("events.user@example.org".to_string()),
-            false,
-            false,
-        )
-        .await;
+    async fn next_event(session: Session) -> Option<String> {
+        let mut stream =
+            build_event_stream(Arc::new(session), Some(USER.to_string()), false, false).await;
         get_global_pubsub()
             .await
             .publish(
@@ -1792,7 +1797,13 @@ mod token_expiry_tests {
             .unwrap()
             .as_secs()
             - 3600;
-        let expired = TokenCheck::with_expiry("user-jwt", an_hour_ago);
+        let user = Principal::User {
+            token_id: TokenId("user-jwt".into()),
+            email: USER.into(),
+            did: "did:key:events-user".into(),
+            caps: vec![],
+        };
+        let expired = Session::for_test_expiring(user, an_hour_ago);
         assert!(next_event(expired).await.is_none());
     }
 
@@ -1801,9 +1812,10 @@ mod token_expiry_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let token =
-            crate::user_management::generate_user_jwt("events.user@example.org", "test").unwrap();
-        assert!(next_event(TokenCheck::new(&token, false)).await.is_some());
+        crate::agent::AgentService::ensure_user_key_exists(USER).unwrap();
+        let token = crate::user_management::generate_user_jwt(USER, "test").unwrap();
+        let session = Session::open(&token, &None, ListenerReach::Network).unwrap();
+        assert!(next_event(session).await.is_some());
     }
 }
 

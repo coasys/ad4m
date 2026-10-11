@@ -50,6 +50,9 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   inline on both sockets (per-connection state, like `request.cancel`).
 - Live query updates (`query-subscription-update`) pass `events.watch` untouched: every socket of
   the perspective owner gets them, and the SDK routes them by `subscriptionId`.
+- Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
+  `Session::check()` again on each request and each delivered event, so revocation and expiry end
+  an open connection. Tests build sessions with `Session::for_test` / `for_test_expiring`.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

@@ -1,9 +1,17 @@
 //! Who is calling: one [`Session`] per connection.
 //!
-//! [`Session::open`] is the one place that turns a token into an identity. It reproduces
-//! the rules of `capabilities_on`, `is_admin_credential_token_on`, `user_email_from_token`
-//! and `resolve_user_session`. Those remain for MCP. A token that opens no session is
-//! refused where it arrives.
+//! [`Session::open`] is the one place that turns a token into an identity:
+//!
+//! - The admin credential is the operator. A node without one treats no token on a loopback
+//!   listener as the operator (#1059).
+//! - Any other caller without a token is anonymous.
+//! - A token that is revoked, past its expiry or does not decode opens no session.
+//! - A token that names a user (`sub`) is that user, and the user's DID must load. Any other
+//!   token is an app. Both are limited to the token's capabilities.
+//!
+//! A token that opens no session is refused where it arrives. [`Session::check`] runs again
+//! on every request and every delivered event. MCP still resolves its tokens itself
+//! (`capabilities_from_token`, `AgentContext::from_auth_token`).
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, check_token_revoked, decode_jwt,
@@ -207,6 +215,16 @@ impl Session {
             token: String::new(),
         }
     }
+
+    /// A session for `principal` on a network listener whose token expires at `expires_at`
+    /// (Unix seconds). Only an app or a user session expires.
+    #[cfg(test)]
+    pub(crate) fn for_test_expiring(principal: Principal, expires_at: u64) -> Session {
+        Session {
+            expires_at: Some(expires_at),
+            ..Session::for_test(principal, ListenerReach::Network)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -214,8 +232,8 @@ mod resolution_tests {
     //! One test per way a token resolves.
     use super::*;
     use crate::agent::capabilities::{
-        apps_map, AuthInfo, AuthInfoExtended, PERSPECTIVE_CREATE_CAPABILITY,
-        RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
+        apps_map, get_user_default_capabilities, AuthInfo, AuthInfoExtended,
+        PERSPECTIVE_CREATE_CAPABILITY, RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
     };
     use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
 
@@ -237,6 +255,15 @@ mod resolution_tests {
             },
         )
         .unwrap()
+    }
+
+    /// `Capability` has no `PartialEq`: tests compare capability lists by their debug form.
+    fn caps_of(caps: Vec<Capability>) -> String {
+        format!("{caps:?}")
+    }
+
+    fn caps(session: &Session) -> String {
+        caps_of(session.capabilities())
     }
 
     /// The anonymous set reads the multi-user setting. Initialises the database only when no
@@ -297,15 +324,55 @@ mod resolution_tests {
         assert!(multi.may(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY));
     }
 
+    /// Every combination of credential, listener and multi-user setting for an empty token.
+    /// Neither the operator nor an anonymous caller has a token that expires.
     #[test]
-    fn a_token_without_a_user_is_an_app_limited_to_its_capabilities() {
+    fn an_empty_token_is_the_operator_or_anonymous_in_every_mode_and_never_expires() {
+        ensure_db();
+        for multi_user in [false, true] {
+            let mode = multi_user.then(MultiUserMode::on);
+            for credential in [None, admin()] {
+                for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+                    let case = format!("{credential:?}, {reach:?}, multi-user {multi_user}");
+                    let session = Session::open("", &credential, reach).unwrap();
+                    let operator = credential.is_none() && reach == ListenerReach::Loopback;
+                    assert_eq!(session.is_operator(), operator, "{case}");
+                    if operator {
+                        assert_eq!(caps(&session), caps_of(vec![ALL_CAPABILITY.clone()]));
+                    } else {
+                        assert_eq!(caps(&session), caps_of(anonymous_capabilities()), "{case}");
+                        assert_eq!(
+                            session.may(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY),
+                            multi_user,
+                            "{case}"
+                        );
+                    }
+                    assert_eq!(session.user(), None, "{case}");
+                    assert_eq!(session.expires_at, None, "{case}");
+                    assert!(session.check().is_ok(), "{case}");
+                }
+            }
+            drop(mode);
+        }
+    }
+
+    #[test]
+    fn a_token_without_a_user_is_an_app_limited_to_its_capabilities_on_any_node() {
         let token = app_token(Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
-        let session = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
-        assert!(matches!(session.principal, Principal::App { .. }));
-        assert!(session.may(&PERSPECTIVE_CREATE_CAPABILITY));
-        assert!(!session.may(&ALL_CAPABILITY));
-        assert!(!session.is_operator());
-        assert!(session.check().is_ok());
+        for credential in [None, admin()] {
+            for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+                let session = Session::open(&token, &credential, reach).unwrap();
+                assert!(matches!(session.principal, Principal::App { .. }));
+                assert_eq!(
+                    caps(&session),
+                    caps_of(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()])
+                );
+                assert!(!session.may(&ALL_CAPABILITY));
+                assert!(!session.is_operator());
+                assert_eq!(session.user(), None);
+                assert!(session.check().is_ok());
+            }
+        }
     }
 
     #[test]
@@ -324,13 +391,21 @@ mod resolution_tests {
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
         let expected_did = AgentService::get_user_did_by_email(email).unwrap();
 
-        let open = || Session::open(&token, &admin(), ListenerReach::Network).unwrap();
-        let single = open();
+        let open = || {
+            let mut sessions = vec![];
+            for credential in [None, admin()] {
+                for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+                    sessions.push(Session::open(&token, &credential, reach).unwrap());
+                }
+            }
+            sessions
+        };
+        let mut sessions = open();
         let multi_user = MultiUserMode::on();
-        let multi = open();
+        sessions.extend(open());
         drop(multi_user);
 
-        for session in [single, multi] {
+        for session in sessions {
             match &session.principal {
                 Principal::User { email: e, did, .. } => {
                     assert_eq!(e, email);
@@ -338,7 +413,10 @@ mod resolution_tests {
                 }
                 other => panic!("expected a user, got {other:?}"),
             }
+            assert_eq!(caps(&session), caps_of(get_user_default_capabilities()));
             assert!(!session.is_operator());
+            assert!(session.expires_at.is_some(), "a user token expires");
+            assert!(session.check().is_ok());
         }
     }
 
@@ -367,6 +445,18 @@ mod resolution_tests {
         setup_agent();
         let err = Session::open("not-a-jwt", &admin(), ListenerReach::Network).unwrap_err();
         assert!(matches!(err, AuthError::Invalid(_)), "{err:?}");
+    }
+
+    // On a node without an admin credential, a string that is not a JWT is garbage, even
+    // the one another node uses as its credential.
+    #[test]
+    fn a_credential_on_a_node_without_one_opens_no_session() {
+        setup_wallet();
+        setup_agent();
+        for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+            let err = Session::open(ADMIN, &None, reach).unwrap_err();
+            assert!(matches!(err, AuthError::Invalid(_)), "{reach:?}: {err:?}");
+        }
     }
 
     #[test]
@@ -412,17 +502,21 @@ mod resolution_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let session = |expires_at| Session {
-            principal: Principal::App {
+        let session = |expires_at| {
+            let app = Principal::App {
                 token_id: TokenId("t".into()),
                 caps: vec![],
-            },
-            reach: ListenerReach::Network,
-            expires_at: Some(expires_at),
-            token: "an-unrevoked-token".into(),
+            };
+            Session::for_test_expiring(app, expires_at)
         };
+        assert!(session(now + 3600).check().is_ok());
         assert!(session(now - 10).check().is_ok(), "inside the leeway");
-        assert_eq!(session(now - 3600).check().unwrap_err(), AuthError::Expired);
+        let err = session(now - 3600).check().unwrap_err();
+        assert_eq!(err, AuthError::Expired);
+        assert_eq!(
+            err.to_string(),
+            "Unauthorized access: the token has expired"
+        );
     }
 
     #[test]

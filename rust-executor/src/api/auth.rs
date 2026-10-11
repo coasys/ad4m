@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{extract::FromRequestParts, http::request::Parts};
 
 use super::errors::ApiError;
-use crate::agent::capabilities::{Capability, ListenerReach, TokenCheck};
+use crate::agent::capabilities::{Capability, ListenerReach};
 use crate::agent::session::{AuthError, Session};
 use crate::types::RequestContext;
 
@@ -18,36 +18,6 @@ pub struct AuthContext {
     pub auth_token: String,
     /// The caller's session.
     pub session: Arc<Session>,
-}
-
-/// The identity a token had before sessions existed: the capabilities to use, the user's
-/// email and the user's DID. A token that names a user whose DID cannot load gets no
-/// capabilities. Tests compare [`Session`] against it.
-#[cfg(test)]
-pub(crate) fn resolve_user_session(
-    auth_token: &str,
-    capabilities: Result<Vec<Capability>, String>,
-) -> (
-    Result<Vec<Capability>, String>,
-    Option<String>,
-    Option<String>,
-) {
-    use crate::agent::AgentService;
-    let user_email = crate::agent::capabilities::user_email_from_token(auth_token.to_string());
-    match &user_email {
-        None => (capabilities, None, None),
-        Some(email) => match AgentService::get_user_did_by_email(email) {
-            Ok(did) => (capabilities, user_email, Some(did)),
-            Err(e) => (
-                Err(format!(
-                    "Could not load the identity of this user session; reconnect: {}",
-                    e
-                )),
-                user_email,
-                None,
-            ),
-        },
-    }
 }
 
 impl AuthContext {
@@ -90,11 +60,6 @@ impl AuthContext {
             cancel_token: None,
             session: self.session.clone(),
         }
-    }
-
-    /// The check a connection that stays open runs again on each message: the session's.
-    pub fn token_check(&self) -> TokenCheck {
-        TokenCheck::for_session(self.session.clone())
     }
 }
 
@@ -202,45 +167,7 @@ impl FromRef<AppState> for AppState {
 #[cfg(test)]
 mod session_tests {
     use super::*;
-    use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
     use crate::agent::AgentService;
-    use crate::test_utils::MultiUserMode;
-
-    // A user token whose DID could not load used to run with that user's capabilities and
-    // no DID, and perspective checks treat a missing DID as the node's main agent.
-    #[test]
-    fn a_user_session_without_a_loadable_identity_gets_no_capabilities() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        let _multi_user = MultiUserMode::on();
-        let token = crate::user_management::generate_user_jwt("no.key@example.org", "test")
-            .expect("the wallet is unlocked in tests");
-
-        let (capabilities, user_email, user_did) =
-            resolve_user_session(&token, Ok(get_user_default_capabilities()));
-        assert!(capabilities.is_err(), "the session must not act at all");
-        assert_eq!(user_email.as_deref(), Some("no.key@example.org"));
-        assert!(user_did.is_none());
-    }
-
-    #[test]
-    fn a_user_session_with_an_identity_keeps_its_capabilities() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        let _multi_user = MultiUserMode::on();
-        let email = "has.key@example.org";
-        AgentService::ensure_user_key_exists(email).unwrap();
-        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
-
-        let (capabilities, user_email, user_did) =
-            resolve_user_session(&token, Ok(get_user_default_capabilities()));
-        assert!(capabilities.is_ok());
-        assert_eq!(user_email.as_deref(), Some(email));
-        assert_eq!(
-            user_did,
-            Some(AgentService::get_user_did_by_email(email).unwrap())
-        );
-    }
 
     // #1175: REST and the OpenAI-compatible API used to decode the token again for every
     // user lookup. The extractor now opens a session and the request context carries it.
@@ -373,14 +300,5 @@ mod session_tests {
             auth.session.principal,
             crate::agent::session::Principal::Anonymous { .. }
         ));
-    }
-
-    #[test]
-    fn an_operator_session_is_unchanged() {
-        let (capabilities, user_email, user_did) =
-            resolve_user_session("", Ok(vec![ALL_CAPABILITY.clone()]));
-        assert!(capabilities.is_ok());
-        assert!(user_email.is_none());
-        assert!(user_did.is_none());
     }
 }

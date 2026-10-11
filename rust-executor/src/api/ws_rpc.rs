@@ -65,15 +65,14 @@ pub async fn ws_rpc(
         state.auto_permit_cap_requests,
         reach,
     ) {
-        Ok((ctx, token_check)) => {
-            ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token_check))
-        }
+        Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx)),
         Err(e) => ws.on_upgrade(move |socket| close_refused(socket, e.to_string())),
     }
 }
 
-/// The context a connection keeps for its lifetime, and the check its requests and events
-/// run. The dispatcher clones the context and injects a fresh `cancel_token` per request.
+/// The context a connection keeps for its lifetime. Its session's `check` runs again on
+/// every request and event. The dispatcher clones the context and injects a fresh
+/// `cancel_token` per request.
 ///
 /// Fails for a token that opens no session (invalid, expired, revoked, or a user whose DID
 /// does not load): the socket then closes at once with [`CLOSE_TOKEN_ENDED`].
@@ -82,9 +81,9 @@ fn connection_context(
     admin_credential: &Option<String>,
     auto_permit_cap_requests: bool,
     reach: ListenerReach,
-) -> Result<(Arc<RequestContext>, TokenCheck), AuthError> {
+) -> Result<Arc<RequestContext>, AuthError> {
     let auth = AuthContext::open(token, admin_credential, auto_permit_cap_requests, reach)?;
-    Ok((Arc::new(auth.to_request_context()), auth.token_check()))
+    Ok(Arc::new(auth.to_request_context()))
 }
 
 /// Whether a connection receives the event stream: the admin credential or any token. A
@@ -126,12 +125,7 @@ fn close_reason(reason: &str) -> String {
 
 // ── Connection handler ──────────────────────────────────────────────────────
 
-async fn handle_ws(
-    socket: WebSocket,
-    handler_map: Arc<HandlerMap>,
-    ctx: Arc<RequestContext>,
-    token_check: TokenCheck,
-) {
+async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<RequestContext>) {
     // Track last_seen at connect time (also updated on each RPC call below)
     if let Some(email) = ctx.user_email() {
         track_last_seen(email).await;
@@ -147,7 +141,7 @@ async fn handle_ws(
         let can_approve_apps =
             check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
         super::events_ws::build_event_stream(
-            token_check.clone(),
+            ctx.session.clone(),
             ctx.user_email().map(str::to_string),
             ctx.is_operator(),
             can_approve_apps,
@@ -156,7 +150,7 @@ async fn handle_ws(
     } else {
         Box::pin(futures::stream::pending())
     };
-    let conn = Connection::new(handler_map, ctx, token_check, tx);
+    let conn = Connection::new(handler_map, ctx, tx);
 
     // ── Writer task ─────────────────────────────────────────────────────
     let writer_session_over = conn.session_over.clone();
@@ -216,8 +210,8 @@ type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>
 /// Per-connection state: what the reader needs to answer a message.
 pub(crate) struct Connection {
     handler_map: Arc<HandlerMap>,
+    /// Carries the session that every request checks again.
     ctx: Arc<RequestContext>,
-    token_check: TokenCheck,
     /// Fires when the token stops working. The connection then closes, so the client
     /// authenticates again instead of waiting on a socket that answers nothing.
     session_over: CancellationToken,
@@ -231,13 +225,11 @@ impl Connection {
     pub(crate) fn new(
         handler_map: Arc<HandlerMap>,
         ctx: Arc<RequestContext>,
-        token_check: TokenCheck,
         tx: mpsc::UnboundedSender<String>,
     ) -> Self {
         Self {
             handler_map,
             ctx,
-            token_check,
             session_over: CancellationToken::new(),
             tx,
             inflight: Default::default(),
@@ -346,13 +338,12 @@ impl Connection {
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
         let inflight = self.inflight.clone();
-        let token_check = self.token_check.clone();
         let session_over = self.session_over.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            // Check the token again on every request: expiry and revokeToken() take
+            // Check the session again on every request: expiry and revokeToken() take
             // effect at once for open connections, and end the connection.
-            if let Err(e) = token_check.check() {
+            if let Err(e) = base_ctx.session.check() {
                 // Remove the inflight entry BEFORE sending the terminal
                 // reply — same ordering as the normal-completion path
                 // below, and for the same reason: a `request.cancel`
@@ -362,8 +353,9 @@ impl Connection {
                 let mut guard = inflight.lock().await;
                 guard.remove(&id);
                 drop(guard);
-                let _ =
-                    tx.send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
+                let _ = tx.send(
+                    json!({"id": id, "error": {"code": 401, "message": e.to_string()}}).to_string(),
+                );
                 session_over.cancel();
                 return;
             }
@@ -450,46 +442,13 @@ where
 
 #[cfg(test)]
 mod connection_context_tests {
-    //! A token that opens a session gets the context it had before sessions existed; a
-    //! token that opens none is refused.
+    //! The context a connection keeps comes from its session. How each kind of token
+    //! resolves is pinned in `session::resolution_tests`.
     use super::*;
     use crate::agent::AgentService;
-    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+    use crate::test_utils::{setup_agent, setup_wallet};
 
     const ADMIN: &str = "the-admin-credential";
-
-    /// The context `ws_rpc` built before `Session`: whether its capabilities loaded, and
-    /// capabilities, operator, user email, DID.
-    fn before_sessions(
-        token: &str,
-        admin: &Option<String>,
-        reach: ListenerReach,
-    ) -> (bool, String) {
-        let is_admin = is_admin_credential_token_on(token, admin, reach);
-        let (capabilities, email, did) = crate::api::auth::resolve_user_session(
-            token,
-            capabilities_on(token.to_string(), admin.clone(), reach),
-        );
-        (
-            capabilities.is_ok(),
-            format!("{capabilities:?} {is_admin} {email:?} {did:?}"),
-        )
-    }
-
-    fn with_sessions(
-        token: &str,
-        admin: &Option<String>,
-        reach: ListenerReach,
-    ) -> Result<String, AuthError> {
-        let (ctx, _) = connection_context(token, admin, false, reach)?;
-        Ok(format!(
-            "{:?} {} {:?} {:?}",
-            ctx.capabilities,
-            ctx.is_operator(),
-            ctx.user_email(),
-            ctx.user_did()
-        ))
-    }
 
     fn jwt(capabilities: Option<Vec<Capability>>) -> String {
         token::generate_jwt(
@@ -503,17 +462,12 @@ mod connection_context_tests {
         .unwrap()
     }
 
-    // Tokens that open a session get the same context as before. Tokens that open none
-    // (no loadable DID, expired, revoked, garbage) used to get a connection whose
-    // capabilities failed; now `connection_context` refuses them.
+    // These tokens used to get a connection whose every capability check failed.
     #[test]
-    fn every_kind_of_token_gets_the_same_context_as_before_or_is_refused() {
+    fn a_token_that_opens_no_session_gets_no_connection() {
         setup_wallet();
         setup_agent();
         crate::test_utils::use_test_apps_file();
-        let user = "context.user@example.org";
-        AgentService::ensure_user_key_exists(user).unwrap();
-
         let revoked = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
         let request_id = format!("context-{}", uuid::Uuid::new_v4());
         let app = AuthInfoExtended {
@@ -523,49 +477,18 @@ mod connection_context_tests {
         apps_map::insert_app(request_id.clone(), app, revoked.clone()).unwrap();
         apps_map::revoke_app(&request_id).unwrap();
 
-        let open = [
-            ADMIN.to_string(),
-            String::new(),
-            jwt(Some(vec![AGENT_READ_CAPABILITY.clone()])),
-            jwt(None),
-            crate::user_management::generate_user_jwt(user, "test").unwrap(),
-        ];
         let refused = [
             crate::user_management::generate_user_jwt("context.nokey@example.org", "test").unwrap(),
-            expired_user_token(user),
+            crate::test_utils::expired_user_token("context.expired@example.org"),
             revoked,
             "not-a-jwt".to_string(),
         ];
-
-        for multi_user in [false, true] {
-            let mode = MultiUserMode::on();
-            if !multi_user {
-                drop(mode);
-            }
-            for admin in [None, Some(ADMIN.to_string())] {
-                for reach in [ListenerReach::Loopback, ListenerReach::Network] {
-                    let case = |token: &str| {
-                        format!("token {token:.20}…, admin {admin:?}, {reach:?}, multi-user {multi_user}")
-                    };
-                    // Exactly the tokens whose context could not act are refused.
-                    for token in open.iter().chain(&refused) {
-                        let (could_act, before) = before_sessions(token, &admin, reach);
-                        match with_sessions(token, &admin, reach) {
-                            Ok(now) => {
-                                assert!(could_act, "{}: accepted", case(token));
-                                assert_eq!(now, before, "{}", case(token));
-                            }
-                            Err(e) => assert!(!could_act, "{}: refused ({e})", case(token)),
-                        }
-                    }
-                    for token in &refused {
-                        assert!(
-                            with_sessions(token, &admin, reach).is_err(),
-                            "{}",
-                            case(token)
-                        );
-                    }
-                }
+        for token in &refused {
+            for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+                assert!(
+                    connection_context(token, &Some(ADMIN.to_string()), false, reach).is_err(),
+                    "token {token:.20}…, {reach:?}"
+                );
             }
         }
     }
@@ -583,16 +506,19 @@ mod connection_context_tests {
         };
         apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
 
-        let (_, check) = connection_context(
+        let ctx = connection_context(
             &token,
             &Some(ADMIN.to_string()),
             false,
             ListenerReach::Network,
         )
         .unwrap();
-        assert!(check.check().is_ok());
+        assert!(ctx.session.check().is_ok());
         apps_map::revoke_app(&request_id).unwrap();
-        assert_eq!(check.check().unwrap_err(), "Unauthorized access");
+        assert_eq!(
+            ctx.session.check().unwrap_err().to_string(),
+            "Unauthorized access"
+        );
     }
 
     #[test]
@@ -609,7 +535,7 @@ mod connection_context_tests {
         ];
 
         for token in &tokens {
-            let (ctx, _) = connection_context(
+            let ctx = connection_context(
                 token,
                 &Some(ADMIN.to_string()),
                 false,
@@ -623,7 +549,7 @@ mod connection_context_tests {
             );
         }
 
-        let (ctx, _) = connection_context(
+        let ctx = connection_context(
             &tokens[2],
             &Some(ADMIN.to_string()),
             false,

@@ -61,7 +61,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         let _ = socket.close().await;
         return;
     }
-    let token_check = auth.token_check();
+    let session = auth.session.clone();
     let caller = auth.to_request_context();
 
     let mut stream_id: Option<String> = None;
@@ -111,8 +111,8 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
         // Check the token again on every client message: expiry and revokeToken() end the
         // session, as they do on the RPC socket.
-        if let Err(e) = token_check.check() {
-            let _ = send_error(&mut socket, "unauthorized", &e).await;
+        if let Err(e) = session.check() {
+            let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
             break;
         }
 
