@@ -12,6 +12,7 @@ checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
 name = "ad4m"
 version = "0.13.0-test-interpretation-2"
 dependencies = [
+ "ad4m-build-support",
  "ad4m-client",
  "ad4m-executor",
  "anyhow",
@@ -37,6 +38,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ad4m-build-support"
+version = "0.13.0-test-interpretation-2"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "ad4m-client"
 version = "0.13.0-test-interpretation-2"
 dependencies = [
@@ -59,6 +67,7 @@ dependencies = [
 name = "ad4m-executor"
 version = "0.13.0-test-interpretation-2"
 dependencies = [
+ "ad4m-build-support",
  "ad4m-client",
  "anyhow",
  "argon2 0.5.3",
@@ -174,6 +183,7 @@ dependencies = [
 name = "ad4m-launcher"
 version = "0.13.0-test-interpretation-2"
 dependencies = [
+ "ad4m-build-support",
  "ad4m-client",
  "ad4m-executor",
  "aes-gcm",

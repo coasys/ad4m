@@ -396,6 +396,11 @@ jobs:
           command: cd cli && cargo test --release
           no_output_timeout: 30m
       - run:
+          # The build-script helper that records AD4M_GIT_COMMIT; its tests
+          # run git in temporary repositories.
+          name: build-support tests
+          command: cd build-support && cargo test --release
+      - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it. Here
           # rather than in a separate job because rust-tests is a required check.
           name: ad4m-ldk (Rust) tests
