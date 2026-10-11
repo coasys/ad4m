@@ -67,7 +67,10 @@ pub async fn ws_rpc(
         reach,
     ) {
         Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx)),
-        Err(e) => ws.on_upgrade(move |socket| close_refused(socket, e.to_string())),
+        Err(e) => {
+            let code = e.close_code();
+            ws.on_upgrade(move |socket| close_refused(socket, code, e.to_string()))
+        }
     }
 }
 
@@ -113,14 +116,19 @@ pub(crate) fn token_ended_frame() -> CloseFrame {
 /// reply this way.
 const REPLY_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Closes a socket whose token opened no session, before anything else runs on it.
-/// `reason` says why: expired, unauthorized, or the identity did not load.
+/// Close code for a connection refused because the node's wallet is locked (RFC 6455 "try
+/// again later"). Clients keep their token and reconnect.
+pub(crate) const CLOSE_TRY_AGAIN_LATER: u16 = 1013;
+
+/// Closes a socket whose token opened no session, before anything else runs on it, with
+/// `code` ([`CLOSE_TOKEN_ENDED`] or [`CLOSE_TRY_AGAIN_LATER`]). `reason` says why: expired,
+/// unauthorized, the identity did not load, or the wallet is locked.
 ///
 /// The upgrade succeeds first: a browser cannot read the HTTP status of a refused upgrade,
 /// but it reads the close code and reason.
-pub(crate) async fn close_refused(mut socket: WebSocket, reason: String) {
+pub(crate) async fn close_refused(mut socket: WebSocket, code: u16, reason: String) {
     let close = CloseFrame {
-        code: CLOSE_TOKEN_ENDED,
+        code,
         reason: close_reason(&reason).into(),
     };
     let _ = socket.send(Message::Close(Some(close))).await;
@@ -971,6 +979,67 @@ mod socket_tests {
             );
         }
         apps_map::remove_app(&request_key).unwrap();
+    }
+
+    // A wallet locked at connect says nothing about the token: before sessions, such a
+    // connection opened and `agent.isLocked` answered. The socket closes with 1013, which
+    // clients read as "try again later" and not as "log in again", so they keep the token.
+    #[tokio::test]
+    async fn a_locked_wallet_closes_with_1013_and_the_token_works_after_the_unlock() {
+        let addr = start_server().await;
+        let token = generate_jwt(
+            "socket-test-locked".to_string(),
+            3600,
+            AuthInfo {
+                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                ..AuthInfo::default()
+            },
+        )
+        .unwrap();
+        let backend = crate::wallet::wallet_backend();
+        backend.lock("socket-locked-test");
+        let mut ws = connect(addr, &token).await;
+        let first = tokio::time::timeout(Duration::from_secs(10), ws.next()).await;
+        let http = reqwest::Client::new()
+            .get(format!("http://{addr}/v1/models"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map(|r| r.status().as_u16());
+        // Unlock before asserting, so a failure cannot leave the shared wallet locked.
+        backend
+            .unlock("socket-locked-test")
+            .expect("restore the shared wallet");
+
+        match first.expect("the socket stayed open") {
+            Some(Ok(WsMessage::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), CLOSE_TRY_AGAIN_LATER);
+                assert!(
+                    frame.reason.starts_with("Executor is locked"),
+                    "{}",
+                    frame.reason
+                );
+            }
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+        assert_eq!(
+            http.unwrap(),
+            503,
+            "HTTP says unavailable, not unauthorized"
+        );
+
+        // After the unlock the same token opens a working connection.
+        let mut ws = connect(addr, &token).await;
+        let request = json!({"id": "1", "type": "agent.status", "params": {}}).to_string();
+        ws.send(WsMessage::Text(request.into())).await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                let reply: Value = serde_json::from_str(&text).unwrap();
+                assert!(reply.get("error").is_none(), "{text}");
+                assert_eq!(reply["result"]["isUnlocked"], true, "{text}");
+            }
+            other => panic!("expected a reply, got {other:?}"),
+        }
     }
 
     // The events socket used to answer a dead token with a refused upgrade (the HTTP

@@ -97,14 +97,18 @@ where
                     .unwrap_or_default()
             });
 
-        // A token that opens no session gets 401: the client logs in again.
+        // A token that opens no session gets 401: the client logs in again. A locked wallet
+        // gets 503: the token may be good, and the client retries after the unlock.
         let auth = AuthContext::open(
             &auth_header,
             &app_state.admin_credential,
             app_state.auto_permit_cap_requests,
             listener_reach(parts),
         )
-        .map_err(|e| ApiError::Unauthorized(e.to_string()))?;
+        .map_err(|e| match e {
+            AuthError::Locked => ApiError::Unavailable(e.to_string()),
+            e => ApiError::Unauthorized(e.to_string()),
+        })?;
 
         // Track last_seen for multi-user mode
         if let Some(email) = auth.user_email() {

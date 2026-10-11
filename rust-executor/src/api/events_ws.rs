@@ -255,7 +255,14 @@ pub async fn events_ws(
     let auth = match auth {
         Ok(auth) => auth,
         Err(ApiError::Unauthorized(reason)) => {
-            return Ok(ws.on_upgrade(move |socket| super::ws_rpc::close_refused(socket, reason)))
+            return Ok(ws.on_upgrade(move |socket| {
+                super::ws_rpc::close_refused(socket, super::ws_rpc::CLOSE_TOKEN_ENDED, reason)
+            }))
+        }
+        Err(ApiError::Unavailable(reason)) => {
+            return Ok(ws.on_upgrade(move |socket| {
+                super::ws_rpc::close_refused(socket, super::ws_rpc::CLOSE_TRY_AGAIN_LATER, reason)
+            }))
         }
         Err(e) => return Err(e),
     };
