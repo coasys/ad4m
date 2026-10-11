@@ -46,6 +46,8 @@ use crate::agent::capabilities::{
 };
 use crate::agent::session::{AuthError, Session};
 use crate::agent::AgentContext;
+use crate::api::perspectives_ws::ACCESS_DENIED;
+use crate::api::ws_handler::{shared_handler_map, WsRpcError};
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::PerspectiveHandle;
@@ -59,7 +61,7 @@ use rmcp::{
     ErrorData, RoleServer, ServerHandler,
 };
 
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 // HTTP request parts injected by rmcp's streamable-HTTP transport into each request's extensions.
@@ -233,6 +235,53 @@ fn authenticated(opened: Opened) -> Result<Arc<Session>, String> {
     }
 }
 
+/// The RPC request context of `session`, as the RPC socket builds it: the session and its
+/// capabilities. MCP has no auto-permit setting and passes no raw token.
+pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestContext {
+    crate::types::RequestContext {
+        capabilities: Ok(session.capabilities()),
+        auto_permit_cap_requests: false,
+        auth_token: String::new(),
+        cancel_token: None,
+        session,
+    }
+}
+
+/// Call the RPC method `method` with `params` as `session`, through the shared handler map.
+pub(crate) async fn call_method_as(
+    session: Arc<Session>,
+    method: &str,
+    params: Value,
+) -> Result<Value, WsRpcError> {
+    shared_handler_map()
+        .dispatch(method, params, Arc::new(request_context(session)))
+        .await
+}
+
+/// A tool's answer when its RPC method refuses or fails: the method's message and status
+/// code, `{"error": .., "status": 401 | 403 | 404 | ..}`.
+pub(crate) fn method_error(e: WsRpcError) -> String {
+    json!({ "error": e.message, "status": e.code }).to_string()
+}
+
+/// [`method_error`] for a method on perspective `id`. A missing perspective and one that is not
+/// the caller's both answer "Perspective not found" (404), so a refusal does not reveal that a
+/// perspective exists.
+pub(crate) fn perspective_error(id: &str, e: WsRpcError) -> String {
+    if e.code == 404 || (e.code == 403 && e.message == ACCESS_DENIED) {
+        method_error(WsRpcError::not_found(format!(
+            "Perspective not found: {id}"
+        )))
+    } else {
+        method_error(e)
+    }
+}
+
+/// Decode an RPC method's result into the type its contract names.
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
+    serde_json::from_value(value).map_err(|e| json!({ "error": e.to_string() }).to_string())
+}
+
 impl Ad4mMcpHandler {
     pub fn new(context: McpContext) -> Self {
         Self {
@@ -274,6 +323,18 @@ impl Ad4mMcpHandler {
             ));
         }
         Ok(session)
+    }
+
+    /// Call the RPC method `method` with `params` as this tool call's caller, through the
+    /// handler map: the method's guard decides who may call it, exactly as on the RPC socket
+    /// (#851). A caller without a working, authenticated session gets 401.
+    pub(crate) async fn call_method(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, WsRpcError> {
+        let session = self.session().await.map_err(WsRpcError::unauthorized)?;
+        call_method_as(session, method, params).await
     }
 
     /// Build the tool router manually, registering all tools from domain modules.
@@ -757,6 +818,70 @@ impl Ad4mMcpHandler {
                 Self::encode_literal(value)
             }
         }
+    }
+}
+
+/// What the tool tests that call as one kind of caller share.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::agent::session::{Principal, TokenId};
+
+    /// A handler whose MCP session holds a session for `principal`, on a network listener of
+    /// a node with an admin credential.
+    pub(crate) fn handler_as(principal: Principal) -> Ad4mMcpHandler {
+        let mut context = McpContext::new(Some("test-admin".into()), ListenerReach::Network, false);
+        context.caller = crate::mcp::caller::Caller::holding(Ok(Arc::new(Session::for_test(
+            principal,
+            ListenerReach::Network,
+        ))));
+        Ad4mMcpHandler::new(context)
+    }
+
+    pub(crate) fn app(caps: Vec<Capability>) -> Principal {
+        Principal::App {
+            token_id: TokenId("mcp-test-app".into()),
+            caps,
+        }
+    }
+
+    pub(crate) fn user(email: &str, did: &str, caps: Vec<Capability>) -> Principal {
+        Principal::User {
+            token_id: TokenId(format!("mcp-test-{email}")),
+            email: email.into(),
+            did: did.into(),
+            caps,
+        }
+    }
+
+    /// The wallet, the main agent and the database the tools need.
+    pub(crate) fn setup() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_db();
+    }
+
+    /// A new perspective owned by `owners` (`None`: unowned). Returns its uuid.
+    pub(crate) async fn perspective(owners: Option<Vec<String>>) -> String {
+        let handle = crate::types::PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            owners,
+            ..Default::default()
+        };
+        let uuid = handle.uuid.clone();
+        crate::perspectives::add_perspective(handle, None)
+            .await
+            .expect("a test perspective");
+        uuid
+    }
+
+    /// The `status` of a tool's answer to a refused or failed RPC method ([`method_error`]),
+    /// `None` for any other answer.
+    pub(crate) fn status(answer: &str) -> Option<u64> {
+        serde_json::from_str::<Value>(answer)
+            .ok()?
+            .get("status")?
+            .as_u64()
     }
 }
 

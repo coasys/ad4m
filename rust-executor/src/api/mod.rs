@@ -41,7 +41,6 @@ use axum::{
 use deno_core::error::AnyError;
 use serde_json::json;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -90,8 +89,8 @@ pub fn api_router(state: AppState) -> Router {
         // Internal platform → executor endpoint (INTERNAL_API_TOKEN auth)
         .route("/internal/shutdown", post(internal::internal_shutdown));
 
-    // Build the WS handler map once at startup
-    let handler_map = Arc::new(ws_handler::build_handler_map());
+    // The WS handler map, shared with the MCP tools that wrap an RPC method.
+    let handler_map = ws_handler::shared_handler_map();
 
     root.nest(
         "/api/v1",

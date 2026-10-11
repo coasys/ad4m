@@ -484,6 +484,14 @@ pub fn build_handler_map() -> HandlerMap {
     map.require_guards()
 }
 
+/// The handler map, built once per process. The RPC sockets and the MCP tools that wrap an RPC
+/// method dispatch through this one map, so both run the same guards.
+pub fn shared_handler_map() -> Arc<HandlerMap> {
+    static MAP: std::sync::LazyLock<Arc<HandlerMap>> =
+        std::sync::LazyLock::new(|| Arc::new(build_handler_map()));
+    MAP.clone()
+}
+
 // ── Param extraction helpers ────────────────────────────────────────────────
 
 /// Helper trait for extracting typed values from JSON params.

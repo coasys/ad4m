@@ -106,6 +106,10 @@ fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveIn
     Ok(Some(p))
 }
 
+/// The 403 message of a perspective that is not the caller's.
+pub(crate) const ACCESS_DENIED: &str =
+    "Access denied: You don't have permission to access this perspective";
+
 /// The perspective `uuid` if the session may reach it: 404 when it is missing, 403 when it
 /// is not the caller's. `Guard::Perspective` runs it before every perspective method's handler.
 pub(crate) async fn get_perspective_with_access(
@@ -117,9 +121,7 @@ pub(crate) async fn get_perspective_with_access(
     if !ctx.is_operator() {
         let handle = perspective.persisted.lock().await.clone();
         if !can_access_perspective_with_did(ctx.user_did(), &handle) {
-            return Err(WsRpcError::forbidden(
-                "Access denied: You don't have permission to access this perspective",
-            ));
+            return Err(WsRpcError::forbidden(ACCESS_DENIED));
         }
     }
 
