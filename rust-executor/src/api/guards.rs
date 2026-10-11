@@ -62,6 +62,25 @@ pub fn uuid_param(params: &Value) -> Option<String> {
 }
 
 impl Guard {
+    /// [`Guard::Perspective`] on the perspective the `uuid` param names.
+    pub fn perspective(capability: fn(Vec<String>) -> Capability) -> Guard {
+        Guard::Perspective {
+            capability,
+            uuid: uuid_param,
+            hides_existence: false,
+        }
+    }
+
+    /// [`Guard::perspective`] for a method that answers `null` when the perspective is
+    /// missing or not the caller's.
+    pub fn perspective_or_null(capability: fn(Vec<String>) -> Capability) -> Guard {
+        Guard::Perspective {
+            capability,
+            uuid: uuid_param,
+            hides_existence: true,
+        }
+    }
+
     /// The capability the guard checks first. For a perspective guard, it names the
     /// perspective `uuid`.
     pub fn capability(&self, uuid: &str) -> Capability {

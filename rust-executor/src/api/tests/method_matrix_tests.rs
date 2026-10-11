@@ -200,6 +200,50 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "runtime.setFreeHostingEnabled",
         || json!({ "enabled": true }),
     ),
+    // Guard::Perspective: the params beside `uuid`.
+    ("perspective.queryProlog", || json!({ "query": "true." })),
+    ("perspective.querySparql", || json!({ "query": "ASK {}" })),
+    ("perspective.subscribeQuery", || json!({ "query": "true." })),
+    (
+        "perspective.subscribeSparql",
+        || json!({ "query": "ASK {}" }),
+    ),
+    (
+        "perspective.keepAliveQuery",
+        || json!({ "subscriptionId": "s" }),
+    ),
+    (
+        "perspective.disposeQuery",
+        || json!({ "subscriptionId": "s" }),
+    ),
+    (
+        "perspective.keepAliveSparql",
+        || json!({ "subscriptionId": "s" }),
+    ),
+    (
+        "perspective.disposeSparql",
+        || json!({ "subscriptionId": "s" }),
+    ),
+    (
+        "perspective.getSubjectData",
+        || json!({ "subjectClass": "C", "expressionAddress": "e" }),
+    ),
+    (
+        "perspective.modelQuery",
+        || json!({ "class_name": "C", "query_json": "{}" }),
+    ),
+    (
+        "perspective.modelSubscribe",
+        || json!({ "class_name": "C", "query_json": "{}" }),
+    ),
+    (
+        "perspective.evaluateGetters",
+        || json!({ "class_name": "C" }),
+    ),
+    ("perspective.verifyFlowReceipt", || json!({ "receipt": {} })),
+    ("perspective.flowValidOutputs", || json!({ "flow": "f" })),
+    ("perspective.getShaclTargetClass", || json!({ "name": "S" })),
+    ("perspective.getShacl", || json!({ "name": "S" })),
 ];
 
 fn entanglement_proof() -> Value {
