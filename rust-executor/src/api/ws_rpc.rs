@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
+use crate::agent::session::Session;
 use crate::types::RequestContext;
 
 use super::auth::AppState;
@@ -58,28 +59,61 @@ pub async fn ws_rpc(
     reach: ListenerReach,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
-
-    // Build RequestContext once for the lifetime of this connection.
-    let is_admin = is_admin_credential_token_on(&token, &state.admin_credential, reach);
-    let (capabilities, user_email, user_did) = super::auth::resolve_user_session(
+    let (ctx, token_check) = connection_context(
         &token,
-        capabilities_on(token.clone(), state.admin_credential.clone(), reach),
+        &state.admin_credential,
+        state.auto_permit_cap_requests,
+        reach,
     );
+    ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token, token_check))
+}
 
-    // Per-connection base context.  The dispatcher clones this and
-    // injects a fresh `cancel_token` for each in-flight request.
+/// The context a connection keeps for its lifetime, and the check its requests and events
+/// run. The dispatcher clones the context and injects a fresh `cancel_token` per request.
+///
+/// A token that opens a [`Session`] takes its identity from it. A token that opens none
+/// (invalid, expired, revoked, or a user whose DID does not load) still gets a connection
+/// with `Err` capabilities, as before sessions existed, so every capability check refuses it.
+fn connection_context(
+    token: &str,
+    admin_credential: &Option<String>,
+    auto_permit_cap_requests: bool,
+    reach: ListenerReach,
+) -> (Arc<RequestContext>, TokenCheck) {
+    let (capabilities, is_admin_credential, user_email, user_did, token_check) =
+        match Session::open(token, admin_credential, reach) {
+            Ok(session) => {
+                let session = Arc::new(session);
+                let user = session.user();
+                (
+                    Ok(session.capabilities()),
+                    session.is_operator(),
+                    user.map(|(email, _)| email.to_string()),
+                    user.map(|(_, did)| did.to_string()),
+                    TokenCheck::for_session(session.clone()),
+                )
+            }
+            // The admin credential always opens a session, so this caller is not the operator.
+            Err(_) => {
+                let (capabilities, user_email, user_did) = super::auth::resolve_user_session(
+                    token,
+                    capabilities_on(token.to_string(), admin_credential.clone(), reach),
+                );
+                let token_check = TokenCheck::new(token, false);
+                (capabilities, false, user_email, user_did, token_check)
+            }
+        };
+
     let ctx = Arc::new(RequestContext {
         capabilities,
-        auto_permit_cap_requests: state.auto_permit_cap_requests,
-        auth_token: token.clone(),
-        is_admin_credential: is_admin,
-        user_email: user_email.clone(),
+        auto_permit_cap_requests,
+        auth_token: token.to_string(),
+        is_admin_credential,
+        user_email,
         user_did,
         cancel_token: None,
     });
-
-    let token_check = TokenCheck::new(&token, is_admin);
-    ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token, token_check))
+    (ctx, token_check)
 }
 
 /// Whether a connection receives the event stream: any authenticated session, meaning the
@@ -416,6 +450,118 @@ where
 
     event_task.abort();
     let _ = event_task.await;
+}
+
+#[cfg(test)]
+mod connection_context_tests {
+    //! A connection gets the context it had before sessions existed, for every kind of token.
+    use super::*;
+    use crate::agent::AgentService;
+    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+
+    const ADMIN: &str = "the-admin-credential";
+
+    /// The context `ws_rpc` built before `Session`: capabilities, operator, user email, DID.
+    fn before_sessions(token: &str, admin: &Option<String>, reach: ListenerReach) -> String {
+        let is_admin = is_admin_credential_token_on(token, admin, reach);
+        let (capabilities, email, did) = crate::api::auth::resolve_user_session(
+            token,
+            capabilities_on(token.to_string(), admin.clone(), reach),
+        );
+        format!("{capabilities:?} {is_admin} {email:?} {did:?}")
+    }
+
+    fn with_sessions(token: &str, admin: &Option<String>, reach: ListenerReach) -> String {
+        let (ctx, _) = connection_context(token, admin, false, reach);
+        format!(
+            "{:?} {} {:?} {:?}",
+            ctx.capabilities, ctx.is_admin_credential, ctx.user_email, ctx.user_did
+        )
+    }
+
+    fn jwt(capabilities: Option<Vec<Capability>>) -> String {
+        token::generate_jwt(
+            "an app".to_string(),
+            3600,
+            AuthInfo {
+                capabilities,
+                ..AuthInfo::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_kind_of_token_gets_the_same_context_as_before() {
+        setup_wallet();
+        setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let user = "context.user@example.org";
+        AgentService::ensure_user_key_exists(user).unwrap();
+
+        let revoked = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
+        let request_id = format!("context-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_id.clone(), app, revoked.clone()).unwrap();
+        apps_map::revoke_app(&request_id).unwrap();
+
+        let tokens = [
+            ADMIN.to_string(),
+            String::new(),
+            jwt(Some(vec![AGENT_READ_CAPABILITY.clone()])),
+            jwt(None),
+            crate::user_management::generate_user_jwt(user, "test").unwrap(),
+            crate::user_management::generate_user_jwt("context.nokey@example.org", "test").unwrap(),
+            expired_user_token(user),
+            revoked,
+            "not-a-jwt".to_string(),
+        ];
+
+        for multi_user in [false, true] {
+            let mode = MultiUserMode::on();
+            if !multi_user {
+                drop(mode);
+            }
+            for admin in [None, Some(ADMIN.to_string())] {
+                for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+                    for token in &tokens {
+                        assert_eq!(
+                            with_sessions(token, &admin, reach),
+                            before_sessions(token, &admin, reach),
+                            "token {token:.20}…, admin {admin:?}, {reach:?}, multi-user {multi_user}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_connection_stops_working_once_its_token_is_revoked() {
+        setup_wallet();
+        setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let token = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
+        let request_id = format!("context-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+
+        let (_, check) = connection_context(
+            &token,
+            &Some(ADMIN.to_string()),
+            false,
+            ListenerReach::Network,
+        );
+        assert!(check.check().is_ok());
+        apps_map::revoke_app(&request_id).unwrap();
+        assert_eq!(check.check().unwrap_err(), "Unauthorized access");
+    }
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, check_token_revoked, decode_jwt,
-    is_admin_credential_token_on, Capability, ListenerReach, AGENT_AUTH_CAPABILITY,
+    is_admin_credential_token_on, Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY,
     TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::AgentService;
@@ -168,6 +168,24 @@ impl Session {
     pub fn is_operator(&self) -> bool {
         matches!(self.principal, Principal::Operator)
     }
+
+    /// The capabilities that checks run against: every capability for the operator.
+    pub fn capabilities(&self) -> Vec<Capability> {
+        match &self.principal {
+            Principal::Operator => vec![ALL_CAPABILITY.clone()],
+            Principal::App { caps, .. }
+            | Principal::User { caps, .. }
+            | Principal::Anonymous { caps } => caps.clone(),
+        }
+    }
+
+    /// A user session's email and DID.
+    pub fn user(&self) -> Option<(&str, &str)> {
+        match &self.principal {
+            Principal::User { email, did, .. } => Some((email, did)),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,7 +193,7 @@ mod resolution_tests {
     //! One test per way a token resolves.
     use super::*;
     use crate::agent::capabilities::{
-        apps_map, AuthInfo, AuthInfoExtended, ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY,
+        apps_map, AuthInfo, AuthInfoExtended, PERSPECTIVE_CREATE_CAPABILITY,
         RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
     };
     use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};

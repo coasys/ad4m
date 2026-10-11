@@ -150,6 +150,8 @@ pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 pub struct TokenCheck {
     token: String,
     expires_at: Option<u64>,
+    /// Set for a connection that opened a session: the session then decides.
+    session: Option<std::sync::Arc<crate::agent::session::Session>>,
 }
 
 impl TokenCheck {
@@ -170,10 +172,23 @@ impl TokenCheck {
         Self {
             token: token.to_string(),
             expires_at,
+            session: None,
+        }
+    }
+
+    /// Re-checks `session`: the same revocation and expiry rules, read from the session.
+    pub fn for_session(session: std::sync::Arc<crate::agent::session::Session>) -> Self {
+        Self {
+            token: String::new(),
+            expires_at: None,
+            session: Some(session),
         }
     }
 
     pub fn check(&self) -> Result<(), String> {
+        if let Some(session) = &self.session {
+            return session.check().map_err(|e| e.to_string());
+        }
         check_token_revoked(&self.token)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -192,6 +207,7 @@ impl TokenCheck {
         Self {
             token: token.to_string(),
             expires_at: Some(expires_at),
+            session: None,
         }
     }
 }
