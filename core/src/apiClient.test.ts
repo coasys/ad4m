@@ -404,6 +404,17 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(TestSocket.instances).toHaveLength(1)
     })
 
+    it('rejects watchApplied() with 401 when the executor refuses events.watch on an open socket', async () => {
+        open()
+        jest.runAllTicks() // fake timers hold the queued watch flush
+        socket(0).open()
+        const watch = socket(0).sent.find((m) => m.type === 'events.watch')!
+        const applied = client.watchApplied()
+        socket(0).reply({ id: watch.id, error: { code: 401, message: REASON } })
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(authFailed).toHaveBeenCalledTimes(1)
+    })
+
     it('fails every pending call on a 401 reply and stops once the executor closes the socket', async () => {
         open()
         socket(0).open()
