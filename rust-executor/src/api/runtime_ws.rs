@@ -68,7 +68,7 @@ async fn set_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 
@@ -182,7 +182,7 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     // and `owner_did`, and users with their password hashes. With AGENT_UPDATE alone, an app
     // token or a managed user could import a granted notification on someone else's
     // perspectives. Only the operator imports, as only the operator grants notifications.
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden(
             "Permission denied: only the node operator (admin credential) can import data",
         ));
@@ -219,7 +219,7 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
     let config = crate::config::get_global_config();
@@ -349,13 +349,10 @@ struct Dids {
 fn notification_dids(ctx: &RequestContext) -> Result<Dids, WsRpcError> {
     let main_agent = AgentService::with_global_instance(|a| a.did.clone())
         .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
-    let caller = match &ctx.user_email {
-        Some(_) => ctx
-            .user_did
-            .clone()
-            .ok_or_else(|| WsRpcError::forbidden("Managed user has no DID"))?,
-        None => main_agent.clone(),
-    };
+    // A user session always carries its DID.
+    let caller = ctx
+        .user_did()
+        .map_or_else(|| main_agent.clone(), str::to_string);
     Ok(Dids { caller, main_agent })
 }
 
@@ -480,7 +477,7 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
     // Only the operator approves notifications: the launcher holds the admin credential. An
     // app token with AGENT_UPDATE must not approve the notification it created, and managed
     // users hold no admin credential either.
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden(
             "Permission denied: only the node operator (admin credential) can grant notifications",
         ));
@@ -693,7 +690,7 @@ fn compute_log_email(
     requested: Option<String>,
     ctx: &RequestContext,
 ) -> Result<String, WsRpcError> {
-    match (ctx.user_email.clone(), requested) {
+    match (ctx.user_email().map(str::to_string), requested) {
         (Some(own), Some(requested)) if requested != own => Err(WsRpcError::forbidden(
             "A user session may read only its own compute log",
         )),
@@ -703,7 +700,7 @@ fn compute_log_email(
 }
 
 async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
     let body: SetHostRatesRequest = serde_json::from_value(params)
@@ -763,7 +760,7 @@ async fn set_unyt_membrane_proof(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
     let body: SetUnytMembraneProofRequest = serde_json::from_value(params)

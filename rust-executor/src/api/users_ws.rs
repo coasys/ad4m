@@ -31,7 +31,7 @@ async fn set_multi_user_enabled(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 
@@ -74,7 +74,7 @@ async fn set_user_free_access(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 

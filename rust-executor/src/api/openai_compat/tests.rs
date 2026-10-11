@@ -766,7 +766,7 @@ async fn transcriptions_handler_does_not_bill() {
 //
 // Handler-driven router tests can't reach the billing path for speech
 // end-to-end here because the handler gates billing on the request's
-// user (`auth.user_email`), which requires a user session — a user JWT
+// user (`auth.user_email()`), which requires a user session — a user JWT
 // and a user key in the Wallet (heavy). The admin credential token used
 // by the router tests deliberately bypasses that path.
 //

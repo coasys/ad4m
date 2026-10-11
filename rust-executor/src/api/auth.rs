@@ -16,12 +16,8 @@ pub struct AuthContext {
     pub capabilities: Result<Vec<Capability>, String>,
     pub auto_permit_cap_requests: bool,
     pub auth_token: String,
-    pub is_admin_credential: bool,
     /// The caller's session.
     pub session: Arc<Session>,
-    /// The user the token names, and that user's DID.
-    pub user_email: Option<String>,
-    pub user_did: Option<String>,
 }
 
 /// The identity a token had before sessions existed: the capabilities to use, the user's
@@ -67,16 +63,22 @@ impl AuthContext {
         reach: ListenerReach,
     ) -> Result<Self, AuthError> {
         let session = Session::open(token, admin_credential, reach)?;
-        let user = session.user();
         Ok(AuthContext {
             capabilities: Ok(session.capabilities()),
             auto_permit_cap_requests,
             auth_token: token.to_string(),
-            is_admin_credential: session.is_operator(),
-            user_email: user.map(|(email, _)| email.to_string()),
-            user_did: user.map(|(_, did)| did.to_string()),
             session: Arc::new(session),
         })
+    }
+
+    /// The email of the user the session names, if it names one.
+    pub fn user_email(&self) -> Option<&str> {
+        self.session.user().map(|(email, _)| email)
+    }
+
+    /// Whether the caller is the node's operator. See [`RequestContext::is_operator`].
+    pub fn is_operator(&self) -> bool {
+        self.session.is_operator()
     }
 
     /// Convert to the existing RequestContext used by internal functions.
@@ -85,11 +87,8 @@ impl AuthContext {
             capabilities: self.capabilities.clone(),
             auto_permit_cap_requests: self.auto_permit_cap_requests,
             auth_token: self.auth_token.clone(),
-            is_admin_credential: self.is_admin_credential,
-            user_email: self.user_email.clone(),
-            user_did: self.user_did.clone(),
             cancel_token: None,
-            session: Some(self.session.clone()),
+            session: self.session.clone(),
         }
     }
 
@@ -143,7 +142,7 @@ where
         .map_err(|e| ApiError::Unauthorized(e.to_string()))?;
 
         // Track last_seen for multi-user mode
-        if let Some(email) = &auth.user_email {
+        if let Some(email) = auth.user_email() {
             crate::agent::capabilities::track_last_seen(email).await;
         }
 
@@ -270,13 +269,12 @@ mod session_tests {
             .unwrap_or_else(|_| panic!("the extractor accepts a user token"));
 
         assert_eq!(auth.session.user(), Some((email, did.as_str())));
-        assert_eq!(auth.user_email.as_deref(), Some(email));
-        assert!(!auth.is_admin_credential);
+        assert_eq!(auth.user_email(), Some(email));
+        assert!(!auth.is_operator());
 
         let ctx = auth.to_request_context();
-        assert!(ctx.session.is_some());
-        assert_eq!(ctx.user_email.as_deref(), Some(email));
-        assert_eq!(ctx.user_did.as_deref(), Some(did.as_str()));
+        assert_eq!(ctx.user_email(), Some(email));
+        assert_eq!(ctx.user_did(), Some(did.as_str()));
         assert_eq!(
             ctx.acts_as(),
             crate::agent::AgentContext::for_user_email(email.to_string())
@@ -370,7 +368,7 @@ mod session_tests {
         let auth = extract("")
             .await
             .unwrap_or_else(|e| panic!("refused: {e:?}"));
-        assert!(!auth.is_admin_credential);
+        assert!(!auth.is_operator());
         assert!(matches!(
             auth.session.principal,
             crate::agent::session::Principal::Anonymous { .. }

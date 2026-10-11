@@ -111,9 +111,9 @@ async fn get_perspective_with_access(
 ) -> Result<PerspectiveInstance, WsRpcError> {
     let perspective = get_perspective_or_404(uuid).await?;
 
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         let handle = perspective.persisted.lock().await.clone();
-        if !can_access_perspective_with_did(&ctx.user_did, &handle) {
+        if !can_access_perspective_with_did(ctx.user_did(), &handle) {
             return Err(WsRpcError::forbidden(
                 "Access denied: You don't have permission to access this perspective",
             ));
@@ -123,13 +123,13 @@ async fn get_perspective_with_access(
     Ok(perspective)
 }
 
-fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
+fn check_credits(user_email: Option<&str>) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    if let Some(ref email) = user_email {
+    if let Some(email) = user_email {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
@@ -143,13 +143,13 @@ fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
     Ok(())
 }
 
-fn reserve_credits(user_email: &Option<String>, amount: f64) -> Result<(), WsRpcError> {
+fn reserve_credits(user_email: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    if let Some(ref email) = user_email {
+    if let Some(email) = user_email {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
@@ -191,11 +191,11 @@ impl crate::ai_service::harness::CreditGate for WsHarnessCreditGate {
     async fn check(&self) -> anyhow::Result<()> {
         // Pre-check: cheap "credits > 0" gate. Free hosting / free-access
         // paths short-circuit inside `check_credits`.
-        check_credits(&self.user_email).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        check_credits(self.user_email.as_deref()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         // Reserve the per-completion opportunity cost. Fire-and-forget
         // wrt success — the ledger deduction happens atomically and any
         // downstream `InsufficientCredits` will fail the NEXT `check`.
-        reserve_credits(&self.user_email, DEFAULT_LINK_WRITE)
+        reserve_credits(self.user_email.as_deref(), DEFAULT_LINK_WRITE)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         Ok(())
     }
@@ -246,7 +246,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
 
     // Admin sees everything; regular users see only their own perspectives
-    if ctx.is_admin_credential {
+    if ctx.is_operator() {
         let mut handles: Vec<PerspectiveHandle> = Vec::new();
         for p in all {
             handles.push(p.persisted.lock().await.clone());
@@ -257,7 +257,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
         let handle = p.persisted.lock().await.clone();
-        if can_access_perspective_with_did(&ctx.user_did, &handle) {
+        if can_access_perspective_with_did(ctx.user_did(), &handle) {
             filtered.push(handle);
         }
     }
@@ -370,7 +370,7 @@ async fn create_perspective(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let body: CreatePerspectiveRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let owner_did = ctx.user_did.clone();
+    let owner_did = ctx.user_did().map(str::to_string);
 
     let handle = if let Some(owner) = &owner_did {
         PerspectiveHandle::new_with_owner(body.name.clone(), owner.clone())
@@ -429,7 +429,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         &perspective_update_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_email())?;
 
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -444,7 +444,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+    if let Err(e) = reserve_credits(ctx.user_email(), DEFAULT_LINK_WRITE) {
         // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2): money-losing
         // credit-ledger failures at debug hide ledger inconsistency. The
         // link write already committed, so this is not fatal to the
@@ -466,7 +466,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         &perspective_update_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_email())?;
 
     let body: AddLinksBulkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -488,7 +488,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let count = diff.additions.len();
     if count > 0 {
-        if let Err(e) = reserve_credits(&ctx.user_email, count as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_email(), count as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for bulk add (operation already committed): {}",
                 e
@@ -548,7 +548,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         &perspective_update_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_email())?;
 
     let body: LinkMutationsRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -565,7 +565,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let total = diff.additions.len() + diff.removals.len();
     if total > 0 {
-        if let Err(e) = reserve_credits(&ctx.user_email, total as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_email(), total as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for mutations (operation already committed): {}",
                 e
@@ -587,7 +587,7 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
         &perspective_update_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_email())?;
 
     let body: AddLinkExpressionRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -601,7 +601,7 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+    if let Err(e) = reserve_credits(ctx.user_email(), DEFAULT_LINK_WRITE) {
         log::warn!(
             "Credit deduction failed (operation already committed): {}",
             e
@@ -930,7 +930,7 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let (subscription_id, result) = perspective
-        .subscribe_and_query(body.query, ctx.user_email.clone())
+        .subscribe_and_query(body.query, ctx.user_email().map(str::to_string))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -1252,7 +1252,7 @@ async fn model_subscribe_handler(
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    let user_email = ctx.user_email.clone();
+    let user_email = ctx.user_email().map(str::to_string);
     let (subscription_id, result_string) = perspective
         .model_subscribe_and_query(class_name, query_json, user_email)
         .await
@@ -1274,7 +1274,7 @@ async fn run_interpretation_handler(
         &perspective_update_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_email())?;
 
     let body: RunInterpretationRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -1492,7 +1492,7 @@ async fn run_interpretation_handler(
     }
 
     if !bases.is_empty() {
-        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_email(), bases.len() as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for runInterpretation (operation already committed): {}",
                 e
@@ -1535,7 +1535,7 @@ async fn run_interpretation_with_harness_handler(
         &perspective_update_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
-    check_credits(&ctx.user_email)?;
+    check_credits(ctx.user_email())?;
 
     let body: RunInterpretationWithHarnessRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -1650,9 +1650,10 @@ async fn run_interpretation_with_harness_handler(
     // Reserves `DEFAULT_LINK_WRITE` per gate call (same rate the pass'
     // exit accounting uses for each landed base) so the accounting
     // stays proportional to the mid-loop opportunity cost.
-    let credit_gate: Option<std::sync::Arc<dyn crate::ai_service::harness::CreditGate>> = Some(
-        std::sync::Arc::new(WsHarnessCreditGate::new(ctx.user_email.clone())),
-    );
+    let credit_gate: Option<std::sync::Arc<dyn crate::ai_service::harness::CreditGate>> =
+        Some(std::sync::Arc::new(WsHarnessCreditGate::new(
+            ctx.user_email().map(str::to_string),
+        )));
 
     let bases = match tokio::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS),
@@ -1702,7 +1703,7 @@ async fn run_interpretation_with_harness_handler(
     };
 
     if !bases.is_empty() {
-        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
+        if let Err(e) = reserve_credits(ctx.user_email(), bases.len() as f64 * DEFAULT_LINK_WRITE) {
             log::warn!(
                 "Credit deduction failed for runInterpretationWithHarness (operation already committed): {}",
                 e

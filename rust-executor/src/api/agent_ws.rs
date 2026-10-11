@@ -73,7 +73,7 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode: extract user DID from JWT token if present
-    if let Some(user_email) = ctx.user_email.clone() {
+    if let Some(user_email) = ctx.user_email().map(str::to_string) {
         let agent_data = AgentService::get_user_agent_data(&user_email)
             .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
@@ -188,7 +188,7 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     // A user session updates the user's own profile, never the node's main agent.
-    if let Some(user_email) = ctx.user_email.clone() {
+    if let Some(user_email) = ctx.user_email().map(str::to_string) {
         let agent = update_user_profile(user_email, body).await?;
         publish_agent_updated(&agent).await;
         return Ok(serde_json::to_value(agent)?);
@@ -557,7 +557,7 @@ async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 /// Approved apps belong to the node's operator. The default user capabilities include
 /// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
 fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
-    if ctx.user_email.is_some() {
+    if ctx.user_email().is_some() {
         return Err(WsRpcError::forbidden(
             "Apps belong to the node's operator; a user session may not remove or revoke them",
         ));
@@ -676,7 +676,7 @@ async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode
-    if let Some(user_email) = ctx.user_email.clone() {
+    if let Some(user_email) = ctx.user_email().map(str::to_string) {
         let agent_data = AgentService::get_user_agent_data(&user_email)
             .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
@@ -1114,16 +1114,11 @@ mod app_management_tests {
     // session could remove or revoke the operator's apps.
     #[tokio::test]
     async fn user_sessions_cannot_remove_or_revoke_apps() {
-        let user = Arc::new(RequestContext {
-            capabilities: Ok(get_user_default_capabilities()),
-            auto_permit_cap_requests: false,
-            auth_token: String::new(),
-            is_admin_credential: false,
-            user_email: Some("apps.user@example.org".to_string()),
-            user_did: None,
-            cancel_token: None,
-            session: None,
-        });
+        let user = Arc::new(RequestContext::user_for_test(
+            "apps.user@example.org",
+            "did:key:apps-user",
+            get_user_default_capabilities(),
+        ));
         for (op, params) in [
             ("agent.removeApp", json!({ "id": "some-request-id" })),
             ("agent.revokeToken", json!({ "token": "some-request-id" })),
@@ -1146,16 +1141,7 @@ mod revoke_token_tests {
     use std::sync::Arc;
 
     fn operator() -> Arc<RequestContext> {
-        Arc::new(RequestContext {
-            capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
-            auto_permit_cap_requests: false,
-            auth_token: String::new(),
-            is_admin_credential: true,
-            user_email: None,
-            user_did: None,
-            cancel_token: None,
-            session: None,
-        })
+        Arc::new(RequestContext::operator_for_test())
     }
 
     /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.

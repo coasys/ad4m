@@ -51,36 +51,23 @@ fn user(email: &str) -> String {
     AgentService::get_user_did_by_email(email).expect("user did")
 }
 
-fn context(
-    capabilities: Vec<Capability>,
-    is_admin_credential: bool,
-    user_email: Option<&str>,
-) -> RequestContext {
-    RequestContext {
-        capabilities: Ok(capabilities),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential,
-        user_email: user_email.map(str::to_string),
-        user_did: user_email.map(|email| AgentService::get_user_did_by_email(email).unwrap()),
-        cancel_token: None,
-        session: None,
-    }
-}
-
 /// A managed user's session.
 fn user_ctx(email: &str) -> RequestContext {
-    context(get_user_default_capabilities(), false, Some(email))
+    RequestContext::user_for_test(
+        email,
+        &AgentService::get_user_did_by_email(email).unwrap(),
+        get_user_default_capabilities(),
+    )
 }
 
 /// The launcher's admin credential.
 fn admin_ctx() -> RequestContext {
-    context(vec![ALL_CAPABILITY.clone()], true, None)
+    RequestContext::operator_for_test()
 }
 
 /// A main-agent app token that holds only `capabilities`.
 fn app_ctx(capabilities: Vec<Capability>) -> RequestContext {
-    context(capabilities, false, None)
+    RequestContext::app_for_test(capabilities)
 }
 
 /// Perspectives put in the global registry for one test. Drop takes them out
@@ -641,18 +628,6 @@ async fn each_caller_lists_only_its_own_notifications() {
             .unwrap()),
         vec![main_id]
     );
-}
-
-// A managed user's session without a DID must not fall back to the main agent's.
-#[tokio::test]
-async fn a_user_session_without_a_did_is_refused() {
-    setup();
-    let mut ctx = context(get_user_default_capabilities(), false, None);
-    ctx.user_email = Some("nobody@notifications.test".to_string());
-    let err = call("runtime.notifications", json!({}), ctx)
-        .await
-        .expect_err("no DID, no notifications");
-    assert_eq!(err.code, 403);
 }
 
 // `runtime.importData` stores a notification's `granted` and `owner_did` as they are in the

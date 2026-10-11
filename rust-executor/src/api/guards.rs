@@ -13,7 +13,7 @@ use crate::types::RequestContext;
 
 /// Refuses the call for a multi-user user session. `what` names the call in the error.
 pub fn refuse_user_session(ctx: &RequestContext, what: &str) -> Result<(), WsRpcError> {
-    if ctx.user_email.is_some() {
+    if ctx.user_email().is_some() {
         return Err(WsRpcError::forbidden(format!(
             "{what} acts on the node itself, so a user session may not call it"
         )));
@@ -24,26 +24,18 @@ pub fn refuse_user_session(ctx: &RequestContext, what: &str) -> Result<(), WsRpc
 /// The agent a session signs and publishes as: the user of a user session, otherwise the
 /// node's main agent.
 pub fn session_agent_context(ctx: &RequestContext) -> AgentContext {
-    match ctx.user_email.clone() {
-        Some(user_email) => AgentContext::for_user_email(user_email),
-        None => AgentContext::main_agent(),
-    }
+    ctx.acts_as()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A user session for `user_email`, else an app token.
     fn ctx(user_email: Option<&str>) -> RequestContext {
-        RequestContext {
-            capabilities: Ok(vec![]),
-            auto_permit_cap_requests: false,
-            auth_token: String::new(),
-            is_admin_credential: false,
-            user_email: user_email.map(String::from),
-            user_did: None,
-            cancel_token: None,
-            session: None,
+        match user_email {
+            Some(email) => RequestContext::user_for_test(email, "did:key:guarded-user", vec![]),
+            None => RequestContext::app_for_test(vec![]),
         }
     }
 

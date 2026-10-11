@@ -2394,7 +2394,7 @@ impl AIService {
         }
 
         // If caller has no email, they must still have a valid token (admin/main user)
-        let Some(caller_email) = caller.user_email.as_ref() else {
+        let Some(caller_email) = caller.user_email() else {
             if crate::agent::capabilities::decode_jwt(caller.auth_token.clone()).is_err() {
                 return Err(anyhow!(
                     "Authorization error: valid token required in multi-user mode"

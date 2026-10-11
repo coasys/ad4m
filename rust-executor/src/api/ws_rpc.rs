@@ -91,7 +91,7 @@ fn connection_context(
 /// socket with no token (for example on a node that has an admin credential) gets none. The
 /// stream's own filters then decide which events reach the session.
 pub(crate) fn may_receive_events(ctx: &RequestContext) -> bool {
-    ctx.is_admin_credential || !ctx.auth_token.is_empty()
+    ctx.is_operator() || !ctx.auth_token.is_empty()
 }
 
 /// Close code for a connection whose token opens no session or stopped working (RFC 6455
@@ -133,7 +133,7 @@ async fn handle_ws(
     token_check: TokenCheck,
 ) {
     // Track last_seen at connect time (also updated on each RPC call below)
-    if let Some(email) = &ctx.user_email {
+    if let Some(email) = ctx.user_email() {
         track_last_seen(email).await;
     }
 
@@ -148,8 +148,8 @@ async fn handle_ws(
             check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
         super::events_ws::build_event_stream(
             token_check.clone(),
-            ctx.user_email.clone(),
-            ctx.is_admin_credential,
+            ctx.user_email().map(str::to_string),
+            ctx.is_operator(),
             can_approve_apps,
         )
         .await
@@ -370,7 +370,7 @@ impl Connection {
             // Refresh last_seen on every RPC dispatch so long-lived
             // connections don't appear stale. Internally throttled to one
             // DB write per 5 minutes per user.
-            if let Some(email) = &base_ctx.user_email {
+            if let Some(email) = base_ctx.user_email() {
                 track_last_seen(email).await;
             }
 
@@ -484,7 +484,10 @@ mod connection_context_tests {
         let (ctx, _) = connection_context(token, admin, false, reach)?;
         Ok(format!(
             "{:?} {} {:?} {:?}",
-            ctx.capabilities, ctx.is_admin_credential, ctx.user_email, ctx.user_did
+            ctx.capabilities,
+            ctx.is_operator(),
+            ctx.user_email(),
+            ctx.user_did()
         ))
     }
 
@@ -613,10 +616,9 @@ mod connection_context_tests {
                 ListenerReach::Network,
             )
             .unwrap_or_else(|e| panic!("token {token:.20}… opens a session: {e}"));
-            assert!(ctx.session.is_some(), "token {token:.20}… opens a session");
             assert_eq!(
                 ctx.acts_as(),
-                crate::agent::AgentContext::for_session(ctx.user_email.clone()),
+                crate::agent::AgentContext::for_session(ctx.user_email().map(str::to_string)),
                 "token {token:.20}…"
             );
         }
@@ -638,17 +640,13 @@ mod connection_context_tests {
 #[cfg(test)]
 mod event_gate_tests {
     use super::*;
+    use crate::agent::session::Principal;
 
-    fn ctx(token: &str, capabilities: Result<Vec<Capability>, String>) -> RequestContext {
+    /// `base` with `token` as the token it arrived with.
+    fn with_token(token: &str, base: RequestContext) -> RequestContext {
         RequestContext {
-            capabilities,
-            auto_permit_cap_requests: false,
             auth_token: token.to_string(),
-            is_admin_credential: false,
-            user_email: None,
-            user_did: None,
-            cancel_token: None,
-            session: None,
+            ..base
         }
     }
 
@@ -656,32 +654,30 @@ mod event_gate_tests {
     // capabilities. It used to receive the main agent's event stream all the same.
     #[test]
     fn an_unauthenticated_socket_receives_no_events() {
-        let unauthenticated = ctx(
-            "",
-            Ok(vec![
+        let unauthenticated = RequestContext::for_test(Principal::Anonymous {
+            caps: vec![
                 AGENT_AUTH_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-            ]),
-        );
+            ],
+        });
         assert!(!may_receive_events(&unauthenticated));
     }
 
     // Apps with narrow capabilities still need their query-subscription and link events.
     #[test]
     fn authenticated_sessions_receive_events_whatever_their_capabilities() {
-        let narrow_app = ctx(
+        let narrow_app = with_token(
             "app-jwt",
-            Ok(vec![perspective_query_capability(vec![
+            RequestContext::app_for_test(vec![perspective_query_capability(vec![
                 "some-uuid".to_string()
             ])]),
         );
         assert!(may_receive_events(&narrow_app));
-        assert!(may_receive_events(&ctx(
+        assert!(may_receive_events(&with_token(
             "user-jwt",
-            Ok(get_user_default_capabilities())
+            RequestContext::app_for_test(get_user_default_capabilities())
         )));
-        let mut admin = ctx("the-admin-credential", Ok(vec![ALL_CAPABILITY.clone()]));
-        admin.is_admin_credential = true;
+        let admin = with_token("the-admin-credential", RequestContext::operator_for_test());
         assert!(may_receive_events(&admin));
     }
 }

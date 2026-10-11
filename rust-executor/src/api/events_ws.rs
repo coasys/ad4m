@@ -261,13 +261,13 @@ pub async fn events_ws(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let user_email = context.user_email.clone();
+    let user_email = context.user_email().map(str::to_string);
     // Captured before the upgrade so the stream builder knows whether the
     // caller is an admin credential. Admin is the ONLY escape hatch for
     // per-DID filters — an ordinary session whose DID hasn't resolved yet
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
-    let is_admin = context.is_admin_credential;
+    let is_admin = context.is_operator();
     let can_approve_apps =
         check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
     let token_check = TokenCheck::new(&context.auth_token, is_admin);
@@ -995,7 +995,7 @@ async fn event_perspective_owned(msg: &str, current_did: Option<&str>, is_admin:
 /// fails closed.
 ///
 /// `is_admin` is the ONLY escape hatch: an admin credential (checked at WS
-/// setup, `AuthContext.is_admin_credential`) sees every event. An ordinary
+/// setup, `AuthContext::is_operator`) sees every event. An ordinary
 /// session whose DID has not yet resolved (`did_for_context` failed —
 /// happens when the client connects before `agent.generate()` completes)
 /// is treated as fail-closed, NOT as admin, per CodeRabbit's second-round
@@ -1108,7 +1108,7 @@ mod auto_processor_filter_tests {
     //! `matches_auto_processor_pass_owner` — CodeRabbit #881 review + Nico's
     //! Aug-19 call: an event is delivered ONLY to the DID whose pass produced
     //! it, so a hosting agent's session never sees events for a managed
-    //! user's pass. `is_admin` (from `AuthContext.is_admin_credential`) is
+    //! user's pass. `is_admin` (from `AuthContext::is_operator`) is
     //! the only escape hatch — an unresolved DID is NOT silently promoted.
     //!
     //! `perspective_is_owned_by` now fails closed when the perspective is not

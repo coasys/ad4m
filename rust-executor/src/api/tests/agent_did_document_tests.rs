@@ -341,16 +341,11 @@ async fn agent_status_for_a_managed_user_carries_no_private_key() {
     let secrets = wallet_private_key_values(email);
     let user_did = AgentService::get_user_did_by_email(email).unwrap();
 
-    let ctx = Arc::new(RequestContext {
-        capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: false,
-        user_email: Some(email.to_string()),
-        user_did: Some(user_did.clone()),
-        cancel_token: None,
-        session: None,
-    });
+    let ctx = Arc::new(RequestContext::user_for_test(
+        email,
+        &user_did,
+        vec![ALL_CAPABILITY.clone()],
+    ));
     let reply = handlers()
         .dispatch("agent.status", json!({}), ctx)
         .await

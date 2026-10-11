@@ -62,7 +62,7 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// A model as a session may see it. A user session sees the model but not its provider
 /// key: the key belongs to the node's operator, and anyone holding it can spend on it.
 fn model_for_session(mut model: Model, ctx: &RequestContext) -> Model {
-    if ctx.user_email.is_some() {
+    if ctx.user_email().is_some() {
         if let Some(api) = model.api.as_mut() {
             api.api_key = String::new();
         }
@@ -363,7 +363,7 @@ async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(ctx.user_email.as_deref())?;
+    check_compute_credits_ws(ctx.user_email())?;
 
     let body: PromptRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -373,7 +373,11 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .prompt(body.task_id, body.prompt, ctx.user_email.clone())
+        .prompt(
+            body.task_id,
+            body.prompt,
+            ctx.user_email().map(str::to_string),
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -383,7 +387,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(ctx.user_email.as_deref())?;
+    check_compute_credits_ws(ctx.user_email())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -393,7 +397,11 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(body.model_id, body.text, ctx.user_email.clone())
+        .embed(
+            body.model_id,
+            body.text,
+            ctx.user_email().map(str::to_string),
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -413,7 +421,7 @@ async fn open_transcription_stream(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(ctx.user_email.as_deref())?;
+    check_compute_credits_ws(ctx.user_email())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -516,8 +524,7 @@ pub async fn feed_transcription_stream(
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
-    check_compute_credits_ws(context.user_email.as_deref())
-        .map_err(|e| ApiError::Forbidden(e.message))?;
+    check_compute_credits_ws(context.user_email()).map_err(|e| ApiError::Forbidden(e.message))?;
 
     let stream_ids_header = headers
         .get("x-stream-ids")
@@ -714,17 +721,16 @@ mod model_key_tests {
         }
     }
 
-    fn ctx(user_email: Option<&str>) -> RequestContext {
-        RequestContext {
-            capabilities: Ok(vec![]),
-            auto_permit_cap_requests: false,
-            auth_token: String::new(),
-            is_admin_credential: false,
-            user_email: user_email.map(String::from),
-            user_did: None,
-            cancel_token: None,
-            session: None,
+    /// A user session for `user_email`, else an app token, holding `caps`.
+    fn ctx_with(user_email: Option<&str>, caps: Vec<Capability>) -> RequestContext {
+        match user_email {
+            Some(email) => RequestContext::user_for_test(email, "did:key:ai-user", caps),
+            None => RequestContext::app_for_test(caps),
         }
+    }
+
+    fn ctx(user_email: Option<&str>) -> RequestContext {
+        ctx_with(user_email, vec![])
     }
 
     #[test]
@@ -757,10 +763,7 @@ mod model_key_tests {
         .unwrap();
         Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
         let session = |user_email: Option<&str>| {
-            Arc::new(RequestContext {
-                capabilities: Ok(vec![AI_READ_CAPABILITY.clone()]),
-                ..ctx(user_email)
-            })
+            Arc::new(ctx_with(user_email, vec![AI_READ_CAPABILITY.clone()]))
         };
         let params = serde_json::json!({ "modelType": "LLM" });
 

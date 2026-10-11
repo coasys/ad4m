@@ -35,7 +35,7 @@ pub fn can_access_perspective(
 
 /// Fast path: check perspective access using a pre-resolved DID (avoids wallet mutex).
 pub fn can_access_perspective_with_did(
-    user_did: &Option<String>,
+    user_did: Option<&str>,
     perspective: &PerspectiveHandle,
 ) -> bool {
     match user_did {

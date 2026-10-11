@@ -102,7 +102,7 @@ async fn an_anonymous_caller_on_a_network_listener_cannot_list_app_tokens() {
     assert!(message.contains("Capability is not matched"), "{reply}");
 }
 
-// `is_admin_credential` gates user management and runtime calls by itself, without a
+// `is_operator()` gates user management and runtime calls by itself, without a
 // capability check, so it has to follow the listener too.
 #[tokio::test]
 async fn an_anonymous_caller_on_a_network_listener_is_not_the_admin() {
@@ -228,8 +228,8 @@ async fn a_forwarded_caller_on_a_loopback_http_route_is_anonymous() {
     }
 }
 
-/// `is_admin_credential` as the HTTP extractor sets it, for a request with no token on a
-/// listener with this reach.
+/// Whether the HTTP extractor makes a request with no token on a listener with this reach
+/// the operator.
 async fn http_admin_flag(reach: ListenerReach, headers: &[(&'static str, &str)]) -> bool {
     let mut request = Request::builder().uri("/v1/models").extension(reach);
     for (name, value) in headers {
@@ -237,7 +237,7 @@ async fn http_admin_flag(reach: ListenerReach, headers: &[(&'static str, &str)])
     }
     let (mut parts, _) = request.body(()).unwrap().into_parts();
     match AuthContext::from_request_parts(&mut parts, &no_credential()).await {
-        Ok(auth) => auth.is_admin_credential,
+        Ok(auth) => auth.is_operator(),
         Err(_) => panic!("the extractor accepts a request with no token"),
     }
 }

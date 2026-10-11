@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
+use crate::agent::capabilities::get_user_default_capabilities;
 use crate::agent::{signing_key_id, signing_key_id_for_context, AgentContext, AgentService};
 use crate::api::ws_handler::build_handler_map;
 use crate::db::Ad4mDb;
@@ -16,30 +16,17 @@ use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_UPDATED_TOPIC};
 use crate::types::{Agent, ModelApiInput, ModelInput, ModelType, RequestContext};
 
+/// A user session with the default user capabilities. No call here reads the session's DID.
 fn user_session(email: &str) -> Arc<RequestContext> {
-    Arc::new(RequestContext {
-        capabilities: Ok(get_user_default_capabilities()),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: false,
-        user_email: Some(email.to_string()),
-        user_did: None,
-        cancel_token: None,
-        session: None,
-    })
+    Arc::new(RequestContext::user_for_test(
+        email,
+        &format!("did:key:test:{email}"),
+        get_user_default_capabilities(),
+    ))
 }
 
 fn operator_session() -> Arc<RequestContext> {
-    Arc::new(RequestContext {
-        capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: true,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        session: None,
-    })
+    Arc::new(RequestContext::operator_for_test())
 }
 
 async fn call(op: &str, params: Value, ctx: Arc<RequestContext>) -> Result<Value, (u16, String)> {

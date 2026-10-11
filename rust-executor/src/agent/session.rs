@@ -196,6 +196,17 @@ impl Session {
             _ => super::AgentContext::main_agent(),
         }
     }
+
+    /// A session for `principal` that never expires and carries no token.
+    #[cfg(test)]
+    pub(crate) fn for_test(principal: Principal, reach: ListenerReach) -> Session {
+        Session {
+            principal,
+            reach,
+            expires_at: None,
+            token: String::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -416,12 +427,7 @@ mod resolution_tests {
 
     #[test]
     fn a_user_acts_as_the_user_and_every_other_caller_as_the_main_agent() {
-        let session = |principal| Session {
-            principal,
-            reach: ListenerReach::Network,
-            expires_at: None,
-            token: String::new(),
-        };
+        let session = |principal| Session::for_test(principal, ListenerReach::Network);
         let user = session(Principal::User {
             token_id: TokenId("t".into()),
             email: "acts.as@example.org".into(),

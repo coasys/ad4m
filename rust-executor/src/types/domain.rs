@@ -14,14 +14,6 @@ pub struct RequestContext {
     pub capabilities: Result<Vec<Capability>, String>,
     pub auto_permit_cap_requests: bool,
     pub auth_token: String,
-    /// True when the request was authenticated with the launcher's admin_credential token.
-    /// Only the launcher (or legacy single-user empty-token) qualifies.
-    /// Regular app tokens (JWT) never have this set, regardless of which capabilities they hold.
-    pub is_admin_credential: bool,
-    /// Cached user email resolved once at connection time (multi-user mode).
-    pub user_email: Option<String>,
-    /// Cached user DID resolved once at connection time (multi-user mode).
-    pub user_did: Option<String>,
     /// Per-request cancellation token, populated by the WS RPC dispatcher
     /// when the client may send `request.cancel`.  Handlers that want to
     /// support mid-flight cancellation can clone this and pass it to
@@ -32,18 +24,74 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
-    /// The connection's session, when it opened one. Handlers take their identity from it.
-    pub session: Option<std::sync::Arc<crate::agent::session::Session>>,
+    /// The caller's session. Handlers take their identity from it.
+    pub session: std::sync::Arc<crate::agent::session::Session>,
 }
 
 impl RequestContext {
-    /// The agent a request acts as: the session's, or for a context without one (REST, MCP,
-    /// tests) the user its email names, else the main agent.
+    /// The agent a request acts as: a user acts as that user, every other caller as the
+    /// node's main agent.
     pub fn acts_as(&self) -> crate::agent::AgentContext {
-        self.session
-            .as_ref()
-            .map(|session| session.acts_as())
-            .unwrap_or_else(|| crate::agent::AgentContext::for_session(self.user_email.clone()))
+        self.session.acts_as()
+    }
+
+    /// The email of the user the session names, if it names one.
+    pub fn user_email(&self) -> Option<&str> {
+        self.session.user().map(|(email, _)| email)
+    }
+
+    /// The DID of the user the session names, if it names one.
+    pub fn user_did(&self) -> Option<&str> {
+        self.session.user().map(|(_, did)| did)
+    }
+
+    /// Whether the caller is the node's operator: the admin credential, or no token on a
+    /// loopback listener of a node without one. An app token never is, whatever its
+    /// capabilities.
+    pub fn is_operator(&self) -> bool {
+        self.session.is_operator()
+    }
+}
+
+#[cfg(test)]
+impl RequestContext {
+    /// A context for `principal` on a network listener, with no token. Its capabilities are
+    /// the session's.
+    pub(crate) fn for_test(principal: crate::agent::session::Principal) -> RequestContext {
+        let session = crate::agent::session::Session::for_test(
+            principal,
+            crate::agent::capabilities::ListenerReach::Network,
+        );
+        RequestContext {
+            capabilities: Ok(session.capabilities()),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+        }
+    }
+
+    /// The operator's context.
+    pub(crate) fn operator_for_test() -> RequestContext {
+        Self::for_test(crate::agent::session::Principal::Operator)
+    }
+
+    /// An app token's context: the main agent, limited to `caps`.
+    pub(crate) fn app_for_test(caps: Vec<Capability>) -> RequestContext {
+        Self::for_test(crate::agent::session::Principal::App {
+            token_id: crate::agent::session::TokenId("test-app".to_string()),
+            caps,
+        })
+    }
+
+    /// A managed user's context, limited to `caps`.
+    pub(crate) fn user_for_test(email: &str, did: &str, caps: Vec<Capability>) -> RequestContext {
+        Self::for_test(crate::agent::session::Principal::User {
+            token_id: crate::agent::session::TokenId("test-user".to_string()),
+            email: email.to_string(),
+            did: did.to_string(),
+            caps,
+        })
     }
 }
 

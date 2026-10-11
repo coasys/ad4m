@@ -2,20 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::agent::capabilities::ALL_CAPABILITY;
 use crate::types::RequestContext;
 
 pub(crate) fn admin_ctx() -> Arc<RequestContext> {
-    Arc::new(RequestContext {
-        capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential: true,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        session: None,
-    })
+    Arc::new(RequestContext::operator_for_test())
 }
 
 /// Unregisters the fixture perspective when the test ends (also on panic).
