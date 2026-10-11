@@ -11,6 +11,7 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
+pub mod revoked;
 pub mod session;
 pub mod signatures;
 
@@ -50,8 +51,8 @@ impl AgentContext {
         if is_admin_credential || auth_token.is_empty() {
             return Ok(Self::main_agent());
         }
-        capabilities::check_token_revoked(&auth_token).map_err(|e| anyhow!(e))?;
         let claims = capabilities::decode_jwt(auth_token)?;
+        capabilities::check_not_revoked(&claims).map_err(|e| anyhow!(e))?;
         Ok(Self::for_session(claims.sub))
     }
 

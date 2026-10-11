@@ -14,10 +14,10 @@
 //! (`capabilities_from_token`, `AgentContext::from_auth_token`).
 
 use super::capabilities::{
-    anonymous_capabilities, capability_matches, check_token_revoked, decode_jwt,
-    is_admin_credential_token_on, Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY,
-    TOKEN_EXPIRY_LEEWAY_SECONDS,
+    anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
+    Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
+use super::revoked::RevokedSet;
 use super::AgentService;
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. Revocation by id needs no
@@ -75,26 +75,14 @@ impl std::fmt::Display for AuthError {
     }
 }
 
-/// Leaves out the token: a formatted session must never carry a credential.
-impl std::fmt::Debug for Session {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Session")
-            .field("principal", &self.principal)
-            .field("reach", &self.reach)
-            .field("expires_at", &self.expires_at)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A connection's identity, checked again on every request and every delivered event.
-#[derive(Clone)]
+/// A connection's identity, checked again on every request and every delivered event. It
+/// holds no token: revocation goes by the token's id.
+#[derive(Clone, Debug)]
 pub struct Session {
     pub principal: Principal,
     pub reach: ListenerReach,
     /// `None` for the operator and anonymous callers: they have no token that expires.
     expires_at: Option<u64>,
-    /// `apps_map` revokes by the raw token, so `check` needs it.
-    token: String,
 }
 
 impl Session {
@@ -108,7 +96,6 @@ impl Session {
             principal,
             reach,
             expires_at,
-            token: token.to_string(),
         };
 
         if is_admin_credential_token_on(token, admin_credential, reach) {
@@ -119,7 +106,6 @@ impl Session {
             return Ok(session(Principal::Anonymous { caps }, None));
         }
 
-        check_token_revoked(token).map_err(|_| AuthError::Revoked)?;
         let claims = decode_jwt(token.to_string()).map_err(|e| {
             if e.downcast_ref::<jsonwebtoken::errors::Error>()
                 .is_some_and(|e| *e.kind() == jsonwebtoken::errors::ErrorKind::ExpiredSignature)
@@ -131,6 +117,9 @@ impl Session {
         })?;
 
         let token_id = TokenId(claims.nonce().to_string());
+        if RevokedSet::global().contains(&token_id) {
+            return Err(AuthError::Revoked);
+        }
         let expires_at = Some(claims.expires_at());
         let caps = claims
             .capabilities
@@ -155,17 +144,14 @@ impl Session {
     /// Fails once the token is revoked or past its expiry. Needs no wallet: the signature was
     /// checked in [`Session::open`].
     pub fn check(&self) -> Result<(), AuthError> {
-        if matches!(
-            self.principal,
-            Principal::Operator | Principal::Anonymous { .. }
-        ) {
-            return Ok(());
+        let token_id = match &self.principal {
+            Principal::Operator | Principal::Anonymous { .. } => return Ok(()),
+            Principal::App { token_id, .. } | Principal::User { token_id, .. } => token_id,
+        };
+        if RevokedSet::global().contains(token_id) {
+            return Err(AuthError::Revoked);
         }
-        check_token_revoked(&self.token).map_err(|_| AuthError::Revoked)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(u64::MAX);
+        let now = super::revoked::now();
         match self.expires_at {
             Some(expires_at) if now > expires_at + TOKEN_EXPIRY_LEEWAY_SECONDS => {
                 Err(AuthError::Expired)
@@ -216,14 +202,13 @@ impl Session {
         }
     }
 
-    /// A session for `principal` that never expires and carries no token.
+    /// A session for `principal` that never expires.
     #[cfg(test)]
     pub(crate) fn for_test(principal: Principal, reach: ListenerReach) -> Session {
         Session {
             principal,
             reach,
             expires_at: None,
-            token: String::new(),
         }
     }
 
@@ -496,8 +481,8 @@ mod resolution_tests {
         }
     }
 
-    #[test]
-    fn a_revoked_token_opens_no_session_and_ends_an_open_one() {
+    /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.
+    fn approved_app() -> (String, String) {
         crate::test_utils::use_test_apps_file();
         let token = app_token(None);
         let request_id = format!("session-{}", uuid::Uuid::new_v4());
@@ -506,6 +491,12 @@ mod resolution_tests {
             auth: AuthInfo::default(),
         };
         apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        (request_id, token)
+    }
+
+    #[test]
+    fn a_revoked_token_opens_no_session_and_ends_an_open_one() {
+        let (request_id, token) = approved_app();
         let open = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
 
         apps_map::revoke_app(&request_id).unwrap();
@@ -514,6 +505,36 @@ mod resolution_tests {
             Session::open(&token, &admin(), ListenerReach::Network).unwrap_err(),
             AuthError::Revoked
         );
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    // #396: removing a revoked app deleted the only record of the revocation, so its token
+    // worked again until it expired.
+    #[test]
+    fn a_revoked_token_stays_revoked_after_its_app_is_removed() {
+        let (request_id, token) = approved_app();
+        let open = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
+
+        apps_map::revoke_app(&request_id).unwrap();
+        apps_map::remove_app(&request_id).unwrap();
+        assert_eq!(open.check().unwrap_err(), AuthError::Revoked);
+        assert_eq!(
+            Session::open(&token, &admin(), ListenerReach::Network).unwrap_err(),
+            AuthError::Revoked
+        );
+    }
+
+    #[test]
+    fn revoking_one_app_leaves_another_apps_token_working() {
+        let (revoked_id, _) = approved_app();
+        let (other_id, other_token) = approved_app();
+        let open = Session::open(&other_token, &admin(), ListenerReach::Network).unwrap();
+
+        apps_map::revoke_app(&revoked_id).unwrap();
+        assert!(open.check().is_ok());
+        assert!(Session::open(&other_token, &admin(), ListenerReach::Network).is_ok());
+        apps_map::remove_app(&revoked_id).unwrap();
+        apps_map::remove_app(&other_id).unwrap();
     }
 
     #[test]

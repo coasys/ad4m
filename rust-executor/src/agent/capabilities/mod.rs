@@ -130,8 +130,11 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
     })
 }
 
-pub fn check_token_revoked(token: &str) -> Result<(), String> {
-    if apps_map::is_revoked(token) {
+/// Refuses a decoded token whose id the operator revoked. For MCP, which resolves its tokens
+/// without a `Session`; `Session` reads the same set.
+pub fn check_not_revoked(claims: &Claims) -> Result<(), String> {
+    let id = crate::agent::session::TokenId(claims.nonce().to_string());
+    if crate::agent::revoked::RevokedSet::global().contains(&id) {
         return Err("Unauthorized access".to_string());
     }
     Ok(())
@@ -326,9 +329,8 @@ pub fn capabilities_on(
         return Ok(anonymous_capabilities());
     }
 
-    check_token_revoked(&token)?;
-
     let claims = decode_jwt(token).map_err(|e| e.to_string())?;
+    check_not_revoked(&claims)?;
 
     if claims.capabilities.capabilities.is_none() {
         Ok(vec![AGENT_AUTH_CAPABILITY.clone()])
@@ -828,8 +830,29 @@ mod app_token_tests {
             "the app list carried the app token"
         );
 
-        assert!(check_token_revoked(&token).is_ok());
+        assert!(capabilities_from_token(token.clone(), None).is_ok());
         apps_map::revoke_app(&request_id).unwrap();
-        assert!(check_token_revoked(&token).is_err());
+        assert!(capabilities_from_token(token, None).is_err());
+    }
+
+    // MCP resolves tokens without a `Session`, by the same revoked set (#396).
+    #[test]
+    fn mcp_refuses_a_revoked_app_token_after_the_app_is_removed() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let token = generate_jwt("mcp app".to_string(), 3600, test_auth_info()).unwrap();
+        let request_id = format!("mcp-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: test_auth_info(),
+        };
+        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        assert!(capabilities_from_token(token.clone(), None).is_ok());
+
+        apps_map::revoke_app(&request_id).unwrap();
+        apps_map::remove_app(&request_id).unwrap();
+        assert!(capabilities_from_token(token.clone(), None).is_err());
+        assert!(crate::agent::AgentContext::from_auth_token(token, false).is_err());
     }
 }

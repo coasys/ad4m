@@ -1146,9 +1146,11 @@ mod revoke_token_tests {
 
     /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.
     fn approved_app() -> (String, String) {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         crate::test_utils::use_test_apps_file();
         let request_id = format!("revoke-test-{}", uuid::Uuid::new_v4());
-        let token = format!("app-token-{}", uuid::Uuid::new_v4());
+        let token = generate_jwt("revoke test".to_string(), 3600, AuthInfo::default()).unwrap();
         let app = AuthInfoExtended {
             request_id: request_id.clone(),
             auth: AuthInfo::default(),
@@ -1164,13 +1166,19 @@ mod revoke_token_tests {
             .map_err(|e| (e.code, e.message))
     }
 
+    fn is_revoked(token: &str) -> bool {
+        let (id, _) = read_stored_token_id(token).expect("a token this node issued");
+        crate::agent::revoked::RevokedSet::global().contains(&id)
+    }
+
     // #1060: revoking by the JWT, as the field name says, reported success and revoked
     // nothing.
     #[tokio::test]
     async fn revoking_by_the_jwt_revokes_the_app() {
         let (request_id, token) = approved_app();
+        assert!(!is_revoked(&token));
         revoke(&token).await.expect("the JWT names the app");
-        assert!(check_token_revoked(&token).is_err());
+        assert!(is_revoked(&token));
         apps_map::remove_app(&request_id).unwrap();
     }
 
@@ -1180,8 +1188,21 @@ mod revoke_token_tests {
         revoke(&request_id)
             .await
             .expect("the SDK sends the request id");
-        assert!(check_token_revoked(&token).is_err());
+        assert!(is_revoked(&token));
         apps_map::remove_app(&request_id).unwrap();
+    }
+
+    // #396: `removeApp` deleted the record that held the revocation.
+    #[tokio::test]
+    async fn removing_a_revoked_app_keeps_its_token_revoked() {
+        let (request_id, token) = approved_app();
+        revoke(&request_id).await.unwrap();
+        build_handler_map()
+            .dispatch("agent.removeApp", json!({ "id": request_id }), operator())
+            .await
+            .unwrap();
+        assert!(apps_map::get_app(&request_id).unwrap().is_none());
+        assert!(is_revoked(&token));
     }
 
     #[tokio::test]
@@ -1201,10 +1222,7 @@ mod revoke_token_tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.0, 500, "{}", err.1);
-        assert!(
-            check_token_revoked(&token).is_err(),
-            "the app stays revoked in memory"
-        );
+        assert!(is_revoked(&token), "the app stays revoked in memory");
         apps_map::remove_app(&request_id).unwrap();
     }
 

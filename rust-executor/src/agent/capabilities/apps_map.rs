@@ -100,6 +100,9 @@ impl std::fmt::Display for RevokeError {
 /// its JWT, which the RPC's field name (`token`) promises. A value that names no app is an
 /// error: a revoke that reports success and revokes nothing ends the search for a leak
 /// (#1060).
+///
+/// The token's id joins the revoked set, so the token stays revoked after `remove_app`
+/// deletes the record (#396). The record keeps its `revoked` flag for the app list.
 pub fn revoke_app(token_or_request_id: &str) -> Result<(), RevokeError> {
     let mut apps = APPS.lock().map_err(|e| RevokeError::Store(e.to_string()))?;
     let key = if apps.contains_key(token_or_request_id) {
@@ -113,7 +116,20 @@ pub fn revoke_app(token_or_request_id: &str) -> Result<(), RevokeError> {
         return Err(RevokeError::NotFound);
     };
     app.revoked = true;
+    if let Some((id, expires_at)) = super::token::read_stored_token_id(&app.token) {
+        crate::agent::revoked::revoke(id, expires_at);
+    }
     persist_apps_to_file(&apps).map_err(|e| RevokeError::Store(e.to_string()))
+}
+
+/// The ids and expiries of the tokens of revoked apps. Apps revoked before the revoked set
+/// existed are in the registry file only; start-up adds them to the set.
+pub fn revoked_token_ids() -> Vec<(crate::agent::session::TokenId, u64)> {
+    let apps = APPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    apps.values()
+        .filter(|app| app.revoked)
+        .filter_map(|app| super::token::read_stored_token_id(&app.token))
+        .collect()
 }
 
 pub fn remove_app(request_key: &str) -> Result<(), String> {
@@ -141,17 +157,6 @@ pub fn client_view() -> Vec<crate::types::Apps> {
             ..app
         })
         .collect()
-}
-
-/// Whether the operator revoked the app that holds this token. Scans in place, without
-/// copying the app list, because connections call it on every request and event.
-pub fn is_revoked(token: &str) -> bool {
-    APPS.lock()
-        .map(|apps| {
-            apps.values()
-                .any(|app| crate::utils::constant_time_eq(&app.token, token) && app.revoked)
-        })
-        .unwrap_or(true)
 }
 
 /// The app list with tokens, for the executor's own revocation checks. Never send it to a client.

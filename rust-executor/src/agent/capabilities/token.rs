@@ -73,6 +73,26 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     Ok(result.claims)
 }
 
+/// The id and expiry of a token this node stored itself, read without the wallet.
+///
+/// Skips the signature check, so never use it to decide who a caller is. It serves
+/// revocation: the app registry holds only tokens this node issued, and the operator may
+/// revoke them while the wallet is locked. `None` when the token does not parse: such a token
+/// opens no session either.
+pub fn read_stored_token_id(token: &str) -> Option<(crate::agent::session::TokenId, u64)> {
+    let mut validation = jsonwebtoken::Validation::new(Algorithm::HS256);
+    validation.insecure_disable_signature_validation();
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    let claims = jsonwebtoken::decode::<Claims>(token, &DecodingKey::from_secret(&[]), &validation)
+        .ok()?
+        .claims;
+    Some((
+        crate::agent::session::TokenId(claims.nonce().to_string()),
+        claims.expires_at(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +107,28 @@ mod tests {
     /// after a node restart, the waker's subscribe 403'd with
     /// "main key not found. call createMainKey() first", which reads like a
     /// broken installation instead of "ask the node's operator to unlock".
+    // Revocation reads a stored token's id without the wallet, so the operator can revoke
+    // while it is locked.
+    #[test]
+    fn a_stored_token_id_reads_without_the_wallet() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let token = generate_jwt("id test".to_string(), 3600, AuthInfo::default()).unwrap();
+        let claims = decode_jwt(token.clone()).unwrap();
+
+        let backend = wallet_backend();
+        backend.lock("stored-token-id-test");
+        let read = read_stored_token_id(&token);
+        backend
+            .unlock("stored-token-id-test")
+            .expect("restore the shared wallet");
+
+        let (id, expires_at) = read.expect("the token parses");
+        assert_eq!(id.0, claims.nonce());
+        assert_eq!(expires_at, claims.expires_at());
+        assert!(read_stored_token_id("not-a-jwt").is_none());
+    }
+
     #[test]
     fn decode_jwt_on_locked_wallet_names_the_locked_state() {
         set_global_config(Ad4mConfig::default());
