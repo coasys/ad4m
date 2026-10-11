@@ -30,6 +30,10 @@ use std::sync::OnceLock;
 #[serde(transparent)]
 pub struct TokenId(pub String);
 
+/// The token id of an in-process session ([`Session::in_process_user`]). No JWT carries it
+/// (their ids are v4 UUIDs), and such a session ignores revocation.
+const IN_PROCESS_TOKEN_ID: &str = "in-process";
+
 /// The kind of caller behind a connection.
 #[derive(Clone, Debug)]
 pub enum Principal {
@@ -113,6 +117,9 @@ pub struct Session {
     /// The main agent's DID, for the operator and apps. Read once it exists (a socket can
     /// open before `agent.generate()`), then fixed for the session's lifetime.
     main_did: OnceLock<String>,
+    /// Opened by the executor for its own work ([`Session::in_process_user`],
+    /// [`Session::in_process_app`]), not from a token: [`Session::check`] always passes.
+    in_process: bool,
 }
 
 impl Session {
@@ -128,6 +135,7 @@ impl Session {
             expires_at,
             issued_at,
             main_did: OnceLock::new(),
+            in_process: false,
         };
 
         if is_admin_credential_token_on(token, admin_credential, reach) {
@@ -180,9 +188,52 @@ impl Session {
         Ok(session(principal, expires_at, issued_at))
     }
 
+    /// A session for work the executor runs for a managed user without a token from that
+    /// user: the user `email` with DID `did`, limited to the default user capabilities, so
+    /// the perspective guard lets it reach the user's own perspectives only. The interpretation
+    /// pass of the auto-processor acts as the owner of its perspective this way, never as the
+    /// operator.
+    ///
+    /// No token stands behind it, so there is nothing to revoke or expire: the user did not
+    /// sign in, and the session lives only as long as the work that holds it. It is never
+    /// registered for revocation and [`Session::check`] always passes.
+    pub fn in_process_user(email: String, did: String) -> Session {
+        Session::in_process(Principal::User {
+            token_id: TokenId(IN_PROCESS_TOKEN_ID.to_string()),
+            email,
+            did,
+            caps: super::capabilities::get_user_default_capabilities(),
+        })
+    }
+
+    /// A session for work the executor runs as its main agent without a token: an app
+    /// limited to `caps`. The perspective guard lets an app reach unowned perspectives and
+    /// the main agent's only, never a user's (unlike the operator, which reaches every
+    /// perspective). Not revocable, for the reason [`Session::in_process_user`] gives.
+    pub fn in_process_app(caps: Vec<Capability>) -> Session {
+        Session::in_process(Principal::App {
+            token_id: TokenId(IN_PROCESS_TOKEN_ID.to_string()),
+            caps,
+        })
+    }
+
+    fn in_process(principal: Principal) -> Session {
+        Session {
+            principal,
+            reach: ListenerReach::Loopback,
+            expires_at: None,
+            issued_at: 0,
+            main_did: OnceLock::new(),
+            in_process: true,
+        }
+    }
+
     /// Fails once the token is revoked (by id, or for a user by the user's session cutoff)
     /// or past its expiry. Needs no wallet: the signature was checked in [`Session::open`].
     pub fn check(&self) -> Result<(), AuthError> {
+        if self.in_process {
+            return Ok(());
+        }
         let (token_id, user) = match &self.principal {
             Principal::Operator | Principal::Anonymous { .. } => return Ok(()),
             Principal::App { token_id, .. } => (token_id, None),
@@ -310,6 +361,7 @@ impl Session {
             expires_at: None,
             issued_at: 0,
             main_did: OnceLock::new(),
+            in_process: false,
         }
     }
 
@@ -712,5 +764,32 @@ mod resolution_tests {
                 crate::agent::AgentContext::main_agent()
             );
         }
+    }
+
+    #[test]
+    fn an_in_process_session_is_never_the_operator_and_ignores_revocation() {
+        let email = "in.process@example.org";
+        let user = Session::in_process_user(email.into(), "did:key:in-process".into());
+        assert!(!user.is_operator());
+        assert_eq!(user.user(), Some((email, "did:key:in-process")));
+        assert_eq!(
+            caps(&user),
+            caps_of(crate::agent::capabilities::get_user_default_capabilities())
+        );
+        assert!(
+            user.user_token().is_none(),
+            "nothing for user.logout to revoke"
+        );
+
+        let read = crate::agent::capabilities::perspective_query_capability(vec!["p".into()]);
+        let app = Session::in_process_app(vec![read.clone()]);
+        assert!(!app.is_operator());
+        assert!(app.may(&read));
+        assert!(!app.may(&ALL_CAPABILITY));
+
+        RevokedSet::global().revoke(TokenId(IN_PROCESS_TOKEN_ID.into()), u64::MAX);
+        SessionCutoffs::global().set(email, u64::MAX);
+        assert!(user.check().is_ok());
+        assert!(app.check().is_ok());
     }
 }

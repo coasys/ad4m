@@ -1092,22 +1092,8 @@ pub async fn run_interpretation_with_harness_and_model(
         .map(class_propose_shape_from_shacl)
         .collect();
 
-    // The AD4M MCP handler is the read-tool surface. Constructed here with a
-    // pass-scoped McpContext — the admin credential of `harness_admin_credential`
-    // + a per-pass session opened from the caller's token. Every existing MCP tool
-    // (`query_*`, `get_*`, subject/perspective tools) becomes visible to the LLM
-    // through `Ad4mToolProvider`. The pass runs in-process, so the reach is
-    // loopback: a pass without a caller token acts as the operator.
-    let mcp_context = crate::mcp::server::McpContext::new(
-        harness_admin_credential(&auth_token),
-        crate::agent::capabilities::ListenerReach::Loopback,
-        // The harness reaches tools through `list_tool_schemas` /
-        // `call_tool_by_name`, which always include the dynamic per-class
-        // tools regardless of this flag (it only gates the MCP transport).
-        // Set explicitly so the intent is visible at the construction site.
-        true,
-    )
-    .with_token(auth_token.as_deref().unwrap_or_default());
+    // The AD4M MCP handler is the read-tool surface (see `pass_mcp_context`).
+    let mcp_context = pass_mcp_context(perspective, context, auth_token.as_deref()).await;
     let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
         mcp_handler,
@@ -1272,13 +1258,86 @@ pub async fn run_interpretation_with_harness_and_model(
     })
 }
 
-/// The admin credential the harness's MCP handler compares a pass's token with. A pass
-/// with a caller token uses the executor's configured credential, so an admin caller acts
-/// as the main agent, as on the RPC socket. An executor-owned pass (the auto-processor's,
-/// with no caller token) keeps the unauthenticated local path it always had: with a
-/// credential set, the handler would ask it to authenticate and hide its read tools.
-fn harness_admin_credential(auth_token: &Option<String>) -> Option<Secret> {
-    auth_token.as_ref()?;
+/// The MCP context of an interpretation pass on `perspective`. The pass runs in-process, so
+/// the reach is loopback. Its dynamic tool list names the classes of `perspective` only.
+///
+/// - A pass with a caller token acts as that token's session, checked against the
+///   executor's configured admin credential, as on the RPC socket.
+/// - A pass without one (the auto-processor's) acts as the perspective's owner
+///   ([`pass_owner_session`]), never as the operator: the transcript it reads may come from
+///   neighbourhood peers and can steer the model, and the operator reaches every user's
+///   perspectives.
+pub(crate) async fn pass_mcp_context(
+    perspective: &PerspectiveInstance,
+    context: &AgentContext,
+    auth_token: Option<&str>,
+) -> crate::mcp::server::McpContext {
+    let mcp = crate::mcp::server::McpContext::new(
+        harness_admin_credential(),
+        crate::agent::capabilities::ListenerReach::Loopback,
+        // The harness reaches tools through `list_tool_schemas` /
+        // `call_tool_by_name`, which always include the dynamic per-class
+        // tools regardless of this flag (it only gates the MCP transport).
+        // Set explicitly so the intent is visible at the construction site.
+        true,
+    )
+    .scoped_to(&perspective.uuid);
+    match auth_token {
+        Some(token) => mcp.with_token(token),
+        None => mcp.with_session(pass_owner_session(perspective, context).await),
+    }
+}
+
+/// The session a pass without a caller token acts as, from the owners of `perspective`:
+///
+/// - a managed user who owns it (the pass's own user, if it is one of them) acts as that
+///   user, with the default user capabilities ([`Session::in_process_user`]);
+/// - otherwise (unowned, owned by the main agent, or by a DID that is no managed user) the
+///   main agent, as an app that may only query this perspective
+///   ([`Session::in_process_app`]). The perspective guard lets an app reach unowned and
+///   main-agent perspectives only, so the pass reaches no user's perspective.
+///
+/// [`Session::in_process_user`]: crate::agent::session::Session::in_process_user
+/// [`Session::in_process_app`]: crate::agent::session::Session::in_process_app
+async fn pass_owner_session(
+    perspective: &PerspectiveInstance,
+    context: &AgentContext,
+) -> crate::agent::session::Session {
+    use crate::agent::session::Session;
+    let handle = perspective.persisted.lock().await.clone();
+    let main_did = crate::agent::AgentService::global_instance()
+        .lock()
+        .ok()
+        .and_then(|agent| agent.as_ref().and_then(|a| a.did.clone()));
+    let main_owns = handle.is_unowned()
+        || main_did
+            .as_deref()
+            .is_some_and(|did| handle.is_owned_by(did));
+    let users: Vec<(String, String)> = handle
+        .get_owners()
+        .into_iter()
+        .filter_map(|did| {
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(&did))
+                .ok()
+                .flatten()
+                .map(|email| (email, did))
+        })
+        .collect();
+    let own_user = users
+        .iter()
+        .find(|(email, _)| context.user_email.as_ref() == Some(email));
+    let owner = own_user.or_else(|| users.first().filter(|_| !main_owns));
+    match owner {
+        Some((email, did)) => Session::in_process_user(email.clone(), did.clone()),
+        None => Session::in_process_app(vec![
+            crate::agent::capabilities::perspective_query_capability(vec![handle.uuid]),
+        ]),
+    }
+}
+
+/// The admin credential the MCP handler of a pass with a caller token compares the token
+/// with: the executor's configured one, so an admin caller acts as on the RPC socket.
+fn harness_admin_credential() -> Option<Secret> {
     // An empty env credential is none, as in `Ad4mConfig::prepare`.
     crate::config::configured_admin_credential()
         .or_else(|| Secret::non_empty(std::env::var("AD4M_ADMIN_CREDENTIAL").ok()))
@@ -1290,26 +1349,332 @@ mod harness_credential_tests {
     use crate::config::{set_global_config, Ad4mConfig};
 
     #[test]
-    fn an_executor_owned_pass_keeps_the_unauthenticated_path() {
-        let config = Ad4mConfig {
-            admin_credential: Some("configured-admin".into()),
-            ..Ad4mConfig::default()
-        };
-        set_global_config(config);
-        assert!(harness_admin_credential(&None).is_none());
-        set_global_config(Ad4mConfig::default());
-    }
-
-    #[test]
     fn a_pass_with_a_caller_token_checks_it_against_the_configured_credential() {
         let config = Ad4mConfig {
             admin_credential: Some("configured-admin".into()),
             ..Ad4mConfig::default()
         };
         set_global_config(config);
-        let credential = harness_admin_credential(&Some("configured-admin".to_string()));
+        let credential = harness_admin_credential();
         assert!(credential.is_some_and(|c| c.expose_for_compare("configured-admin")));
         set_global_config(Ad4mConfig::default());
+    }
+}
+
+/// Whom the tools of a pass without a caller token act as, and what they reach.
+#[cfg(test)]
+mod pass_session_tests {
+    use super::*;
+    use crate::agent::session::Principal;
+    use crate::mcp::tools::provider_impl::Ad4mToolProvider;
+    use crate::mcp::tools::Ad4mMcpHandler;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::{register_perspective, unregister_perspective};
+    use serde_json::{json, Value};
+
+    const NOTE_SDNA: &str = r#"{
+      "target_class": "pass://Note",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Note"}
+      ],
+      "properties": [
+        {"path":"pass://note_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://note_title","target":"value"}]}
+      ]
+    }"#;
+
+    const DIARY_SDNA: &str = r#"{
+      "target_class": "pass://Diary",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Diary"}
+      ],
+      "properties": [
+        {"path":"pass://diary_entry","name":"entry","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://diary_entry","target":"value"}]}
+      ]
+    }"#;
+
+    const LEDGER_SDNA: &str = r#"{
+      "target_class": "pass://Ledger",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"pass://Ledger"}
+      ],
+      "properties": [
+        {"path":"pass://ledger_sum","name":"sum","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"pass://ledger_sum","target":"value"}]}
+      ]
+    }"#;
+
+    /// What user B wrote in B's perspective: no tool of another pass may return it.
+    const B_SECRET: &str = "pass-test-b-secret-entry";
+
+    /// A registered perspective with one class, owned by `owner` (`None`: unowned).
+    /// Unregistered when dropped.
+    struct Fixture {
+        perspective: PerspectiveInstance,
+        uuid: String,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            unregister_perspective(&self.uuid);
+        }
+    }
+
+    async fn fixture(class: &str, sdna: &str, owner: Option<&str>) -> Fixture {
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[(class, sdna)]).await;
+        let uuid = {
+            let mut handle = perspective.persisted.lock().await;
+            handle.owners = owner.map(|did| vec![did.to_string()]);
+            handle.uuid.clone()
+        };
+        register_perspective(uuid.clone(), perspective.clone());
+        Fixture { perspective, uuid }
+    }
+
+    /// A managed user: a row in the users table, which maps the owner DID to the email.
+    fn managed_user(email: &str, did: &str) {
+        let known = crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))
+            .ok()
+            .flatten();
+        if known.is_none() {
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_user(email, did, "pw"))
+                .expect("a managed user");
+        }
+    }
+
+    const A_EMAIL: &str = "pass.owner.a@example.org";
+    const A_DID: &str = "did:key:pass-owner-a";
+    const B_EMAIL: &str = "pass.owner.b@example.org";
+    const B_DID: &str = "did:key:pass-owner-b";
+
+    /// User B's perspective with a Diary entry in it, written as the operator.
+    async fn b_perspective() -> Fixture {
+        managed_user(B_EMAIL, B_DID);
+        let b = fixture("Diary", DIARY_SDNA, Some(B_DID)).await;
+        let operator = crate::mcp::tools::test_support::handler_as(Principal::Operator);
+        let created = operator
+            .call_tool_by_name(
+                "instance_create",
+                json!({
+                    "perspective_id": b.uuid,
+                    "class_name": "Diary",
+                    "properties": { "entry": B_SECRET },
+                }),
+            )
+            .await
+            .expect("the operator writes B's diary");
+        assert!(!created.contains("error"), "{created}");
+        // The operator reads it: the secret is there for a tool to leak.
+        let read = operator
+            .call_tool_by_name(
+                "instance_query",
+                json!({ "perspective_id": b.uuid, "class_name": "Diary" }),
+            )
+            .await
+            .unwrap();
+        assert!(read.contains(B_SECRET), "{read}");
+        b
+    }
+
+    /// The handler of a pass without a caller token on `pass`, run by `context`.
+    async fn pass_handler(pass: &Fixture, context: &AgentContext) -> Arc<Ad4mMcpHandler> {
+        let mcp = pass_mcp_context(&pass.perspective, context, None).await;
+        Arc::new(Ad4mMcpHandler::new(mcp))
+    }
+
+    /// A value for a schema property the test does not care about, of the declared type,
+    /// that the tool parses before it reaches its guard.
+    fn filler(name: &str, schema: &Value) -> Value {
+        if name == "commands" {
+            return json!(
+                r#"[{"action":"addLink","source":"this","predicate":"pass://p","target":"pass://t"}]"#
+            );
+        }
+        match schema["type"].as_str() {
+            Some("integer") | Some("number") => json!(1),
+            Some("boolean") => json!(false),
+            Some("array") => json!([]),
+            Some("object") => json!({}),
+            _ => json!("Diary"),
+        }
+    }
+
+    /// Calls every tool of `handler` that names a perspective with `target` as that
+    /// perspective (the other required arguments filled in), and returns each answer.
+    async fn every_perspective_tool_on(
+        handler: &Ad4mMcpHandler,
+        target: &str,
+    ) -> Vec<(String, String)> {
+        let mut answers = Vec::new();
+        for tool in handler.list_tool_schemas().await {
+            let properties = tool.parameters["properties"].clone();
+            let Some(properties) = properties.as_object() else {
+                continue;
+            };
+            let key = ["perspective_id", "perspective_uuid", "uuid"]
+                .into_iter()
+                .find(|k| properties.contains_key(*k));
+            let Some(key) = key else { continue };
+            let mut args = serde_json::Map::new();
+            for required in tool.parameters["required"].as_array().into_iter().flatten() {
+                let name = required.as_str().unwrap_or_default();
+                args.insert(name.to_string(), filler(name, &properties[name]));
+            }
+            args.insert(key.to_string(), json!(target));
+            let answer = match handler
+                .call_tool_by_name(&tool.name, Value::Object(args))
+                .await
+            {
+                Ok(answer) => answer,
+                Err(e) => e.to_string(),
+            };
+            answers.push((tool.name, answer));
+        }
+        answers
+    }
+
+    /// No answer carries B's data, and every one refuses B: as missing, by status, or as a
+    /// tool the in-process bridge does not dispatch.
+    fn assert_b_unreachable(answers: &[(String, String)], b: &str) {
+        assert!(answers.len() > 10, "the tools that name a perspective ran");
+        let not_refused: Vec<_> = answers
+            .iter()
+            .filter(|(_, answer)| {
+                answer.contains(B_SECRET)
+                    || !(answer.contains(&format!("Perspective not found: {b}"))
+                        || answer.contains("\"status\":403")
+                        || answer.contains("\"status\":401")
+                        || answer.starts_with("Unknown tool:"))
+            })
+            .collect();
+        assert!(not_refused.is_empty(), "reached B: {not_refused:#?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_pass_acts_as_the_user_who_owns_the_perspective() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let session = pass_handler(&a, &AgentContext::for_user_email(A_EMAIL.into()))
+            .await
+            .session()
+            .await
+            .unwrap();
+        assert!(!session.is_operator());
+        assert_eq!(session.user(), Some((A_EMAIL, A_DID)));
+        // Run by the main agent's loop, it is still the owner.
+        let session = pass_handler(&a, &AgentContext::main_agent())
+            .await
+            .session()
+            .await
+            .unwrap();
+        assert_eq!(session.user(), Some((A_EMAIL, A_DID)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_on_user_as_perspective_cannot_read_user_bs() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let b = b_perspective().await;
+        let handler = pass_handler(&a, &AgentContext::for_user_email(A_EMAIL.into())).await;
+
+        // The pass reads its own perspective.
+        let described = handler
+            .call_tool_by_name("describe_perspective", json!({ "perspective_id": a.uuid }))
+            .await
+            .unwrap();
+        assert!(described.contains("Note"), "{described}");
+
+        // Every perspective tool, called with B's uuid, refuses.
+        assert_b_unreachable(&every_perspective_tool_on(&handler, &b.uuid).await, &b.uuid);
+
+        // Through the pass's provider, a model that sends B's uuid reads A's perspective.
+        let bound = BoundArgsProvider::new(
+            Arc::new(Ad4mToolProvider::new(handler)),
+            std::collections::BTreeMap::from([(
+                "perspective_id".to_string(),
+                Value::String(a.uuid.clone()),
+            )]),
+        );
+        for (tool, args) in [
+            (
+                "instance_query",
+                json!({ "perspective_id": b.uuid, "class_name": "Diary" }),
+            ),
+            ("describe_perspective", json!({ "perspective_id": b.uuid })),
+            ("query_links", json!({ "perspective_id": b.uuid })),
+        ] {
+            let answer = bound
+                .call(tool, args)
+                .await
+                .unwrap_or_else(|e| e.to_string());
+            assert!(!answer.contains(B_SECRET), "{tool} read B: {answer}");
+            assert!(!answer.contains(&b.uuid), "{tool} named B: {answer}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_on_an_unowned_perspective_cannot_reach_a_users_perspective() {
+        let unowned = fixture("Note", NOTE_SDNA, None).await;
+        let b = b_perspective().await;
+        let handler = pass_handler(&unowned, &AgentContext::main_agent()).await;
+        let session = handler.session().await.unwrap();
+        assert!(!session.is_operator());
+        assert!(matches!(session.principal, Principal::App { .. }));
+
+        let described = handler
+            .call_tool_by_name(
+                "describe_perspective",
+                json!({ "perspective_id": unowned.uuid }),
+            )
+            .await
+            .unwrap();
+        assert!(described.contains("Note"), "{described}");
+
+        assert_b_unreachable(&every_perspective_tool_on(&handler, &b.uuid).await, &b.uuid);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_tool_list_of_a_pass_names_the_classes_of_its_perspective_only() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        // A's other perspective: A may read it, the pass on A still does not list it.
+        let a_other = fixture("Ledger", LEDGER_SDNA, Some(A_DID)).await;
+        let b = b_perspective().await;
+
+        let names = |tools: Vec<crate::ai_service::harness::provider::ToolSchema>| {
+            tools.into_iter().map(|t| t.name).collect::<Vec<_>>()
+        };
+        let tokenless = pass_handler(&a, &AgentContext::for_user_email(A_EMAIL.into())).await;
+        // A pass with the operator's token reaches every perspective; its list is scoped too.
+        // (Built as `pass_mcp_context` builds it, with a test credential in place of the
+        // configured one.)
+        let operator_pass = Ad4mMcpHandler::new(
+            crate::mcp::server::McpContext::new(
+                Some("pass-test-admin".into()),
+                crate::agent::capabilities::ListenerReach::Loopback,
+                true,
+            )
+            .scoped_to(&a.uuid)
+            .with_token("pass-test-admin"),
+        );
+        assert!(operator_pass.session().await.unwrap().is_operator());
+
+        for listed in [
+            names(tokenless.list_tool_schemas().await),
+            names(operator_pass.list_tool_schemas().await),
+        ] {
+            assert!(listed.iter().any(|n| n.starts_with("note_")), "{listed:?}");
+            assert!(
+                !listed.iter().any(|n| n.starts_with("diary_")),
+                "{listed:?}"
+            );
+            assert!(
+                !listed.iter().any(|n| n.starts_with("ledger_")),
+                "{listed:?}"
+            );
+        }
+        drop((a_other, b));
     }
 }
 

@@ -49,6 +49,10 @@ pub struct McpContext {
     /// (`list_tool_schemas` / `call_tool_by_name`) always includes the
     /// dynamic tools.
     pub dynamic_class_tools: bool,
+    /// The one perspective whose classes the dynamic per-class tools list, when set: an
+    /// interpretation pass runs on one perspective, so its tool list names no class of any
+    /// other. `None` lists the classes of every perspective the caller may read.
+    pub perspective_scope: Option<String>,
 }
 
 impl McpContext {
@@ -63,6 +67,7 @@ impl McpContext {
             reach,
             caller: Caller::default(),
             dynamic_class_tools,
+            perspective_scope: None,
         }
     }
 
@@ -70,6 +75,19 @@ impl McpContext {
     /// is known before any call, as in the in-process interpretation harness.
     pub fn with_token(mut self, token: &str) -> Self {
         self.caller = Caller::from_token(token, &self.admin_credential, self.reach);
+        self
+    }
+
+    /// The same context with a caller that holds `session`, which no token opened: the
+    /// in-process session of an interpretation pass without a caller token.
+    pub fn with_session(mut self, session: crate::agent::session::Session) -> Self {
+        self.caller = Caller::holding(Ok(Arc::new(session)));
+        self
+    }
+
+    /// The same context with the dynamic tool list limited to perspective `uuid`'s classes.
+    pub fn scoped_to(mut self, uuid: &str) -> Self {
+        self.perspective_scope = Some(uuid.to_string());
         self
     }
 }

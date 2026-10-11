@@ -32,9 +32,9 @@ impl Caller {
         Caller(Arc::new(RwLock::new(opened)))
     }
 
-    /// A caller that holds `opened` already, for tests that need a session no token makes
-    /// (one that expires within the test, say).
-    #[cfg(test)]
+    /// A caller that holds `opened` already: a session no token makes, such as the
+    /// in-process session of an interpretation pass without a caller token
+    /// ([`Session::in_process_user`]), or one that expires within a test.
     pub(crate) fn holding(opened: Opened) -> Self {
         Caller(Arc::new(RwLock::new(Some(opened))))
     }
@@ -67,14 +67,29 @@ impl Caller {
             None => None,
         };
         if let Some(token) = header.filter(|token| !token.is_empty()) {
-            let session = Arc::new(Session::open(token, admin, reach)?);
-            *self.0.write().await = Some(Ok(session.clone()));
-            return Ok(session);
+            let session = Session::open(token, admin, reach)?;
+            return Ok(self.remember(session).await);
         }
         match refused {
             Some(e) => Err(e),
             None => Session::open("", admin, reach).map(Arc::new),
         }
+    }
+
+    /// Store a session a header token opened, unless the slot now holds a live one: a
+    /// concurrent [`Caller::sign_in`] (or another request's header) may have stored it after
+    /// [`Caller::resolve`] read the slot, and a remembered live session outranks a header.
+    /// Returns the session the slot holds afterwards.
+    async fn remember(&self, session: Session) -> Arc<Session> {
+        let mut slot = self.0.write().await;
+        if let Some(Ok(current)) = slot.as_ref() {
+            if current.check().is_ok() {
+                return current.clone();
+            }
+        }
+        let session = Arc::new(session);
+        *slot = Some(Ok(session.clone()));
+        session
     }
 }
 
@@ -188,6 +203,41 @@ mod tests {
             .await
             .unwrap();
         assert!(session.may(&PERSPECTIVE_CREATE_CAPABILITY));
+    }
+
+    /// `resolve` reads the slot, opens the header's session without a lock, then stores it.
+    /// A `sign_in` that lands between the two must survive: the store checks the slot again.
+    /// The interleaving itself cannot be forced without a hook in `resolve`, so this drives the
+    /// store step with the slot as a concurrent `sign_in` leaves it.
+    #[tokio::test]
+    async fn a_header_session_does_not_overwrite_a_concurrent_sign_in() {
+        let caller = Caller::default();
+        caller
+            .sign_in(ADMIN, &admin(), ListenerReach::Network)
+            .await;
+        let header = Session::open(&app_token(), &admin(), ListenerReach::Network).unwrap();
+        let kept = caller.remember(header).await;
+        assert!(kept.is_operator());
+        let next = caller
+            .resolve(None, &admin(), ListenerReach::Network)
+            .await
+            .unwrap();
+        assert!(next.is_operator(), "the sign-in stays remembered");
+    }
+
+    #[tokio::test]
+    async fn a_header_session_replaces_a_dead_remembered_one_on_store() {
+        let dead = Principal::App {
+            token_id: TokenId("mcp-dead-on-store".into()),
+            caps: vec![],
+        };
+        let caller = Caller::holding(Ok(Arc::new(Session::for_test_expiring(dead, 1))));
+        let header = Session::open(ADMIN, &admin(), ListenerReach::Network).unwrap();
+        assert!(caller.remember(header).await.is_operator());
+
+        let refused = Caller::holding(Err(AuthError::Revoked));
+        let header = Session::open(ADMIN, &admin(), ListenerReach::Network).unwrap();
+        assert!(refused.remember(header).await.is_operator());
     }
 
     #[tokio::test]

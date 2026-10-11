@@ -1406,10 +1406,10 @@ async fn run_interpretation_with_harness_handler(
 
     // Thread the caller's auth token into the harness so `Ad4mMcpHandler`'s
     // tool dispatch executes with the caller's capabilities — same
-    // principle as the `/v1` openai-compat path. Empty string means an
-    // unauthenticated caller: don't propagate that as a phantom token
-    // (Ad4mMcpHandler treats `None` as "no user session; fall back to
-    // admin credential if configured").
+    // principle as the `/v1` openai-compat path. Empty string means a
+    // caller without a token: don't propagate that as a phantom token
+    // (a pass without one acts as the perspective's owner, see
+    // `interpretation::run::pass_mcp_context`).
     let auth_token = if ctx.auth_token.is_empty() {
         None
     } else {

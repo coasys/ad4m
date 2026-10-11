@@ -16,16 +16,23 @@ use serde_json::json;
 use std::sync::Arc;
 
 impl Ad4mMcpHandler {
-    /// Generate dynamic MCP tools from SHACL subject classes across all perspectives
+    /// Generate dynamic MCP tools from the SHACL subject classes of every perspective the
+    /// caller may read, or of the context's `perspective_scope` only when it is set.
     pub(crate) async fn generate_dynamic_tools(&self) -> Vec<Tool> {
-        let perspectives = all_perspectives();
+        let uuids = match &self.context.perspective_scope {
+            Some(uuid) => vec![uuid.clone()],
+            None => {
+                let mut uuids = Vec::new();
+                for p in all_perspectives() {
+                    uuids.push(p.persisted.lock().await.uuid.clone());
+                }
+                uuids
+            }
+        };
         let mut tools = Vec::new();
         let mut seen_classes = std::collections::HashSet::new();
 
-        for p in perspectives.iter() {
-            let handle = p.persisted.lock().await.clone();
-
-            let uuid = handle.uuid.clone();
+        for uuid in uuids {
             if !self.may_read_perspective(&uuid).await {
                 continue;
             }
