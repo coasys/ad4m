@@ -871,6 +871,12 @@ impl AgentService {
         if !backend.can_rename_keys() {
             return;
         }
+        // While the legacy backup exists, `unlock_from_legacy_backup` needs the agent file to
+        // hold exactly the backup's keys, names included. The unlock that retires the backup
+        // runs this again.
+        if path::Path::new(&self.legacy_backup_file()).exists() {
+            return;
+        }
         let users = match Ad4mDb::global_instance().lock() {
             Ok(db) => match db.as_ref().map(|db| db.list_users()) {
                 Some(Ok(users)) => users,
@@ -2554,6 +2560,47 @@ mod tests {
         assert_eq!(
             wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN),
             main_key
+        );
+
+        setup_agent();
+    }
+
+    /// D16 on a legacy keystore that names a managed agent's key by the user's email. The
+    /// rewrite unlock keeps the key names, so the agent file still holds exactly the backup's
+    /// keys and the fallback stays open. The unlock that retires the backup names the key by
+    /// its DID.
+    #[test]
+    fn the_legacy_fallback_stays_open_until_the_backup_goes_then_keys_are_named_by_did() {
+        ensure_setup();
+        let _db = crate::test_utils::MultiUserMode::on();
+        let email = format!("legacy.{}@example.org", uuid::Uuid::new_v4());
+        let backend = wallet_backend();
+        backend.generate_keypair(&email).unwrap();
+        let user_did = wallet_did(backend.as_ref(), &email).unwrap();
+        Ad4mDb::with_global_instance(|db| db.add_user(&email, &user_did, "pw")).unwrap();
+        let (_tmp, agent_file) = legacy_agent_file(OWNER);
+        let backup_file = format!("{}.legacy", agent_file);
+
+        restart_and_unlock(VARIANT).expect("the variant opens the legacy file");
+        assert!(std::path::Path::new(&backup_file).exists());
+        assert!(
+            backend.key_exists(&email),
+            "no rename while the backup exists"
+        );
+
+        restart_and_unlock(OWNER).expect("the real passphrase still opens the executor");
+        assert!(std::path::Path::new(&backup_file).exists());
+        assert!(backend.key_exists(&email));
+
+        restart_and_unlock(OWNER).expect("the rewritten file opens under the real passphrase");
+        assert!(!std::path::Path::new(&backup_file).exists());
+        assert_eq!(
+            wallet_did(backend.as_ref(), &user_did),
+            Some(user_did.clone())
+        );
+        assert!(
+            !backend.key_exists(&email),
+            "named by its DID once the backup is gone"
         );
 
         setup_agent();
