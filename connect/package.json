@@ -50,7 +50,7 @@
     "email": "nicolas@coasys.org"
   },
   "devDependencies": {
-    "@coasys/ad4m": "workspace:0.13.0-test-interpretation-2",
+    "@coasys/ad4m": "workspace:0.13.1-staging.1",
     "@types/node": "^16.11.11",
     "esbuild": "^0.15.5",
     "esbuild-plugin-copy": "^2.1.1",
@@ -69,10 +69,10 @@
     "auto-bind": "^5.0.1",
     "lit": "^2.3.1"
   },
-  "publishConfig": {
-    "devDependencies": {
-      "@coasys/ad4m": "*"
-    }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "connect"
   },
-  "version": "0.13.0-test-interpretation-2"
+  "version": "0.13.1-staging.1"
 }

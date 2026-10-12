@@ -4,7 +4,7 @@ use tokio::sync::oneshot;
 
 lazy_static! {
     /// The current version of AD4M
-    pub static ref AD4M_VERSION: String = String::from("0.13.0-test-interpretation-2");
+    pub static ref AD4M_VERSION: String = String::from("0.13.1-staging.1");
 }
 
 /// Global shutdown signal sender. Used by the `runtime_quit` WS-RPC method and signal handlers

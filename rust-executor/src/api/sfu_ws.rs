@@ -66,7 +66,7 @@ fn parse<P: DeserializeOwned>(params: Value) -> Result<P, WsRpcError> {
 
 /// The DID the caller acts as: a user token's own DID; a token that names
 /// no user acts as the main agent, as everywhere else
-/// (`AgentContext::from_auth_token`) — the admin credential and, on a
+/// (`AgentContext::from_request`) — the admin credential and, on a
 /// single-user node, the app tokens ad4m-connect hands out. A user token
 /// whose DID could not be resolved is refused, never promoted to the main
 /// agent. Handlers check a capability first, so an anonymous caller never
@@ -254,7 +254,7 @@ async fn set_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
             "Only the neighbourhood's creator can change its call config".to_string(),
         ));
     }
-    let context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let context = AgentContext::from_request(&ctx);
     service()?
         .set_config(&p.neighbourhood_url, p.config, &context)
         .await
