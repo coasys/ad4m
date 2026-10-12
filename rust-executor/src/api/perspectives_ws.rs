@@ -9,6 +9,7 @@ use ts_rs::TS;
 use crate::agent::capabilities::*;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
+use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
@@ -961,7 +962,7 @@ async fn model_query_handler(
     params: Value,
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let class_name = params.require_str("class_name")?;
+    let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
     let perspective = guarded_perspective(&params).await?;
@@ -969,7 +970,7 @@ async fn model_query_handler(
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query(&class_name, &query_json),
+        perspective.model_query_classes(&classes, &query_json),
     )
     .await;
 
@@ -1049,14 +1050,14 @@ async fn model_subscribe_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let class_name = params.require_str("class_name")?;
+    let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
     let perspective = guarded_perspective(&params).await?;
 
     let agent_did = ctx.user_did().map(str::to_string);
     let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query(class_name, query_json, agent_did)
+        .model_subscribe_and_query(classes, query_json, agent_did)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -2708,12 +2709,46 @@ pub struct PerspectiveSubscriptionParams {
 }
 
 /// Wire names stay snake_case, as the handlers read them.
+///
+/// Exactly one of `class_name` and `class_names`: one class, or one query over
+/// the union of several (#1238), whose rows carry `__subjectClass` and
+/// `__subjectClasses`.
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveModelQueryParams {
     pub uuid: String,
-    pub class_name: String,
+    #[ts(optional)]
+    pub class_name: Option<String>,
+    #[ts(optional)]
+    pub class_names: Option<Vec<String>>,
     pub query_json: String,
+}
+
+/// The classes a `modelQuery` / `modelSubscribe` call names: `class_name` or
+/// `class_names`, never both and never neither.
+fn query_classes(params: &Value) -> Result<QueryClasses, WsRpcError> {
+    let one = params.opt_str("class_name");
+    let many: Option<Vec<String>> = match params.get("class_names") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| {
+            WsRpcError::bad_request(format!(
+                "Invalid parameter 'class_names': expected string[]: {e}"
+            ))
+        })?),
+    };
+    match (one, many) {
+        (Some(name), None) => Ok(QueryClasses::One(name)),
+        (None, Some(names)) if !names.is_empty() => Ok(QueryClasses::union(names)),
+        (None, Some(_)) => Err(WsRpcError::bad_request(
+            "Parameter 'class_names' must name at least one class".to_string(),
+        )),
+        (Some(_), Some(_)) => Err(WsRpcError::bad_request(
+            "Pass 'class_name' or 'class_names', not both".to_string(),
+        )),
+        (None, None) => Err(WsRpcError::bad_request(
+            "Missing required parameter: 'class_name' (or 'class_names')".to_string(),
+        )),
+    }
 }
 
 /// Wire names stay snake_case, as the SDK reads them.
