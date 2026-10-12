@@ -3178,7 +3178,7 @@ impl Ad4mDb {
     pub fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username FROM users WHERE did = ?1")?;
+            .prepare("SELECT username FROM users WHERE did = ?1 AND did != ''")?;
         match stmt.query_row([did], |row| row.get::<_, String>(0)) {
             Ok(username) => Ok(Some(username)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
