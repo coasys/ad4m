@@ -1284,6 +1284,59 @@ async fn instance_tools_round_trip_typed_data() {
     assert!(err.contains("Widget") && err.contains("Channel") && err.contains("Message"));
 }
 
+/// What a request without a token on a loopback listener contributes, proxied (with a
+/// forwarding header) or not.
+fn tokenless_request(proxied: bool) -> crate::mcp::tools::RequestAuth {
+    let mut request = axum::http::Request::builder();
+    if proxied {
+        request = request.header("x-forwarded-for", "203.0.113.9");
+    }
+    let (parts, _) = request
+        .extension(crate::agent::capabilities::ListenerReach::Loopback)
+        .body(())
+        .unwrap()
+        .into_parts();
+    crate::mcp::tools::RequestAuth {
+        header: None,
+        reach: Some(crate::api::auth::listener_reach(&parts)),
+    }
+}
+
+// On a loopback listener of an executor without an admin credential, a caller without a
+// token is the operator unless its request came through a proxy (#1059). What a tool resolves
+// without the request in hand (`session()` for tools/list's class tools, the login tools'
+// call without a token, `sign_in`) must read the request's reach, not the listener's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxied_request_without_a_token_is_not_the_operator_anywhere() {
+    let (_admin, _uuid, _guard) = setup(true).await;
+    let handler = Ad4mMcpHandler::new(McpContext::new(
+        None,
+        crate::agent::capabilities::ListenerReach::Loopback,
+        true,
+    ));
+    let names = |tools: Vec<rmcp::model::Tool>| -> Vec<String> {
+        tools.iter().map(|t| t.name.to_string()).collect()
+    };
+
+    let local = handler.for_request(&tokenless_request(false));
+    assert!(local.session().await.unwrap().is_operator());
+    assert!(local.tokenless_session().unwrap().is_operator());
+    let listed = names(local.exposed_tools().await);
+    assert!(listed.iter().any(|n| n == "channel_create"), "{listed:?}");
+
+    let proxied = handler.for_request(&tokenless_request(true));
+    let err = proxied.session().await.unwrap_err();
+    assert!(err.starts_with("Authentication required"), "{err}");
+    assert!(!proxied.tokenless_session().unwrap().is_authenticated());
+    let listed = names(proxied.exposed_tools().await);
+    assert!(
+        !listed
+            .iter()
+            .any(|n| n.starts_with("channel_") || n.starts_with("message_")),
+        "a proxied caller lists the operator's classes: {listed:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     let (hidden, uuid, _guard) = setup(false).await;

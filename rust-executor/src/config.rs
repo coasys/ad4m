@@ -280,8 +280,18 @@ impl Ad4mConfig {
     /// flag says so. Called by `run()` after `prepare()`, which has already
     /// turned `Some("")` into `None`, and before any service starts, so every
     /// entry point (CLI, launcher, library) goes through it.
+    ///
+    /// Multi-user mode never starts without a credential, testing flag or not: a
+    /// caller with no token on a loopback listener would be the operator, so any
+    /// user on the host (or a user who drops their token) could act as every user.
     pub fn check_admin_credential(&self) -> Result<(), String> {
-        if self.admin_credential.is_some() || self.insecure_no_admin_credential == Some(true) {
+        if self.admin_credential.is_some() {
+            return Ok(());
+        }
+        if self.enable_multi_user == Some(true) {
+            return Err(MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR.to_string());
+        }
+        if self.insecure_no_admin_credential == Some(true) {
             return Ok(());
         }
         Err(NO_ADMIN_CREDENTIAL_ERROR.to_string())
@@ -339,6 +349,25 @@ pub const NO_ADMIN_CREDENTIAL_ERROR: &str =
      `adminCredential` in the config) to a secret, or, for tests and local \
      development only, pass --insecure-no-admin-credential \
      (AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true).";
+
+/// Why an executor without an admin credential refuses multi-user mode, at startup
+/// (`--enable-multi-user`, or the mode left on in its database) and from
+/// `user.setMultiUserEnabled`.
+pub const MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR: &str =
+    "Multi-user mode needs an admin credential: without one, a caller with no token on a \
+     loopback listener is the operator and could act as every user. Set \
+     AD4M_ADMIN_CREDENTIAL (or --admin-credential, `adminCredential` in the config); \
+     --insecure-no-admin-credential does not allow multi-user mode.";
+
+/// Whether the running executor has an admin credential. `false` without a global config
+/// (it is set before any service starts), so a check on it fails closed.
+pub fn has_admin_credential() -> bool {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|config| config.admin_credential.is_some())
+}
 
 /// Validate that a shared-backend URL uses HTTPS for production security.
 /// Local development addresses (localhost, 127.0.0.1, [::1], host.docker.internal)
@@ -536,6 +565,34 @@ mod tests {
         ] {
             assert!(NO_ADMIN_CREDENTIAL_ERROR.contains(option), "{option}");
         }
+    }
+
+    /// Multi-user mode without an admin credential would make a tokenless loopback caller
+    /// the operator of every user: refused, with the testing flag too.
+    #[test]
+    fn multi_user_without_an_admin_credential_refuses_to_start() {
+        for flag in [None, Some(false), Some(true)] {
+            let config = Ad4mConfig {
+                enable_multi_user: Some(true),
+                ..with_credential(None, flag)
+            };
+            assert_eq!(
+                config.check_admin_credential().unwrap_err(),
+                MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR,
+                "flag {flag:?}"
+            );
+        }
+        let credentialed = Ad4mConfig {
+            enable_multi_user: Some(true),
+            ..with_credential(Some("secret"), None)
+        };
+        assert!(credentialed.check_admin_credential().is_ok());
+        let single_user = Ad4mConfig {
+            enable_multi_user: Some(false),
+            ..with_credential(None, Some(true))
+        };
+        assert!(single_user.check_admin_credential().is_ok());
+        assert!(MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR.contains("--admin-credential"));
     }
 
     #[test]

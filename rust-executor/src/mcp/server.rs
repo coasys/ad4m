@@ -174,9 +174,11 @@ fn resolve_tls_port(plain_port: u16, rpc_tls_port: u16) -> TlsPort {
 /// Configure a credential and the default widens back to `0.0.0.0`, where a
 /// sibling container on the same Docker network can reach it.
 ///
-/// A multi-user executor is **not** gated by having user accounts. A login JWT
-/// authenticates a user; it is not an admin credential. `--enable-multi-user`
-/// without `--admin-credential` is an ungated executor and binds loopback here.
+/// A multi-user executor always has a credential: `run` refuses multi-user mode
+/// without one (`Ad4mConfig::check_admin_credential`), and `user.setMultiUserEnabled`
+/// refuses to turn it on, because a tokenless loopback caller would be the operator
+/// of every user. User accounts themselves gate nothing: a login JWT authenticates a
+/// user; it is not an admin credential.
 ///
 /// `MCP_HOST` is the operator saying it outright and is honoured either way.
 /// On an ungated executor a non-loopback bind makes the listener a network one,

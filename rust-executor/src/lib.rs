@@ -494,6 +494,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .expect("Failed to enable multi-user mode");
         }
     }
+    // `check_admin_credential` refused `--enable-multi-user` without a credential; the mode
+    // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
+    if config.admin_credential.is_none() && crate::user_management::is_multi_user_enabled() {
+        return failed_start(format!(
+            "Refusing to start: multi-user mode is on in this executor's database. {}",
+            crate::config::MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR
+        ));
+    }
 
     info!("Initializing AI service...");
     AIService::init_global_instance()
@@ -561,6 +569,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         warn!("║  A caller with no token gets ALL_CAPABILITY (full admin      ║");
         warn!("║  access) on a loopback listener. On --localhost false, TLS,  ║");
         warn!("║  or a request with a forwarding header it is anonymous.      ║");
+        warn!("║  Multi-user mode is refused: it needs an admin credential.   ║");
         warn!("║  This mode is intended for local testing ONLY.               ║");
         warn!("╚══════════════════════════════════════════════════════════════╝");
     }

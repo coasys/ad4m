@@ -28,6 +28,13 @@ async fn set_multi_user_enabled(
 ) -> Result<Value, WsRpcError> {
     let body: SetMultiUserRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    // Without an admin credential a caller with no token on a loopback listener is the
+    // operator: with users on the executor, that caller could act as every one of them.
+    if body.enabled && !crate::config::has_admin_credential() {
+        return Err(WsRpcError::forbidden(
+            crate::config::MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR,
+        ));
+    }
 
     Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(body.enabled))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -584,6 +591,59 @@ mod operator_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, 501, "{}", err.message);
+    }
+
+    // Without an admin credential a caller with no token on a loopback listener is the
+    // operator: the operator may not turn multi-user mode on there, only off.
+    #[tokio::test]
+    async fn multi_user_mode_needs_an_admin_credential() {
+        use crate::config::{Ad4mConfig, GLOBAL_AD4M_CONFIG};
+        crate::test_utils::ensure_test_db();
+        let saved_config = GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let saved_mode = crate::user_management::is_multi_user_enabled();
+        let set_mode = |enabled: bool| {
+            crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(enabled))
+                .unwrap()
+        };
+        set_mode(false);
+        let mut map = HandlerMap::new();
+        super::register_ws_handlers(&mut map);
+        let set = |enabled: bool| {
+            map.dispatch(
+                "user.setMultiUserEnabled",
+                json!({ "enabled": enabled }),
+                Arc::new(RequestContext::operator_for_test()),
+            )
+        };
+
+        crate::config::set_global_config(Ad4mConfig {
+            insecure_no_admin_credential: Some(true),
+            ..Default::default()
+        });
+        let err = set(true).await.unwrap_err();
+        let refused_mode = crate::user_management::is_multi_user_enabled();
+        let turned_off = set(false).await;
+
+        crate::config::set_global_config(Ad4mConfig {
+            admin_credential: Some("users-ws-admin".into()),
+            ..Default::default()
+        });
+        let credentialed = set(true).await;
+
+        set_mode(saved_mode);
+        *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = saved_config;
+
+        assert_eq!(err.code, 403, "{}", err.message);
+        assert_eq!(
+            err.message,
+            crate::config::MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR
+        );
+        assert!(!refused_mode, "the refused call left multi-user mode on");
+        assert_eq!(turned_off.unwrap(), json!(true));
+        assert_eq!(credentialed.unwrap(), json!(true));
     }
 }
 

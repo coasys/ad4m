@@ -66,8 +66,9 @@ export async function startAgent(
   opts: {
     passphrase?: string;
     bootstrapSeedPath?: string;
-    /** When set, starts the executor in admin-credential mode and connects
-     *  the returned client using that credential as the bearer token. */
+    /** The executor's admin credential; the returned client connects with it.
+     *  Defaults to one derived from `agentName`: every agent turns multi-user
+     *  mode on, which an executor without an admin credential refuses. */
     adminCredential?: string;
     /** Start the Holochain conductor. Defaults to false when
      *  LOCAL_MODE=true, true otherwise. */
@@ -87,6 +88,7 @@ export async function startAgent(
 
   const bootstrapSeedPath = opts.bootstrapSeedPath ?? BOOTSTRAP_SEED;
   const runHolochain = opts.runHolochain ?? (process.env.LOCAL_MODE !== 'true');
+  const adminCredential = opts.adminCredential ?? `${agentName}-test-admin`;
 
   const executorProcess = await startExecutor(
     appDataPath,
@@ -95,7 +97,7 @@ export async function startAgent(
     hcAdminPort,
     hcAppPort,
     false,
-    opts.adminCredential,
+    adminCredential,
     undefined,   // proxyUrl
     undefined,   // bootstrapUrl
     undefined,   // relayUrl
@@ -106,7 +108,7 @@ export async function startAgent(
   );
   _activeExecutors.add(executorProcess);
 
-  const client = new Ad4mClient(baseUrl(apiPort), opts.adminCredential);
+  const client = new Ad4mClient(baseUrl(apiPort), adminCredential);
   await client.agent.generate(opts.passphrase ?? "test-passphrase");
   await client.runtime.setMultiUserEnabled(true);
 
@@ -128,7 +130,7 @@ export async function startAgent(
     // suites (prolog-and-literals, app, etc.) already use and falls back
     // to SIGTERM → SIGKILL on its own.
     try {
-      await quitExecutor(executorProcess, apiPort, opts.adminCredential);
+      await quitExecutor(executorProcess, apiPort, adminCredential);
     } catch {
       // quitExecutor already escalates internally; the only way to land here
       // is a programming error, in which case kill is still the right thing.

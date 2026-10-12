@@ -1126,17 +1126,15 @@ pub async fn run_interpretation_with_harness_and_model(
     // overlay) and never touched `extintention_propose_create`. Filtering
     // down to the ~2 classes × ~3 read verbs the pass actually needs
     // forces the LLM through the propose-write wrappers below.
-    let allowed_class_prefixes: Vec<String> = propose_shapes
+    let offered_classes: Vec<_> = all_shacl_classes
         .iter()
-        .map(|s| format!("{}_", s.class_name.to_lowercase()))
+        .filter(|c| requested_class_names.contains_key(&c.name))
+        .cloned()
         .collect();
-    let ad4m_filtered: Arc<dyn ToolProvider> =
-        Arc::new(FilteredProvider::new(ad4m_bound, move |t: &ToolSchema| {
-            if !is_read_only(t) {
-                return false;
-            }
-            allowed_class_prefixes.iter().any(|p| t.name.starts_with(p))
-        }));
+    let ad4m_filtered: Arc<dyn ToolProvider> = Arc::new(FilteredProvider::new(
+        ad4m_bound,
+        offered_class_tools(&offered_classes),
+    ));
 
     // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
     // per-class writers whose side-effect is "queue an InterpretationOp",
@@ -1261,14 +1259,25 @@ pub async fn run_interpretation_with_harness_and_model(
     })
 }
 
+/// Which AD4M tools a pass sees: the read tools generated for `offered` classes, by exact
+/// name. Not a name prefix: offered classes come from graph state neighbourhood peers write,
+/// and a class named `List` would otherwise admit the static `list_perspectives`.
+fn offered_class_tools(
+    offered: &[crate::mcp::shacl::ShaclClass],
+) -> impl Fn(&ToolSchema) -> bool + Send + Sync + 'static {
+    let names = crate::mcp::tools::Ad4mMcpHandler::class_tool_names(offered);
+    move |t: &ToolSchema| is_read_only(t) && names.contains(&t.name)
+}
+
 /// The MCP context of an interpretation pass on `perspective`. The pass runs in-process, so
 /// the reach is loopback. Its dynamic tool list names the classes of `perspective` only.
 ///
 /// - A pass with a caller acts as the caller's session: the one its RPC request arrived on,
 ///   so the pass's tools reach what the caller reaches, and stop once that session's grant
 ///   ends.
-/// - A pass without one (the auto-processor's) acts as the perspective's owner
-///   ([`pass_owner_session`]), never as the operator: the transcript it reads may come from
+/// - A pass without one (the auto-processor's) acts as the perspective's owner, limited to
+///   querying `perspective` ([`pass_owner_session`]), never as the operator: the transcript it
+///   reads may come from
 ///   neighbourhood peers and can steer the model, and the operator reaches every user's
 ///   perspectives.
 pub(crate) async fn pass_mcp_context(
@@ -1304,9 +1313,9 @@ pub(crate) async fn pass_mcp_context(
 ///   main agent. The perspective guard lets the main agent reach its own and unowned
 ///   perspectives only, so the pass reaches no user's perspective.
 ///
-/// Either way the session may only query this perspective: a tool outside it (a static tool
-/// whose name shares an offered class's prefix, `list_perspectives` for a class `List`)
-/// reaches nothing else of the agent's. The pass writes through its proposal buffer.
+/// Either way the session may only query this perspective, so even a tool outside the pass's
+/// offered ones ([`offered_class_tools`]) would reach nothing else of the agent's. The pass
+/// writes through its proposal buffer.
 ///
 /// [`Session::in_process`]: crate::agent::session::Session::in_process
 async fn pass_owner_session(
@@ -1598,9 +1607,61 @@ mod pass_session_tests {
         }
     }
 
-    // The pass reaches its own perspective, not the rest of its user's: a class named `List`
-    // offers `list_perspectives` through the class-prefix filter, and the perspective's
-    // config and SHACL are shared graph state that neighbourhood peers write.
+    /// A class with no properties, named `name`.
+    fn bare_class(name: &str) -> crate::mcp::shacl::ShaclClass {
+        crate::mcp::shacl::ShaclClass {
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            properties: vec![],
+            shape_uri: None,
+            all_predicates: vec![],
+        }
+    }
+
+    /// A read tool named `name`, as the filter sees it.
+    fn read_tool(name: &str) -> crate::ai_service::harness::provider::ToolSchema {
+        crate::ai_service::harness::provider::ToolSchema {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: json!({}),
+            side_effect: crate::ai_service::harness::provider::SideEffect::Read,
+        }
+    }
+
+    // Offered classes come from SHACL in the perspective, shared graph state that
+    // neighbourhood peers write: a class named after a static tool's first word (`List`,
+    // `Query`, `Get`, `Instance`, ...) must not admit that static tool.
+    #[test]
+    fn an_offered_class_admits_its_own_tools_and_no_static_tool() {
+        let statics = Ad4mMcpHandler::static_tool_names();
+        assert!(statics.iter().any(|n| n == "list_perspectives"));
+        let mut words: Vec<&str> = statics.iter().filter_map(|n| n.split('_').next()).collect();
+        words.extend(["List", "Query", "Get"]);
+        for word in words {
+            let mut chars = word.chars();
+            let class_name: String = chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
+            let admits = offered_class_tools(&[bare_class(&class_name)]);
+            for name in &statics {
+                assert!(
+                    !admits(&read_tool(name)),
+                    "a class named `{class_name}` admits the static tool `{name}`"
+                );
+            }
+        }
+
+        let admits = offered_class_tools(&[bare_class("List")]);
+        for own in ["list_query", "list_list", "list_get"] {
+            assert!(admits(&read_tool(own)), "`{own}` is the class's own tool");
+        }
+        assert!(!admits(&read_tool("note_query")), "another class's tool");
+    }
+
+    // The pass reaches its own perspective, not the rest of its user's, even through a static
+    // tool: the perspective's config and SHACL are shared graph state that neighbourhood peers
+    // write.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tokenless_pass_lists_no_other_perspective_of_its_user() {
         managed_user(A_EMAIL, A_DID);

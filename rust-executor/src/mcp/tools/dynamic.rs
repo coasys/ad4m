@@ -49,25 +49,49 @@ impl Ad4mMcpHandler {
                     continue;
                 }
 
-                tools.push(Self::make_create_tool(&class.name, &class.properties));
-                tools.push(Self::make_query_tool(&class.name));
-                tools.push(Self::make_list_tool(&class.name));
-                tools.push(Self::make_get_tool(&class.name));
-                tools.push(Self::make_delete_tool(&class.name));
-                // Per-property set tools and collection tools
-                for prop in &class.properties {
-                    if prop.is_collection {
-                        tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
-                    } else {
-                        tools.push(Self::make_set_property_tool(&class.name, &prop.name));
-                    }
-                }
+                tools.extend(Self::class_tools(class));
             }
         }
 
         tools
+    }
+
+    /// The dynamic tools of one SHACL class: create, query, list, get and delete, a setter
+    /// per property, and get/add/remove per collection.
+    pub(crate) fn class_tools(class: &shacl::ShaclClass) -> Vec<Tool> {
+        let mut tools = vec![
+            Self::make_create_tool(&class.name, &class.properties),
+            Self::make_query_tool(&class.name),
+            Self::make_list_tool(&class.name),
+            Self::make_get_tool(&class.name),
+            Self::make_delete_tool(&class.name),
+        ];
+        for prop in &class.properties {
+            if prop.is_collection {
+                tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
+                tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
+                tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
+            } else {
+                tools.push(Self::make_set_property_tool(&class.name, &prop.name));
+            }
+        }
+        tools
+    }
+
+    /// The names of the dynamic tools of `classes` that are theirs alone: a generated name
+    /// that a static tool also has (a class named `Instance` generates `instance_query`)
+    /// dispatches to the static tool, so it is left out.
+    pub(crate) fn class_tool_names(
+        classes: &[shacl::ShaclClass],
+    ) -> std::collections::HashSet<String> {
+        let statics: std::collections::HashSet<String> =
+            Self::static_tool_names().into_iter().collect();
+        classes
+            .iter()
+            .flat_map(Self::class_tools)
+            .map(|t| t.name.to_string())
+            .filter(|name| !statics.contains(name))
+            .collect()
     }
 
     /// Extract property information from a SHACL shape

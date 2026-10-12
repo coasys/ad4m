@@ -402,9 +402,17 @@ impl Ad4mMcpHandler {
     /// the MCP session holds: they obtain the session that replaces it, as an RPC client
     /// does on a connection without a token.
     async fn call_without_token(&self, method: &str, params: Value) -> Result<Value, WsRpcError> {
-        let session = Session::open("", &self.context.admin_credential, self.context.reach)
+        let session = self
+            .tokenless_session()
             .map_err(|e| WsRpcError::unauthorized(e.to_string()))?;
         call_method_as(Arc::new(session), method, params).await
+    }
+
+    /// The session of a caller without a token on this request: `context.reach` is the
+    /// request's own reach (`Ad4mMcpHandler::for_request`), so a proxied request is never the
+    /// operator.
+    pub(crate) fn tokenless_session(&self) -> Result<Session, AuthError> {
+        Session::open("", &self.context.admin_credential, self.context.reach)
     }
 
     /// Check current authentication status

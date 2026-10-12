@@ -22,7 +22,9 @@ pub(crate) type Opened = Result<Arc<Session>, AuthError>;
 /// Only a token is remembered. A caller without one resolves again on every call
 /// ([`Session::open`] with an empty token: the operator on a loopback listener of an executor
 /// without an admin credential, anonymous otherwise), so a header that arrives later still
-/// takes effect.
+/// takes effect. An executor without a credential is never a multi-user one: it refuses
+/// multi-user mode (`Ad4mConfig::check_admin_credential`, `user.setMultiUserEnabled`), so
+/// that operator is never a user's neighbour on the host.
 #[derive(Clone, Default)]
 pub struct Caller(Arc<RwLock<Option<Opened>>>);
 

@@ -192,10 +192,13 @@ impl ServerHandler for Ad4mMcpHandler {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        // The dynamic tools name the classes of the perspectives this request's caller may
+        // read: a proxied request without a token is anonymous, not the operator.
+        let this = self.for_request(&RequestAuth::of(&context));
         Ok(ListToolsResult {
-            tools: self.exposed_tools().await,
+            tools: this.exposed_tools().await,
             meta: None,
             next_cursor: None,
         })
@@ -212,7 +215,13 @@ impl ServerHandler for Ad4mMcpHandler {
         // remembers) a session before any tool runs, auth tools included: `auth_status`
         // then reports the session the other tools use. The auth tools run whatever the
         // outcome; every other tool needs a working, authenticated session.
-        let caller = self.caller(RequestAuth::of(&context)).await;
+        //
+        // The tool runs on a handler whose reach is this request's (`for_request`), so what
+        // the tool resolves again without the request (`session()`, the login tools' call
+        // without a token, `sign_in`) reads a proxied request as a network one too.
+        let auth = RequestAuth::of(&context);
+        let this = self.for_request(&auth);
+        let caller = this.caller(auth).await;
         if !AUTH_TOOLS.contains(&tool_name.as_str()) {
             if let Err(refusal) = authenticated(caller) {
                 return Ok(CallToolResult::error(vec![Content::text(
@@ -221,7 +230,7 @@ impl ServerHandler for Ad4mMcpHandler {
             }
         }
 
-        self.dispatch_tool(request, context).await
+        this.dispatch_tool(request, context).await
     }
 }
 
@@ -282,6 +291,18 @@ impl Ad4mMcpHandler {
             context,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// This handler for one HTTP request: the same MCP session (its caller is shared), with
+    /// the request's reach in place of the listener's. A request with a forwarding header
+    /// reads as `Network` (#1059), so nothing a tool resolves without the request in hand
+    /// treats a proxied caller without a token as the operator.
+    pub(crate) fn for_request(&self, request: &RequestAuth) -> Self {
+        let mut this = self.clone();
+        if let Some(reach) = request.reach {
+            this.context.reach = reach;
+        }
+        this
     }
 
     /// The caller of one call: the MCP session's [`Session`], opened from the request's
@@ -348,6 +369,15 @@ impl Ad4mMcpHandler {
             Err(e) if matches!(e.code, 401 | 403 | 404) => Err(method_error(e)),
             Err(e) => Err(failed(e)),
         }
+    }
+
+    /// The names of the static tools: every tool the router registers.
+    pub(crate) fn static_tool_names() -> Vec<String> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
     }
 
     /// Build the tool router manually, registering all tools from domain modules.

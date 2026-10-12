@@ -29,9 +29,11 @@ Model Context Protocol server exposing AD4M to LLM agents (`rmcp`). Transport in
 - An interpretation pass holds a session instead of a token (`McpContext::with_session`):
   the caller's RPC session, or for a pass without a caller (the auto-processor's) an
   in-process session (`Session::in_process`, no token, no grant) acting as the
-  perspective's owner — the user who owns it, otherwise the main agent limited to querying
-  that perspective. Never the operator
-  (`perspectives::interpretation::run::pass_mcp_context`).
+  perspective's owner — the user who owns it, otherwise the main agent — and either way
+  limited to querying that perspective. Never the operator
+  (`perspectives::interpretation::run::pass_mcp_context`). The pass is offered the read
+  tools generated for its offered classes only, matched by exact name
+  (`Ad4mMcpHandler::class_tool_names`), never a static tool.
 
 ## Tools that wrap an RPC method dispatch through the handler map
 
