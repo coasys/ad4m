@@ -593,6 +593,24 @@ mod resolution_tests {
             let err = Session::open(&token, &admin(), ListenerReach::Network).unwrap_err();
             assert_eq!(err, AuthError::Revoked, "{ghost}");
         }
+        // A key named by its DID that no user owns (a signup that failed after the key was
+        // made): the key alone is no agent. A token re-signed to name it keeps its grant on
+        // another agent, so the grant check refuses it first (Revoked); the subject lookup
+        // refuses the orphan on its own too.
+        let orphan = crate::wallet::wallet_backend()
+            .generate_keypair_named_by_did()
+            .unwrap();
+        let orphan_token = crate::test_utils::resigned_token(&token, |claims| {
+            claims["sub"] = serde_json::json!(orphan)
+        });
+        let err = Session::open(&orphan_token, &admin(), ListenerReach::Network).unwrap_err();
+        assert_eq!(err, AuthError::Revoked, "{orphan}");
+        assert!(
+            crate::agent::AgentService::managed_agent_for_subject(&orphan, None).is_err(),
+            "{orphan}: no user owns this DID"
+        );
+        // Nor does a user token for an email no user has get minted at all.
+        assert!(crate::user_management::generate_user_jwt("ghost@example.org", "test").is_err());
     }
 
     /// D16: user tokens minted before agents were keyed by DID carry the user's email in

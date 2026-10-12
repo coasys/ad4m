@@ -273,12 +273,39 @@ pub fn import_user_from_shared_db(
     if did.is_empty() {
         return Ok(None);
     }
+    adopt_shared_user(email, did, stored_hash).map(Some)
+}
+
+/// Writes the shared record `(email, did)` into the local `users` table and returns the DID
+/// the local row holds. The insert keeps an existing row and skips one whose DID another
+/// local user owns, so the record's DID is the agent only if the row now says so: a shared
+/// record that names a local user's DID under another email must not act as that user.
+fn adopt_shared_user(
+    email: &str,
+    did: &str,
+    stored_hash: &str,
+) -> Result<String, deno_core::error::AnyError> {
     if let Err(e) =
         Ad4mDb::with_global_instance(|db| db.add_user_prehashed(email, did, stored_hash))
     {
         log::warn!("Failed to import user to local DB: {}", e);
     }
-    Ok(Some(did.to_string()))
+    let local = Ad4mDb::with_global_instance(|db| db.get_user(email)).map_err(|_| {
+        deno_core::anyhow::anyhow!(
+            "The shared record of {} names the agent {}, which is not this user's here",
+            email,
+            did
+        )
+    })?;
+    if local.did != did {
+        return Err(deno_core::anyhow::anyhow!(
+            "The shared record of {} names the agent {}, but the local account holds {}",
+            email,
+            did,
+            local.did
+        ));
+    }
+    Ok(local.did)
 }
 
 /// Full login flow: check multi-user, verify credentials, generate JWT.
@@ -377,6 +404,28 @@ mod tests {
         // try_init is idempotent: if another test already set the backend it is a no-op.
         let _ = try_init_wallet_backend(Arc::new(LocalWallet::new()) as Arc<dyn WalletBackend>);
         crate::test_utils::setup_agent();
+    }
+
+    /// D16: a shared record's DID is the agent only if the local row says so. A record that
+    /// names a local user's DID under another email is skipped by the insert (`users.did` is
+    /// unique) and must not act as that user; a record for a local email with another DID
+    /// keeps the local agent.
+    #[test]
+    fn a_shared_record_acts_only_as_the_agent_its_local_row_holds() {
+        setup();
+        let victim = "did:key:z6MkSharedVictim";
+        Ad4mDb::with_global_instance(|db| db.add_user("victim@example.org", victim, "pw")).unwrap();
+
+        assert!(adopt_shared_user("other@example.org", victim, "hash").is_err());
+        assert!(Ad4mDb::with_global_instance(|db| db.get_user("other@example.org")).is_err());
+        assert!(
+            adopt_shared_user("victim@example.org", "did:key:z6MkSomeoneElse", "hash").is_err()
+        );
+
+        assert_eq!(
+            adopt_shared_user("new@example.org", "did:key:z6MkSharedNew", "hash").unwrap(),
+            "did:key:z6MkSharedNew"
+        );
     }
 
     /// Invariant: create_user on a locked executor must return Err before writing any DB row.
