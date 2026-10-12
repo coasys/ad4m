@@ -5604,19 +5604,27 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    /// Publishes a live query update as `query-subscription-update` to the perspective's
-    /// owners ([`super::event_recipients`], read here, before the task), who also need the
-    /// capability to query it. Every socket of an owner gets it, whatever it watches; the
-    /// client routes it by `subscriptionId`. Delivery takes no lock. When live queries belong
-    /// to a connection (#1207), only the audience changes.
+    /// Publishes a live query update as `query-subscription-update` to its subscriber
+    /// (`SubscribedQuery::agent_did`: a managed agent, or `None` for the main agent) if it is
+    /// one of the perspective's owners ([`super::event_recipients`], read here, before the
+    /// task), and it needs the capability to query the perspective. The query ran as the
+    /// subscriber, so a co-owner does not get its results. Every socket of the subscriber gets
+    /// it, whatever it watches; the client routes it by `subscriptionId`. Delivery takes no
+    /// lock. When live queries belong to a connection (#1207), only the audience changes.
     pub(crate) async fn send_subscription_update(
         &self,
         subscription_id: String,
+        subscriber: Option<String>,
         result: String,
         delay: Option<Duration>,
     ) {
         let uuid = self.uuid.clone();
-        let owners = super::event_recipients(&*self.persisted.lock().await);
+        let main = || crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).ok();
+        let subscriber = subscriber.or_else(main);
+        let owners = super::event_recipients(&*self.persisted.lock().await)
+            .into_iter()
+            .filter(|owner| Some(owner) == subscriber.as_ref())
+            .collect();
         tokio::spawn(async move {
             if let Some(delay) = delay {
                 sleep(delay).await;
@@ -6038,7 +6046,7 @@ impl PerspectiveInstance {
                             new_len
                         );
                         stored_query.last_result = result_string.clone();
-                        updates_to_send.push((id, result_string));
+                        updates_to_send.push((id, stored_query.agent_did.clone(), result_string));
                     } else {
                         log::trace!(
                             "📭 🔗 subscription {} result unchanged (len={})",
@@ -6051,8 +6059,9 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, result_string) in updates_to_send {
-            self.send_subscription_update(id, result_string, None).await;
+        for (id, subscriber, result_string) in updates_to_send {
+            self.send_subscription_update(id, subscriber, result_string, None)
+                .await;
         }
 
         // Remove timed out queries and notify prolog service
