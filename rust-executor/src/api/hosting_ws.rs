@@ -16,7 +16,11 @@ use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    let user_info = if let Some(user_email) = ctx.user_email().map(str::to_string) {
+    // The account of the session's managed agent: its email is the address shown to the user.
+    let account = ctx
+        .user_did()
+        .and_then(|did| crate::agent::AgentService::email_for_did(did).ok());
+    let user_info = if let Some(user_email) = account {
         let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
         let hot_wallet_address =
             Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
@@ -97,10 +101,11 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: SetHotWalletAddressRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let email = ctx
-        .user_email()
-        .map(str::to_string)
+    let did = ctx
+        .user_did()
         .ok_or_else(|| WsRpcError::forbidden("User email required"))?;
+    let email = crate::agent::AgentService::email_for_did(did)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(&email, &body.address))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;

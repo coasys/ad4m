@@ -102,8 +102,9 @@ struct TranscriptionSession {
     // stored here for potential close-stream reconciliation)
     #[allow(dead_code)]
     model_id: String,
-    #[allow(dead_code)]
-    user_email: Option<String>,
+    /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
+    /// stream. `None`: the main agent.
+    agent_did: Option<String>,
 }
 
 #[derive(Clone)]
@@ -411,14 +412,18 @@ pub struct VoiceActivityParams {
     pub time_before_speech: Option<u64>,
 }
 
-/// The owner of a new transcription stream: the email (billing, ownership) and DID (event
-/// filtering) of the agent the caller acts as. A caller whose DID does not resolve owns
-/// nothing and opens no stream: text without an owner DID would reach every session.
+/// The owner of a new transcription stream: the managed agent's DID (billing, ownership;
+/// `None` for the main agent) and the DID of the agent the caller acts as (event filtering).
+/// A caller whose agent does not resolve owns nothing and opens no stream: text without an
+/// owner DID would reach every session.
 fn transcription_stream_owner(
     context: crate::agent::AgentContext,
 ) -> Result<(Option<String>, String)> {
+    if let Some(managed) = context.managed_did() {
+        crate::agent::AgentService::wallet_key_for_did(managed)?;
+    }
     let did = crate::agent::did_for_context(&context)?;
-    Ok((context.user_email, did))
+    Ok((context.managed_did().map(str::to_string), did))
 }
 
 impl AIService {
@@ -1203,8 +1208,8 @@ impl AIService {
         Ok(tasks)
     }
 
-    /// `user_email` is the owning managed user; `None` makes an operator task.
-    pub async fn add_task(&self, task: AITaskInput, user_email: Option<&str>) -> Result<AITask> {
+    /// `agent_did` is the owning managed agent's DID; `None` makes a task of the main agent.
+    pub async fn add_task(&self, task: AITaskInput, agent_did: Option<&str>) -> Result<AITask> {
         let task_id = Ad4mDb::with_global_instance(|db| {
             db.add_task(
                 task.name.clone(),
@@ -1215,7 +1220,7 @@ impl AIService {
                     .map(|p| p.clone().into())
                     .collect(),
                 task.meta_data.clone(),
-                user_email,
+                agent_did,
             )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -1789,31 +1794,37 @@ impl AIService {
     /// This mirrors what the transcription worker does with word_count,
     /// so every AI billing path routes through the same shape.
     ///
-    /// `bill_to` is the user the request resolved; a caller without a user pays nothing.
+    /// `bill_to` is the managed agent the request acts as, by DID; the main agent pays
+    /// nothing.
     fn bill_prompt_if_authed(
         bill_to: Option<&str>,
         model_id: &str,
         prompt_tokens: usize,
         completion_tokens: usize,
     ) {
-        let Some(email) = bill_to else {
+        let Some(agent_did) = bill_to else {
             return;
         };
         let total_tokens = prompt_tokens.saturating_add(completion_tokens);
         // Ignore result: rate=0 no-ops, InsufficientCredits is logged
         // inside bill_ai_operation. Prompt has already run so we don't
         // want to fail the caller on a bookkeeping-only issue.
-        let _ =
-            crate::billing::bill_ai_operation(email, model_id, "ai_prompt", total_tokens, "tokens");
+        let _ = crate::billing::bill_ai_operation(
+            agent_did,
+            model_id,
+            "ai_prompt",
+            total_tokens,
+            "tokens",
+        );
     }
 
     /// Shared post-compute billing hook for embed paths.
     fn bill_embed_if_authed(bill_to: Option<&str>, model_id: &str, token_count: usize) {
-        let Some(email) = bill_to else {
+        let Some(agent_did) = bill_to else {
             return;
         };
         let _ = crate::billing::bill_ai_operation(
-            email,
+            agent_did,
             model_id,
             "ai_embedding",
             token_count,
@@ -1996,7 +2007,7 @@ impl AIService {
         caller: &RequestContext,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
-        let (user_email, user_did) = transcription_stream_owner(caller.acts_as())?;
+        let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -2044,7 +2055,7 @@ impl AIService {
         let text_broadcast_tx_clone = text_broadcast_tx.clone();
 
         // Clone billing context for the async task
-        let billing_email = user_email.clone();
+        let billing_agent = agent_did.clone();
         let billing_model_id = model_id.clone();
 
         let user_did = Some(user_did);
@@ -2154,7 +2165,7 @@ impl AIService {
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
-                                if let Some(ref email) = billing_email {
+                                if let Some(ref billed_did) = billing_agent {
                                     let rate_key =
                                         crate::db::Ad4mDb::with_global_instance(|db| {
                                             db.get_model(billing_model_id.clone())
@@ -2173,7 +2184,7 @@ impl AIService {
                                         .unwrap_or(0.0);
                                     let cost = word_count as f64 * rate;
                                     match crate::billing::bill_compute(
-                                        email,
+                                        billed_did,
                                         cost,
                                         "ai_transcription",
                                         Some(&format!(
@@ -2184,7 +2195,7 @@ impl AIService {
                                         Err(
                                             crate::billing::BillingError::InsufficientCredits,
                                         ) => {
-                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
+                                            log::warn!("Transcription: insufficient credits for agent {} — delivering already-computed text, future feeds will be rejected", billed_did);
                                         }
                                         Err(e) => {
                                             log::warn!(
@@ -2250,7 +2261,7 @@ impl AIService {
                 last_activity,
                 text_broadcast_tx,
                 model_id: model_id.clone(),
-                user_email,
+                agent_did,
             },
         );
 
@@ -2373,9 +2384,9 @@ impl AIService {
         }
     }
 
-    /// Verify that the caller (the user its request resolved) owns the given transcription
+    /// Verify that the caller (the agent its request acts as) owns the given transcription
     /// session. In single-user mode, ownership is not enforced.
-    /// In multi-user mode, both the session and the caller must have valid emails that match.
+    /// In multi-user mode, a managed agent reaches only the streams it opened.
     fn verify_stream_ownership(
         session: &TranscriptionSession,
         caller: &RequestContext,
@@ -2392,7 +2403,7 @@ impl AIService {
         // A caller without a user acts as the main agent. The session already resolved and
         // checked it: the operator and a grant on the main agent may reach any stream, an
         // anonymous caller none.
-        let Some(caller_email) = caller.user_email() else {
+        let Some(caller_did) = caller.user_did() else {
             return match &caller.session.principal {
                 crate::agent::session::Principal::Operator => Ok(()),
                 crate::agent::session::Principal::Agent(agent) if agent.is_main_agent() => Ok(()),
@@ -2402,19 +2413,8 @@ impl AIService {
             };
         };
 
-        // Session must also have an owner email to enforce ownership
-        let owner_email = match session.user_email.as_ref() {
-            Some(email) => email,
-            // Session has no owner email (created by admin) — only admin can access,
-            // but we already handled the admin case above, so reject.
-            None => {
-                return Err(anyhow!(
-                    "Authorization error: caller does not own this transcription stream"
-                ))
-            }
-        };
-
-        if caller_email == owner_email {
+        // A stream the main agent opened (owner `None`) is not a managed agent's.
+        if session.agent_did.as_deref() == Some(caller_did) {
             Ok(())
         } else {
             Err(anyhow!(
@@ -3062,7 +3062,7 @@ mod stream_ownership_tests {
             last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
             text_broadcast_tx,
             model_id: "m".to_string(),
-            user_email: owner.map(str::to_string),
+            agent_did: owner.map(str::to_string),
         }
     }
 
@@ -3071,13 +3071,13 @@ mod stream_ownership_tests {
     #[test]
     fn in_multi_user_mode_the_session_decides_who_reaches_a_stream() {
         let _multi_user = MultiUserMode::on();
-        let alice = RequestContext::user_for_test("alice@example.org", "did:key:alice", vec![]);
-        let bob = RequestContext::user_for_test("bob@example.org", "did:key:bob", vec![]);
+        let alice = RequestContext::user_for_test("did:key:alice", vec![]);
+        let bob = RequestContext::user_for_test("did:key:bob", vec![]);
         let operator = RequestContext::operator_for_test();
         let app = RequestContext::app_for_test(vec![]);
         let anonymous = RequestContext::for_test(Principal::Anonymous);
 
-        let alices = stream_of(Some("alice@example.org"));
+        let alices = stream_of(Some("did:key:alice"));
         let main_agents = stream_of(None);
         let reaches = |stream, caller| AIService::verify_stream_ownership(stream, caller).is_ok();
 
@@ -3113,7 +3113,7 @@ mod transcription_owner_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let owner = AgentContext::for_user_email("no.key.stream@example.org".to_string());
+        let owner = AgentContext::managed("did:key:z6MkNoKeyStreamOwner".to_string());
         assert!(transcription_stream_owner(owner).is_err());
     }
 
@@ -3122,19 +3122,15 @@ mod transcription_owner_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let email = "stream.owner@example.org";
-        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
-        let (user_email, did) =
-            transcription_stream_owner(AgentContext::for_user_email(email.to_string())).unwrap();
-        assert_eq!(user_email.as_deref(), Some(email));
-        assert_eq!(
-            did,
-            crate::agent::AgentService::get_user_did_by_email(email).unwrap()
-        );
+        let user_did = crate::test_utils::create_test_user("stream.owner@example.org");
+        let (agent_did, did) =
+            transcription_stream_owner(AgentContext::managed(user_did.clone())).unwrap();
+        assert_eq!(agent_did.as_deref(), Some(user_did.as_str()));
+        assert_eq!(did, user_did);
 
-        let (admin_email, admin_did) =
+        let (admin_agent, admin_did) =
             transcription_stream_owner(AgentContext::main_agent()).unwrap();
-        assert!(admin_email.is_none());
+        assert!(admin_agent.is_none());
         assert_eq!(admin_did, crate::agent::did());
     }
 

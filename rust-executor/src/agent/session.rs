@@ -12,8 +12,10 @@
 //! - A token that does not decode or is past its expiry opens no session, and neither does
 //!   one without an active grant (`agent::grants`): grants are the allowlist, so a revoked,
 //!   removed or never-recorded token is refused.
-//! - A grant on a managed agent acts as that user's agent, whose DID must load. Any other
-//!   grant acts as the main agent. Both are limited to the grant's capabilities.
+//! - A grant on a managed agent acts as that agent, by its DID, whose key must derive that
+//!   DID. The token's `sub` must name the grant's agent: its DID, or, in tokens minted before
+//!   agents were keyed by DID, the email of the user who owns it. Any other grant acts as the
+//!   main agent. Both are limited to the grant's capabilities.
 //!
 //! A token that opens no session is refused where it arrives. [`Session::check`] runs again
 //! on every request and every delivered event. MCP still resolves its tokens itself
@@ -153,15 +155,15 @@ impl Session {
         let grant = Grants::global()
             .get(&TokenId(claims.nonce().to_string()))
             .ok_or(AuthError::Revoked)?;
-        if grant.agent.user_email != claims.sub {
+        if !sub_names_agent(claims.sub.as_deref(), &grant.agent) {
             return Err(AuthError::Revoked);
         }
         let did = OnceLock::new();
-        match &grant.agent.user_email {
-            Some(email) => {
-                let user_did = AgentService::get_user_did_by_email(email)
+        match grant.agent.managed_did() {
+            Some(agent_did) => {
+                AgentService::wallet_key_for_did(agent_did)
                     .map_err(|e| AuthError::NoIdentity(e.to_string()))?;
-                let _ = did.set(user_did);
+                let _ = did.set(agent_did.to_string());
             }
             None if !grant.did.is_empty() => {
                 let _ = did.set(grant.did.clone());
@@ -239,19 +241,16 @@ impl Session {
     /// A user session's grant: what `user.logout` revokes.
     pub fn user_grant(&self) -> Option<&Arc<LiveGrant>> {
         match &self.principal {
-            Principal::Agent(AgentContext {
-                user_email: Some(_),
-            }) => self.grant.as_ref(),
+            Principal::Agent(AgentContext::Managed { .. }) => self.grant.as_ref(),
             _ => None,
         }
     }
 
-    /// The email and DID of the user whose managed agent the session acts as.
-    pub fn user(&self) -> Option<(&str, &str)> {
+    /// The DID of the managed agent the session acts as; `None` for the main agent, the
+    /// operator and anonymous callers.
+    pub fn managed_did(&self) -> Option<&str> {
         match &self.principal {
-            Principal::Agent(AgentContext {
-                user_email: Some(email),
-            }) => Some((email, self.acts_as_did()?)),
+            Principal::Agent(agent) => agent.managed_did(),
             _ => None,
         }
     }
@@ -295,6 +294,20 @@ impl Session {
                 .is_some_and(|did| dids.iter().any(|d| d == did)),
         };
         in_audience && self.may(&event.capability)
+    }
+}
+
+/// Whether a token's `sub` names the agent of its grant: none for the main agent; for a
+/// managed agent its DID, or the email of the user who owns it (tokens minted before agents
+/// were keyed by DID).
+fn sub_names_agent(sub: Option<&str>, agent: &AgentContext) -> bool {
+    match (sub, agent.managed_did()) {
+        (None, None) => true,
+        (Some(sub), Some(did)) if sub == did => true,
+        (Some(sub), Some(did)) if !sub.starts_with("did:") => {
+            AgentService::did_for_email(sub).is_ok_and(|owner| owner == did)
+        }
+        _ => false,
     }
 }
 
@@ -481,7 +494,7 @@ mod resolution_tests {
                             "{case}"
                         );
                     }
-                    assert_eq!(session.user(), None, "{case}");
+                    assert_eq!(session.managed_did(), None, "{case}");
                     assert!(session.grant().is_none(), "{case}");
                     assert!(session.check().is_ok(), "{case}");
                 }
@@ -506,7 +519,7 @@ mod resolution_tests {
                 );
                 assert!(!session.may(&ALL_CAPABILITY));
                 assert!(!session.is_operator());
-                assert_eq!(session.user(), None);
+                assert_eq!(session.managed_did(), None);
                 assert!(session.check().is_ok());
             }
         }
@@ -524,9 +537,8 @@ mod resolution_tests {
         setup_wallet();
         setup_agent();
         let email = "session.user@example.org";
-        AgentService::ensure_user_key_exists(email).unwrap();
+        let expected_did = crate::test_utils::create_test_user(email);
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
-        let expected_did = AgentService::get_user_did_by_email(email).unwrap();
 
         let open = || {
             let mut sessions = vec![];
@@ -539,15 +551,18 @@ mod resolution_tests {
         };
         let mut sessions = open();
         let multi_user = MultiUserMode::on();
+        // Multi-user mode starts on a fresh database: the user signs up there too.
+        crate::db::Ad4mDb::with_global_instance(|db| db.add_user(email, &expected_did, "pw"))
+            .unwrap();
         sessions.extend(open());
         drop(multi_user);
 
         for session in sessions {
             assert_eq!(
                 session.principal,
-                Principal::Agent(AgentContext::for_user_email(email.to_string()))
+                Principal::Agent(AgentContext::managed(expected_did.clone()))
             );
-            assert_eq!(session.user(), Some((email, expected_did.as_str())));
+            assert_eq!(session.managed_did(), Some(expected_did.as_str()));
             assert_eq!(session.acts_as_did(), Some(expected_did.as_str()));
             assert_eq!(caps(&session), caps_of(get_user_default_capabilities()));
             assert!(!session.is_operator());
@@ -568,9 +583,74 @@ mod resolution_tests {
     fn a_user_whose_did_does_not_load_opens_no_session() {
         setup_wallet();
         setup_agent();
-        let token = crate::test_utils::token_of_a_user_without_a_key("session.nokey@example.org");
+        let token = crate::test_utils::keyless_user_token("session.nokey@example.org");
         let err = Session::open(&token, &admin(), ListenerReach::Network).unwrap_err();
         assert!(matches!(err, AuthError::NoIdentity(_)), "{err:?}");
+        // Nor does a user token for an email no user has get minted at all.
+        assert!(crate::user_management::generate_user_jwt("ghost@example.org", "test").is_err());
+    }
+
+    // A token's `sub` must name its grant's agent: one re-signed to name another agent, by
+    // email or by DID, is refused.
+    #[test]
+    fn a_token_whose_sub_names_another_agent_opens_no_session() {
+        setup_wallet();
+        setup_agent();
+        let email = "session.sub@example.org";
+        crate::test_utils::create_test_user(email);
+        let other = "session.sub.other@example.org";
+        let other_did = crate::test_utils::create_test_user(other);
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        for ghost in [
+            other,
+            other_did.as_str(),
+            "session.ghost@example.org",
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        ] {
+            let token = crate::test_utils::resigned_token(&token, |claims| {
+                claims["sub"] = serde_json::json!(ghost)
+            });
+            let err = Session::open(&token, &admin(), ListenerReach::Network).unwrap_err();
+            assert_eq!(err, AuthError::Revoked, "{ghost}");
+        }
+    }
+
+    /// D16: user tokens minted before agents were keyed by DID carry the user's email in
+    /// `sub`; tokens minted since carry the agent's DID. Both open a session acting as the
+    /// same agent.
+    #[test]
+    fn an_old_email_token_and_a_new_did_token_act_as_the_same_agent() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let email = "session.both.forms@example.org";
+        let did = crate::test_utils::create_test_user(email);
+
+        let new_token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let new_claims = crate::agent::capabilities::decode_jwt(new_token.clone()).unwrap();
+        assert_eq!(
+            new_claims.sub.as_deref(),
+            Some(did.as_str()),
+            "new tokens name the DID"
+        );
+        let old_token = crate::test_utils::resigned_token(&new_token, |claims| {
+            claims["sub"] = serde_json::json!(email)
+        });
+
+        for token in [&old_token, &new_token] {
+            let session = Session::open(token, &admin(), ListenerReach::Network).unwrap();
+            assert_eq!(
+                session.principal,
+                Principal::Agent(AgentContext::managed(did.clone()))
+            );
+            assert_eq!(session.acts_as_did(), Some(did.as_str()));
+            let signed = crate::agent::create_signed_expression(
+                serde_json::json!({ "x": 1 }),
+                &session.acts_as(),
+            )
+            .unwrap();
+            assert_eq!(signed.author, did, "the session signs as the user's agent");
+        }
     }
 
     #[test]
@@ -734,7 +814,7 @@ mod resolution_tests {
         // A grant stops working at its token's expiry, on the main agent and on a managed one.
         for agent in [
             AgentContext::main_agent(),
-            AgentContext::for_user_email("expiring@example.org".into()),
+            AgentContext::managed("did:key:expiring".into()),
         ] {
             let session = |expires_at| {
                 Session::for_test(Principal::Agent(agent.clone())).expiring_at(expires_at)
@@ -761,7 +841,7 @@ mod resolution_tests {
 
     #[test]
     fn a_grant_acts_as_its_agent_and_every_other_caller_as_the_main_agent() {
-        let managed = AgentContext::for_user_email("acts.as@example.org".into());
+        let managed = AgentContext::managed("did:key:acts-as".into());
         let user = Session::for_test(Principal::Agent(managed.clone()));
         assert_eq!(user.acts_as(), managed);
 
@@ -786,14 +866,13 @@ mod resolution_tests {
         let main_token = app_token(Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
         let main_did = AgentService::with_global_instance(|a| a.did.clone()).unwrap();
         let email = "session.grant@example.org";
-        AgentService::ensure_user_key_exists(email).unwrap();
-        let user_did = AgentService::get_user_did_by_email(email).unwrap();
+        let user_did = crate::test_utils::create_test_user(email);
 
         let main = Session::open(&main_token, &admin(), ListenerReach::Network).unwrap();
         assert!(matches!(&main.principal, Principal::Agent(agent) if agent.is_main_agent()));
         assert!(main.acts_as().is_main_agent());
         assert_eq!(main.acts_as_did(), Some(main_did.as_str()));
-        assert_eq!(main.user(), None, "the main agent has no user");
+        assert_eq!(main.managed_did(), None, "the main agent has no user");
         assert_eq!(
             caps(&main),
             caps_of(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()])
@@ -802,10 +881,7 @@ mod resolution_tests {
         let user_token = crate::user_management::generate_user_jwt(email, "test").unwrap();
         let user = Session::open(&user_token, &admin(), ListenerReach::Network).unwrap();
         assert!(matches!(&user.principal, Principal::Agent(agent) if !agent.is_main_agent()));
-        assert_eq!(
-            user.acts_as(),
-            AgentContext::for_user_email(email.to_string())
-        );
+        assert_eq!(user.acts_as(), AgentContext::managed(user_did.clone()));
         assert_eq!(user.acts_as_did(), Some(user_did.as_str()));
         assert_eq!(caps(&user), caps_of(get_user_default_capabilities()));
 
@@ -819,7 +895,7 @@ mod resolution_tests {
         assert!(operator.is_authenticated());
         assert_eq!(operator.acts_as(), AgentContext::main_agent());
         assert_eq!(operator.acts_as_did(), Some(main_did.as_str()));
-        assert_eq!(operator.user(), None);
+        assert_eq!(operator.managed_did(), None);
         assert!(operator.grant().is_none());
     }
 

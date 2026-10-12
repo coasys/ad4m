@@ -6,9 +6,8 @@ use super::Ad4mMcpHandler;
 use crate::agent::capabilities::{
     defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
     request_capability as cap_request_capability, requested_agent, token::decode_jwt, AuthInfo,
-    AuthInfoExtended,
+    AuthInfoExtended, RequestTarget,
 };
-use crate::agent::AgentContext;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -167,7 +166,7 @@ impl Ad4mMcpHandler {
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
-        target: AgentContext,
+        target: impl Into<RequestTarget>,
         caller_can_permit: bool,
     ) -> String {
         let auth_info = AuthInfo {
@@ -331,7 +330,8 @@ impl Ad4mMcpHandler {
             {
                 Ok(grant) => SessionToken::Valid {
                     app_name: grant.app_name().to_string(),
-                    user_email: grant.agent.user_email.clone(),
+                    // The account a login names; the grant keys its agent by DID.
+                    user_email: grant.auth.user_email.clone(),
                     has_capabilities: grant.auth.capabilities.is_some(),
                 },
                 Err(_) => SessionToken::Undecodable,
@@ -521,7 +521,11 @@ mod capability_mint_tests {
     async fn an_unauthenticated_caller_gets_no_mint_code() {
         let handler = handler_with_admin_credential();
         let resp = handler
-            .handle_capability_request(mint_params(), AgentContext::main_agent(), false)
+            .handle_capability_request(
+                mint_params(),
+                crate::agent::AgentContext::main_agent(),
+                false,
+            )
             .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         assert!(
@@ -543,7 +547,11 @@ mod capability_mint_tests {
 
         let handler = handler_with_admin_credential();
         let resp = handler
-            .handle_capability_request(mint_params(), AgentContext::main_agent(), true)
+            .handle_capability_request(
+                mint_params(),
+                crate::agent::AgentContext::main_agent(),
+                true,
+            )
             .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         let request_id = v["request_id"].as_str().expect("request_id present");

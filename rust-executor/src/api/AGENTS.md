@@ -40,6 +40,13 @@ takes `AgentContext` from the session
 (`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
 
+**An agent is its DID.** A user session is known by its managed agent's DID
+(`ctx.user_did()`); there is no `ctx.user_email()`. Bill, own, filter and log by that DID. A
+parameter that names a user by email (`runtime.computeLog { userEmail }`, the operator's
+`user.*` calls) resolves to the DID at the handler with `AgentService::did_for_email`; a reply
+field that shows an address (`hosting.info`'s `email`, the compute log's `userEmail`) reads it
+back with `AgentService::email_for_did` or a join on `users.did`.
+
 `RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`,
 the per-request `cancel_token`, and `auth_token` (read only by the interpretation pass; Plan 20
 PR 6 removes it). The RPC socket opens one per connection (`RequestContext::open`); REST and the
@@ -80,7 +87,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 
 - `Perspective`: its `owners` DIDs; none = the main agent (`get_perspective_with_access`).
   A grant on the main agent reaches the main agent's and the unowned perspectives.
-- `Task`: `tasks.user_email`; none = the main agent. A grant on the main agent reaches the main
+- `Task`: `tasks.agent_did`; none = the main agent. A grant on the main agent reaches the main
   agent's tasks only, not a managed agent's.
 - `Grant`: the agent of the grant a token or request id names (`Grants::find`), for
   `agent.revokeToken` and `agent.removeApp` (D14). `agent.getApps` is `Cap`: it lists only the
@@ -393,17 +400,22 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   grants of `acts_as()`.
 - Capability flow (#1399, executor side; `agent/capabilities/mod.rs` + `pending.rs`):
   1. `agent.requestCapability { authInfo, agent? }` (anyone, AGENT_AUTH): `agent` is a managed
-     user's email or an agent's DID, absent = the main agent (`requested_agent`; an unknown DID
-     is 400, an email is never checked so the answer reveals no accounts). The request is a
+     user's email or an agent's DID, absent = the main agent (`requested_agent` returns a
+     `RequestTarget`: an agent keyed by DID, D16). An email resolves to its user's DID there;
+     an email no user has is still taken, as `RequestTarget::NoAgent`, so the answer reveals no
+     accounts: it reaches nobody, only the operator may approve it, its code mints nothing, and
+     it expires after 24 hours like a managed agent's. An unknown DID is 400. The request is a
      `PendingRequest` in memory only: never on disk, 1024 at most (a new one evicts the
      unapproved one nearest its expiry), 10 minutes for the main agent and 24 hours for a
-     managed agent, restarted at approval. Its approval request goes to the target agent
+     managed agent, restarted at approval. Its approval request goes to the target agent's DID
      (`Event::approval_request`). Every request waits for that owner: the declared app name
-     and domain are the caller's claim and approve nothing.
+     and domain are the caller's claim and approve nothing. `AuthInfo.user_email` on the
+     request and the grant is only a display hint (the owner's email, from `email_for_did`).
   2. `agent.permitCapability { auth }`: its guard, `Owns { owner: Request }`, admits the
-     operator or a session acting as the request's agent with AGENT_PERMIT; anyone else gets
-     404, as for a missing request. The approver may grant fewer capabilities than asked; the
-     target is fixed by the request. It returns a six-digit code, stored as a `Secret`.
+     operator or a session acting as the request's agent (the same DID) with AGENT_PERMIT;
+     anyone else gets 404, as for a missing request. The approver may grant fewer capabilities
+     than asked; the target is fixed by the request. It returns a six-digit code, stored as a
+     `Secret`.
   3. `agent.generateJwt { requestId, rand }` (anyone): `PendingRequests::redeem` checks the code
      and mints the grant on the request's agent in one locked step, with the approved
      capabilities capped at that agent's own (`grant_caps_for`: a managed agent holds its user's
