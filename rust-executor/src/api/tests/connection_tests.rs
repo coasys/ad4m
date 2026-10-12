@@ -29,8 +29,7 @@ fn listener(did: &str) -> Arc<Session> {
     Arc::new(
         Session::for_test(user)
             .with_caps(get_user_default_capabilities())
-            .with_did(did)
-            .with_token_id(&format!("listener-{did}")),
+            .with_did(did),
     )
 }
 

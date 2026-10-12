@@ -128,8 +128,9 @@ pub fn event_specs() -> Vec<EventSpec> {
 /// The event stream of a session's socket: the JSON message of each event the session may
 /// receive and `interest` (what the socket asked for with `events.watch`) wants. The
 /// session's DID is read per event, so a socket opened before the main agent had a DID gets
-/// its events once it has one. The stream ends at the first event after `session.check()`
-/// fails: expiry and revocation stop events as they stop requests.
+/// its events once it has one. The stream ends when the session's grant ends (revoked or
+/// removed, without waiting for another event), and at the first event after
+/// `session.check()` fails: expiry and revocation stop events as they stop requests.
 pub(crate) async fn build_event_stream(
     session: Arc<Session>,
     interest: SharedInterest,
@@ -138,6 +139,7 @@ pub(crate) async fn build_event_stream(
 
     let events = get_global_pubsub().await.subscribe_events();
     let check = session.clone();
+    let ended = session.ended();
     // The session decides who, the socket's interest what. An event the session may receive
     // checks the token even when the socket does not want it.
     Box::pin(
@@ -149,7 +151,8 @@ pub(crate) async fn build_event_stream(
                 }))
             })
             .take_while(move |_| ready(check.check().is_ok()))
-            .filter_map(ready),
+            .filter_map(ready)
+            .take_until(ended.cancelled_owned()),
     )
 }
 
@@ -245,12 +248,14 @@ mod app_approval_event_tests {
     use std::collections::BTreeSet;
     use std::time::Duration;
 
+    /// An app's session: a grant named `name` on the main agent.
     fn app(name: &str, caps: Vec<Capability>) -> Arc<Session> {
-        let app = Principal::Agent(AgentContext::main_agent());
+        let main = AgentContext::main_agent();
+        let grant = crate::agent::grants::LiveGrant::for_test(name, main.clone(), u64::MAX);
         Arc::new(
-            Session::for_test(app)
+            Session::for_test(Principal::Agent(main))
                 .with_caps(caps)
-                .with_token_id(&format!("approval-{name}")),
+                .with_grant(Arc::new(grant)),
         )
     }
 
@@ -294,7 +299,7 @@ mod app_approval_event_tests {
         };
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+        crate::test_utils::ensure_test_db();
         let operator = Arc::new(Session::for_test(Principal::Operator));
         let user = |name: &str, caps: Vec<Capability>| {
             Session::for_test(Principal::Agent(AgentContext::for_user_email(format!(
@@ -302,7 +307,6 @@ mod app_approval_event_tests {
             ))))
             .with_caps(caps)
             .with_did(&format!("did:key:approval-{name}"))
-            .with_token_id(&format!("approval-{name}"))
         };
         let mut user_caps = get_user_default_capabilities();
         let user_session = user("user", user_caps.clone());
@@ -540,14 +544,15 @@ mod audience_matrix_tests {
         Session::for_test(Principal::Agent(agent))
             .with_caps(get_user_default_capabilities())
             .with_did(did)
-            .with_token_id(&format!("matrix-{name}"))
     }
 
-    /// A grant on the main agent.
+    /// A grant named `name` on the main agent.
     fn app(name: &str, caps: Vec<Capability>) -> Session {
-        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+        let main = AgentContext::main_agent();
+        let grant = crate::agent::grants::LiveGrant::for_test(name, main.clone(), u64::MAX);
+        Session::for_test(Principal::Agent(main))
             .with_caps(caps)
-            .with_token_id(&format!("matrix-{name}"))
+            .with_grant(Arc::new(grant))
     }
 
     /// The sessions of the matrix, by name. Users hold what a user token holds; "app" holds
@@ -1345,8 +1350,7 @@ mod audience_matrix_tests {
             email.clone(),
         )))
         .with_caps(get_user_default_capabilities())
-        .with_did(&did)
-        .with_token_id("matrix-hosted");
+        .with_did(&did);
         let mut sessions = sessions();
         sessions.push(("hosted user", Arc::new(hosted)));
 
@@ -1630,9 +1634,32 @@ mod token_expiry_tests {
         let expired = Session::for_test(user)
             .with_caps(get_user_default_capabilities())
             .with_did("did:key:events-user")
-            .with_token_id("user-jwt")
             .expiring_at(an_hour_ago);
         assert!(next_event(expired).await.is_none());
+    }
+
+    // A revoked grant ends its session's event stream at once, not at the next event: the
+    // stream must not wait on an event that may never come.
+    #[tokio::test]
+    async fn a_revoked_grant_ends_the_event_stream_without_another_event() {
+        use crate::agent::grants::LiveGrant;
+        let agent = AgentContext::for_user_email(USER.into());
+        let grant = Arc::new(LiveGrant::for_test(
+            "revoked-events",
+            agent.clone(),
+            u64::MAX,
+        ));
+        let session = Session::for_test(Principal::Agent(agent))
+            .with_caps(get_user_default_capabilities())
+            .with_did("did:key:events-user")
+            .with_grant(grant.clone());
+        let mut stream =
+            build_event_stream(Arc::new(session), event_interest::watching_all()).await;
+        grant.ended.cancel();
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream ends when the grant does, without another event");
+        assert!(next.is_none(), "a revoked session got {next:?}");
     }
 
     #[tokio::test]

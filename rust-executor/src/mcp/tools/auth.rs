@@ -311,11 +311,16 @@ impl Ad4mMcpHandler {
     pub async fn auth_status(&self, _params: Parameters<AuthStatusParams>) -> String {
         let token = self.context.auth_token.read().await;
         let session = match token.as_deref() {
-            Some(t) if !t.is_empty() => match decode_jwt(t.to_string()) {
-                Ok(claims) => SessionToken::Valid {
-                    app_name: claims.capabilities.app_name,
-                    user_email: claims.capabilities.user_email,
-                    has_capabilities: claims.capabilities.capabilities.is_some(),
+            // The app and capabilities are the grant's: a token carries neither. A token
+            // without an active grant works no more than one that does not decode.
+            Some(t) if !t.is_empty() => match decode_jwt(t.to_string())
+                .map_err(|e| e.to_string())
+                .and_then(|claims| crate::agent::capabilities::granted(&claims))
+            {
+                Ok(grant) => SessionToken::Valid {
+                    app_name: grant.app_name().to_string(),
+                    user_email: grant.agent.user_email.clone(),
+                    has_capabilities: grant.auth.capabilities.is_some(),
                 },
                 Err(_) => SessionToken::Undecodable,
             },
@@ -572,27 +577,21 @@ mod capability_mint_tests {
     #[tokio::test]
     async fn a_token_without_permit_may_not_auto_permit() {
         use crate::agent::capabilities::{
-            get_user_default_capabilities, token::generate_jwt, types::AuthInfo, Capability,
-            ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
+            get_user_default_capabilities, types::AuthInfo, Capability, ALL_CAPABILITY,
         };
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
 
         let jwt_with = |caps: Vec<Capability>| {
-            generate_jwt(
-                "test-app".to_string(),
-                DEFAULT_TOKEN_VALID_PERIOD,
-                AuthInfo {
-                    app_name: "test-app".to_string(),
-                    app_desc: String::new(),
-                    app_domain: None,
-                    app_url: None,
-                    app_icon_path: None,
-                    capabilities: Some(caps),
-                    user_email: None,
-                },
-            )
-            .expect("the wallet is unlocked in tests")
+            crate::test_utils::granted_token(AuthInfo {
+                app_name: "test-app".to_string(),
+                app_desc: String::new(),
+                app_domain: None,
+                app_url: None,
+                app_icon_path: None,
+                capabilities: Some(caps),
+                user_email: None,
+            })
         };
 
         // Through the tool's own path: the header credential joins a fresh session, then

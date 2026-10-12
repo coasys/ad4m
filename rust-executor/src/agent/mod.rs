@@ -11,9 +11,8 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
-pub mod revoked;
+pub mod grants;
 pub mod session;
-pub mod session_registry;
 pub mod signatures;
 
 /// Validate that a user email is safe to use as a filesystem path segment.
@@ -59,10 +58,8 @@ impl AgentContext {
             return Ok(Self::main_agent());
         }
         let claims = capabilities::decode_jwt(auth_token)?;
-        capabilities::check_not_revoked(&claims).map_err(|e| anyhow!(e))?;
-        Ok(claims
-            .sub
-            .map_or_else(Self::main_agent, Self::for_user_email))
+        let grant = capabilities::granted(&claims).map_err(|e| anyhow!(e))?;
+        Ok(grant.agent.clone())
     }
 
     /// The main agent.
@@ -2239,12 +2236,18 @@ mod tests {
 
 #[cfg(test)]
 mod agent_context_tests {
-    use super::{capabilities, AgentContext};
+    use super::{AgentContext, AgentService};
     use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
 
     fn setup() {
         setup_wallet();
         setup_agent();
+    }
+
+    /// A login of `email`, whose agent gets a key first: a login's grant names its DID.
+    fn login(email: &str) -> String {
+        AgentService::ensure_user_key_exists(email).unwrap();
+        crate::user_management::generate_user_jwt(email, "test").unwrap()
     }
 
     // A token that no longer decoded used to act as the main agent.
@@ -2267,7 +2270,7 @@ mod agent_context_tests {
     fn a_user_token_acts_as_its_user() {
         setup();
         let _multi_user = MultiUserMode::on();
-        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
+        let token = login("alice@example.org");
         let context = AgentContext::from_auth_token(token, false).unwrap();
         assert!(!context.is_main_agent());
         assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
@@ -2289,7 +2292,7 @@ mod agent_context_tests {
     fn a_user_token_acts_as_its_user_when_multi_user_mode_is_off() {
         setup();
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
-        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
+        let token = login("alice@example.org");
         let context = AgentContext::from_auth_token(token, false).unwrap();
         assert!(!context.is_main_agent());
         assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
@@ -2298,18 +2301,11 @@ mod agent_context_tests {
     #[test]
     fn a_revoked_token_acts_as_nobody() {
         setup();
-        crate::test_utils::use_test_apps_file();
-        let token =
-            crate::user_management::generate_user_jwt("revoked@example.org", "test").unwrap();
-        let request_key = format!("key-{}", uuid::Uuid::new_v4());
-        let app = capabilities::AuthInfoExtended {
-            request_id: request_key.clone(),
-            auth: capabilities::AuthInfo::default(),
-        };
-        capabilities::apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
-        capabilities::apps_map::revoke_app(&request_key).unwrap();
+        let token = login("revoked@example.org");
+        assert!(AgentContext::from_auth_token(token.clone(), false).is_ok());
+        let grants = super::grants::Grants::global();
+        grants.revoke(&grants.find(&token)).unwrap();
         assert!(AgentContext::from_auth_token(token, false).is_err());
-        capabilities::apps_map::remove_app(&request_key).unwrap();
     }
 
     #[test]

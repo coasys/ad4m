@@ -110,16 +110,20 @@ from the global config where `agent.requestCapability` uses it.
 - Every socket (RPC, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
   an open connection. Tests build sessions with `Session::for_test(principal)` plus
-  `.with_caps(..)`, `.with_did(..)`, `.with_token_id(..)`, `.expiring_at(..)`, and contexts with
+  `.with_caps(..)`, `.with_did(..)`, `.with_grant(..)`, `.expiring_at(..)`, and contexts with
   `RequestContext::{operator,app,user}_for_test` / `for_session`.
-- App and user sockets also register in `agent::session_registry` while open (an RAII guard).
-  `revoked::revoke` and `revoked::revoke_all_sessions` cancel their token, and the socket closes
-  at once with `ws_rpc::token_ended_frame()` (1008), the same frame a failed check sends. Only
-  the socket's own task writes the close frame. The RPC socket first delivers in-flight replies
-  for up to `REPLY_GRACE`, so `user.logout` gets its answer. A new socket type must register too.
-- User revocation: `user.logout` revokes the caller's token id; `user.revokeAllSessions` sets a
-  per-user cutoff (`users.sessions_valid_after`, cached in `revoked::SessionCutoffs`) that refuses
-  every token with `iat` at or before it. `generate_user_jwt` issues later tokens after the cutoff.
+- Each socket's "session over" token is `ctx.session.ended()`: a child of the grant's `ended`
+  token (a token that never fires for the operator and anonymous callers). Revoking or removing
+  the grant cancels it, and the socket closes at once with `ws_rpc::token_ended_frame()` (1008),
+  the same frame a failed check sends. A grant revoked before the socket starts serving gives an
+  already-cancelled child, so there is no race to check. Only the socket's own task writes the
+  close frame. The RPC socket first delivers in-flight replies for up to `REPLY_GRACE`, so
+  `user.logout` gets its answer. A new socket type must take `session.ended()` too.
+- Revocation is on grants (`agent::grants::Grants`): `agent.revokeToken` (by request id or by
+  the token) and `agent.removeApp` act on grants of the caller's own agent, or any for the
+  operator; another agent's grant answers as missing. `user.logout` revokes the caller's grant;
+  `user.revokeAllSessions` revokes every grant on that user's agent. `agent.getApps` lists the
+  grants of `acts_as()`.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

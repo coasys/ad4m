@@ -711,8 +711,7 @@ fn user_session(email: &str, did: &str) -> Arc<Session> {
     Arc::new(
         Session::for_test(user)
             .with_caps(get_user_default_capabilities())
-            .with_did(did)
-            .with_token_id(&format!("notifications-{email}")),
+            .with_did(did),
     )
 }
 

@@ -171,8 +171,7 @@ mod session_tests {
     fn a_user_without_a_loadable_identity_opens_no_request_context() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        let token =
-            crate::user_management::generate_user_jwt("rest.nokey@example.org", "test").unwrap();
+        let token = crate::test_utils::token_of_a_user_without_a_key("rest.nokey@example.org");
         let refused = RequestContext::open(
             &token,
             &Some("the-admin-credential".to_string()),
@@ -191,24 +190,23 @@ mod session_tests {
     async fn the_http_extractor_answers_401_for_a_token_that_opens_no_session() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
-        let revoked = crate::agent::capabilities::token::generate_jwt(
-            "a revoked app".to_string(),
-            3600,
-            crate::agent::capabilities::AuthInfo::default(),
-        )
-        .unwrap();
-        let request_id = format!("extractor-{}", uuid::Uuid::new_v4());
-        let app = crate::agent::capabilities::AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: crate::agent::capabilities::AuthInfo::default(),
-        };
-        crate::agent::capabilities::apps_map::insert_app(request_id.clone(), app, revoked.clone())
-            .unwrap();
-        crate::agent::capabilities::apps_map::revoke_app(&request_id).unwrap();
+        let revoked = crate::test_utils::granted_token(crate::agent::capabilities::AuthInfo {
+            app_name: "a revoked app".to_string(),
+            ..Default::default()
+        });
+        let grants = crate::agent::grants::Grants::global();
+        grants.revoke(&grants.find(&revoked)).unwrap();
+        let (ungranted, _) =
+            crate::agent::capabilities::token::sign_token("no grant".to_string(), 3600, None)
+                .unwrap();
 
         let expired = crate::test_utils::expired_user_token("rest.expired@example.org");
-        for token in [revoked.as_str(), expired.as_str(), "not-a-jwt"] {
+        for token in [
+            revoked.as_str(),
+            expired.as_str(),
+            ungranted.as_str(),
+            "not-a-jwt",
+        ] {
             match extract(token).await {
                 Err(ApiError::Unauthorized(reason)) => assert!(!reason.is_empty()),
                 Err(other) => panic!("token {token:.20}…: expected 401, got {other:?}"),

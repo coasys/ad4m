@@ -9,28 +9,29 @@
 //! - The admin credential is the operator. An executor without one treats no token on a
 //!   loopback listener as the operator (#1059).
 //! - Any other caller without a token is anonymous.
-//! - A token that is revoked, past its expiry or does not decode opens no session.
-//! - A token that names a user (`sub`) acts as that user's managed agent, whose DID must
-//!   load. Any other token acts as the main agent. Both are limited to the token's
-//!   capabilities.
+//! - A token that does not decode or is past its expiry opens no session, and neither does
+//!   one without an active grant (`agent::grants`): grants are the allowlist, so a revoked,
+//!   removed or never-recorded token is refused.
+//! - A grant on a managed agent acts as that user's agent, whose DID must load. Any other
+//!   grant acts as the main agent. Both are limited to the grant's capabilities.
 //!
 //! A token that opens no session is refused where it arrives. [`Session::check`] runs again
 //! on every request and every delivered event. MCP still resolves its tokens itself
 //! (`capabilities_from_token`, `AgentContext::from_auth_token`).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+use tokio_util::sync::CancellationToken;
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
-    require_capability, Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY,
-    TOKEN_EXPIRY_LEEWAY_SECONDS,
+    require_capability, Capability, ListenerReach, ALL_CAPABILITY,
 };
-use super::revoked::{RevokedSet, SessionCutoffs};
+use super::grants::{Grants, LiveGrant};
 use super::{did_for_context, AgentContext, AgentService};
 use crate::events::{Audience, Event};
 
-/// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. Revocation by id needs no
-/// change to the token format.
+/// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. It names the token's grant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TokenId(pub String);
 
@@ -51,7 +52,8 @@ pub enum Principal {
 /// Why a token opens no session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthError {
-    /// The operator revoked the token.
+    /// The token has no active grant: revoked, removed, or never recorded (a user token
+    /// issued before grants).
     Revoked,
     /// The token's expiry has passed.
     Expired,
@@ -96,22 +98,17 @@ impl std::fmt::Display for AuthError {
 }
 
 /// A connection's identity, checked again on every request and every delivered event. It
-/// holds no token: revocation goes by the token's id.
+/// holds no token: a grant's session holds the grant.
 #[derive(Clone, Debug)]
 pub struct Session {
     pub principal: Principal,
     /// What the session may do: every capability for the operator, the anonymous set, or the
-    /// token's capabilities.
+    /// grant's capabilities.
     caps: Vec<Capability>,
-    /// The grant's token id. `None` for the operator and anonymous callers.
-    token_id: Option<TokenId>,
-    /// `None` for the operator and anonymous callers: they have no token that expires.
-    expires_at: Option<u64>,
-    /// When the token was issued (Unix seconds): a user's session cutoff revokes the tokens
-    /// issued at or before it. 0 for the operator and anonymous callers.
-    issued_at: u64,
-    /// The DID of the agent the session acts as. A managed agent's is set at open; the main
-    /// agent's is read once it exists (a socket can open before `agent.generate()`).
+    /// The grant the token acts within. `None` for the operator and anonymous callers.
+    grant: Option<Arc<LiveGrant>>,
+    /// The DID of the agent the session acts as. A grant's is set at open; the main agent's
+    /// is read once it exists for the operator (a socket can open before `agent.generate()`).
     did: OnceLock<String>,
 }
 
@@ -150,32 +147,30 @@ impl Session {
             }
         })?;
 
-        let token_id = TokenId(claims.nonce().to_string());
-        let issued_at = claims.issued_at();
-        let cut_off = |email: &str| SessionCutoffs::global().refuses(email, issued_at);
-        if RevokedSet::global().contains(&token_id) || claims.sub.as_deref().is_some_and(cut_off) {
+        // The allowlist: a token works only while its grant does. A token without one (revoked
+        // and removed, or a user token from before grants) is refused.
+        let grant = Grants::global()
+            .get(&TokenId(claims.nonce().to_string()))
+            .ok_or(AuthError::Revoked)?;
+        if grant.agent.user_email != claims.sub {
             return Err(AuthError::Revoked);
         }
-        let expires_at = Some(claims.expires_at());
         let did = OnceLock::new();
-        let agent = match claims.sub {
+        match &grant.agent.user_email {
             Some(email) => {
-                let user_did = AgentService::get_user_did_by_email(&email)
+                let user_did = AgentService::get_user_did_by_email(email)
                     .map_err(|e| AuthError::NoIdentity(e.to_string()))?;
                 let _ = did.set(user_did);
-                AgentContext::for_user_email(email)
             }
-            None => AgentContext::main_agent(),
-        };
+            None if !grant.did.is_empty() => {
+                let _ = did.set(grant.did.clone());
+            }
+            None => {}
+        }
         Ok(Session {
-            principal: Principal::Agent(agent),
-            caps: claims
-                .capabilities
-                .capabilities
-                .unwrap_or_else(|| vec![AGENT_AUTH_CAPABILITY.clone()]),
-            token_id: Some(token_id),
-            expires_at,
-            issued_at,
+            principal: Principal::Agent(grant.agent.clone()),
+            caps: grant.caps.clone(),
+            grant: Some(grant),
             did,
         })
     }
@@ -185,36 +180,28 @@ impl Session {
         Session {
             principal,
             caps,
-            token_id: None,
-            expires_at: None,
-            issued_at: 0,
+            grant: None,
             did: OnceLock::new(),
         }
     }
 
-    /// Fails once the token is revoked (by id, or for a user by the user's session cutoff)
-    /// or past its expiry. Needs no wallet: the signature was checked in [`Session::open`].
+    /// Fails once the grant is revoked or removed, or the token is past its expiry. Needs no
+    /// wallet and no lock: the signature was checked in [`Session::open`], and the grant
+    /// carries its own state.
     pub fn check(&self) -> Result<(), AuthError> {
-        let Principal::Agent(agent) = &self.principal else {
-            return Ok(());
-        };
-        let revoked = self
-            .token_id
-            .as_ref()
-            .is_some_and(|id| RevokedSet::global().contains(id));
-        let cut_off = agent
-            .user_email
-            .as_deref()
-            .is_some_and(|email| SessionCutoffs::global().refuses(email, self.issued_at));
-        if revoked || cut_off {
-            return Err(AuthError::Revoked);
+        match &self.grant {
+            Some(grant) => grant.holds(),
+            None => Ok(()),
         }
-        let now = super::revoked::now();
-        match self.expires_at {
-            Some(expires_at) if now > expires_at + TOKEN_EXPIRY_LEEWAY_SECONDS => {
-                Err(AuthError::Expired)
-            }
-            _ => Ok(()),
+    }
+
+    /// Fires when the session's grant ends (revoked or removed): each socket of the session
+    /// watches one and closes. Cancelling it ends only that socket. Never fires for the
+    /// operator and anonymous callers.
+    pub fn ended(&self) -> CancellationToken {
+        match &self.grant {
+            Some(grant) => grant.ended.child_token(),
+            None => CancellationToken::new(),
         }
     }
 
@@ -243,23 +230,17 @@ impl Session {
         self.caps.clone()
     }
 
-    /// The grant's token id: what a revocation names. `None` for the operator and anonymous
-    /// callers.
-    pub fn token_id(&self) -> Option<&TokenId> {
-        self.token_id.as_ref()
+    /// The grant the session acts within. `None` for the operator and anonymous callers.
+    pub fn grant(&self) -> Option<&Arc<LiveGrant>> {
+        self.grant.as_ref()
     }
 
-    /// A user session's token id and the token's expiry (Unix seconds): what `user.logout`
-    /// revokes.
-    pub fn user_token(&self) -> Option<(&TokenId, u64)> {
-        match (&self.principal, &self.token_id, self.expires_at) {
-            (
-                Principal::Agent(AgentContext {
-                    user_email: Some(_),
-                }),
-                Some(token_id),
-                Some(expires_at),
-            ) => Some((token_id, expires_at)),
+    /// A user session's grant: what `user.logout` revokes.
+    pub fn user_grant(&self) -> Option<&Arc<LiveGrant>> {
+        match &self.principal {
+            Principal::Agent(AgentContext {
+                user_email: Some(_),
+            }) => self.grant.as_ref(),
             _ => None,
         }
     }
@@ -319,15 +300,23 @@ impl Session {
 #[cfg(test)]
 impl Session {
     /// A session for `principal` that never expires and carries no raw token: every
-    /// capability for the operator, none otherwise. A grant gets a token id.
+    /// capability for the operator, none otherwise. An agent gets a grant that no store
+    /// holds.
     pub(crate) fn for_test(principal: Principal) -> Session {
         let caps = match principal {
             Principal::Operator => vec![ALL_CAPABILITY.clone()],
             _ => vec![],
         };
-        let token_id = matches!(principal, Principal::Agent(_)).then(|| TokenId("test".into()));
+        let grant = match &principal {
+            Principal::Agent(agent) => Some(Arc::new(LiveGrant::for_test(
+                "test",
+                agent.clone(),
+                u64::MAX,
+            ))),
+            _ => None,
+        };
         Session {
-            token_id,
+            grant,
             ..Session::without_token(principal, caps)
         }
     }
@@ -345,20 +334,22 @@ impl Session {
         }
     }
 
-    /// This grant with `token_id` as its token id.
-    pub(crate) fn with_token_id(self, token_id: &str) -> Session {
+    /// This session within `grant`.
+    pub(crate) fn with_grant(self, grant: Arc<LiveGrant>) -> Session {
         Session {
-            token_id: Some(TokenId(token_id.to_string())),
+            grant: Some(grant),
             ..self
         }
     }
 
-    /// This session with a token that expires at `expires_at` (Unix seconds).
+    /// This grant's session with a token that expires at `expires_at` (Unix seconds).
     pub(crate) fn expiring_at(self, expires_at: u64) -> Session {
-        Session {
-            expires_at: Some(expires_at),
-            ..self
-        }
+        let grant = self
+            .grant
+            .as_ref()
+            .expect("only a grant's session has a token that expires")
+            .expiring_at(expires_at);
+        self.with_grant(Arc::new(grant))
     }
 }
 
@@ -367,7 +358,7 @@ mod resolution_tests {
     //! One test per way a token resolves.
     use super::*;
     use crate::agent::capabilities::{
-        apps_map, get_user_default_capabilities, AuthInfo, AuthInfoExtended, ALL_CAPABILITY,
+        get_user_default_capabilities, AuthInfo, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY,
         PERSPECTIVE_CREATE_CAPABILITY, RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
         RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
     };
@@ -382,15 +373,11 @@ mod resolution_tests {
     fn app_token(capabilities: Option<Vec<Capability>>) -> String {
         setup_wallet();
         setup_agent();
-        crate::agent::capabilities::token::generate_jwt(
-            "an app".to_string(),
-            3600,
-            AuthInfo {
-                capabilities,
-                ..AuthInfo::default()
-            },
-        )
-        .unwrap()
+        crate::test_utils::granted_token(AuthInfo {
+            app_name: "an app".to_string(),
+            capabilities,
+            ..AuthInfo::default()
+        })
     }
 
     /// `Capability` has no `PartialEq`: tests compare capability lists by their debug form.
@@ -494,7 +481,7 @@ mod resolution_tests {
                         );
                     }
                     assert_eq!(session.user(), None, "{case}");
-                    assert_eq!(session.expires_at, None, "{case}");
+                    assert!(session.grant().is_none(), "{case}");
                     assert!(session.check().is_ok(), "{case}");
                 }
             }
@@ -567,17 +554,20 @@ mod resolution_tests {
                 !session.may(&ALL_CAPABILITY),
                 "a user never holds every capability"
             );
-            assert!(session.expires_at.is_some(), "a user token expires");
+            assert!(
+                session.grant().is_some_and(|g| g.expires_at > 0),
+                "a user token expires"
+            );
             assert!(session.check().is_ok());
         }
     }
 
+    // A user whose key went after the login: the grant stays, the identity does not load.
     #[test]
     fn a_user_whose_did_does_not_load_opens_no_session() {
         setup_wallet();
         setup_agent();
-        let token =
-            crate::user_management::generate_user_jwt("session.nokey@example.org", "test").unwrap();
+        let token = crate::test_utils::token_of_a_user_without_a_key("session.nokey@example.org");
         let err = Session::open(&token, &admin(), ListenerReach::Network).unwrap_err();
         assert!(matches!(err, AuthError::NoIdentity(_)), "{err:?}");
     }
@@ -636,60 +626,102 @@ mod resolution_tests {
         assert!(Session::open(&token, &admin(), ListenerReach::Network).is_ok());
     }
 
-    /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.
-    fn approved_app() -> (String, String) {
-        crate::test_utils::use_test_apps_file();
-        let token = app_token(None);
-        let request_id = format!("session-{}", uuid::Uuid::new_v4());
-        let app = AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: AuthInfo::default(),
-        };
-        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
-        (request_id, token)
+    fn revoke(token: &str) {
+        let grants = Grants::global();
+        grants.revoke(&grants.find(token)).unwrap();
+    }
+
+    // The allowlist: a token the executor signed but holds no grant for (a user token from
+    // before grants, D4) opens no session.
+    #[test]
+    fn a_signed_token_without_a_grant_opens_no_session() {
+        setup_wallet();
+        setup_agent();
+        let (token, _) =
+            crate::agent::capabilities::token::sign_token("no grant".to_string(), 3600, None)
+                .unwrap();
+        for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+            let err = Session::open(&token, &admin(), reach).unwrap_err();
+            assert_eq!(err, AuthError::Revoked);
+            assert_eq!(err.close_code(), 1008);
+        }
     }
 
     #[test]
     fn a_revoked_token_opens_no_session_and_ends_an_open_one() {
-        let (request_id, token) = approved_app();
+        let token = app_token(None);
         let open = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
+        let socket = open.ended();
 
-        apps_map::revoke_app(&request_id).unwrap();
+        revoke(&token);
         assert_eq!(open.check().unwrap_err(), AuthError::Revoked);
+        assert!(socket.is_cancelled(), "the session's sockets end");
         assert_eq!(
             Session::open(&token, &admin(), ListenerReach::Network).unwrap_err(),
             AuthError::Revoked
         );
-        apps_map::remove_app(&request_id).unwrap();
     }
 
     // #396: removing a revoked app deleted the only record of the revocation, so its token
-    // worked again until it expired.
+    // worked again until it expired. A removed grant refuses as a revoked one does.
     #[test]
-    fn a_revoked_token_stays_revoked_after_its_app_is_removed() {
-        let (request_id, token) = approved_app();
-        let open = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
-
-        apps_map::revoke_app(&request_id).unwrap();
-        apps_map::remove_app(&request_id).unwrap();
-        assert_eq!(open.check().unwrap_err(), AuthError::Revoked);
-        assert_eq!(
-            Session::open(&token, &admin(), ListenerReach::Network).unwrap_err(),
-            AuthError::Revoked
-        );
+    fn a_removed_apps_token_stays_refused() {
+        for revoke_first in [true, false] {
+            let token = app_token(None);
+            let open = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
+            let grants = Grants::global();
+            let found = grants.find(&token);
+            if revoke_first {
+                grants.revoke(&found).unwrap();
+            }
+            grants.remove(&found).unwrap();
+            assert_eq!(open.check().unwrap_err(), AuthError::Revoked);
+            assert_eq!(
+                Session::open(&token, &admin(), ListenerReach::Network).unwrap_err(),
+                AuthError::Revoked
+            );
+        }
     }
 
     #[test]
     fn revoking_one_app_leaves_another_apps_token_working() {
-        let (revoked_id, _) = approved_app();
-        let (other_id, other_token) = approved_app();
-        let open = Session::open(&other_token, &admin(), ListenerReach::Network).unwrap();
+        let revoked = app_token(None);
+        let other = app_token(None);
+        let open = Session::open(&other, &admin(), ListenerReach::Network).unwrap();
 
-        apps_map::revoke_app(&revoked_id).unwrap();
+        revoke(&revoked);
         assert!(open.check().is_ok());
-        assert!(Session::open(&other_token, &admin(), ListenerReach::Network).is_ok());
-        apps_map::remove_app(&revoked_id).unwrap();
-        apps_map::remove_app(&other_id).unwrap();
+        assert!(!open.ended().is_cancelled());
+        assert!(Session::open(&other, &admin(), ListenerReach::Network).is_ok());
+    }
+
+    // Capabilities come from the grant, not the token: a token carries none.
+    #[test]
+    fn a_session_has_its_grants_capabilities() {
+        let token = app_token(Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
+        let claims = crate::agent::capabilities::read_stored_claims(&token).unwrap();
+        let payload = token.split('.').nth(1).unwrap();
+        let raw =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+                .unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let mut fields: Vec<&str> = raw
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        fields.sort();
+        assert_eq!(fields, ["aud", "exp", "iat", "iss", "nonce", "sub"]);
+        let session = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
+        assert_eq!(
+            session.grant().unwrap().id,
+            TokenId(claims.nonce().to_string())
+        );
+        assert_eq!(
+            caps(&session),
+            caps_of(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()])
+        );
     }
 
     #[test]
@@ -779,7 +811,7 @@ mod resolution_tests {
         for grant in [&main, &user] {
             assert!(grant.is_authenticated());
             assert!(!grant.is_operator());
-            assert!(grant.token_id.is_some(), "a grant names its token");
+            assert!(grant.grant().is_some(), "a grant's session holds its grant");
         }
 
         let operator = Session::open(ADMIN, &admin(), ListenerReach::Network).unwrap();
@@ -787,7 +819,7 @@ mod resolution_tests {
         assert_eq!(operator.acts_as(), AgentContext::main_agent());
         assert_eq!(operator.acts_as_did(), Some(main_did.as_str()));
         assert_eq!(operator.user(), None);
-        assert!(operator.token_id.is_none());
+        assert!(operator.grant().is_none());
     }
 
     #[test]

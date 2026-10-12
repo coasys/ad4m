@@ -37,7 +37,6 @@ use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
 use crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY;
-use crate::agent::session_registry::SessionRegistry;
 use crate::ai_service::AIService;
 use crate::api::errors::ApiError;
 use crate::types::{ModelType, RequestContext};
@@ -71,9 +70,8 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
         return;
     }
     let session = caller.session.clone();
-    // Fires when the token is revoked: the socket closes at once, not at the next message.
-    let revoked = tokio_util::sync::CancellationToken::new();
-    let _registered = SessionRegistry::global().register(&session, revoked.clone());
+    // Fires when the grant ends: the socket closes at once, not at the next message.
+    let revoked = session.ended();
     // Set when the token stopped working: the socket then closes with 1008.
     let mut token_ended = false;
 
