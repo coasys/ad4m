@@ -393,6 +393,51 @@ impl Wallet {
             .map(|keys| keys.by_name.keys().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Store the key named `from` under `to` as well.
+    pub fn copy_key(&mut self, from: &str, to: &str) -> Result<(), AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        if keys.by_name.contains_key(to) {
+            return Err(anyhow!("a key named {} already exists", to));
+        }
+        let key = keys
+            .by_name
+            .get(from)
+            .cloned()
+            .ok_or_else(|| anyhow!("no key named {}", from))?;
+        keys.by_name.insert(to.to_string(), key);
+        Ok(())
+    }
+
+    /// Remove the key named `name`.
+    pub fn remove_key(&mut self, name: &str) -> Result<(), AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        keys.by_name
+            .remove(name)
+            .map(|_| ())
+            .ok_or_else(|| anyhow!("no key named {}", name))
+    }
+
+    /// Generate a new keypair, store it under its own DID and return the DID.
+    pub fn generate_keypair_named_by_did(&mut self) -> Result<String, AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        let key = did_key::generate::<Ed25519KeyPair>(None);
+        let did = key.get_did_document(DID_DOCUMENT_CONFIG).id;
+        if keys.by_name.contains_key(&did) {
+            return Err(anyhow!("a key named {} already exists", did));
+        }
+        keys.by_name.insert(did.clone(), Key::from(key));
+        Ok(did)
+    }
 }
 
 // ── Key name constants ─────────────────────────────────────────────────────
@@ -479,6 +524,31 @@ pub trait WalletBackend: Send + Sync {
     /// LocalWallet overrides this to resolve the DID and import its keys.
     fn initialize_keys(&self, _name: &str, _did: &str) -> Option<did_key::Document> {
         None
+    }
+
+    // ── Key naming: a managed agent's key is named by its DID ────────
+
+    /// Whether this backend can store a key under a name of its choosing: `copy_key`,
+    /// `remove_key` and `generate_keypair_named_by_did` work. Shared mode: false (the
+    /// service creates keys under a name it is given and copies none).
+    fn can_rename_keys(&self) -> bool {
+        false
+    }
+
+    /// Store the key named `from` under `to` as well. Fails if `from` holds no key or `to`
+    /// already holds one.
+    fn copy_key(&self, _from: &str, _to: &str) -> Result<(), AnyError> {
+        Err(anyhow!("this wallet backend cannot copy keys"))
+    }
+
+    /// Remove the key named `name`. Fails if there is none.
+    fn remove_key(&self, _name: &str) -> Result<(), AnyError> {
+        Err(anyhow!("this wallet backend cannot remove keys"))
+    }
+
+    /// Generate a new Ed25519 keypair, store it under its own DID, and return the DID.
+    fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
+        Err(anyhow!("this wallet backend cannot name keys by DID"))
     }
 }
 
@@ -644,6 +714,25 @@ impl WalletBackend for LocalWallet {
     fn initialize_keys(&self, name: &str, did: &str) -> Option<did_key::Document> {
         let mut wallet = self.inner.lock().expect("wallet lock");
         wallet.initialize_keys(name.to_string(), did.to_string())
+    }
+
+    fn can_rename_keys(&self) -> bool {
+        true
+    }
+
+    fn copy_key(&self, from: &str, to: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.copy_key(from, to)
+    }
+
+    fn remove_key(&self, name: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.remove_key(name)
+    }
+
+    fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.generate_keypair_named_by_did()
     }
 }
 

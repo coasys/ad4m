@@ -30,6 +30,8 @@ use crate::api::perspectives_ws::PerspectiveUuidParams;
 use crate::api::ws_handler::{build_handler_map, HandlerMap, NoParams, WsRpcError};
 use crate::types::{PerspectiveHandle, RequestContext};
 
+/// The matrix's user: its login name (the email) and its agent (the DID, D16). The world
+/// records the account, so the email resolves to the DID where a caller names a user by email.
 pub(super) const USER_EMAIL: &str = "user@example.org";
 pub(super) const USER_DID: &str = "did:key:matrix-user";
 pub(super) const OTHER_USER_EMAIL: &str = "other@example.org";
@@ -617,10 +619,8 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
         Caller::Operator => RequestContext::operator_for_test(),
         Caller::AppWithout => RequestContext::app_for_test(vec![]),
         Caller::AppWith => RequestContext::app_for_test(caps()),
-        Caller::User => RequestContext::user_for_test(USER_EMAIL, USER_DID, caps()),
-        Caller::OtherUser => {
-            RequestContext::user_for_test(OTHER_USER_EMAIL, OTHER_USER_DID, caps())
-        }
+        Caller::User => RequestContext::user_for_test(USER_DID, caps()),
+        Caller::OtherUser => RequestContext::user_for_test(OTHER_USER_DID, caps()),
         // The most a caller without a token holds: multi-user mode on adds signing up,
         // logging in and verifying an email.
         Caller::Anonymous => RequestContext::for_session(
@@ -655,6 +655,11 @@ impl World {
         {
             crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
         }
+        // The two users' accounts: an email names its user's agent only through `users`.
+        for (email, did) in [(USER_EMAIL, USER_DID), (OTHER_USER_EMAIL, OTHER_USER_DID)] {
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_user_prehashed(email, did, ""))
+                .expect("a user account");
+        }
         let main_did = AgentService::with_global_instance(|a| a.did.clone()).expect("main DID");
         let run = uuid::Uuid::new_v4();
         let task = |owner: Option<&str>| {
@@ -687,12 +692,12 @@ impl World {
             );
             id
         };
-        let user = || AgentContext::for_user_email(USER_EMAIL.to_string());
+        let user = || AgentContext::managed(USER_DID.to_string());
         let world = World {
             users_own: format!("{run}-users-own"),
             main_agents: format!("{run}-main-agents"),
             unowned: format!("{run}-unowned"),
-            users_task: task(Some(USER_EMAIL)),
+            users_task: task(Some(USER_DID)),
             operators_task: task(None),
             users_grant: grant("users", user()),
             main_agents_grant: grant("main", AgentContext::main_agent()),
@@ -1106,22 +1111,14 @@ async fn a_user_approves_and_revokes_only_their_own_agents_requests_and_grants()
     let world = World::new().await;
     let map = build_handler_map();
     let user_caps = crate::agent::capabilities::get_user_default_capabilities();
-    let alice = Arc::new(RequestContext::user_for_test(
-        USER_EMAIL,
-        USER_DID,
-        user_caps.clone(),
-    ));
-    let bob = Arc::new(RequestContext::user_for_test(
-        OTHER_USER_EMAIL,
-        OTHER_USER_DID,
-        user_caps,
-    ));
+    let alice = Arc::new(RequestContext::user_for_test(USER_DID, user_caps.clone()));
+    let bob = Arc::new(RequestContext::user_for_test(OTHER_USER_DID, user_caps));
     let operator = Arc::new(RequestContext::operator_for_test());
     let bobs_grant = format!("{}-bob-grant", uuid::Uuid::new_v4());
     Grants::global()
         .insert(LiveGrant::for_test(
             &bobs_grant,
-            AgentContext::for_user_email(OTHER_USER_EMAIL.to_string()),
+            AgentContext::managed(OTHER_USER_DID.to_string()),
             u64::MAX,
         ))
         .unwrap();

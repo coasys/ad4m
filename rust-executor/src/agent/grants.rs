@@ -125,8 +125,7 @@ impl LiveGrant {
         Ok(GrantRow {
             id: self.id.0.clone(),
             request_id: self.request_id.clone(),
-            agent_email: self.agent.user_email.clone(),
-            agent_did: self.did.clone(),
+            agent_did: self.agent.managed_did().map(str::to_string),
             auth_info: serde_json::to_string(&self.auth).map_err(|e| e.to_string())?,
             revoked: self.is_ended(),
             expires_at: self.expires_at,
@@ -137,15 +136,17 @@ impl LiveGrant {
     fn from_row(row: GrantRow) -> Result<LiveGrant, String> {
         let auth: AuthInfo = serde_json::from_str(&row.auth_info)
             .map_err(|e| format!("grant {}: unreadable auth info: {e}", row.id))?;
-        let agent = match row.agent_email {
-            Some(email) => AgentContext::for_user_email(email),
-            None => AgentContext::main_agent(),
+        // The table names only a managed agent's DID: a main-agent grant read back leaves
+        // its DID to the session, which reads the main agent's.
+        let (agent, did) = match row.agent_did {
+            Some(did) => (AgentContext::managed(did.clone()), did),
+            None => (AgentContext::main_agent(), String::new()),
         };
         let grant = LiveGrant::new(
             TokenId(row.id),
             row.request_id,
             agent,
-            row.agent_did,
+            did,
             auth,
             row.expires_at,
             row.created_at,
@@ -383,13 +384,11 @@ pub fn mint(
     let (token, claims) = super::capabilities::token::sign_token(
         auth.app_name.clone(),
         valid_for,
-        agent.user_email.clone(),
+        agent.managed_did().map(str::to_string),
     )
     .map_err(|e| e.to_string())?;
-    let did = match &agent.user_email {
-        Some(email) => {
-            super::AgentService::get_user_did_by_email(email).map_err(|e| e.to_string())?
-        }
+    let did = match agent.managed_did() {
+        Some(did) => did.to_string(),
         None => claims.issuer().to_string(),
     };
     let id = claims.nonce().to_string();
@@ -440,8 +439,7 @@ pub fn migrate_apps_file(db: &Ad4mDb, apps_file: &Path) -> Result<usize, String>
         let row = GrantRow {
             id: claims.nonce().to_string(),
             request_id,
-            agent_email: None,
-            agent_did: claims.issuer().to_string(),
+            agent_did: None,
             auth_info: serde_json::to_string(&auth).map_err(|e| e.to_string())?,
             revoked: app.revoked,
             expires_at: claims.expires_at(),
@@ -490,7 +488,10 @@ mod tests {
     }
 
     fn user(name: &str) -> AgentContext {
-        AgentContext::for_user_email(format!("{name}-{}@example.org", uuid::Uuid::new_v4()))
+        AgentContext::managed(format!(
+            "did:key:z6Mk{name}{}",
+            uuid::Uuid::new_v4().simple()
+        ))
     }
 
     #[test]
@@ -649,8 +650,7 @@ mod tests {
         let row = |id: &str, expires_at: u64| GrantRow {
             id: id.into(),
             request_id: id.into(),
-            agent_email: None,
-            agent_did: "did:key:main".into(),
+            agent_did: None,
             auth_info: serde_json::to_string(&AuthInfo::default()).unwrap(),
             revoked: false,
             expires_at,
@@ -746,7 +746,8 @@ mod tests {
             .expect("the app's token keeps working");
         assert_eq!(app.agent, AgentContext::main_agent());
         assert_eq!(app.request_id, "req-live-app");
-        assert_eq!(app.did, "did:key:the-main-agent");
+        // The table names the main agent by `NULL`; a session reads the main agent's DID.
+        assert_eq!(app.did, "");
         assert_eq!(
             format!("{:?}", app.caps),
             format!("{:?}", vec![AGENT_READ_CAPABILITY.clone()])
@@ -768,5 +769,133 @@ mod tests {
         let (_, live, _) = old_registry(dir.path());
         let claims = read_stored_claims(&live).expect("old claims decode");
         assert_eq!(claims.expires_at(), claims.issued_at() + 3600);
+    }
+
+    /// D16: grants stored before agents were keyed by DID name a managed agent by its user's
+    /// email (`agent_email`) and carry `agent_did NOT NULL`. A start moves them to `agent_did`
+    /// alone (`NULL` for the main agent), and their tokens still open sessions as the same
+    /// agents: a login whose `sub` is the email, and an app on the main agent.
+    #[test]
+    fn grants_keyed_by_email_move_to_the_did_and_their_tokens_act_as_the_same_agents() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::{Principal, Session};
+        setup();
+        let email = format!(
+            "grants-by-email-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        );
+        let did = crate::test_utils::create_test_user(&email);
+        // Tokens as the executor minted them then: a login names the user by email.
+        let sign = |sub: Option<String>| {
+            super::super::capabilities::token::sign_token("old".to_string(), 3600, sub).unwrap()
+        };
+        let (login, login_claims) = sign(Some(email.clone()));
+        let (login_without_did, second_claims) = sign(Some(email.clone()));
+        let (app, app_claims) = sign(None);
+        let (_, orphan_claims) = sign(Some("gone@example.org".to_string()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m.db");
+        let path = path.to_str().unwrap();
+        Ad4mDb::new(path)
+            .unwrap()
+            .add_user_prehashed(&email, &did, "hash")
+            .unwrap();
+        {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE grants;
+                 CREATE TABLE grants (
+                    id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    agent_email TEXT,
+                    agent_did TEXT NOT NULL,
+                    auth_info TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+                    expires_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX idx_grants_agent_email ON grants(agent_email);",
+            )
+            .unwrap();
+            let auth =
+                serde_json::to_string(&auth("old", vec![AGENT_READ_CAPABILITY.clone()])).unwrap();
+            for (claims, agent_email, agent_did) in [
+                (&login_claims, Some(email.as_str()), did.as_str()),
+                (&second_claims, Some(email.as_str()), ""),
+                (&app_claims, None, app_claims.issuer()),
+                (&orphan_claims, Some("gone@example.org"), ""),
+            ] {
+                conn.execute(
+                    "INSERT INTO grants VALUES (?1, ?1, ?2, ?3, ?4, 'active', ?5, ?6)",
+                    rusqlite::params![
+                        claims.nonce(),
+                        agent_email,
+                        agent_did,
+                        auth,
+                        claims.expires_at() as i64,
+                        claims.issued_at() as i64
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let db = Ad4mDb::new(path).unwrap();
+        let columns: Vec<String> = rusqlite::Connection::open(path)
+            .unwrap()
+            .prepare("SELECT name FROM pragma_table_info('grants')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!columns.contains(&"agent_email".to_string()), "{columns:?}");
+        let by_id = |claims: &super::super::capabilities::Claims| {
+            db.grants()
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id == claims.nonce())
+                .map(|row| row.agent_did)
+        };
+        assert_eq!(by_id(&login_claims), Some(Some(did.clone())));
+        assert_eq!(
+            by_id(&second_claims),
+            Some(Some(did.clone())),
+            "an empty DID is filled from the user"
+        );
+        assert_eq!(by_id(&app_claims), Some(None), "the main agent is NULL");
+        assert_eq!(
+            by_id(&orphan_claims),
+            None,
+            "a grant no user owns is dropped"
+        );
+
+        // A second start changes nothing.
+        drop(db);
+        let db = Ad4mDb::new(path).unwrap();
+        assert_eq!(db.grants().unwrap().len(), 3);
+
+        Grants::global().load(&db).unwrap();
+        for token in [&login, &login_without_did] {
+            let session = Session::open(token, &None, ListenerReach::Network).unwrap();
+            assert_eq!(
+                session.principal,
+                Principal::Agent(AgentContext::managed(did.clone()))
+            );
+            assert_eq!(session.acts_as_did(), Some(did.as_str()));
+        }
+        let session = Session::open(&app, &None, ListenerReach::Network).unwrap();
+        assert_eq!(
+            session.principal,
+            Principal::Agent(AgentContext::main_agent())
+        );
+        assert!(session.may(&AGENT_READ_CAPABILITY));
+        assert_eq!(
+            Grants::global()
+                .list(&AgentContext::managed(did.clone()))
+                .len(),
+            2
+        );
     }
 }

@@ -77,7 +77,7 @@ impl Executor {
         let token = crate::user_management::generate_user_jwt(&email, "isolation-test")
             .expect("user token");
         let session = session_for(&token);
-        assert_eq!(session.user_email(), Some(email.as_str()));
+        assert_eq!(session.user_did(), Some(did.as_str()));
         User {
             email,
             did,

@@ -371,7 +371,7 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     // redeems; the approval request and `apps-changed` reach the user's stream.
     let user_app_request = request_capability(
         app_auth.clone(),
-        AgentContext::for_user_email(user_email.clone()),
+        crate::agent::AgentService::managed_agent_for_email(&user_email).unwrap(),
     )
     .await;
     let user_app_code = answer(

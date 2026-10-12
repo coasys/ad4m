@@ -86,11 +86,8 @@ async fn operator_only_methods_refuse_an_app_holding_every_capability_and_users(
     let mut map = HandlerMap::new();
     register_ws_handlers(&mut map);
     let app = RequestContext::app_for_test(vec![ALL_CAPABILITY.clone()]);
-    let user = RequestContext::user_for_test(
-        "operator-only@example.org",
-        "did:key:operator-only",
-        get_user_default_capabilities(),
-    );
+    let user =
+        RequestContext::user_for_test("did:key:operator-only", get_user_default_capabilities());
     for (method, params) in [
         ("runtime.openLink", json!({ "url": "https://example.org" })),
         ("runtime.restartHolochain", json!({})),

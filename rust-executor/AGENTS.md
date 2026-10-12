@@ -36,7 +36,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `prolog_service/` | Scryer Prolog engine pools. **Disabled by default** (`PROLOG_MODE`), kept as an option | `src/prolog_service/AGENTS.md` |
 | `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
-| `agent/` | Agent keys/DID, signing, multi-user (managed users by email), `capabilities/` (auth tokens, capability defs) | — |
+| `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
 | `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event, plus one string topic for live query updates until #1207; feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
@@ -59,36 +59,57 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   language runtime, so third-party language code reaches every op: an op that signs must sign as
   `get_runtime_agent_context()`, never as the main agent directly.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
-- **Agents and sessions**: an executor hosts N agents. `AgentContext` (`agent/mod.rs`) names one:
-  the main agent (agent #0, `user_email: None`, `is_main_agent()`), or a user's managed agent.
+- **Agents and sessions**: an executor hosts N agents, and **an agent is its DID**.
+  `AgentContext` (`agent/mod.rs`) is `Main` (agent #0, `is_main_agent()`) or `Managed { did }`
+  (`managed_did()`). An email is only the login name of the user account that owns a managed
+  agent: it resolves to the DID once, where a caller names an address (login, signup, email
+  verification, `runtime.computeLog { userEmail }`, the language host's `*ForUser(email)` ops) via
+  `AgentService::did_for_email` / `managed_agent_for_email`. Code that needs an address (SMTP,
+  hosting info, the profile directory) looks it up with `AgentService::email_for_did`; nothing
+  else carries an email. `users.did` is unique (partial index, empty DIDs excluded).
   `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
   credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
-  (a grant on the main agent or on a user's agent), or `Principal::Anonymous`. Capabilities, the
-  grant and the agent's DID are `Session` fields. Read identity with `acts_as()` /
-  `acts_as_did()` / `user()` / `is_operator()`; never decode the token again. Any
-  signing/DID/billing path takes the `AgentContext` explicitly.
+  (a grant on the main agent or on a managed agent, by DID), or `Principal::Anonymous`.
+  Capabilities, the grant and the agent's DID are `Session` fields. Read identity with
+  `acts_as()` / `acts_as_did()` / `managed_did()` / `is_operator()`; never decode the token
+  again. Any signing/DID/billing path takes the `AgentContext` explicitly.
 - **Grants** (`agent/grants.rs`, table `grants` in `db/grants.rs`) are the one allowlist of
   tokens: a token (id = its `nonce`) opens a session only while its grant exists, is active and
   has not expired, and the session's capabilities are the grant's (tokens carry `iss, aud, iat,
-  exp, nonce, sub` only). Both mint paths go through `grants::mint`: the app capability flow (a
-  grant on the main agent) and a user login (an auto-approved grant on that user's agent). The
-  admin credential is no token. Revoking or removing a grant cancels its `ended` token, which
-  every socket of the session watches through `Session::ended()`. Start-up moves the old app
-  registry (`apps_data.json`, renamed `.migrated`) into grant rows and drops expired rows. Tests
+  exp, nonce, sub` only). A grant names its agent by `agent_did` (`NULL` = the main agent); a
+  token's `sub` must name the same agent: none for the main agent, the DID, or the owner's email
+  in user tokens minted before D16. Both mint paths go through `grants::mint`: the app
+  capability flow (a grant on the main agent) and a user login (an auto-approved grant on that
+  user's agent). The admin credential is no token. Revoking or removing a grant cancels its
+  `ended` token, which every socket of the session watches through `Session::ended()`.
+  Start-up moves the old app registry (`apps_data.json`, renamed `.migrated`) into grant rows,
+  moves `grants.agent_email` (PR 2 before D16) to `agent_did`, and drops expired rows. Tests
   mint with `test_utils::granted_token(auth)`; a token signed without a grant is refused.
+- **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
+  `AgentService::create_managed_agent_key` creates one under its DID,
+  `AgentService::wallet_key_for_did` finds it (cached; it accepts a key under the user's email only
+  if that key derives the DID: a shared wallet cannot rename keys). On every unlock
+  `migrate_managed_key_names` renames keys an older executor named by email: copy under the DID,
+  check the copy derives it, save, remove the old name, save. A key that derives another DID keeps
+  its name and its user's sessions fail with `NoIdentity`.
+- **Billing** is per agent: `billing::bill_compute(agent_did, ..)`, `compute_log.agent_did`,
+  `payment_requests.agent_did` (moved from `user_email` at start by
+  `Ad4mDb::migrate_user_email_to_agent_did`). Credits stay on the user's `users` row, reached by
+  DID (`get_agent_credits`, `deduct_credits_and_log`).
 - **Capabilities**: every WS method declares a guard where it registers (`api/guards.rs`); the
   dispatcher checks its capability (`agent/capabilities/defs.rs`) and ownership rule before the
   handler runs. A handler calls `ctx.require(&X_CAPABILITY)` only for a check its guard does not
   make; `Session::may` answers the same question as a `bool`. MCP tools check via
   `Ad4mMcpHandler::get_*_perspective`.
 - **Per-agent objects**: a session reaches only its agent's; the operator reaches all.
-  Perspectives are owned by DID (`owners`; none = the main agent), AI tasks by email
-  (`tasks.user_email`; none = the main agent), grants and capability requests by their agent.
-  A WS method that names one declares `Guard::Owns` (`api/AGENTS.md`); missing and not yours
-  are both 404. The capability check alone does not
+  Perspectives are owned by DID (`owners`; none = the main agent), AI tasks by DID
+  (`tasks.agent_did`; `NULL` = the main agent; moved from `user_email` at start by
+  `Ad4mDb::migrate_task_owner_to_agent_did`), grants and capability requests by their agent's
+  DID. A WS method that names one declares `Guard::Owns` (`api/AGENTS.md`); missing and not
+  yours are both 404. The capability check alone does not
   separate users: user tokens hold wildcard perspective, neighbourhood and AI capabilities.
 - **Capability requests** (#1399, executor side): `agent.requestCapability(authInfo, agent?)`
-  names a target agent (a managed user's email; absent = the main agent) and records a
+  names a target agent (a managed agent's DID, or its user's email, resolved to the DID at once; absent = the main agent) and records a
   `PendingRequest` in memory only (`agent/capabilities/pending.rs`: never on disk, anonymous
   callers create them; 1024 at most, unapproved evicted first). The approval request event goes to
   the target agent's DID with `AGENT_PERMIT`. `agent.permitCapability` (the operator, or a

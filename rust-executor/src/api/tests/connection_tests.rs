@@ -25,7 +25,7 @@ const DID: &str = "did:key:alice";
 /// The event stream's session: the user `did`, whose token nobody revokes and which never
 /// expires.
 fn listener(did: &str) -> Arc<Session> {
-    let user = Principal::Agent(AgentContext::for_user_email(format!("{did}@example.org")));
+    let user = Principal::Agent(AgentContext::managed(did.to_string()));
     Arc::new(
         Session::for_test(user)
             .with_caps(get_user_default_capabilities())

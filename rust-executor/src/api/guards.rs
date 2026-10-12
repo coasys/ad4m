@@ -65,7 +65,7 @@ pub enum Owner {
     /// A perspective: its owners (DIDs); one without owners is the main agent's
     /// (`helpers::can_access_perspective_with_did`).
     Perspective,
-    /// An AI task: its `user_email`; none is the main agent's.
+    /// An AI task: its `agent_did`; none is the main agent's.
     Task,
     /// A grant, named by its token or its request id (`Grants::find`): the grant's agent.
     Grant,
@@ -189,7 +189,7 @@ pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), Ws
             let Some(task_owner) = task_owner else {
                 return Err(not_found());
             };
-            task_owner == agent.user_email
+            task_owner.as_deref() == agent.managed_did()
         }
         Owner::Grant => {
             let grants = Grants::global().find(id);
@@ -200,7 +200,9 @@ pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), Ws
         }
         Owner::Request => match crate::agent::capabilities::request_target(id) {
             None => return Err(not_found()),
-            Some(target) => target == agent,
+            // The same DID; a request for an email without an agent (`NoAgent`) is the
+            // operator's alone.
+            Some(target) => target.agent() == Some(&agent),
         },
     };
     if ctx.is_operator() || (ctx.session.is_authenticated() && owned) {
@@ -218,11 +220,7 @@ mod tests {
     async fn an_executor_guard_refuses_user_sessions_and_names_the_method() {
         let update = crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone();
         let lock = Guard::Executor(update.clone());
-        let user = RequestContext::user_for_test(
-            "alice@example.org",
-            "did:key:alice",
-            vec![update.clone()],
-        );
+        let user = RequestContext::user_for_test("did:key:alice", vec![update.clone()]);
         let err = lock
             .admit("agent.lock", &Value::Null, &user)
             .await

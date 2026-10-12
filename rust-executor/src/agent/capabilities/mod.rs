@@ -5,6 +5,7 @@ pub mod types;
 
 pub use defs::*;
 use pending::PendingRequests;
+pub use pending::RequestTarget;
 pub use pending::MAX_CODE_ATTEMPTS;
 pub use token::*;
 #[allow(ambiguous_glob_reexports)]
@@ -24,7 +25,7 @@ use tokio::sync::RwLock;
 pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in seconds
 
 // Cache for last_seen timestamps to avoid repeated database lookups
-// Maps user_email -> (last_checked_timestamp, last_seen_value)
+// Maps agent DID -> (last_checked_timestamp, last_seen_value)
 #[derive(Clone)]
 struct LastSeenCacheEntry {
     last_checked: i64,    // When we last checked the database
@@ -127,19 +128,20 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
 pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 
-/// Update the last_seen timestamp of the user the caller's session names.
+/// Update the last_seen timestamp of the account that owns the managed agent `agent_did`, the
+/// agent the caller's session acts as.
 /// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
-pub async fn track_last_seen(user_email: &str) {
+pub async fn track_last_seen(agent_did: &str) {
     use crate::db::Ad4mDb;
 
-    let user_email = user_email.to_string();
+    let agent_did = agent_did.to_string();
     let now = chrono::Utc::now().timestamp();
 
     // Check cache first (non-blocking read)
     {
         let cache = LAST_SEEN_CACHE.read().await;
-        if let Some(entry) = cache.get(&user_email) {
+        if let Some(entry) = cache.get(&agent_did) {
             let cache_age = now - entry.last_checked;
             if cache_age < CACHE_TTL_SECONDS {
                 // Cache is fresh, check if update is needed based on cached value
@@ -148,7 +150,7 @@ pub async fn track_last_seen(user_email: &str) {
                     // Still inside the throttle period, no need to update
                     log::trace!(
                         "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
-                        user_email, entry.last_seen_value, time_since_last_seen
+                        agent_did, entry.last_seen_value, time_since_last_seen
                     );
                     return;
                 }
@@ -158,10 +160,10 @@ pub async fn track_last_seen(user_email: &str) {
 
     // Cache miss or stale - need to check database
     // Use spawn_blocking to avoid blocking the async runtime
-    let user_email_clone = user_email.clone();
+    let agent_did_clone = agent_did.clone();
     let should_update = tokio::task::spawn_blocking(move || {
         Ad4mDb::with_global_instance(|db| {
-            if let Ok(user) = db.get_user(&user_email_clone) {
+            if let Ok(Some(user)) = db.get_user_by_did(&agent_did_clone) {
                 if let Some(last_seen) = user.last_seen {
                     let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
 
@@ -170,7 +172,7 @@ pub async fn track_last_seen(user_email: &str) {
                     let should_update = if last_seen > now + 60 {
                         log::warn!(
                             "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                            user_email_clone, last_seen
+                            agent_did_clone, last_seen
                         );
                         true
                     } else {
@@ -178,19 +180,19 @@ pub async fn track_last_seen(user_email: &str) {
                     };
 
                     log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                        user_email_clone, last_seen, throttle_cutoff, should_update);
+                        agent_did_clone, last_seen, throttle_cutoff, should_update);
                     (should_update, Some(last_seen))
                 } else {
                     log::debug!(
                         "last_seen tracking for {}: never seen before, updating now",
-                        user_email_clone
+                        agent_did_clone
                     );
                     (true, None) // Never updated, do it now
                 }
             } else {
                 log::warn!(
-                    "last_seen tracking: user {} not found in database",
-                    user_email_clone
+                    "last_seen tracking: no user owns the agent {}",
+                    agent_did_clone
                 );
                 (false, None) // User not found
             }
@@ -213,7 +215,7 @@ pub async fn track_last_seen(user_email: &str) {
     if let Some(last_seen_val) = last_seen_value {
         let mut cache = LAST_SEEN_CACHE.write().await;
         cache.insert(
-            user_email.clone(),
+            agent_did.clone(),
             LastSeenCacheEntry {
                 last_checked: now,
                 last_seen_value: last_seen_val,
@@ -222,12 +224,12 @@ pub async fn track_last_seen(user_email: &str) {
     }
 
     if should_update {
-        log::debug!("Updating last_seen for user: {}", user_email);
+        log::debug!("Updating last_seen for agent: {}", agent_did);
 
         // Perform the update in spawn_blocking
-        let user_email_for_update = user_email.clone();
+        let agent_did_for_update = agent_did.clone();
         let update_result = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
+            Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(&agent_did_for_update))
         })
         .await;
 
@@ -236,7 +238,7 @@ pub async fn track_last_seen(user_email: &str) {
                 // Update succeeded, refresh cache with new timestamp
                 let mut cache = LAST_SEEN_CACHE.write().await;
                 cache.insert(
-                    user_email,
+                    agent_did,
                     LastSeenCacheEntry {
                         last_checked: now,
                         last_seen_value: now,
@@ -245,15 +247,15 @@ pub async fn track_last_seen(user_email: &str) {
             }
             Ok(Err(e)) => {
                 log::error!(
-                    "Failed to update last_seen for user {}: {:?}",
-                    user_email,
+                    "Failed to update last_seen for agent {}: {:?}",
+                    agent_did,
                     e
                 );
             }
             Err(e) => {
                 log::error!(
-                    "Failed to update last_seen for user {} (spawn_blocking join error): {:?}",
-                    user_email,
+                    "Failed to update last_seen for agent {} (spawn_blocking join error): {:?}",
+                    agent_did,
                     e
                 );
             }
@@ -289,42 +291,62 @@ pub fn anonymous_capabilities_when(multi_user_enabled: bool) -> Vec<Capability> 
     }
 }
 
-/// The agent that a capability request names (#1399, D11): `agent` is a managed user's email
-/// or an agent's DID; absent or empty, the main agent. An email is taken as it is, whether or
-/// not a user has it: anyone may request, and an answer that differed would tell them which
-/// emails have accounts. A request for an email without a user reaches no one and expires. A
-/// DID (public anyway) must be the main agent's or a user's.
-pub fn requested_agent(agent: Option<&str>) -> Result<AgentContext, String> {
+/// The agent that a capability request names (#1399, D11, D16): `agent` is a managed user's
+/// email or an agent's DID; absent or empty, the main agent. An email resolves to its user's
+/// DID here, at the edge; an email no user has is taken all the same, as
+/// [`RequestTarget::NoAgent`]: anyone may request, and an answer that differed would tell
+/// them which emails have accounts. Such a request reaches no one and expires. A DID (public
+/// anyway) must be the main agent's or a user's.
+pub fn requested_agent(agent: Option<&str>) -> Result<RequestTarget, String> {
     let Some(agent) = agent.map(str::trim).filter(|agent| !agent.is_empty()) else {
-        return Ok(AgentContext::main_agent());
+        return Ok(AgentContext::main_agent().into());
     };
     if !agent.starts_with("did:") {
-        return Ok(AgentContext::for_user_email(agent.to_lowercase()));
+        return Ok(
+            match crate::agent::AgentService::did_for_email(&agent.to_lowercase()) {
+                Ok(did) => AgentContext::managed(did).into(),
+                Err(_) => RequestTarget::NoAgent,
+            },
+        );
     }
     if crate::agent::did_for_context(&AgentContext::main_agent()).is_ok_and(|did| did == agent) {
-        return Ok(AgentContext::main_agent());
+        return Ok(AgentContext::main_agent().into());
     }
-    crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(agent))
-        .map_err(|e| e.to_string())?
-        .map(AgentContext::for_user_email)
-        .ok_or_else(|| format!("No agent on this executor has the DID {agent}"))
+    match crate::agent::AgentService::email_for_did(agent) {
+        Ok(_) => Ok(AgentContext::managed(agent.to_string()).into()),
+        Err(_) => Err(format!("No agent on this executor has the DID {agent}")),
+    }
+}
+
+/// The email of the user who owns `agent`, as a display hint in the request and the grant's
+/// auth info (`AuthInfo.user_email`): the approver sees whose agent it is. Never a key: the
+/// agent is its DID (D16).
+fn display_email(agent: &AgentContext) -> Option<String> {
+    agent
+        .managed_did()
+        .and_then(|did| crate::agent::AgentService::email_for_did(did).ok())
 }
 
 /// Records an app's request for capabilities on the agent `target` and returns its id. The
 /// request waits in memory ([`pending`]) for the owner of `target` to approve it: the approval
-/// request event goes to `target`'s sessions that hold AGENT_PERMIT. No request is ever
-/// approved here: the app name and domain are whatever the (possibly anonymous) caller
-/// declares, so they never grant anything.
-pub async fn request_capability(auth_info: AuthInfo, target: AgentContext) -> String {
+/// request event goes to `target`'s sessions (by DID) that hold AGENT_PERMIT. A request for
+/// [`RequestTarget::NoAgent`] publishes nothing. No request is ever approved here: the app
+/// name and domain are whatever the (possibly anonymous) caller declares, so they never
+/// grant anything.
+pub async fn request_capability(auth_info: AuthInfo, target: impl Into<RequestTarget>) -> String {
+    let target = target.into();
     let request_id = uuid::Uuid::new_v4().to_string();
-    // The request names its agent in the auth info, so the approver sees whose it is.
+    // The request names its agent's user in the auth info, so the approver sees whose it is.
     let auth = AuthInfo {
-        user_email: target.user_email.clone(),
+        user_email: target.agent().and_then(display_email),
         ..auth_info
     };
     let pending = PendingRequests::global();
     pending.request(request_id.clone(), auth.clone(), target.clone(), now());
 
+    let Some(agent) = target.agent() else {
+        return request_id;
+    };
     let app_name = auth.app_name.clone();
     let auth_extended = AuthInfoExtended {
         request_id: request_id.clone(),
@@ -341,13 +363,13 @@ pub async fn request_capability(auth_info: AuthInfo, target: AgentContext) -> St
     };
     get_global_pubsub()
         .await
-        .publish_event(Event::approval_request(&exception_info, &target));
+        .publish_event(Event::approval_request(&exception_info, agent));
 
     request_id
 }
 
 /// The agent that the pending request `request_id` is for, while it waits.
-pub fn request_target(request_id: &str) -> Option<AgentContext> {
+pub fn request_target(request_id: &str) -> Option<RequestTarget> {
     PendingRequests::global().target(request_id, now())
 }
 
@@ -411,7 +433,7 @@ pub async fn generate_capability_token(request_id: String, code: String) -> Resu
             };
             let auth = AuthInfo {
                 capabilities,
-                user_email: target.user_email.clone(),
+                user_email: display_email(target),
                 ..auth.clone()
             };
             crate::agent::grants::mint(
@@ -925,22 +947,20 @@ mod app_token_tests {
     #[tokio::test]
     async fn a_request_for_a_managed_agent_mints_a_grant_on_it_with_the_approved_subset() {
         setup();
-        let alice = AgentContext::for_user_email(crate::test_utils::managed_user("req-alice"));
+        let alice_email = crate::test_utils::managed_user("req-alice");
+        let alice = crate::agent::AgentService::managed_agent_for_email(&alice_email).unwrap();
         let alice_did = crate::agent::did_for_context(&alice).unwrap();
         let mut events = get_global_pubsub().await.subscribe_events();
 
         let request_id = request_capability(test_auth_info(), alice.clone()).await;
-        assert_eq!(request_target(&request_id), Some(alice.clone()));
+        assert_eq!(request_target(&request_id), Some(alice.clone().into()));
         let event = approval_request(&mut events, &request_id, Duration::from_secs(5))
             .await
             .expect("the approval request is published");
         assert_eq!(event.audience, Audience::Dids(vec![alice_did.clone()]));
         assert_eq!(event.capability, *AGENT_PERMIT_CAPABILITY);
         assert!(
-            event
-                .payload
-                .to_string()
-                .contains(alice.user_email.as_deref().unwrap()),
+            event.payload.to_string().contains(&alice_email),
             "the approver sees whose agent the request is for: {}",
             event.payload
         );
@@ -965,7 +985,7 @@ mod app_token_tests {
         assert_eq!(caps_text(&grant.caps), caps_text(&subset));
         assert_eq!(
             decode_jwt(token).unwrap().sub.as_deref(),
-            alice.user_email.as_deref(),
+            Some(alice_did.as_str()),
             "the token names the agent it acts as"
         );
     }
@@ -974,7 +994,7 @@ mod app_token_tests {
     // user lacks. `*` narrows to the user's set; a capability outside it is dropped.
     #[test]
     fn a_grant_on_a_managed_agent_is_capped_at_its_users_capabilities() {
-        let alice = AgentContext::for_user_email("alice@example.org".into());
+        let alice = AgentContext::managed("did:key:z6MkAlice".into());
         let user = get_user_default_capabilities();
         assert_eq!(
             caps_text(&grant_caps_for(&alice, &[ALL_CAPABILITY.clone()])),
@@ -1003,7 +1023,10 @@ mod app_token_tests {
     #[tokio::test]
     async fn redeeming_caps_a_wider_approval_at_the_managed_agents_capabilities() {
         setup();
-        let alice = AgentContext::for_user_email(crate::test_utils::managed_user("cap-alice"));
+        let alice = crate::agent::AgentService::managed_agent_for_email(
+            &crate::test_utils::managed_user("cap-alice"),
+        )
+        .unwrap();
         let request_id = request_capability(test_auth_info(), alice.clone()).await;
         let code = permit_capability(AuthInfoExtended {
             request_id: request_id.clone(),
@@ -1029,7 +1052,10 @@ mod app_token_tests {
     #[tokio::test]
     async fn no_app_name_skips_the_owners_approval() {
         setup();
-        let alice = AgentContext::for_user_email(crate::test_utils::managed_user("claim-alice"));
+        let alice = crate::agent::AgentService::managed_agent_for_email(
+            &crate::test_utils::managed_user("claim-alice"),
+        )
+        .unwrap();
         let mut events = get_global_pubsub().await.subscribe_events();
 
         for target in [AgentContext::main_agent(), alice] {
@@ -1088,23 +1114,24 @@ mod app_token_tests {
     #[test]
     fn a_request_names_its_agent_by_email_or_did() {
         setup();
-        assert_eq!(requested_agent(None).unwrap(), AgentContext::main_agent());
-        assert_eq!(
-            requested_agent(Some(" ")).unwrap(),
-            AgentContext::main_agent()
-        );
-        assert_eq!(
-            requested_agent(Some(&crate::agent::did())).unwrap(),
-            AgentContext::main_agent()
-        );
+        let main: RequestTarget = AgentContext::main_agent().into();
+        assert_eq!(requested_agent(None).unwrap(), main);
+        assert_eq!(requested_agent(Some(" ")).unwrap(), main);
+        assert_eq!(requested_agent(Some(&crate::agent::did())).unwrap(), main);
         let email = crate::test_utils::managed_user("named");
-        let alice = AgentContext::for_user_email(email.clone());
+        let alice = crate::agent::AgentService::managed_agent_for_email(&email).unwrap();
         assert_eq!(
             requested_agent(Some(&format!(" {} ", email.to_uppercase()))).unwrap(),
-            alice
+            alice.clone().into()
         );
         let did = crate::agent::did_for_context(&alice).unwrap();
-        assert_eq!(requested_agent(Some(&did)).unwrap(), alice);
+        assert_eq!(requested_agent(Some(&did)).unwrap(), alice.into());
         assert!(requested_agent(Some("did:key:z6MkNoSuchAgent")).is_err());
+        // An email without a user is taken, as one for nobody: the answer does not say
+        // whether the email has an account.
+        assert_eq!(
+            requested_agent(Some("nobody-here@example.org")).unwrap(),
+            RequestTarget::NoAgent
+        );
     }
 }

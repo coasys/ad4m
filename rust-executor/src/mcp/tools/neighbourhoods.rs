@@ -384,7 +384,6 @@ mod guard_tests {
         let uuid = perspective(Some(vec![owner_did.into()])).await;
 
         let other = handler_as(user(
-            "other.publisher@example.org",
             "did:key:mcp-other-publisher",
             vec![ALL_CAPABILITY.clone()],
         ));
@@ -399,7 +398,6 @@ mod guard_tests {
         for session in [
             operator(),
             user(
-                "publisher@example.org",
                 owner_did,
                 vec![
                     NEIGHBOURHOOD_CREATE_CAPABILITY.clone(),
@@ -422,7 +420,6 @@ mod guard_tests {
         let owner_did = "did:key:mcp-publisher-without-language";
         let uuid = perspective(Some(vec![owner_did.into()])).await;
         let owner = handler_as(user(
-            "publisher.without.language@example.org",
             owner_did,
             vec![NEIGHBOURHOOD_CREATE_CAPABILITY.clone()],
         ));

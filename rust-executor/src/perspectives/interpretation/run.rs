@@ -1164,9 +1164,12 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
-    // A pass with a caller bills the user it acts as; the caller's session named that user.
-    // An executor-owned pass (no caller) bills no one.
-    let bill_to = context.user_email.clone().filter(|_| has_caller);
+    // A pass with a caller bills the agent it acts as (by DID); the caller's session named that
+    // agent. An executor-owned pass (no caller) bills no one.
+    let bill_to = context
+        .managed_did()
+        .map(str::to_string)
+        .filter(|_| has_caller);
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
@@ -1317,23 +1320,20 @@ async fn pass_owner_session(
         || main_did
             .as_deref()
             .is_some_and(|did| handle.is_owned_by(did));
-    let users: Vec<(String, String)> = handle
+    // Owners are agent DIDs (D16); the managed ones are those a user account holds.
+    let managed = crate::agent::AgentService::managed_agent_dids().unwrap_or_default();
+    let users: Vec<String> = handle
         .get_owners()
         .into_iter()
-        .filter_map(|did| {
-            crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(&did))
-                .ok()
-                .flatten()
-                .map(|email| (email, did))
-        })
+        .filter(|did| managed.contains(did))
         .collect();
     let own_user = users
         .iter()
-        .find(|(email, _)| context.user_email.as_ref() == Some(email));
+        .find(|did| context.managed_did() == Some(did.as_str()));
     let owner = own_user.or_else(|| users.first().filter(|_| !main_owns));
     match owner {
-        Some((email, did)) => Session::in_process(
-            AgentContext::for_user_email(email.clone()),
+        Some(did) => Session::in_process(
+            AgentContext::managed(did.clone()),
             crate::agent::capabilities::get_user_default_capabilities(),
         )
         .with_did(did),
@@ -1417,7 +1417,7 @@ mod pass_session_tests {
         Fixture { perspective, uuid }
     }
 
-    /// A managed user: a row in the users table, which maps the owner DID to the email.
+    /// A managed user: a row in the users table, which makes the owner DID a managed agent.
     fn managed_user(email: &str, did: &str) {
         let known = crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))
             .ok()
@@ -1543,20 +1543,20 @@ mod pass_session_tests {
     async fn a_tokenless_pass_acts_as_the_user_who_owns_the_perspective() {
         managed_user(A_EMAIL, A_DID);
         let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
-        let session = pass_handler(&a, &AgentContext::for_user_email(A_EMAIL.into()))
+        let session = pass_handler(&a, &AgentContext::managed(A_DID.into()))
             .await
             .session()
             .await
             .unwrap();
         assert!(!session.is_operator());
-        assert_eq!(session.user(), Some((A_EMAIL, A_DID)));
+        assert_eq!(session.managed_did(), Some(A_DID));
         // Run by the main agent's loop, it is still the owner.
         let session = pass_handler(&a, &AgentContext::main_agent())
             .await
             .session()
             .await
             .unwrap();
-        assert_eq!(session.user(), Some((A_EMAIL, A_DID)));
+        assert_eq!(session.managed_did(), Some(A_DID));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1564,7 +1564,7 @@ mod pass_session_tests {
         managed_user(A_EMAIL, A_DID);
         let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
         let b = b_perspective().await;
-        let handler = pass_handler(&a, &AgentContext::for_user_email(A_EMAIL.into())).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
 
         // The pass reads its own perspective.
         let described = handler
@@ -1640,7 +1640,7 @@ mod pass_session_tests {
         let names = |tools: Vec<crate::ai_service::harness::provider::ToolSchema>| {
             tools.into_iter().map(|t| t.name).collect::<Vec<_>>()
         };
-        let tokenless = pass_handler(&a, &AgentContext::for_user_email(A_EMAIL.into())).await;
+        let tokenless = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
         // A pass run by the operator reaches every perspective; its list is scoped too.
         let operator = Arc::new(crate::agent::session::Session::for_test(
             Principal::Operator,

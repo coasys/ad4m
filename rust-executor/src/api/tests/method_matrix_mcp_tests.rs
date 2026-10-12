@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 
 use super::method_matrix_tests::{
     owns_rows, perspective_rows, resource_rows, Caller, Expect, Target, World, OTHER_USER_DID,
-    OTHER_USER_EMAIL, USER_DID, USER_EMAIL,
+    USER_DID, USER_EMAIL,
 };
 use crate::agent::capabilities::{
     anonymous_capabilities_when, perspective_query_capability, perspective_update_capability,
@@ -655,8 +655,8 @@ const NOT_WRAPPED: &[&str] = &[
 /// The session of `caller`, holding `caps` where the row gives it capabilities: the matrix's
 /// callers as MCP holds them.
 fn session(caller: Caller, caps: &[Capability]) -> Arc<Session> {
-    let user = |email: &str, did: &str| {
-        Session::for_test(Principal::Agent(AgentContext::for_user_email(email.into())))
+    let user = |did: &str| {
+        Session::for_test(Principal::Agent(AgentContext::managed(did.to_string())))
             .with_caps(caps.to_vec())
             .with_did(did)
     };
@@ -667,8 +667,8 @@ fn session(caller: Caller, caps: &[Capability]) -> Arc<Session> {
         Caller::Operator => Session::for_test(Principal::Operator),
         Caller::AppWithout => app(vec![]),
         Caller::AppWith => app(caps.to_vec()),
-        Caller::User => user(USER_EMAIL, USER_DID),
-        Caller::OtherUser => user(OTHER_USER_EMAIL, OTHER_USER_DID),
+        Caller::User => user(USER_DID),
+        Caller::OtherUser => user(OTHER_USER_DID),
         Caller::Anonymous => {
             Session::for_test(Principal::Anonymous).with_caps(anonymous_capabilities_when(true))
         }

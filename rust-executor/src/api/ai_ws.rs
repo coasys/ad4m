@@ -20,18 +20,18 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 /// Refuses a request whose user has no compute credits left. A caller without a user
-/// (the operator, an app) pays nothing.
-fn check_compute_credits_ws(user_email: Option<&str>) -> Result<(), WsRpcError> {
+/// (the operator, an app) pays nothing. `agent_did` is the managed agent the request acts as.
+fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    if let Some(email) = user_email {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+    if let Some(did) = agent_did {
+        let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(did))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+            let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(did))
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
@@ -280,13 +280,14 @@ async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?
     } else {
         let agent = ctx.acts_as();
-        Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(agent.user_email.as_deref()))
+        Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(agent.managed_did()))
             .map_err(|e| WsRpcError::internal(e.to_string()))?
     };
     Ok(serde_json::to_value(tasks)?)
 }
 
-/// The new task belongs to the caller's user; the operator's and apps' tasks to no user.
+/// The new task belongs to the caller's agent, by DID: a user session's to its managed agent,
+/// the operator's and main-agent apps' to the main agent (`NULL`).
 async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let task: AITaskInput =
         serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
@@ -297,7 +298,7 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .add_task(task, ctx.user_email())
+        .add_task(task, ctx.user_did())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -338,7 +339,7 @@ async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 // ── Prompt & Embed ──
 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_compute_credits_ws(ctx.user_email())?;
+    check_compute_credits_ws(ctx.user_did())?;
 
     let body: PromptRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -351,7 +352,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .prompt(
             body.task_id,
             body.prompt,
-            ctx.user_email().map(str::to_string),
+            ctx.user_did().map(str::to_string),
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -360,7 +361,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_compute_credits_ws(ctx.user_email())?;
+    check_compute_credits_ws(ctx.user_did())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -370,11 +371,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(
-            body.model_id,
-            body.text,
-            ctx.user_email().map(str::to_string),
-        )
+        .embed(body.model_id, body.text, ctx.user_did().map(str::to_string))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -392,7 +389,7 @@ async fn open_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_compute_credits_ws(ctx.user_email())?;
+    check_compute_credits_ws(ctx.user_did())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -460,7 +457,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
-    // Tasks belong to the agent whose session created them (`tasks.user_email`, none for the
+    // Tasks belong to the agent whose session created them (`tasks.agent_did`, `NULL` for the
     // main agent); the operator reaches every task, any other session its agent's. The list
     // and the new task follow the caller's agent.
     map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
@@ -530,7 +527,7 @@ pub async fn feed_transcription_stream(
     context
         .require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
-    check_compute_credits_ws(context.user_email()).map_err(|e| ApiError::Forbidden(e.message))?;
+    check_compute_credits_ws(context.user_did()).map_err(|e| ApiError::Forbidden(e.message))?;
 
     let stream_ids_header = headers
         .get("x-stream-ids")
@@ -770,7 +767,7 @@ mod model_key_tests {
             ("app", RequestContext::app_for_test(read.clone())),
             (
                 "user",
-                RequestContext::user_for_test("a@example.org", "did:key:ai-user", read.clone()),
+                RequestContext::user_for_test("did:key:ai-user", read.clone()),
             ),
         ] {
             let model = get_default_model(params.clone(), Arc::new(ctx))
@@ -888,9 +885,11 @@ mod compute_credit_tests {
         let id = uuid::Uuid::new_v4();
         let broke = format!("broke-{id}@example.org");
         let funded = format!("funded-{id}@example.org");
+        let broke_did = format!("did:key:broke-{id}");
+        let funded_did = format!("did:key:funded-{id}");
         let was_free = Ad4mDb::with_global_instance(|db| {
-            db.add_user(&broke, "did:key:broke", "pw")?;
-            db.add_user(&funded, "did:key:funded", "pw")?;
+            db.add_user(&broke, &broke_did, "pw")?;
+            db.add_user(&funded, &funded_did, "pw")?;
             db.set_user_credits(&funded, 5.0)?;
             let was_free = db.get_free_hosting_enabled()?;
             db.set_free_hosting_enabled(false)?;
@@ -899,8 +898,8 @@ mod compute_credit_tests {
         .unwrap();
 
         let results = (
-            check_compute_credits_ws(Some(&broke)),
-            check_compute_credits_ws(Some(&funded)),
+            check_compute_credits_ws(Some(&broke_did)),
+            check_compute_credits_ws(Some(&funded_did)),
             check_compute_credits_ws(None),
         );
         Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(was_free)).unwrap();

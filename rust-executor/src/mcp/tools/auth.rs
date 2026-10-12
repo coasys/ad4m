@@ -477,7 +477,11 @@ fn auth_status_json(
                 "executor_locked": !unlocked,
                 "principal": principal,
                 "app_name": app_name,
-                "user_email": session.user().map(|(email, _)| email),
+                // The login name of the managed agent's account, for clients that read it;
+                // the agent itself is `did` (D16).
+                "user_email": session
+                    .managed_did()
+                    .and_then(|did| crate::agent::AgentService::email_for_did(did).ok()),
                 "did": session.acts_as_did(),
                 "capabilities": session.capabilities(),
                 "message": if unlocked { serde_json::Value::Null } else { json!(LOCKED_MESSAGE) },
@@ -532,9 +536,16 @@ mod auth_status_tests {
         Session::for_test(Principal::Anonymous)
     }
 
+    /// A grant on a managed agent whose account is `agent@example.org`: the report reads the
+    /// email from the account (D16).
     fn user() -> Session {
-        Session::for_test(Principal::Agent(AgentContext::for_user_email(
-            "agent@example.org".into(),
+        crate::test_utils::ensure_test_db();
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_user_prehashed("agent@example.org", "did:key:agent", "")
+        })
+        .expect("the agent's account");
+        Session::for_test(Principal::Agent(AgentContext::managed(
+            "did:key:agent".into(),
         )))
         .with_caps(vec![ALL_CAPABILITY.clone()])
         .with_did("did:key:agent")
@@ -707,16 +718,13 @@ mod auth_status_session_tests {
         setup_wallet();
         setup_agent();
         let email = "auth.status.user@example.org";
-        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+        let did = crate::test_utils::create_test_user(email);
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
         let v = status(&handler(ListenerReach::Network, Some(ADMIN)), Some(&token)).await;
         assert_eq!(v["authenticated"], true, "{v}");
         assert_eq!(v["principal"], "user");
         assert_eq!(v["user_email"], email);
-        assert_eq!(
-            v["did"],
-            crate::agent::AgentService::get_user_did_by_email(email).unwrap()
-        );
+        assert_eq!(v["did"], did);
     }
 
     #[tokio::test]
@@ -919,9 +927,9 @@ mod capability_mint_tests {
     #[tokio::test]
     async fn a_user_session_holding_permit_gets_no_mint_code_for_the_main_agent() {
         crate::test_utils::ensure_test_db();
-        let user = Session::for_test(Principal::Agent(
-            crate::agent::AgentContext::for_user_email("mint.user@example.org".into()),
-        ))
+        let user = Session::for_test(Principal::Agent(crate::agent::AgentContext::managed(
+            "did:key:mint-user".into(),
+        )))
         .with_caps(vec![ALL_CAPABILITY.clone()])
         .with_did("did:key:mint-user");
         let resp = handler_with_admin_credential()

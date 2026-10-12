@@ -5,6 +5,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
+use crate::db::Ad4mDb;
 use crate::types::domain::Perspective;
 use crate::types::{Agent, AgentStatus};
 use crate::types::{Expression, ExpressionProof};
@@ -30,48 +31,165 @@ fn validate_user_email_for_path(email: &str) -> Result<(), AnyError> {
 }
 
 /// One of the executor's agents: the main agent (agent #0, owned by the operator), or the
-/// managed agent of a user.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentContext {
-    /// The managed agent's user, which names its wallet key. `None`: the main agent.
-    pub user_email: Option<String>,
+/// managed agent of a user. An agent is its DID: a managed agent is named by nothing else.
+/// An email is only the login name of the user account that owns a managed agent; it
+/// resolves to the DID where a caller names an address (login, signup, an RPC parameter).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AgentContext {
+    /// The main agent (agent #0). Its DID is read from `AgentService` once it exists.
+    Main,
+    /// A managed agent, by its DID.
+    Managed { did: String },
 }
 
 impl AgentContext {
     /// Whether this is the main agent.
     pub fn is_main_agent(&self) -> bool {
-        self.user_email.is_none()
+        matches!(self, AgentContext::Main)
+    }
+
+    /// The DID of a managed agent; `None` for the main agent.
+    pub fn managed_did(&self) -> Option<&str> {
+        match self {
+            AgentContext::Main => None,
+            AgentContext::Managed { did } => Some(did),
+        }
     }
 
     /// The main agent.
     pub fn main_agent() -> Self {
-        Self { user_email: None }
+        AgentContext::Main
     }
 
-    /// The managed agent of `user_email`.
-    pub fn for_user_email(user_email: String) -> Self {
-        Self {
-            user_email: Some(user_email),
-        }
+    /// The managed agent whose DID is `did`. Checks nothing: callers that start from a name a
+    /// caller supplied resolve it through `AgentService::managed_agent_for_email` or
+    /// `AgentService::managed_agent_for_subject`, which check the agent exists.
+    pub fn managed(did: String) -> Self {
+        AgentContext::Managed { did }
     }
 
-    /// Get the wallet key name for this context
-    /// For users, this uses their email directly
-    pub fn wallet_key_name(&self) -> String {
-        match &self.user_email {
-            Some(email) => email.clone(),
-            None => crate::wallet::KEY_NAME_MAIN.to_string(),
+    /// The name of this agent's key in the wallet: `KEY_NAME_MAIN` for the main agent, the
+    /// DID for a managed agent (see [`AgentService::wallet_key_for_did`]).
+    pub fn wallet_key_name(&self) -> Result<String, AnyError> {
+        match self {
+            AgentContext::Main => Ok(crate::wallet::KEY_NAME_MAIN.to_string()),
+            AgentContext::Managed { did } => AgentService::wallet_key_for_did(did),
         }
     }
 }
 
-/// Data for a specific agent (main or user)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentData {
-    pub did: String,
-    pub did_document: String,
-    pub signing_key_id: String,
-    pub wallet_key_name: String,
+/// Where each managed agent's key sits in the wallet, by DID. Filled by
+/// [`AgentService::wallet_key_for_did`]; cleared when the wallet's key names change.
+static MANAGED_KEY_NAMES: once_cell::sync::Lazy<
+    std::sync::RwLock<std::collections::HashMap<String, String>>,
+> = once_cell::sync::Lazy::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+fn forget_managed_key_names() {
+    if let Ok(mut names) = MANAGED_KEY_NAMES.write() {
+        names.clear();
+    }
+}
+
+/// The DID of the key named `name` in `wallet`, if it holds one.
+fn derived_did(wallet: &dyn crate::wallet::WalletBackend, name: &str) -> Option<String> {
+    wallet.get_did_document(name).map(|doc| doc.id)
+}
+
+/// The outcome of [`migrate_managed_key_names`] for one user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyNameMigration {
+    /// The key was already named by the DID, and no key carries the old name.
+    AlreadyNamedByDid,
+    /// The key was copied under the DID, and the old name removed.
+    Renamed,
+    /// Both names held the same key: the old name was removed.
+    RemovedDuplicate,
+    /// The key is named by the DID, and the old name holds another key (deriving `derived`).
+    /// That key is left alone: it is not this agent's, and removing it could lose it.
+    KeptOtherKey { derived: String },
+    /// The user has no key under either name.
+    NoKey,
+    /// The key under the old name derives another DID than the user's: it stays under its
+    /// old name, and the user's sessions fail with `NoIdentity` until an operator fixes it.
+    Mismatch { derived: String },
+    /// The wallet refused the copy or the removal.
+    Failed(String),
+}
+
+/// Names every managed agent's key by its DID (D16): for each `(username, did)` from the
+/// `users` table, a key named `username` is copied under `did`, the copy is checked to derive
+/// `did`, and the old name is removed. `persist` writes the wallet to disk; it runs after
+/// every copy and before any old name goes, so a crash at any point leaves the key reachable
+/// under the old name, the new one, or both, and the next run finishes the job. With both
+/// names present, the old one goes only if both hold the same key.
+///
+/// Idempotent: a second run on a migrated wallet changes nothing and persists nothing.
+pub fn migrate_managed_key_names(
+    wallet: &dyn crate::wallet::WalletBackend,
+    users: &[(String, String)],
+    mut persist: impl FnMut() -> Result<(), AnyError>,
+) -> Vec<(String, KeyNameMigration)> {
+    let mut outcomes = Vec::new();
+    let mut to_remove = Vec::new();
+    for (username, did) in users {
+        if did.is_empty() || username == did {
+            continue;
+        }
+        let old_key = derived_did(wallet, username);
+        let new_key = derived_did(wallet, did);
+        let outcome = match (old_key, new_key) {
+            (_, Some(new_did)) if &new_did != did => {
+                KeyNameMigration::Mismatch { derived: new_did }
+            }
+            (None, Some(_)) => KeyNameMigration::AlreadyNamedByDid,
+            (Some(old_did), Some(_)) if &old_did == did => {
+                to_remove.push(username.clone());
+                KeyNameMigration::RemovedDuplicate
+            }
+            (Some(old_did), Some(_)) => KeyNameMigration::KeptOtherKey { derived: old_did },
+            (None, None) => KeyNameMigration::NoKey,
+            (Some(derived), None) if &derived != did => KeyNameMigration::Mismatch { derived },
+            (Some(_), None) => match wallet.copy_key(username, did) {
+                Ok(()) if derived_did(wallet, did).as_deref() == Some(did.as_str()) => {
+                    to_remove.push(username.clone());
+                    KeyNameMigration::Renamed
+                }
+                Ok(()) => {
+                    // A copy that derives another DID must not stay under the user's DID.
+                    let _ = wallet.remove_key(did);
+                    KeyNameMigration::Failed("the copy derives another DID".to_string())
+                }
+                Err(e) => KeyNameMigration::Failed(e.to_string()),
+            },
+        };
+        outcomes.push((username.clone(), outcome));
+    }
+
+    if to_remove.is_empty() {
+        return outcomes;
+    }
+    // The copies reach the disk before any old name goes.
+    if let Err(e) = persist() {
+        log::error!(
+            "🔑 Could not save the wallet after naming keys by DID; the old names stay: {}",
+            e
+        );
+        return outcomes;
+    }
+    for username in &to_remove {
+        if let Err(e) = wallet.remove_key(username) {
+            log::error!("🔑 Could not remove the key named {}: {}", username, e);
+        }
+    }
+    if let Err(e) = persist() {
+        log::warn!(
+            "🔑 Could not save the wallet after removing the old key names; the next unlock \
+             removes them again: {}",
+            e
+        );
+    }
+    forget_managed_key_names();
+    outcomes
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -199,19 +317,10 @@ fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(
 }
 
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
-    if context.is_main_agent() {
-        let backend = wallet_backend();
-        let key_name = context.wallet_key_name();
-        backend
-            .get_did_document(&key_name)
-            .ok_or(anyhow!("{} key not found", key_name))
-    } else if let Some(user_email) = &context.user_email {
-        let agent_data = AgentService::get_user_agent_data(user_email)?;
-        let did_doc: did_key::Document = serde_json::from_str(&agent_data.did_document)?;
-        Ok(did_doc)
-    } else {
-        Err(anyhow!("Invalid user context"))
-    }
+    let key_name = context.wallet_key_name()?;
+    wallet_backend()
+        .get_did_document(&key_name)
+        .ok_or(anyhow!("{} key not found", key_name))
 }
 
 pub fn signing_key_id_for_context(context: &AgentContext) -> Result<String, AnyError> {
@@ -220,26 +329,19 @@ pub fn signing_key_id_for_context(context: &AgentContext) -> Result<String, AnyE
 }
 
 pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
-    if context.is_main_agent() {
-        // For main agent, get from AgentService
-        let did_result = AgentService::with_global_instance(|a| {
+    match context {
+        AgentContext::Main => AgentService::with_global_instance(|a| {
             a.did
                 .clone()
                 .ok_or(anyhow!("DID requested but not yet set in AgentService"))
-        });
-        did_result
-    } else {
-        if let Some(user_email) = &context.user_email {
-            AgentService::get_user_did_by_email(user_email)
-        } else {
-            Err(anyhow!("Invalid user context"))
-        }
+        }),
+        AgentContext::Managed { did } => Ok(did.clone()),
     }
 }
 
 pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
     let backend = wallet_backend();
-    let key_name = context.wallet_key_name();
+    let key_name = context.wallet_key_name()?;
     let signature = backend
         .sign(&key_name, payload)
         .ok_or(anyhow!("{} key not found", key_name))?;
@@ -593,99 +695,188 @@ impl AgentService {
 
     // User management functions
 
-    /// Ensure a user key exists in the wallet, generating it if necessary.
-    /// Uses email as the wallet key name.
-    pub fn ensure_user_key_exists(user_email: &str) -> Result<(), AnyError> {
+    /// Creates the key of a new managed agent and returns its DID. A wallet that can name keys
+    /// freely names it by the DID. A shared wallet's service creates a key under the name it
+    /// is given and cannot rename it, so there it is named by the user's email, where
+    /// [`AgentService::wallet_key_for_did`] finds it.
+    pub fn create_managed_agent_key(user_email: &str) -> Result<String, AnyError> {
         let backend = wallet_backend();
-
-        let available_keys = backend.list_key_names();
-        log::debug!(
-            "🔧 ensure_user_key_exists() called for user: '{}'",
-            user_email
-        );
-        log::debug!("🔧 Keys in wallet: {} total", available_keys.len());
-
-        if backend.get_did_document(user_email).is_some() {
-            log::debug!("✅ Key already exists for user: '{}'", user_email);
-            return Ok(());
+        if backend.can_rename_keys() {
+            return backend.generate_keypair_named_by_did();
         }
-
-        log::warn!(
-            "⚠️  Key NOT found for user '{}', generating new key",
-            user_email
-        );
-        log::warn!(
-            "⚠️  This will create a NEW DID! {} keys in wallet",
-            available_keys.len()
-        );
         backend.get_or_create_keypair(user_email)?;
-
-        Ok(())
+        derived_did(backend.as_ref(), user_email)
+            .ok_or_else(|| anyhow!("The wallet did not create a key for {}", user_email))
     }
 
-    /// Get user agent data for a specific user email. Fails if the user does not exist.
-    pub fn get_user_agent_data(user_email: &str) -> Result<AgentData, AnyError> {
-        let backend = wallet_backend();
-
-        let available_keys = backend.list_key_names();
-        log::trace!("🔍 get_user_agent_data() called for user: '{}'", user_email);
-        log::trace!("🔍 Keys in wallet: {} total", available_keys.len());
-
-        let did_document = backend.get_did_document(user_email).ok_or_else(|| {
-            log::error!(
-                "❌ No key found for user '{}'. {} keys in wallet",
-                user_email,
-                available_keys.len()
-            );
-            anyhow!("No key found for user {}", user_email)
-        })?;
-
-        let signing_key_id = did_document.verification_method[0].id.clone();
-        let did = did_document.id.clone();
-
-        log::trace!("✅ Found user key for '{}' with DID: {}", user_email, did);
-
-        Ok(AgentData {
-            did,
-            did_document: serde_json::to_string(&did_document)?,
-            signing_key_id,
-            wallet_key_name: user_email.to_string(),
-        })
+    /// The DID of the managed agent of the user `user_email`, from the `users` table. On an
+    /// executor with a shared database, a user created on another executor is imported first.
+    pub fn did_for_email(user_email: &str) -> Result<String, AnyError> {
+        let local = Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok());
+        let did = match local {
+            Some(user) => user.did,
+            None => crate::user_management::import_user_from_shared_db(user_email)?
+                .ok_or_else(|| anyhow!("No user {}", user_email))?,
+        };
+        if did.is_empty() {
+            return Err(anyhow!("The user {} has no agent", user_email));
+        }
+        Ok(did)
     }
 
-    /// Check whether a user key exists in the wallet.
-    pub fn user_exists(user_email: &str) -> bool {
-        let backend = wallet_backend();
-        backend.key_exists(user_email)
+    /// The email of the user who owns the managed agent `did`: the address to write to, and
+    /// the name of the user's profile directory. Not an identity: everything else names the
+    /// agent by its DID.
+    pub fn email_for_did(did: &str) -> Result<String, AnyError> {
+        Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))?
+            .ok_or_else(|| anyhow!("No user owns the agent {}", did))
     }
 
-    /// List all user emails that have keys in the wallet (excluding the
-    /// main agent key and platform signing key).
-    pub fn list_user_emails() -> Result<Vec<String>, AnyError> {
-        let backend = wallet_backend();
-        let signing_name = crate::config::get_global_config().signing_key_name();
-        let all_keys = backend.list_key_names();
-        let user_emails: Vec<String> = all_keys
+    /// The DIDs of the executor's managed agents: every user with an agent.
+    pub fn managed_agent_dids() -> Result<Vec<String>, AnyError> {
+        Ok(Ad4mDb::with_global_instance(|db| db.list_users())?
             .into_iter()
-            .filter(|key_name| {
-                key_name != crate::wallet::KEY_NAME_MAIN && key_name != &signing_name
-            })
-            .collect();
-        Ok(user_emails)
+            .map(|user| user.did)
+            .filter(|did| !did.is_empty())
+            .collect())
     }
 
-    /// Get DID for a user by email. Fails if the user does not exist.
-    pub fn get_user_did_by_email(user_email: &str) -> Result<String, AnyError> {
-        let agent_data = Self::get_user_agent_data(user_email)?;
-        Ok(agent_data.did)
+    /// The managed agent of the user `user_email`: where a caller names a user by email
+    /// (login, an RPC parameter), this resolves it to the agent once. Fails if the user does
+    /// not exist or the wallet holds no key that derives the agent's DID.
+    pub fn managed_agent_for_email(user_email: &str) -> Result<AgentContext, AnyError> {
+        let did = Self::did_for_email(user_email)?;
+        Self::wallet_key_for_did(&did)?;
+        Ok(AgentContext::managed(did))
     }
 
-    /// The file that holds a user's agent profile.
+    /// The managed agent a user token's `sub` names. Tokens minted since agents are keyed by
+    /// DID carry the DID; tokens minted before carry the user's email. `email_hint` is the
+    /// token's `userEmail`, which imports a user created on another executor of a shared
+    /// database. Fails if no user owns the agent or the wallet holds no key for it.
+    pub fn managed_agent_for_subject(
+        sub: &str,
+        email_hint: Option<&str>,
+    ) -> Result<AgentContext, AnyError> {
+        if !sub.starts_with("did:") {
+            return Self::managed_agent_for_email(sub);
+        }
+        if Self::email_for_did(sub).is_err() {
+            let imported = match email_hint {
+                Some(email) => crate::user_management::import_user_from_shared_db(email)?,
+                None => None,
+            };
+            if imported.as_deref() != Some(sub) {
+                return Err(anyhow!("No user owns the agent {}", sub));
+            }
+        }
+        Self::wallet_key_for_did(sub)?;
+        Ok(AgentContext::managed(sub.to_string()))
+    }
+
+    /// The name of the wallet key of the managed agent `did`. Keys are named by the DID (D16).
+    /// A key under the user's email (a shared wallet, which cannot rename keys, or a wallet
+    /// whose migration kept the old name) is used only if it derives `did`. Fails if neither
+    /// name holds a key that derives `did`: the agent has no identity on this executor.
+    pub fn wallet_key_for_did(did: &str) -> Result<String, AnyError> {
+        if let Some(name) = MANAGED_KEY_NAMES
+            .read()
+            .ok()
+            .and_then(|names| names.get(did).cloned())
+        {
+            return Ok(name);
+        }
+        let backend = wallet_backend();
+        let name = if derived_did(backend.as_ref(), did).as_deref() == Some(did) {
+            did.to_string()
+        } else {
+            let email = Self::email_for_did(did)?;
+            if derived_did(backend.as_ref(), &email).as_deref() != Some(did) {
+                return Err(anyhow!("No key in the wallet derives the agent {}", did));
+            }
+            email
+        };
+        if let Ok(mut names) = MANAGED_KEY_NAMES.write() {
+            names.insert(did.to_string(), name.clone());
+        }
+        Ok(name)
+    }
+
+    /// Names every managed agent's key by its DID; see [`migrate_managed_key_names`]. Runs
+    /// on unlock, the only time the keys are in memory. Does nothing on a wallet that cannot
+    /// rename keys.
+    fn migrate_managed_key_names_on_unlock(&self, password: &str) {
+        // The unlocked keystore replaces the keys in memory: resolve names afresh.
+        forget_managed_key_names();
+        let backend = wallet_backend();
+        if !backend.can_rename_keys() {
+            return;
+        }
+        let users = match Ad4mDb::global_instance().lock() {
+            Ok(db) => match db.as_ref().map(|db| db.list_users()) {
+                Some(Ok(users)) => users,
+                Some(Err(e)) => {
+                    log::error!("🔑 Could not list users to name their keys by DID: {}", e);
+                    return;
+                }
+                // No database yet (some tests): no users.
+                None => return,
+            },
+            Err(_) => return,
+        };
+        let pairs: Vec<(String, String)> = users.into_iter().map(|u| (u.username, u.did)).collect();
+        let outcomes =
+            migrate_managed_key_names(backend.as_ref(), &pairs, || self.try_save(password));
+        for (username, outcome) in outcomes {
+            match outcome {
+                KeyNameMigration::AlreadyNamedByDid => {}
+                KeyNameMigration::Renamed | KeyNameMigration::RemovedDuplicate => {
+                    log::info!("🔑 The key of {} is now named by its DID", username)
+                }
+                KeyNameMigration::KeptOtherKey { derived } => log::warn!(
+                    "🔑 The key of {} is named by its DID; the key under the old name derives \
+                     {} and was left in place",
+                    username,
+                    derived
+                ),
+                KeyNameMigration::NoKey => {
+                    log::warn!("🔑 The wallet holds no key for the user {}", username)
+                }
+                KeyNameMigration::Mismatch { derived } => log::error!(
+                    "🔑 The key of the user {} derives {}, not the user's DID; it keeps its old \
+                     name and the user's sessions fail until an operator fixes it",
+                    username,
+                    derived
+                ),
+                KeyNameMigration::Failed(e) => log::error!(
+                    "🔑 Could not name the key of {} by its DID: {}",
+                    username,
+                    e
+                ),
+            }
+        }
+    }
+
+    /// The file that holds a user's agent profile. Profiles sit in a directory named by the
+    /// user's email: a DID carries `:`, which some filesystems refuse in a name.
     pub fn user_profile_path(&self, user_email: &str) -> Result<path::PathBuf, AnyError> {
         validate_user_email_for_path(user_email)?;
         Ok(path::Path::new(&self.users_dir)
             .join(user_email)
             .join("profile.json"))
+    }
+
+    /// The stored profile of the managed agent `did`, if it has one.
+    pub fn load_managed_agent_profile(did: &str) -> Result<Option<Agent>, AnyError> {
+        // Resolved before the service lock: the lookup takes the database lock.
+        let email = Self::email_for_did(did)?;
+        Self::with_global_instance(|svc| svc.load_user_agent_profile(&email))
+    }
+
+    /// Stores the profile of the managed agent `did`.
+    pub fn store_managed_agent_profile(did: &str, agent: &Agent) -> Result<(), AnyError> {
+        let email = Self::email_for_did(did)?;
+        Self::with_global_instance(|svc| svc.store_user_agent_profile(&email, agent))
     }
 
     /// Store agent profile for a specific user
@@ -736,13 +927,10 @@ impl AgentService {
 
     /// Get the Agent data for a given context (main agent or managed user).
     pub fn get_agent_for_context(context: &AgentContext) -> Result<Agent, AnyError> {
-        match &context.user_email {
-            Some(email) => {
-                let agent =
-                    AgentService::with_global_instance(|svc| svc.load_user_agent_profile(email))?;
-                agent.ok_or_else(|| anyhow!("User profile not found for {}", email))
-            }
-            None => AgentService::with_mutable_global_instance(|svc| {
+        match context {
+            AgentContext::Managed { did } => Self::load_managed_agent_profile(did)?
+                .ok_or_else(|| anyhow!("User profile not found for {}", did)),
+            AgentContext::Main => AgentService::with_mutable_global_instance(|svc| {
                 svc.ensure_main_agent_loaded();
                 svc.agent
                     .clone()
@@ -758,7 +946,7 @@ impl AgentService {
     }
 
     /// Load agent profile for a specific user
-    pub fn load_user_agent_profile(&self, user_email: &str) -> Result<Option<Agent>, AnyError> {
+    fn load_user_agent_profile(&self, user_email: &str) -> Result<Option<Agent>, AnyError> {
         let profile_path = self.user_profile_path(user_email)?;
 
         if !profile_path.exists() {
@@ -937,6 +1125,7 @@ impl AgentService {
                     ),
                 }
             }
+            self.migrate_managed_key_names_on_unlock(&password);
             self.passphrase = Some(password);
             let key_count = backend.list_key_names().len();
             log::debug!("🔑 Wallet unlocked. {} key(s) present.", key_count);
@@ -1277,16 +1466,21 @@ mod tests {
 
     #[test]
     fn test_agent_context_creation() {
+        ensure_setup();
         let main_context = AgentContext::main_agent();
         assert!(main_context.is_main_agent());
-        assert_eq!(main_context.user_email, None);
-        assert_eq!(main_context.wallet_key_name(), "main");
+        assert_eq!(main_context.managed_did(), None);
+        assert_eq!(main_context.wallet_key_name().unwrap(), "main");
 
-        let user_email = "test@example.com".to_string();
-        let user_context = AgentContext::for_user_email(user_email.clone());
+        let user_did = crate::test_utils::create_test_user("test@example.com");
+        let user_context = AgentContext::managed(user_did.clone());
         assert!(!user_context.is_main_agent());
-        assert_eq!(user_context.user_email, Some(user_email.clone()));
-        assert_eq!(user_context.wallet_key_name(), user_email);
+        assert_eq!(user_context.managed_did(), Some(user_did.as_str()));
+        assert_eq!(
+            user_context.wallet_key_name().unwrap(),
+            user_did,
+            "a managed agent's key is named by its DID"
+        );
     }
 
     #[test]
@@ -1373,171 +1567,124 @@ mod tests {
     }
 
     #[test]
-    fn test_user_context_auto_key_generation() {
+    fn a_managed_agent_signs_only_with_a_key_that_derives_its_did() {
         ensure_setup();
-        let test_user_email = "test.auto@example.com";
-        let user_context = AgentContext::for_user_email(test_user_email.to_string());
-
-        // Before the key exists, operations should fail
-        assert!(did_document_for_context(&user_context).is_err());
-        assert!(signing_key_id_for_context(&user_context).is_err());
-        assert!(did_for_context(&user_context).is_err());
-        assert!(sign_for_context(b"test", &user_context).is_err());
-
-        AgentService::ensure_user_key_exists(test_user_email).expect("Failed to create user key");
-
-        assert!(did_document_for_context(&user_context).is_ok());
-        assert!(signing_key_id_for_context(&user_context).is_ok());
-        assert!(did_for_context(&user_context).is_ok());
-        assert!(sign_for_context(b"test", &user_context).is_ok());
-        assert!(
-            create_signed_expression(json!({"test": "data"}), &user_context).is_ok(),
-            "Creating signed expression should succeed once key exists"
+        let _db = crate::test_utils::MultiUserMode::on();
+        // A DID no key in the wallet derives, and no user owns.
+        let unknown = AgentContext::managed(
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string(),
         );
+        assert!(did_document_for_context(&unknown).is_err());
+        assert!(signing_key_id_for_context(&unknown).is_err());
+        assert!(sign_for_context(b"test", &unknown).is_err());
+        assert!(create_signed_expression(json!({"test": "data"}), &unknown).is_err());
+
+        let user_did = crate::test_utils::create_test_user("test.auto@example.com");
+        let user_context = AgentContext::managed(user_did.clone());
+        assert_eq!(
+            did_document_for_context(&user_context).unwrap().id,
+            user_did
+        );
+        assert!(signing_key_id_for_context(&user_context).is_ok());
+        assert_eq!(did_for_context(&user_context).unwrap(), user_did);
+        assert!(sign_for_context(b"test", &user_context).is_ok());
+        let expression = create_signed_expression(json!({"test": "data"}), &user_context)
+            .expect("Creating signed expression should succeed once key exists");
+        assert_eq!(expression.author, user_did);
+        assert!(signatures::verify(&expression).unwrap());
     }
 
     // User key management tests
 
     #[test]
-    fn test_ensure_user_key_exists() {
+    fn a_new_managed_agent_key_is_named_by_its_did() {
         ensure_setup();
-        let test_user_email = "test.keygeneration@example.com";
+        let email = "test.keygeneration@example.com";
 
-        // First call should generate the key
-        let result = AgentService::ensure_user_key_exists(test_user_email);
-        assert!(
-            result.is_ok(),
-            "First call to ensure_user_key_exists should succeed"
-        );
-
-        // Second call should be idempotent (key already exists)
-        let result2 = AgentService::ensure_user_key_exists(test_user_email);
-        assert!(
-            result2.is_ok(),
-            "Second call to ensure_user_key_exists should also succeed"
-        );
-
-        // Verify the key was actually created
+        let did = AgentService::create_managed_agent_key(email).expect("key created");
         let backend = wallet_backend();
-        let did_doc = backend.get_did_document(test_user_email);
-        assert!(
-            did_doc.is_some(),
-            "User key should exist in wallet after generation"
-        );
-    }
-
-    #[test]
-    fn test_get_or_create_user_agent_data() {
-        ensure_setup();
-        let test_user_email = "test.agentdata@example.com";
-
-        AgentService::ensure_user_key_exists(test_user_email).expect("Failed to create user key");
-
-        let data = AgentService::get_user_agent_data(test_user_email)
-            .expect("Failed to get user agent data");
-        assert!(
-            data.did.starts_with("did:key:"),
-            "Agent data should have a valid DID"
-        );
-        assert!(
-            !data.did_document.is_empty(),
-            "Agent data should have a DID document"
-        );
-        assert!(
-            !data.signing_key_id.is_empty(),
-            "Agent data should have a signing key ID"
-        );
         assert_eq!(
-            data.wallet_key_name, test_user_email,
-            "Wallet key name should match user email"
+            backend.get_did_document(&did).map(|doc| doc.id),
+            Some(did.clone()),
+            "the key is under its own DID"
+        );
+        assert!(
+            backend.get_did_document(email).is_none(),
+            "no key is named by the email"
+        );
+
+        // Each call makes a new agent: `create_user` refuses a taken email before it.
+        let other = AgentService::create_managed_agent_key(email).expect("second key");
+        assert_ne!(other, did);
+    }
+
+    #[test]
+    fn an_email_resolves_to_its_users_agent_and_back() {
+        ensure_setup();
+        let _db = crate::test_utils::MultiUserMode::on();
+        let email = "test.agentdata@example.com";
+        let did = crate::test_utils::create_test_user(email);
+
+        assert!(did.starts_with("did:key:"));
+        assert_eq!(AgentService::did_for_email(email).unwrap(), did);
+        assert_eq!(AgentService::email_for_did(&did).unwrap(), email);
+        assert_eq!(
+            AgentService::managed_agent_for_email(email).unwrap(),
+            AgentContext::managed(did.clone())
+        );
+        assert_eq!(AgentService::wallet_key_for_did(&did).unwrap(), did);
+
+        assert!(AgentService::did_for_email("nobody@example.com").is_err());
+        assert!(AgentService::email_for_did("did:key:nobody").is_err());
+        assert!(AgentService::managed_agent_for_email("nobody@example.com").is_err());
+    }
+
+    #[test]
+    fn managed_agents_are_the_users_dids() {
+        ensure_setup();
+        let _db = crate::test_utils::MultiUserMode::on();
+        let initial = AgentService::managed_agent_dids().unwrap();
+
+        let did1 = crate::test_utils::create_test_user("user1.list@example.com");
+        let did2 = crate::test_utils::create_test_user("user2.list@example.com");
+        // A user without an agent is no agent.
+        Ad4mDb::with_global_instance(|db| db.add_user("no.agent@example.com", "", "pw")).unwrap();
+
+        let managed = AgentService::managed_agent_dids().unwrap();
+        assert_eq!(managed.len(), initial.len() + 2, "{managed:?}");
+        assert!(managed.contains(&did1));
+        assert!(managed.contains(&did2));
+        assert!(
+            !managed.contains(&did()),
+            "the main agent is not a managed agent"
         );
     }
 
     #[test]
-    fn test_list_user_emails() {
+    fn test_did_based_agent_context() {
         ensure_setup();
-        let test_user_email1 = "user1.list@example.com";
-        let test_user_email2 = "user2.list@example.com";
+        let _db = crate::test_utils::MultiUserMode::on();
 
-        // Initially should only have main key
-        let initial_users = AgentService::list_user_emails().unwrap_or_default();
-        let initial_count = initial_users.len();
-
-        // Add two user keys
-        AgentService::ensure_user_key_exists(test_user_email1)
-            .expect("Failed to create user 1 key");
-        AgentService::ensure_user_key_exists(test_user_email2)
-            .expect("Failed to create user 2 key");
-
-        // Should now have at least 2 more users (other parallel tests may
-        // have added keys to the shared wallet backend concurrently).
-        let final_users = AgentService::list_user_emails().expect("Failed to list user emails");
-        assert!(
-            final_users.len() >= initial_count + 2,
-            "Should have at least 2 more users after key generation, got {} (initial {})",
-            final_users.len(),
-            initial_count
-        );
-
-        assert!(
-            final_users.contains(&test_user_email1.to_string()),
-            "User list should contain test user 1"
-        );
-        assert!(
-            final_users.contains(&test_user_email2.to_string()),
-            "User list should contain test user 2"
-        );
-
-        // Should not contain "main"
-        assert!(
-            !final_users.contains(&"main".to_string()),
-            "User list should not contain main agent"
-        );
-    }
-
-    #[test]
-    fn test_email_based_agent_context() {
-        ensure_setup();
-
-        // Test the new email-based approach
         let alice_email = "alice@example.com";
         let bob_email = "bob@example.com";
-
-        // Keys do not exist initially
-        let alice_context = AgentContext::for_user_email(alice_email.to_string());
-        let bob_context = AgentContext::for_user_email(bob_email.to_string());
-
-        assert!(did_for_context(&alice_context).is_err());
-        assert!(did_for_context(&bob_context).is_err());
-
-        AgentService::ensure_user_key_exists(alice_email).expect("Failed to create alice key");
-        AgentService::ensure_user_key_exists(bob_email).expect("Failed to create bob key");
-
-        let alice_context = AgentContext::for_user_email(alice_email.to_string());
-        let bob_context = AgentContext::for_user_email(bob_email.to_string());
-
-        assert!(
-            !alice_context.is_main_agent(),
-            "Alice context should not be main agent"
-        );
-        assert!(
-            !bob_context.is_main_agent(),
-            "Bob context should not be main agent"
-        );
-        assert_eq!(alice_context.user_email, Some(alice_email.to_string()));
-        assert_eq!(bob_context.user_email, Some(bob_email.to_string()));
-
-        // Verify wallet key names are emails
-        assert_eq!(alice_context.wallet_key_name(), alice_email);
-        assert_eq!(bob_context.wallet_key_name(), bob_email);
-
-        // Generate DIDs
-        let alice_did = did_for_context(&alice_context).expect("Alice DID generation failed");
-        let bob_did = did_for_context(&bob_context).expect("Bob DID generation failed");
-
+        let alice_did = crate::test_utils::create_test_user(alice_email);
+        let bob_did = crate::test_utils::create_test_user(bob_email);
         assert_ne!(alice_did, bob_did);
 
-        let test_data = json!({"message": "Email-based context test"});
+        let alice_context = AgentService::managed_agent_for_email(alice_email).unwrap();
+        let bob_context = AgentService::managed_agent_for_email(bob_email).unwrap();
+        assert!(!alice_context.is_main_agent());
+        assert!(!bob_context.is_main_agent());
+        assert_eq!(alice_context, AgentContext::managed(alice_did.clone()));
+        assert_eq!(bob_context, AgentContext::managed(bob_did.clone()));
+
+        // Wallet key names are DIDs
+        assert_eq!(alice_context.wallet_key_name().unwrap(), alice_did);
+        assert_eq!(bob_context.wallet_key_name().unwrap(), bob_did);
+        assert_eq!(did_for_context(&alice_context).unwrap(), alice_did);
+        assert_eq!(did_for_context(&bob_context).unwrap(), bob_did);
+
+        let test_data = json!({"message": "DID-based context test"});
         let alice_expr = create_signed_expression(test_data.clone(), &alice_context)
             .expect("Alice expression creation failed");
         let bob_expr = create_signed_expression(test_data.clone(), &bob_context)
@@ -1549,39 +1696,26 @@ mod tests {
         assert_eq!(bob_expr.author, bob_did);
         assert_ne!(alice_expr.proof.signature, bob_expr.proof.signature);
 
-        let alice_data =
-            AgentService::get_user_agent_data(alice_email).expect("Alice agent data failed");
-        let bob_data = AgentService::get_user_agent_data(bob_email).expect("Bob agent data failed");
-
-        assert_eq!(alice_data.wallet_key_name, alice_email);
-        assert_eq!(bob_data.wallet_key_name, bob_email);
-
-        let user_emails = AgentService::list_user_emails().expect("Failed to list user emails");
-        assert!(user_emails.contains(&alice_email.to_string()));
-        assert!(user_emails.contains(&bob_email.to_string()));
+        let managed = AgentService::managed_agent_dids().unwrap();
+        assert!(managed.contains(&alice_did));
+        assert!(managed.contains(&bob_did));
     }
 
     #[test]
     fn test_multi_user_agent_system_integration() {
         ensure_setup();
+        let _db = crate::test_utils::MultiUserMode::on();
 
-        let alice_email = "alice.integration@example.com";
-        let bob_email = "bob.integration@example.com";
         let main_context = AgentContext::main_agent();
-
-        AgentService::ensure_user_key_exists(alice_email).expect("Failed to create alice key");
-        AgentService::ensure_user_key_exists(bob_email).expect("Failed to create bob key");
-
-        let alice_context = AgentContext::for_user_email(alice_email.to_string());
-        let bob_context = AgentContext::for_user_email(bob_email.to_string());
+        let alice_did = crate::test_utils::create_test_user("alice.integration@example.com");
+        let bob_did = crate::test_utils::create_test_user("bob.integration@example.com");
+        let alice_context = AgentContext::managed(alice_did.clone());
+        let bob_context = AgentContext::managed(bob_did.clone());
 
         let main_did = did_for_context(&main_context).expect("Main agent DID failed");
-        let alice_did_result = did_for_context(&alice_context).expect("Alice DID failed");
-        let bob_did_result = did_for_context(&bob_context).expect("Bob DID failed");
-
-        assert_ne!(main_did, alice_did_result);
-        assert_ne!(main_did, bob_did_result);
-        assert_ne!(alice_did_result, bob_did_result);
+        assert_ne!(main_did, alice_did);
+        assert_ne!(main_did, bob_did);
+        assert_ne!(alice_did, bob_did);
 
         let test_data =
             json!({"message": "Hello from multi-user system", "timestamp": "2024-01-01"});
@@ -1598,48 +1732,29 @@ mod tests {
         assert!(signatures::verify(&bob_expr).expect("Bob expression verification failed"));
 
         assert_eq!(main_expr.author, main_did);
-        assert_eq!(alice_expr.author, alice_did_result);
-        assert_eq!(bob_expr.author, bob_did_result);
+        assert_eq!(alice_expr.author, alice_did);
+        assert_eq!(bob_expr.author, bob_did);
 
         assert_ne!(main_expr.proof.signature, alice_expr.proof.signature);
         assert_ne!(main_expr.proof.signature, bob_expr.proof.signature);
         assert_ne!(alice_expr.proof.signature, bob_expr.proof.signature);
 
-        let user_list = AgentService::list_user_emails().expect("Failed to list user emails");
-        assert!(user_list.contains(&alice_email.to_string()));
-        assert!(user_list.contains(&bob_email.to_string()));
-        assert!(!user_list.contains(&"main".to_string()));
-
-        let alice_data =
-            AgentService::get_user_agent_data(alice_email).expect("Failed to get Alice agent data");
-        let bob_data =
-            AgentService::get_user_agent_data(bob_email).expect("Failed to get Bob agent data");
-
-        assert_eq!(alice_data.did, alice_did_result);
-        assert_eq!(bob_data.did, bob_did_result);
+        let managed = AgentService::managed_agent_dids().unwrap();
+        assert!(managed.contains(&alice_did));
+        assert!(managed.contains(&bob_did));
+        assert!(!managed.contains(&main_did));
     }
 
     #[test]
     fn test_user_key_isolation() {
         ensure_setup();
-        let user1_email = "user1.isolation@example.com";
-        let user2_email = "user2.isolation@example.com";
+        let _db = crate::test_utils::MultiUserMode::on();
+        let user1_did = crate::test_utils::create_test_user("user1.isolation@example.com");
+        let user2_did = crate::test_utils::create_test_user("user2.isolation@example.com");
+        let user1_context = AgentContext::managed(user1_did.clone());
+        let user2_context = AgentContext::managed(user2_did.clone());
 
-        let user1_context = AgentContext::for_user_email(user1_email.to_string());
-        let user2_context = AgentContext::for_user_email(user2_email.to_string());
-
-        assert!(did_for_context(&user1_context).is_err());
-        assert!(did_for_context(&user2_context).is_err());
-
-        AgentService::ensure_user_key_exists(user1_email).expect("Failed to create user1 key");
-        AgentService::ensure_user_key_exists(user2_email).expect("Failed to create user2 key");
-
-        let user1_did_result =
-            did_for_context(&user1_context).expect("User 1 DID generation failed");
-        let user2_did_result =
-            did_for_context(&user2_context).expect("User 2 DID generation failed");
-
-        assert_ne!(user1_did_result, user2_did_result);
+        assert_ne!(user1_did, user2_did);
 
         let test_payload = b"isolation test message";
         let user1_signature =
@@ -1648,6 +1763,16 @@ mod tests {
             sign_for_context(test_payload, &user2_context).expect("User 2 signing failed");
 
         assert_ne!(user1_signature, user2_signature);
+        let user1_key = signing_key_id_for_context(&user1_context).unwrap();
+        assert!(
+            signatures::verify_string_signed_by_did(
+                &user1_did,
+                "isolation",
+                &sign_string_hex_for_context("isolation".to_string(), &user1_context).unwrap()
+            )
+            .unwrap(),
+            "{user1_key} signs as {user1_did}"
+        );
     }
 
     #[test]
@@ -1660,12 +1785,8 @@ mod tests {
         let test_dir = "test_data/ad4m";
         std::fs::create_dir_all(test_dir).expect("Failed to create test directory");
 
-        // Create user key
-        AgentService::ensure_user_key_exists(test_user_email).expect("Failed to create user key");
-
-        // Get the DID before save
-        let did_before_save = AgentService::get_user_did_by_email(test_user_email)
-            .expect("Failed to get DID before save");
+        // Create the user and its agent
+        let did_before_save = crate::test_utils::create_test_user(test_user_email);
 
         // Simulate unlock by storing passphrase
         AgentService::with_mutable_global_instance(|agent_service| {
@@ -1685,9 +1806,11 @@ mod tests {
                 .expect("Failed to unlock after load");
         });
 
-        // Get the DID after reload
-        let did_after_reload = AgentService::get_user_did_by_email(test_user_email)
-            .expect("Failed to get DID after reload");
+        // The key reloads under the DID and still derives it
+        let did_after_reload = AgentService::managed_agent_for_email(test_user_email)
+            .and_then(|agent| did_document_for_context(&agent))
+            .expect("Failed to get DID after reload")
+            .id;
 
         // Verify DIDs are the same
         assert_eq!(
@@ -1762,6 +1885,265 @@ mod tests {
         // and syncs the DID, preventing mismatches for subsequent tests.
         setup_agent();
     }
+
+    // ---- D16: managed agents' keys are named by their DID ----------------
+
+    /// A wallet of its own, with a key named `name`; returns the key's DID.
+    fn wallet_with_key(wallet: &crate::wallet::LocalWallet, name: &str) -> String {
+        use crate::wallet::WalletBackend;
+        wallet.generate_keypair(name).unwrap();
+        wallet.get_did_document(name).unwrap().id
+    }
+
+    fn key_names(wallet: &dyn crate::wallet::WalletBackend) -> Vec<String> {
+        let mut names = wallet.list_key_names();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_key_name_migration_copies_persists_then_removes() {
+        let wallet = crate::wallet::LocalWallet::new();
+        let alice = wallet_with_key(&wallet, "alice@example.org");
+        let users = vec![("alice@example.org".to_string(), alice.clone())];
+
+        let mut seen_at_persist = Vec::new();
+        let outcomes = migrate_managed_key_names(&wallet, &users, || {
+            seen_at_persist.push(key_names(&wallet));
+            Ok(())
+        });
+
+        assert_eq!(
+            outcomes,
+            vec![("alice@example.org".to_string(), KeyNameMigration::Renamed)]
+        );
+        assert_eq!(
+            seen_at_persist.first(),
+            Some(&vec!["alice@example.org".to_string(), alice.clone()]),
+            "the copy reaches the disk while the old name still holds the key"
+        );
+        assert_eq!(key_names(&wallet), vec![alice.clone()], "the old name goes");
+        assert_eq!(
+            seen_at_persist.last(),
+            Some(&vec![alice.clone()]),
+            "the removal is persisted too"
+        );
+        assert_eq!(wallet_did(&wallet, &alice), Some(alice.clone()));
+
+        // Idempotent: nothing to do, nothing written.
+        let mut persisted_again = 0;
+        let again = migrate_managed_key_names(&wallet, &users, || {
+            persisted_again += 1;
+            Ok(())
+        });
+        assert_eq!(
+            again,
+            vec![(
+                "alice@example.org".to_string(),
+                KeyNameMigration::AlreadyNamedByDid
+            )]
+        );
+        assert_eq!(persisted_again, 0);
+        assert_eq!(key_names(&wallet), vec![alice]);
+    }
+
+    fn wallet_did(wallet: &dyn crate::wallet::WalletBackend, name: &str) -> Option<String> {
+        wallet.get_did_document(name).map(|doc| doc.id)
+    }
+
+    #[test]
+    fn the_key_name_migration_finishes_after_a_crash_and_keeps_keys_it_cannot_vouch_for() {
+        use crate::wallet::WalletBackend;
+        let wallet = crate::wallet::LocalWallet::new();
+        // Crashed after the copy was persisted: both names hold the same key.
+        let bob = wallet_with_key(&wallet, "bob@example.org");
+        wallet.copy_key("bob@example.org", &bob).unwrap();
+        // A key under the old name that is not the user's: it derives another DID.
+        let carol_key = wallet_with_key(&wallet, "carol@example.org");
+        let carol = wallet_with_key(&wallet, "carol-agent");
+        wallet.copy_key("carol-agent", &carol).unwrap();
+        wallet.remove_key("carol-agent").unwrap();
+        // The user's row names a DID the key under its email does not derive.
+        let dave_key = wallet_with_key(&wallet, "dave@example.org");
+        let dave = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
+        let users = vec![
+            ("bob@example.org".to_string(), bob.clone()),
+            ("carol@example.org".to_string(), carol.clone()),
+            ("dave@example.org".to_string(), dave.clone()),
+            ("erin@example.org".to_string(), "did:key:erin".to_string()),
+            ("frank@example.org".to_string(), String::new()),
+        ];
+
+        let outcomes = migrate_managed_key_names(&wallet, &users, || Ok(()));
+
+        assert_eq!(
+            outcomes,
+            vec![
+                (
+                    "bob@example.org".to_string(),
+                    KeyNameMigration::RemovedDuplicate
+                ),
+                (
+                    "carol@example.org".to_string(),
+                    KeyNameMigration::KeptOtherKey {
+                        derived: carol_key.clone()
+                    }
+                ),
+                (
+                    "dave@example.org".to_string(),
+                    KeyNameMigration::Mismatch {
+                        derived: dave_key.clone()
+                    }
+                ),
+                ("erin@example.org".to_string(), KeyNameMigration::NoKey),
+            ]
+        );
+        assert_eq!(wallet_did(&wallet, &bob), Some(bob.clone()));
+        assert!(!wallet.key_exists("bob@example.org"), "the duplicate goes");
+        assert_eq!(
+            wallet_did(&wallet, "carol@example.org"),
+            Some(carol_key),
+            "a key that is not the user's is never removed"
+        );
+        assert_eq!(
+            wallet_did(&wallet, "dave@example.org"),
+            Some(dave_key),
+            "a mismatched key keeps its old name"
+        );
+        assert!(
+            !wallet.key_exists(&dave),
+            "nothing is named by a DID no key derives"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_old_key_names() {
+        let wallet = crate::wallet::LocalWallet::new();
+        let alice = wallet_with_key(&wallet, "alice@example.org");
+        let users = vec![("alice@example.org".to_string(), alice.clone())];
+
+        migrate_managed_key_names(&wallet, &users, || Err(anyhow!("disk full")));
+
+        assert_eq!(
+            wallet_did(&wallet, "alice@example.org"),
+            Some(alice.clone()),
+            "without a saved copy the old name stays"
+        );
+    }
+
+    /// An executor whose agent file still names a managed agent's key by the user's email.
+    /// Returns the agent file's path. Leaves the global `AgentService` on `app_path`.
+    fn executor_with_a_key_named_by_email(
+        app_path: &str,
+        passphrase: &str,
+        email: &str,
+        users_did: Option<&str>,
+    ) -> (String, String) {
+        let backend = wallet_backend();
+        backend.generate_keypair(email).unwrap();
+        let key_did = backend.get_did_document(email).unwrap().id;
+        let did = users_did.map(str::to_string).unwrap_or(key_did);
+        Ad4mDb::with_global_instance(|db| db.add_user(email, &did, "pw")).unwrap();
+        let global = AgentService::global_instance();
+        let mut lock = global.lock().unwrap();
+        *lock = Some(AgentService::new(app_path.to_string()));
+        let svc = lock.as_mut().unwrap();
+        svc.create_new_keys();
+        svc.save(passphrase.to_string());
+        (format!("{}/ad4m/agent.json", app_path), did)
+    }
+
+    /// Unlocks the agent file on disk: the keys it holds replace the ones in memory.
+    fn unlock_from_disk(passphrase: &str) {
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.unlock(passphrase.to_string()).expect("unlock");
+        });
+    }
+
+    /// D16: restart on pre-migration data (a managed agent's key named by the user's email).
+    /// The unlock names the key by the DID, removes the old name, saves both steps, and the
+    /// user still signs as the same DID. A second unlock changes nothing.
+    #[test]
+    fn unlock_names_a_managed_agents_key_by_its_did() {
+        ensure_setup();
+        let _db = crate::test_utils::MultiUserMode::on();
+        let tmp = tempfile::tempdir().unwrap();
+        let app_path = tmp.path().to_str().unwrap().to_string();
+        std::fs::create_dir_all(format!("{}/ad4m", app_path)).unwrap();
+        let passphrase = "d16 migration";
+        let email = format!("migrate.{}@example.org", uuid::Uuid::new_v4());
+        let (agent_file, did) =
+            executor_with_a_key_named_by_email(&app_path, passphrase, &email, None);
+        let backend = wallet_backend();
+        assert!(backend.key_exists(&email) && !backend.key_exists(&did));
+
+        unlock_from_disk(passphrase);
+
+        assert_eq!(wallet_did(backend.as_ref(), &did), Some(did.clone()));
+        assert!(!backend.key_exists(&email), "the old name is gone");
+        // What the unlock saved, read back from the agent file.
+        let saved = std::fs::read_to_string(&agent_file).unwrap();
+        unlock_from_disk(passphrase);
+        assert_eq!(wallet_did(backend.as_ref(), &did), Some(did.clone()));
+        assert!(
+            !backend.key_exists(&email),
+            "the agent file holds the new name only"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&agent_file).unwrap(),
+            saved,
+            "a second unlock writes nothing: every export draws a fresh salt"
+        );
+
+        let agent = AgentService::managed_agent_for_email(&email).unwrap();
+        assert_eq!(agent, AgentContext::managed(did.clone()));
+        let signed = create_signed_expression(json!({ "after": "migration" }), &agent).unwrap();
+        assert_eq!(signed.author, did, "the user signs as the same DID");
+        assert!(signatures::verify(&signed).unwrap());
+
+        setup_agent();
+    }
+
+    /// D16: a key whose DID is not the user's keeps its old name, and the user's sessions
+    /// fail with `NoIdentity` until an operator fixes it.
+    #[test]
+    fn unlock_keeps_a_mismatched_key_and_its_users_sessions_fail() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::{AuthError, Session};
+        ensure_setup();
+        let _db = crate::test_utils::MultiUserMode::on();
+        let tmp = tempfile::tempdir().unwrap();
+        let app_path = tmp.path().to_str().unwrap().to_string();
+        std::fs::create_dir_all(format!("{}/ad4m", app_path)).unwrap();
+        let passphrase = "d16 mismatch";
+        let email = format!("mismatch.{}@example.org", uuid::Uuid::new_v4());
+        let recorded = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+        let (_, did) =
+            executor_with_a_key_named_by_email(&app_path, passphrase, &email, Some(recorded));
+        let backend = wallet_backend();
+        let key_did = wallet_did(backend.as_ref(), &email).unwrap();
+        assert_ne!(key_did, did);
+
+        unlock_from_disk(passphrase);
+
+        assert_eq!(
+            wallet_did(backend.as_ref(), &email),
+            Some(key_did),
+            "the key keeps its old name"
+        );
+        assert!(!backend.key_exists(&did));
+        let token = crate::user_management::generate_user_jwt(&email, "test").unwrap();
+        let old_token =
+            crate::test_utils::resigned_token(&token, |claims| claims["sub"] = json!(email));
+        for token in [token, old_token] {
+            let err = Session::open(&token, &None, ListenerReach::Network).unwrap_err();
+            assert!(matches!(err, AuthError::NoIdentity(_)), "{err:?}");
+        }
+
+        setup_agent();
+    }
+
     /// An agent file that an older executor wrote holds a legacy keystore. The first
     /// unlock rewrites it in the current format, and it still unlocks afterwards.
     #[test]
@@ -2217,7 +2599,7 @@ mod tests {
 
 #[cfg(test)]
 mod agent_context_tests {
-    use super::{capabilities, AgentContext, AgentService};
+    use super::{capabilities, AgentContext};
     use crate::agent::session::{AuthError, Session};
     use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
 
@@ -2234,9 +2616,10 @@ mod agent_context_tests {
         Session::open(token, &admin, capabilities::ListenerReach::Network).map(|s| s.acts_as())
     }
 
-    /// A login of `email`, whose agent gets a key first: a login's grant names its DID.
+    /// A login of `email`, whose agent gets a key and a `users` row first: a login's grant
+    /// names its DID.
     fn login(email: &str) -> String {
-        AgentService::ensure_user_key_exists(email).unwrap();
+        crate::test_utils::create_test_user(email);
         crate::user_management::generate_user_jwt(email, "test").unwrap()
     }
 
@@ -2260,9 +2643,10 @@ mod agent_context_tests {
     fn a_user_token_acts_as_its_user() {
         setup();
         let _multi_user = MultiUserMode::on();
+        let did = crate::test_utils::create_test_user("alice@example.org");
         let context = acts_as(&login("alice@example.org")).unwrap();
         assert!(!context.is_main_agent());
-        assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
+        assert_eq!(context, AgentContext::managed(did));
     }
 
     #[test]
@@ -2279,9 +2663,10 @@ mod agent_context_tests {
     fn a_user_token_acts_as_its_user_when_multi_user_mode_is_off() {
         setup();
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
+        let did = crate::test_utils::create_test_user("alice@example.org");
         let context = acts_as(&login("alice@example.org")).unwrap();
         assert!(!context.is_main_agent());
-        assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
+        assert_eq!(context, AgentContext::managed(did));
     }
 
     #[test]
@@ -2296,11 +2681,15 @@ mod agent_context_tests {
 
     #[test]
     fn only_the_agent_without_a_user_is_the_main_agent() {
-        let managed = AgentContext::for_user_email("alice@example.org".to_string());
+        let managed = AgentContext::managed("did:key:z6MkManaged".to_string());
         assert!(!managed.is_main_agent());
-        assert_eq!(managed.wallet_key_name(), "alice@example.org");
+        assert_eq!(managed.managed_did(), Some("did:key:z6MkManaged"));
         let main = AgentContext::main_agent();
         assert!(main.is_main_agent());
-        assert_eq!(main.wallet_key_name(), crate::wallet::KEY_NAME_MAIN);
+        assert_eq!(main.managed_did(), None);
+        assert_eq!(
+            main.wallet_key_name().unwrap(),
+            crate::wallet::KEY_NAME_MAIN
+        );
     }
 }

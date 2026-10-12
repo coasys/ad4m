@@ -828,9 +828,9 @@ pub(crate) mod test_support {
         Session::for_test(Principal::Agent(AgentContext::main_agent())).with_caps(caps)
     }
 
-    /// A grant on the managed agent of `email`, whose DID is `did`, limited to `caps`.
-    pub(crate) fn user(email: &str, did: &str, caps: Vec<Capability>) -> Session {
-        Session::for_test(Principal::Agent(AgentContext::for_user_email(email.into())))
+    /// A grant on the managed agent `did`, limited to `caps`.
+    pub(crate) fn user(did: &str, caps: Vec<Capability>) -> Session {
+        Session::for_test(Principal::Agent(AgentContext::managed(did.to_string())))
             .with_caps(caps)
             .with_did(did)
     }
@@ -950,17 +950,14 @@ mod agent_context_tests {
         setup_agent();
         let _multi_user = MultiUserMode::on();
         let email = "mcp.user@example.org";
-        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+        let user_did = crate::test_utils::create_test_user(email);
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
         let handler = handler(&token);
         let context = handler.get_agent_context().await.unwrap();
-        assert_eq!(context.user_email.as_deref(), Some(email));
+        assert_eq!(context, AgentContext::managed(user_did.clone()));
         // A user never acts as the main agent: its own DID, not the main agent's.
         let did = handler.get_my_did(profile_params()).await;
-        assert_eq!(
-            did,
-            crate::agent::AgentService::get_user_did_by_email(email).unwrap()
-        );
+        assert_eq!(did, user_did);
         assert_ne!(did, crate::agent::did());
     }
 
@@ -1048,13 +1045,13 @@ mod agent_context_tests {
         setup_wallet();
         setup_agent();
         let email = "mcp.cutoff@example.org";
-        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+        let did = crate::test_utils::create_test_user(email);
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
         let handler = handler(&token);
         assert!(handler.session().await.is_ok());
 
         crate::agent::grants::Grants::global()
-            .revoke_agent(&AgentContext::for_user_email(email.to_string()))
+            .revoke_agent(&AgentContext::managed(did))
             .unwrap();
         let err = handler.get_agent_context().await.unwrap_err();
         assert!(err.contains("Unauthorized access"), "{err}");

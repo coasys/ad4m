@@ -17,11 +17,10 @@ use crate::languages::LanguageController;
 use crate::pubsub::get_global_pubsub;
 use crate::types::{Agent, ModelApiInput, ModelInput, ModelType, RequestContext};
 
-/// A user session with the default user capabilities. No call here reads the session's DID.
-fn user_session(email: &str) -> Arc<RequestContext> {
+/// A user session on the managed agent `did`, with the default user capabilities.
+fn user_session(did: &str) -> Arc<RequestContext> {
     Arc::new(RequestContext::user_for_test(
-        email,
-        &format!("did:key:test:{email}"),
+        did,
         get_user_default_capabilities(),
     ))
 }
@@ -41,28 +40,25 @@ async fn call(op: &str, params: Value, ctx: Arc<RequestContext>) -> Result<Value
 /// the user's profile directory, so test profiles do not pile up under `test_data`.
 /// Needs `setup_wallet` and `setup_agent` first.
 struct TestUser {
-    email: String,
+    did: String,
     profile_path: PathBuf,
 }
 
 impl TestUser {
     fn new(label: &str) -> Self {
         let email = format!("{label}.{}@example.org", uuid::Uuid::new_v4());
-        AgentService::ensure_user_key_exists(&email).unwrap();
+        let did = crate::test_utils::create_test_user(&email);
         let profile_path =
             AgentService::with_global_instance(|a| a.user_profile_path(&email)).unwrap();
-        Self {
-            email,
-            profile_path,
-        }
+        Self { did, profile_path }
     }
 
     fn did(&self) -> String {
-        AgentService::get_user_did_by_email(&self.email).unwrap()
+        self.did.clone()
     }
 
     fn stored_profile(&self) -> Agent {
-        AgentService::with_global_instance(|a| a.load_user_agent_profile(&self.email))
+        AgentService::load_managed_agent_profile(&self.did)
             .unwrap()
             .expect("the user's profile exists")
     }
@@ -81,22 +77,20 @@ async fn a_user_session_signs_as_the_user_not_the_main_agent() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let email = "signing.user@example.org";
-    AgentService::ensure_user_key_exists(email).unwrap();
+    let user_did = crate::test_utils::create_test_user(email);
 
     let result = call(
         "agent.sign",
         json!({ "message": "hello" }),
-        user_session(email),
+        user_session(&user_did),
     )
     .await
     .expect("a user may sign as themselves");
 
-    let user_key =
-        signing_key_id_for_context(&AgentContext::for_user_email(email.to_string())).unwrap();
+    let user_key = signing_key_id_for_context(&AgentContext::managed(user_did.clone())).unwrap();
     assert_eq!(result["publicKey"], json!(user_key));
     assert_ne!(result["publicKey"], json!(signing_key_id()));
 
-    let user_did = AgentService::get_user_did_by_email(email).unwrap();
     let signature = result["signature"].as_str().unwrap();
     assert!(
         crate::agent::signatures::verify_string_signed_by_did(&user_did, "hello", signature)
@@ -133,7 +127,7 @@ async fn a_user_sets_their_own_dm_language_not_the_main_agents() {
     let returned = call(
         "agent.updateProfile",
         json!({ "dmLanguage": "lang://the-users-own" }),
-        user_session(&user.email),
+        user_session(&user.did),
     )
     .await
     .expect("a user may set their own DM language");
@@ -161,7 +155,7 @@ async fn a_user_sets_their_own_dm_language_not_the_main_agents() {
     call(
         "agent.updateProfile",
         json!({ "publicPerspective": { "links": [] } }),
-        user_session(&user.email),
+        user_session(&user.did),
     )
     .await
     .expect("a user may update their own perspective");
@@ -209,7 +203,7 @@ async fn one_profile_update_with_both_fields_stores_and_announces_once() {
                 "proof": { "key": "#key", "signature": "00" },
             }] },
         }),
-        user_session(&user.email),
+        user_session(&user.did),
     )
     .await
     .expect("a user may update both profile fields at once");
@@ -264,7 +258,7 @@ async fn a_profile_that_fails_to_load_fails_the_update() {
         match call(
             "agent.updateProfile",
             params.clone(),
-            user_session(&user.email),
+            user_session(&user.did),
         )
         .await
         {
@@ -286,12 +280,16 @@ async fn a_profile_that_fails_to_load_fails_the_update() {
 async fn a_user_reads_only_their_own_compute_log() {
     Ad4mDb::init_global_instance(":memory:").unwrap();
     let (alice, bob) = ("alice.log@example.org", "bob.log@example.org");
+    let (alice_did, bob_did) = ("did:key:z6MkAliceLog", "did:key:z6MkBobLog");
     Ad4mDb::with_global_instance(|db| {
-        db.insert_compute_log(alice, "prompt", Some("alice's prompt"), 1.0, 9.0)
+        db.add_user(alice, alice_did, "pw").unwrap();
+        db.add_user(bob, bob_did, "pw").unwrap();
+        db.insert_compute_log(alice_did, "prompt", Some("alice's prompt"), 1.0, 9.0)
             .unwrap();
-        db.insert_compute_log(bob, "prompt", Some("bob's prompt"), 2.0, 8.0)
+        db.insert_compute_log(bob_did, "prompt", Some("bob's prompt"), 2.0, 8.0)
             .unwrap();
     });
+    // The log names each entry's account by email, as before agents were keyed by DID.
     let owners = |log: Value| -> Vec<String> {
         log.as_array()
             .unwrap()
@@ -303,15 +301,25 @@ async fn a_user_reads_only_their_own_compute_log() {
     match call(
         "runtime.computeLog",
         json!({ "userEmail": bob }),
-        user_session(alice),
+        user_session(alice_did),
     )
     .await
     {
         Err((403, _)) => {}
         other => panic!("a user read another user's compute log: {other:?}"),
     }
+    match call(
+        "runtime.computeLog",
+        json!({ "userEmail": "nobody@example.org" }),
+        user_session(alice_did),
+    )
+    .await
+    {
+        Err((403, _)) => {}
+        other => panic!("a user named an email that is not theirs: {other:?}"),
+    }
 
-    let own = call("runtime.computeLog", json!({}), user_session(alice))
+    let own = call("runtime.computeLog", json!({}), user_session(alice_did))
         .await
         .expect("a user may read their own compute log");
     assert_eq!(
@@ -322,7 +330,7 @@ async fn a_user_reads_only_their_own_compute_log() {
     let own_by_name = call(
         "runtime.computeLog",
         json!({ "userEmail": alice }),
-        user_session(alice),
+        user_session(alice_did),
     )
     .await
     .expect("a user may name themselves");
@@ -336,6 +344,15 @@ async fn a_user_reads_only_their_own_compute_log() {
     .await
     .expect("the operator may read any user's compute log");
     assert_eq!(owners(bobs), vec![bob]);
+
+    let nobodys = call(
+        "runtime.computeLog",
+        json!({ "userEmail": "nobody@example.org" }),
+        operator_session(),
+    )
+    .await
+    .expect("the operator reads an empty log for an unknown email");
+    assert!(owners(nobodys).is_empty());
 }
 
 #[tokio::test]
@@ -363,7 +380,7 @@ async fn the_default_model_never_shows_its_key() {
     let as_user = call(
         "ai.getDefaultModel",
         params.clone(),
-        user_session("model.user@example.org"),
+        user_session("did:key:test:model-user"),
     )
     .await
     .expect("a user may read the default model");
@@ -504,7 +521,7 @@ async fn apply_template_publishes_as_the_calling_session() {
     let users_copy = call(
         "language.applyTemplate",
         template("the user's copy"),
-        user_session(&user.email),
+        user_session(&user.did),
     )
     .await
     .expect("a user may template a link language to create a neighbourhood");
@@ -518,7 +535,7 @@ async fn apply_template_publishes_as_the_calling_session() {
     let users_meta = call(
         "language.meta",
         json!({ "address": users_copy["address"] }),
-        user_session(&user.email),
+        user_session(&user.did),
     )
     .await
     .expect("the user's copy was published");
@@ -565,7 +582,7 @@ async fn mcp_clones_a_link_language_as_the_calling_agent() {
     let users_copy = crate::mcp::tools::neighbourhoods::clone_link_language(
         &languages.template_address,
         "the user's space",
-        &AgentContext::for_user_email(user.email.clone()),
+        &AgentContext::managed(user.did.clone()),
     )
     .await
     .expect("a user clones a link language");

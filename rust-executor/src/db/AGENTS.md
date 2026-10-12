@@ -16,16 +16,19 @@ migration still live in `db.rs`.
 
 ## Invariants
 
-- `tasks.user_email` is the managed user who created the task. `NULL` is an operator task:
-  admin credential, app token, the executor's own interpretation tasks, or any row older
-  than the column.
+- `tasks.agent_did` is the DID of the managed agent whose session created the task (D16).
+  `NULL` is a task of the main agent: admin credential, app token on the main agent, the
+  executor's own interpretation tasks, or any row older than the column. A table that named
+  its owner by `user_email` moves at start (`migrate_task_owner_to_agent_did`): the email
+  resolves to the user's DID through `users`; a task whose user is gone is logged and
+  deleted (it was unreachable); `NULL` stays `NULL`; then `user_email` is dropped.
 - A session reaches only its agent's tasks (`Guard::Owns { owner: Task }` in
   `api/guards.rs`; `ai.tasks` lists them): a user its own, a grant on the main agent the
   operator tasks. The operator reaches every task. Another agent's task is 404.
 - Executor code that looks a task up by name reads operator tasks only
   (`get_tasks_owned_by(None)`). Otherwise a user can create a task under that name first and
   have it used for every user.
-- `update_task` never writes `user_email`: a rewrite keeps the owner. Export and import carry
+- `update_task` never writes `agent_did`: a rewrite keeps the owner. Export and import carry
   it, so a restore keeps each task's owner.
 
 ## Do not

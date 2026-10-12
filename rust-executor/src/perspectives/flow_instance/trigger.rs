@@ -349,27 +349,26 @@ impl PerspectiveInstance {
         }
 
         let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone());
-        let managed_users: Vec<(String, String)> =
-            if crate::user_management::is_multi_user_enabled() {
-                match crate::db::Ad4mDb::with_global_instance(|db| db.list_users()) {
-                    Ok(users) => users.into_iter().map(|u| (u.did, u.username)).collect(),
-                    Err(e) => {
-                        // The main agent still resolves from `owners` alone, so
-                        // the host's own view stays correct; the managed users
-                        // heal on the next touch.
-                        log::warn!(
-                            "sync-triggered flow pass on {}: could not list users ({e}); \
+        let managed_agents: Vec<String> = if crate::user_management::is_multi_user_enabled() {
+            match crate::agent::AgentService::managed_agent_dids() {
+                Ok(dids) => dids,
+                Err(e) => {
+                    // The main agent still resolves from `owners` alone, so
+                    // the host's own view stays correct; the managed users
+                    // heal on the next touch.
+                    log::warn!(
+                        "sync-triggered flow pass on {}: could not list users ({e}); \
                              resolving owners against the main agent only",
-                            self.uuid
-                        );
-                        Vec::new()
-                    }
+                        self.uuid
+                    );
+                    Vec::new()
                 }
-            } else {
-                Vec::new()
-            };
+            }
+        } else {
+            Vec::new()
+        };
 
-        let contexts = flow_pass_agents(&owners, main_did.as_deref(), &managed_users);
+        let contexts = flow_pass_agents(&owners, main_did.as_deref(), &managed_agents);
         log::debug!(
             "sync-triggered flow pass on {}: {} of {} owner(s) are agents on this executor",
             self.uuid,
@@ -433,7 +432,7 @@ impl PerspectiveInstance {
 pub fn flow_pass_agents(
     owners: &[String],
     main_agent_did: Option<&str>,
-    managed_users: &[(String, String)],
+    managed_agents: &[String],
 ) -> Vec<AgentContext> {
     if owners.is_empty() {
         return vec![AgentContext::main_agent()];
@@ -444,12 +443,8 @@ pub fn flow_pass_agents(
         let context = if Some(owner.as_str()) == main_agent_did {
             AgentContext::main_agent()
         } else {
-            match managed_users
-                .iter()
-                .find(|(did, _)| did == owner)
-                .map(|(_, email)| email.clone())
-            {
-                Some(email) => AgentContext::for_user_email(email),
+            match managed_agents.iter().find(|did| *did == owner) {
+                Some(did) => AgentContext::managed(did.clone()),
                 // An owner this executor does not act for: a peer that joined the
                 // neighbourhood from its own executor, or a user that has since
                 // been removed. Its bookkeeping is not ours to advance.
@@ -464,10 +459,7 @@ pub fn flow_pass_agents(
 }
 
 fn log_synced_outcomes(context: &AgentContext, outcomes: &[super::pass::FireOutcome]) {
-    let agent = match &context.user_email {
-        Some(email) => email.as_str(),
-        None => "main agent",
-    };
+    let agent = context.managed_did().unwrap_or("main agent");
     for outcome in outcomes {
         log::info!(
             "🔥 flow settled (synced in, for {agent}): {} {} → {} (by {:?})",
@@ -672,22 +664,16 @@ mod tests {
 
     // ---- flow_pass_agents ---------------------------------------------
 
-    fn emails(contexts: &[AgentContext]) -> Vec<Option<&str>> {
-        contexts
-            .iter()
-            .map(|c| c.user_email.as_deref())
-            .collect::<Vec<_>>()
+    fn managed_dids(contexts: &[AgentContext]) -> Vec<Option<&str>> {
+        contexts.iter().map(|c| c.managed_did()).collect::<Vec<_>>()
     }
 
     const MAIN: &str = "did:key:zMain";
     const ALICE: &str = "did:key:zAlice";
     const BOB: &str = "did:key:zBob";
 
-    fn users() -> Vec<(String, String)> {
-        vec![
-            (ALICE.into(), "a@example.com".into()),
-            (BOB.into(), "b@example.com".into()),
-        ]
+    fn users() -> Vec<String> {
+        vec![ALICE.into(), BOB.into()]
     }
 
     #[test]
@@ -696,7 +682,7 @@ mod tests {
         // local perspective has none — and that is the single-user norm. Users
         // in the DB must not fan a pass out over a perspective nobody claims.
         let contexts = flow_pass_agents(&[], Some(MAIN), &users());
-        assert_eq!(emails(&contexts), vec![None]);
+        assert_eq!(managed_dids(&contexts), vec![None]);
         assert!(contexts[0].is_main_agent());
     }
 
@@ -705,8 +691,8 @@ mod tests {
         let owners = vec![BOB.to_string(), MAIN.to_string(), ALICE.to_string()];
         let contexts = flow_pass_agents(&owners, Some(MAIN), &users());
         assert_eq!(
-            emails(&contexts),
-            vec![Some("b@example.com"), None, Some("a@example.com")],
+            managed_dids(&contexts),
+            vec![Some(BOB), None, Some(ALICE)],
             "one context per owner, in the handle's order"
         );
         assert!(
@@ -725,7 +711,7 @@ mod tests {
         // agent cannot read it (`perspectives_ws` denies it), so writing its
         // `Local` bookkeeping there would be bookkeeping nobody reads.
         let contexts = flow_pass_agents(&[ALICE.to_string()], Some(MAIN), &users());
-        assert_eq!(emails(&contexts), vec![Some("a@example.com")]);
+        assert_eq!(managed_dids(&contexts), vec![Some(ALICE)]);
     }
 
     #[test]
@@ -735,7 +721,7 @@ mod tests {
         // the main agent — that would sign one agent's cache with another's key.
         let owners = vec!["did:key:zRemotePeer".to_string(), MAIN.to_string()];
         assert_eq!(
-            emails(&flow_pass_agents(&owners, Some(MAIN), &users())),
+            managed_dids(&flow_pass_agents(&owners, Some(MAIN), &users())),
             vec![None]
         );
 
@@ -750,8 +736,8 @@ mod tests {
     fn a_duplicated_owner_is_swept_once() {
         let owners = vec![ALICE.to_string(), ALICE.to_string(), MAIN.to_string()];
         assert_eq!(
-            emails(&flow_pass_agents(&owners, Some(MAIN), &users())),
-            vec![Some("a@example.com"), None]
+            managed_dids(&flow_pass_agents(&owners, Some(MAIN), &users())),
+            vec![Some(ALICE), None]
         );
     }
 
@@ -761,8 +747,8 @@ mod tests {
         // owners that still resolve are swept, and no context is invented.
         let owners = vec![MAIN.to_string(), ALICE.to_string()];
         assert_eq!(
-            emails(&flow_pass_agents(&owners, None, &users())),
-            vec![Some("a@example.com")]
+            managed_dids(&flow_pass_agents(&owners, None, &users())),
+            vec![Some(ALICE)]
         );
         assert!(flow_pass_agents(&owners, Some(MAIN), &[]).len() == 1);
     }
