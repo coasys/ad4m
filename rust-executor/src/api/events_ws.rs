@@ -67,12 +67,12 @@ use super::event_interest::{self, SharedInterest};
 use crate::agent::capabilities::*;
 use crate::agent::session::Session;
 use crate::agent::session_registry::SessionRegistry;
-use crate::agent::{did_for_context, AgentContext};
 use crate::events::{Event, Topic};
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 
-use super::auth::{AppState, AuthContext};
+use super::auth::AppState;
 use super::errors::ApiError;
+use crate::types::RequestContext;
 use crate::types::{
     AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
     NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveExpression,
@@ -191,10 +191,10 @@ pub fn event_specs() -> Vec<EventSpec> {
 pub async fn events_ws(
     ws: WebSocketUpgrade,
     State(_state): State<AppState>,
-    auth: Result<AuthContext, ApiError>,
+    context: Result<RequestContext, ApiError>,
 ) -> Result<Response, ApiError> {
-    let auth = match auth {
-        Ok(auth) => auth,
+    let context = match context {
+        Ok(context) => context,
         Err(ApiError::Unauthorized(reason)) => {
             return Ok(ws.on_upgrade(move |socket| {
                 super::ws_rpc::close_refused(socket, super::ws_rpc::CLOSE_TOKEN_ENDED, reason)
@@ -207,31 +207,29 @@ pub async fn events_ws(
         }
         Err(e) => return Err(e),
     };
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+    context
+        .require(&AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let user_email = context.user_email().map(str::to_string);
     let session = context.session.clone();
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, session, user_email)))
+    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, session)))
 }
 
-/// Build the merged event stream for a given user.
+/// Build the merged event stream for the agent a session acts as.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user and to `interest` (what the socket asked for with `events.watch`).
+/// per agent and to `interest` (what the socket asked for with `events.watch`).
 /// The stream ends at the first event after `session.check()` fails.
 pub(crate) async fn build_event_stream(
     session: Arc<Session>,
     interest: SharedInterest,
-    user_email: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     // The session's own agent, taken from the session: a token that stops decoding cannot
     // turn it into the main agent. Resolved once at subscription time, for the live-query
     // filter; `None` (a client that connected before `agent.generate()`) lets every update
     // through, as single-user mode.
-    let resolved_did = did_for_context(&AgentContext::for_session(user_email)).ok();
+    let resolved_did = session.acts_as_did().map(str::to_string);
     build_event_stream_for(session, interest, resolved_did).await
 }
 
@@ -344,11 +342,7 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
     }
 }
 
-async fn handle_events_ws(
-    mut socket: WebSocket,
-    session: Arc<Session>,
-    user_email: Option<String>,
-) {
+async fn handle_events_ws(mut socket: WebSocket, session: Arc<Session>) {
     log::info!("Events WebSocket connected");
 
     // Fires when the token is revoked: the socket closes at once, not at the next event.
@@ -356,7 +350,7 @@ async fn handle_events_ws(
     let _registered = SessionRegistry::global().register(&session, revoked.clone());
 
     let interest = SharedInterest::default();
-    let mut event_stream = build_event_stream(session, interest.clone(), user_email).await;
+    let mut event_stream = build_event_stream(session, interest.clone()).await;
 
     loop {
         tokio::select! {
@@ -507,8 +501,9 @@ mod perspective_is_owned_by_tests {
     //! a write holds instead of failing: a failed `try_lock` here used to drop
     //! live-query updates published during writes.
     use super::{matches_perspective_owner, perspective_is_owned_by, query_updates};
-    use crate::agent::capabilities::{perspective_query_capability, ListenerReach};
-    use crate::agent::session::{Principal, Session, TokenId};
+    use crate::agent::capabilities::perspective_query_capability;
+    use crate::agent::session::{Principal, Session};
+    use crate::agent::AgentContext;
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::perspectives::{register_perspective, unregister_perspective};
     use crate::types::PerspectiveHandle;
@@ -517,10 +512,7 @@ mod perspective_is_owned_by_tests {
     use std::time::Duration;
 
     fn operator() -> Arc<Session> {
-        Arc::new(Session::for_test(
-            Principal::Operator,
-            ListenerReach::Loopback,
-        ))
+        Arc::new(Session::for_test(Principal::Operator))
     }
 
     // #1284: a live query update reaches a socket only if its session may query the
@@ -528,13 +520,11 @@ mod perspective_is_owned_by_tests {
     // so the owner check alone let an app read the updates of every perspective.
     #[tokio::test]
     async fn a_live_query_update_needs_the_capability_to_query_its_perspective() {
-        let app = Arc::new(Session::for_test(
-            Principal::App {
-                token_id: TokenId("live-query-app".into()),
-                caps: vec![perspective_query_capability(vec!["readable".into()])],
-            },
-            ListenerReach::Network,
-        ));
+        let app = Arc::new(
+            Session::for_test(Principal::Agent(AgentContext::main_agent()))
+                .with_caps(vec![perspective_query_capability(vec!["readable".into()])])
+                .with_token_id("live-query-app"),
+        );
         let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
         let mut stream = Box::pin(query_updates(rx, None, app));
         for uuid in ["other", "readable"] {
@@ -660,15 +650,19 @@ mod events_socket_message_tests {
 #[cfg(test)]
 mod app_approval_event_tests {
     use super::*;
-    use crate::agent::session::{Principal, TokenId};
+    use crate::agent::session::Principal;
+    use crate::agent::AgentContext;
     use crate::events::Audience;
     use std::collections::BTreeSet;
     use std::time::Duration;
 
     fn app(name: &str, caps: Vec<Capability>) -> Arc<Session> {
-        let token_id = TokenId(format!("approval-{name}"));
-        let app = Principal::App { token_id, caps };
-        Arc::new(Session::for_test(app, ListenerReach::Network))
+        let app = Principal::Agent(AgentContext::main_agent());
+        Arc::new(
+            Session::for_test(app)
+                .with_caps(caps)
+                .with_token_id(&format!("approval-{name}")),
+        )
     }
 
     /// The event types `stream` delivers that mention `request_id`, until the fence (a
@@ -710,21 +704,15 @@ mod app_approval_event_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::use_test_apps_file();
-        let operator = Arc::new(Session::for_test(
-            Principal::Operator,
-            ListenerReach::Loopback,
-        ));
-        let user = Principal::User {
-            token_id: TokenId("approval-user".into()),
-            email: "approval.user@example.org".into(),
-            did: "did:key:approval-user".into(),
-            caps: crate::agent::capabilities::get_user_default_capabilities(),
-        };
+        let operator = Arc::new(Session::for_test(Principal::Operator));
+        let user = Session::for_test(Principal::Agent(AgentContext::for_user_email(
+            "approval.user@example.org".into(),
+        )))
+        .with_caps(crate::agent::capabilities::get_user_default_capabilities())
+        .with_did("did:key:approval-user")
+        .with_token_id("approval-user");
         // A socket that never authenticated gets no stream and is no approver.
-        let anonymous = Session::for_test(
-            Principal::Anonymous { caps: vec![] },
-            ListenerReach::Network,
-        );
+        let anonymous = Session::for_test(Principal::Anonymous);
         assert!(!anonymous.is_authenticated());
         assert!(!anonymous.in_audience(&Audience::Approvers));
         let sessions = [
@@ -739,16 +727,12 @@ mod app_approval_event_tests {
                 app("reader", vec![AGENT_READ_CAPABILITY.clone()]),
                 false,
             ),
-            (
-                "user",
-                Arc::new(Session::for_test(user, ListenerReach::Network)),
-                false,
-            ),
+            ("user", Arc::new(user), false),
         ];
         let mut streams = Vec::new();
         for (name, session, approver) in sessions {
             let all = event_interest::watching_all();
-            streams.push((name, approver, build_event_stream(session, all, None).await));
+            streams.push((name, approver, build_event_stream(session, all).await));
         }
 
         let auth = AuthInfo {
@@ -801,11 +785,8 @@ mod app_approval_event_tests {
             .expect("the test agent has a DID");
         crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
         let all = event_interest::watching_all();
-        let operator = Arc::new(Session::for_test(
-            Principal::Operator,
-            ListenerReach::Loopback,
-        ));
-        let mut stream = build_event_stream(operator, all, None).await;
+        let operator = Arc::new(Session::for_test(Principal::Operator));
+        let mut stream = build_event_stream(operator, all).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -907,7 +888,8 @@ mod audience_matrix_tests {
     //! the event. Each case goes through `Session::may_receive` and through a real stream
     //! from `build_event_stream_for`. A new topic or audience adds its cases here.
     use super::*;
-    use crate::agent::session::{Principal, TokenId};
+    use crate::agent::session::Principal;
+    use crate::agent::AgentContext;
     use crate::events::Audience;
     use std::collections::BTreeSet;
     use std::time::Duration;
@@ -919,18 +901,19 @@ mod audience_matrix_tests {
     /// A perspective the "P reader" app may not query.
     const Q: &str = "matrix-perspective-q";
 
-    fn user(name: &str, did: &str) -> Principal {
-        Principal::User {
-            token_id: TokenId(format!("matrix-{name}")),
-            email: format!("matrix.{name}@example.org"),
-            did: did.to_string(),
-            caps: get_user_default_capabilities(),
-        }
+    fn user(name: &str, did: &str) -> Session {
+        let agent = AgentContext::for_user_email(format!("matrix.{name}@example.org"));
+        Session::for_test(Principal::Agent(agent))
+            .with_caps(get_user_default_capabilities())
+            .with_did(did)
+            .with_token_id(&format!("matrix-{name}"))
     }
 
-    fn app(name: &str, caps: Vec<Capability>) -> Principal {
-        let token_id = TokenId(format!("matrix-{name}"));
-        Principal::App { token_id, caps }
+    /// A grant on the main agent.
+    fn app(name: &str, caps: Vec<Capability>) -> Session {
+        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(caps)
+            .with_token_id(&format!("matrix-{name}"))
     }
 
     /// The sessions of the matrix, by name. Users hold what a user token holds; "app" holds
@@ -944,34 +927,21 @@ mod audience_matrix_tests {
         ];
         let p_reader = vec![perspective_query_capability(vec![P.to_string()])];
         [
-            ("operator", Principal::Operator, ListenerReach::Loopback),
-            (
-                "app",
-                app("app", get_user_default_capabilities()),
-                ListenerReach::Network,
-            ),
+            ("operator", Session::for_test(Principal::Operator)),
+            ("app", app("app", get_user_default_capabilities())),
             // An app whose token may approve apps (`AGENT_PERMIT`, here through `ALL`).
             (
                 "permit app",
                 app("permit-app", vec![ALL_CAPABILITY.clone()]),
-                ListenerReach::Network,
             ),
-            ("user A", user("a", A), ListenerReach::Network),
-            ("user B", user("b", B), ListenerReach::Network),
-            ("AI app", app("ai-app", ai), ListenerReach::Network),
-            (
-                "P reader",
-                app("p-reader", p_reader),
-                ListenerReach::Network,
-            ),
-            (
-                "anonymous",
-                Principal::Anonymous { caps: vec![] },
-                ListenerReach::Network,
-            ),
+            ("user A", user("a", A)),
+            ("user B", user("b", B)),
+            ("AI app", app("ai-app", ai)),
+            ("P reader", app("p-reader", p_reader)),
+            ("anonymous", Session::for_test(Principal::Anonymous)),
         ]
         .into_iter()
-        .map(|(name, principal, reach)| (name, Arc::new(Session::for_test(principal, reach))))
+        .map(|(name, session)| (name, Arc::new(session)))
         .collect()
     }
 
@@ -1680,17 +1650,14 @@ mod audience_matrix_tests {
         let email = format!("hosting-{}@example.org", uuid::Uuid::new_v4());
         crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
         let did = crate::agent::AgentService::get_user_did_by_email(&email).unwrap();
-        let hosted = Principal::User {
-            token_id: TokenId("matrix-hosted".into()),
-            email: email.clone(),
-            did,
-            caps: get_user_default_capabilities(),
-        };
+        let hosted = Session::for_test(Principal::Agent(AgentContext::for_user_email(
+            email.clone(),
+        )))
+        .with_caps(get_user_default_capabilities())
+        .with_did(&did)
+        .with_token_id("matrix-hosted");
         let mut sessions = sessions();
-        sessions.push((
-            "hosted user",
-            Arc::new(Session::for_test(hosted, ListenerReach::Network)),
-        ));
+        sessions.push(("hosted user", Arc::new(hosted)));
 
         let info = crate::types::HostingUserInfo {
             email: email.clone(),
@@ -1812,10 +1779,7 @@ mod audience_matrix_tests {
     // The socket's `events.watch` narrows typed events by topic and perspective.
     #[tokio::test]
     async fn a_socket_gets_only_the_typed_events_it_watches() {
-        let session = Arc::new(Session::for_test(
-            Principal::Operator,
-            ListenerReach::Loopback,
-        ));
+        let session = Arc::new(Session::for_test(Principal::Operator));
         let interest = SharedInterest::default();
         event_interest::handle_control(
             event_interest::WATCH,
@@ -1860,11 +1824,8 @@ mod audience_matrix_tests {
             .as_secs()
             - 3600;
         // It may read the event: one it may not read never reaches the stream's end check.
-        let app = Principal::App {
-            token_id: TokenId("matrix-expired".into()),
-            caps: vec![AI_READ_CAPABILITY.clone()],
-        };
-        let expired = Arc::new(Session::for_test_expiring(app, an_hour_ago));
+        let expired =
+            Arc::new(app("expired", vec![AI_READ_CAPABILITY.clone()]).expiring_at(an_hour_ago));
         let mut stream = open(expired).await;
         get_global_pubsub().await.publish_event(Event::new(
             Topic::AiModelLoadingStatus,
@@ -1881,7 +1842,8 @@ mod audience_matrix_tests {
 #[cfg(test)]
 mod token_expiry_tests {
     use super::*;
-    use crate::agent::session::{Principal, TokenId};
+    use crate::agent::session::Principal;
+    use crate::agent::AgentContext;
     use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
     use std::time::Duration;
 
@@ -1890,7 +1852,7 @@ mod token_expiry_tests {
     /// Builds a user's event stream, publishes one event and returns what the stream yields.
     async fn next_event(session: Session) -> Option<String> {
         let all = event_interest::watching_all();
-        let mut stream = build_event_stream(Arc::new(session), all, Some(USER.to_string())).await;
+        let mut stream = build_event_stream(Arc::new(session), all).await;
         get_global_pubsub().await.publish_event(Event::new(
             Topic::AiModelLoadingStatus,
             crate::events::Audience::Everyone,
@@ -1909,13 +1871,12 @@ mod token_expiry_tests {
             .unwrap()
             .as_secs()
             - 3600;
-        let user = Principal::User {
-            token_id: TokenId("user-jwt".into()),
-            email: USER.into(),
-            did: "did:key:events-user".into(),
-            caps: get_user_default_capabilities(),
-        };
-        let expired = Session::for_test_expiring(user, an_hour_ago);
+        let user = Principal::Agent(AgentContext::for_user_email(USER.into()));
+        let expired = Session::for_test(user)
+            .with_caps(get_user_default_capabilities())
+            .with_did("did:key:events-user")
+            .with_token_id("user-jwt")
+            .expiring_at(an_hour_ago);
         assert!(next_event(expired).await.is_none());
     }
 

@@ -14,7 +14,7 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 
 async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let global_free =
@@ -56,9 +56,9 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn get_hosting_wallet(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node's own ledger: reading it can also create the node's ledger key.
+    // The executor's own ledger: reading it can also create the executor's ledger key.
     refuse_user_session(&ctx, "hosting.wallet")?;
 
     let balance = match crate::unyt_service::get_ledger().await {
@@ -81,7 +81,7 @@ async fn get_hosting_wallet_history(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "hosting.walletHistory")?;
 
@@ -93,7 +93,7 @@ async fn get_hosting_wallet_history(
 }
 
 async fn request_payment(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: RequestPaymentRequest = serde_json::from_value(params)
@@ -106,7 +106,7 @@ async fn request_payment(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: SetHotWalletAddressRequest = serde_json::from_value(params)

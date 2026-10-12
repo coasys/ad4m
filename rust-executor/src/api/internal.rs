@@ -1,7 +1,7 @@
 //! Internal API endpoints — authenticated via INTERNAL_API_TOKEN.
 //!
 //! These endpoints serve platform → executor communication only.
-//! They do not use the normal user auth (AuthContext / capabilities).
+//! They do not use the normal session auth (RequestContext / capabilities).
 
 use axum::{http::HeaderMap, response::Json};
 use serde_json::json;

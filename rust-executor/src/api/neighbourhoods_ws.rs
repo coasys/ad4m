@@ -16,7 +16,7 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
@@ -34,7 +34,7 @@ async fn publish_neighbourhood(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
@@ -89,7 +89,7 @@ fn build_signed_perspective(
 }
 
 async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
@@ -112,7 +112,7 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
@@ -135,7 +135,7 @@ async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
@@ -158,7 +158,7 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
@@ -169,7 +169,7 @@ async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
@@ -185,7 +185,7 @@ async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;

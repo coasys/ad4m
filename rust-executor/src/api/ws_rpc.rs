@@ -29,7 +29,7 @@ use crate::agent::session::AuthError;
 use crate::agent::session_registry::{Registered, SessionRegistry};
 use crate::types::RequestContext;
 
-use super::auth::{AppState, AuthContext};
+use super::auth::AppState;
 use super::event_interest;
 use super::ws_handler::HandlerMap;
 
@@ -60,12 +60,7 @@ pub async fn ws_rpc(
     reach: ListenerReach,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
-    match connection_context(
-        &token,
-        &state.admin_credential,
-        state.auto_permit_cap_requests,
-        reach,
-    ) {
+    match connection_context(&token, &state.admin_credential, reach) {
         Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx)),
         Err(e) => {
             let code = e.close_code();
@@ -83,11 +78,13 @@ pub async fn ws_rpc(
 fn connection_context(
     token: &str,
     admin_credential: &Option<String>,
-    auto_permit_cap_requests: bool,
     reach: ListenerReach,
 ) -> Result<Arc<RequestContext>, AuthError> {
-    let auth = AuthContext::open(token, admin_credential, auto_permit_cap_requests, reach)?;
-    Ok(Arc::new(auth.to_request_context()))
+    Ok(Arc::new(RequestContext::open(
+        token,
+        admin_credential,
+        reach,
+    )?))
 }
 
 /// Close code for a connection whose token opens no session or stopped working (RFC 6455
@@ -111,7 +108,7 @@ pub(crate) fn token_ended_frame() -> CloseFrame {
 /// reply this way.
 const REPLY_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Close code for a connection refused because the node's wallet is locked (RFC 6455 "try
+/// Close code for a connection refused because the executor's wallet is locked (RFC 6455 "try
 /// again later"). Clients keep their token and reconnect.
 pub(crate) const CLOSE_TRY_AGAIN_LATER: u16 = 1013;
 
@@ -159,15 +156,10 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
     let conn = Connection::new(handler_map, ctx.clone(), tx);
-    // An anonymous socket (no token, for example on a node that has an admin credential) gets
-    // no events: a stream that never yields.
+    // An anonymous socket (no token, for example on an executor that has an admin credential)
+    // gets no events: a stream that never yields.
     let events: EventStream = if ctx.session.is_authenticated() {
-        super::events_ws::build_event_stream(
-            ctx.session.clone(),
-            conn.interest(),
-            ctx.user_email().map(str::to_string),
-        )
-        .await
+        super::events_ws::build_event_stream(ctx.session.clone(), conn.interest()).await
     } else {
         Box::pin(futures::stream::pending())
     };
@@ -519,7 +511,7 @@ mod connection_context_tests {
         for token in &refused {
             for reach in [ListenerReach::Loopback, ListenerReach::Network] {
                 assert!(
-                    connection_context(token, &Some(ADMIN.to_string()), false, reach).is_err(),
+                    connection_context(token, &Some(ADMIN.to_string()), reach).is_err(),
                     "token {token:.20}…, {reach:?}"
                 );
             }
@@ -539,13 +531,8 @@ mod connection_context_tests {
         };
         apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
 
-        let ctx = connection_context(
-            &token,
-            &Some(ADMIN.to_string()),
-            false,
-            ListenerReach::Network,
-        )
-        .unwrap();
+        let ctx =
+            connection_context(&token, &Some(ADMIN.to_string()), ListenerReach::Network).unwrap();
         assert!(ctx.session.check().is_ok());
         apps_map::revoke_app(&request_id).unwrap();
         assert_eq!(
@@ -567,32 +554,16 @@ mod connection_context_tests {
             crate::user_management::generate_user_jwt(user, "test").unwrap(),
         ];
 
-        for token in &tokens {
-            let ctx = connection_context(
-                token,
-                &Some(ADMIN.to_string()),
-                false,
-                ListenerReach::Network,
-            )
-            .unwrap_or_else(|e| panic!("token {token:.20}… opens a session: {e}"));
-            assert_eq!(
-                ctx.acts_as(),
-                crate::agent::AgentContext::for_session(ctx.user_email().map(str::to_string)),
-                "token {token:.20}…"
-            );
+        let expected = [
+            crate::agent::AgentContext::main_agent(),
+            crate::agent::AgentContext::main_agent(),
+            crate::agent::AgentContext::for_user_email(user.to_string()),
+        ];
+        for (token, expected) in tokens.iter().zip(expected) {
+            let ctx = connection_context(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+                .unwrap_or_else(|e| panic!("token {token:.20}… opens a session: {e}"));
+            assert_eq!(ctx.acts_as(), expected, "token {token:.20}…");
         }
-
-        let ctx = connection_context(
-            &tokens[2],
-            &Some(ADMIN.to_string()),
-            false,
-            ListenerReach::Network,
-        )
-        .unwrap();
-        assert_eq!(
-            ctx.acts_as(),
-            crate::agent::AgentContext::for_user_email(user.to_string())
-        );
     }
 }
 
@@ -617,10 +588,8 @@ mod event_gate_tests {
     fn an_unauthenticated_socket_receives_no_events() {
         assert!(!gets_events("", Some(ADMIN), ListenerReach::Loopback));
         assert!(!gets_events("", Some(ADMIN), ListenerReach::Network));
-        let anonymous = Principal::Anonymous {
-            caps: vec![AGENT_AUTH_CAPABILITY.clone()],
-        };
-        let anonymous = Session::for_test(anonymous, ListenerReach::Network);
+        let anonymous =
+            Session::for_test(Principal::Anonymous).with_caps(vec![AGENT_AUTH_CAPABILITY.clone()]);
         assert!(!anonymous.is_authenticated());
     }
 
@@ -673,7 +642,6 @@ mod socket_tests {
         let addr = listener.local_addr().unwrap();
         let app = crate::api::api_router(AppState {
             admin_credential: Some(ADMIN.to_string()),
-            auto_permit_cap_requests: false,
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         addr

@@ -79,13 +79,11 @@ impl SessionRegistry {
         session: &Session,
         end: CancellationToken,
     ) -> Option<Registered> {
-        let (token_id, user) = match &session.principal {
-            Principal::App { token_id, .. } => (token_id.clone(), None),
-            Principal::User {
-                token_id, email, ..
-            } => (token_id.clone(), Some(email.clone())),
-            Principal::Operator | Principal::Anonymous { .. } => return None,
+        let Principal::Agent(agent) = &session.principal else {
+            return None;
         };
+        let token_id = session.token_id()?.clone();
+        let user = agent.user_email.clone();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.lock()
             .entry(token_id.clone())
@@ -137,7 +135,7 @@ impl SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::capabilities::ListenerReach;
+    use crate::agent::AgentContext;
 
     fn registry() -> &'static SessionRegistry {
         Box::leak(Box::default())
@@ -148,25 +146,15 @@ mod tests {
     }
 
     fn app(token_id: &str) -> Session {
-        Session::for_test(
-            Principal::App {
-                token_id: id(token_id),
-                caps: vec![],
-            },
-            ListenerReach::Network,
-        )
+        Session::for_test(Principal::Agent(AgentContext::main_agent())).with_token_id(token_id)
     }
 
     fn user(token_id: &str, email: &str) -> Session {
-        Session::for_test(
-            Principal::User {
-                token_id: id(token_id),
-                email: email.to_string(),
-                did: format!("did:key:{email}"),
-                caps: vec![],
-            },
-            ListenerReach::Network,
-        )
+        Session::for_test(Principal::Agent(AgentContext::for_user_email(
+            email.to_string(),
+        )))
+        .with_token_id(token_id)
+        .with_did(&format!("did:key:{email}"))
     }
 
     #[test]
@@ -209,8 +197,8 @@ mod tests {
     #[test]
     fn the_operator_and_anonymous_callers_do_not_register() {
         let registry = registry();
-        for principal in [Principal::Operator, Principal::Anonymous { caps: vec![] }] {
-            let session = Session::for_test(principal, ListenerReach::Network);
+        for principal in [Principal::Operator, Principal::Anonymous] {
+            let session = Session::for_test(principal);
             assert!(registry
                 .register(&session, CancellationToken::new())
                 .is_none());

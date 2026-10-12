@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::agent::capabilities::{get_user_default_capabilities, ListenerReach, ALL_CAPABILITY};
-use crate::agent::session::{Principal, Session, TokenId};
+use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
+use crate::agent::session::{Principal, Session};
+use crate::agent::AgentContext;
 use crate::api::events_ws::build_event_stream_for;
 use crate::api::tests::support::{admin_ctx, registered_perspective};
 use crate::api::ws_handler::build_handler_map;
@@ -24,13 +25,13 @@ const DID: &str = "did:key:alice";
 /// The event stream's session: the user `did`, whose token nobody revokes and which never
 /// expires.
 fn listener(did: &str) -> Arc<Session> {
-    let user = Principal::User {
-        token_id: TokenId(format!("listener-{did}")),
-        email: format!("{did}@example.org"),
-        did: did.to_string(),
-        caps: get_user_default_capabilities(),
-    };
-    Arc::new(Session::for_test(user, ListenerReach::Network))
+    let user = Principal::Agent(AgentContext::for_user_email(format!("{did}@example.org")));
+    Arc::new(
+        Session::for_test(user)
+            .with_caps(get_user_default_capabilities())
+            .with_did(did)
+            .with_token_id(&format!("listener-{did}")),
+    )
 }
 
 struct Socket {
@@ -298,14 +299,11 @@ async fn a_token_that_expired_gets_401_and_ends_the_connection() {
         .unwrap()
         .as_secs()
         - 3600;
-    let app = Principal::App {
-        token_id: TokenId("expired-jwt".into()),
-        caps: vec![ALL_CAPABILITY.clone()],
-    };
-    let expired = RequestContext {
-        session: Arc::new(Session::for_test_expiring(app, an_hour_ago)),
-        ..RequestContext::app_for_test(vec![ALL_CAPABILITY.clone()])
-    };
+    let expired = RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(vec![ALL_CAPABILITY.clone()])
+            .expiring_at(an_hour_ago),
+    );
     let mut socket = Socket::open_with(DID, Arc::new(expired)).await;
     socket.send(json!({ "id": "1", "type": "agent.status" }));
     assert_eq!(socket.reply("1").await["error"]["code"], 401);

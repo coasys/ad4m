@@ -57,12 +57,19 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
   `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every JS runtime is a
   language runtime, so third-party language code reaches every op: an op that signs must sign as
-  `get_runtime_agent_context()`, never as the node directly.
+  `get_runtime_agent_context()`, never as the main agent directly.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
-- **Capabilities**: every WS handler checks `check_capability(&ctx.capabilities, &X_CAPABILITY)`
-  itself (`agent/capabilities/defs.rs`). MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
-- **Multi-user**: `AgentContext` (`agent/mod.rs`) carries main-agent vs managed-user (by email).
-  Any signing/DID/billing path takes it explicitly.
+- **Agents and sessions**: an executor hosts N agents. `AgentContext` (`agent/mod.rs`) names one:
+  the main agent (agent #0, `user_email: None`, `is_main_agent()`), or a user's managed agent.
+  `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
+  credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
+  (a grant: a token without `sub` acts as the main agent, with `sub` as that user's agent), or
+  `Principal::Anonymous`. Capabilities, token id, expiry and the agent's DID are `Session` fields.
+  Read identity with `acts_as()` / `acts_as_did()` / `user()` / `is_operator()`; never decode the
+  token again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+- **Capabilities**: every WS handler checks `ctx.require(&X_CAPABILITY)` itself
+  (`agent/capabilities/defs.rs`); `Session::may` answers the same question as a `bool`. MCP tools
+  check via `Ad4mMcpHandler::get_*_perspective`.
 - **Notifications** post perspective data to any webhook URL. Their grant, update and delivery
   rules live in `runtime_service/notification_access.rs`: a notification fires only when granted
   and its owner may read the perspective. The owner is a DID (`owner_did`: a managed user's, or the
