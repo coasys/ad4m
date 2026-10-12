@@ -66,8 +66,8 @@
 
 use super::accept::{accept_flow_proposal, load_outputs};
 use super::atom::{
-    check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
-    TransitionAtom,
+    check_outputs_commitment, normalised_outputs, outputs_hash, retain_shared_status, OutputRef,
+    OutputsRefusal, TransitionAtom,
 };
 use super::pass::{run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
@@ -167,6 +167,12 @@ pub async fn propose_flow_transition(
     // catch-up, and the pass after the vote must report what the vote settles.
     super::pass::catch_up_before_acting(perspective, instance_uri, context).await;
 
+    // The guard and the outputs are read on shared graphs only, as a
+    // co-signer's `accept` reads them: a Local item would satisfy a guard or
+    // count as an output on this replica alone, and the proposal it seals
+    // would be one no peer can co-sign.
+    let shared = perspective.clone().for_shared_reads();
+
     let reachable = reachable_next_states(flow, &derived.state);
     let target_state = reachable
         .iter()
@@ -184,7 +190,7 @@ pub async fn propose_flow_transition(
     let terminal = is_terminal_state(flow, to_state);
     let outputs = if terminal {
         let named = normalised_outputs(outputs);
-        let loaded = load_outputs(&*perspective, &named).await?;
+        let loaded = load_outputs(&shared, &named).await?;
         if let Some(missing) = named.iter().find(|r| !loaded.contains_key(*r)) {
             return Err(anyhow::anyhow!(
                 "a voter would refuse this proposal: {} — no proposal written",
@@ -222,8 +228,7 @@ pub async fn propose_flow_transition(
     // states it found in `flow.states` (`flow_context::render`), so a
     // transition naming a state the flow does not define is unreachable and
     // never gets this far.
-    let sealed =
-        recompute_evidence_seal(perspective, flow, &record_now, to_state, &acting_did).await?;
+    let sealed = recompute_evidence_seal(&shared, flow, &record_now, to_state, &acting_did).await?;
     let Some(evidence_hash_val) = sealed.seal.hash() else {
         debug_assert_eq!(sealed.seal, EvidenceSeal::Unmet);
         return Err(anyhow::anyhow!(
@@ -440,17 +445,18 @@ async fn live_proposal_role(
     terminal: bool,
     committed: Option<&str>,
 ) -> anyhow::Result<LiveProposalRole> {
-    // Shared graphs only, as the fold counts it: a Local vote of ours is not
-    // `AlreadyVoted`, and a Local proposal is not one to join.
-    let links = perspective
-        .clone()
-        .for_shared_reads()
+    // Shared material only, as the fold counts it: a Local vote of ours is
+    // not `AlreadyVoted`, a Local proposal is not one to join, and a Local
+    // output is not one a voter can load.
+    let shared = perspective.clone().for_shared_reads();
+    let mut links = shared
         .get_links(&LinkQuery {
             source: Some(proposal_uri.to_string()),
             ..Default::default()
         })
         .await
         .map_err(|e| anyhow::anyhow!("reading proposal {proposal_uri} failed: {e:#}"))?;
+    retain_shared_status(&mut links);
     let atom = match TransitionAtom::from_links(instance_uri, proposal_uri, &links) {
         Ok(atom) => atom,
         Err(reason) => {
@@ -470,7 +476,7 @@ async fn live_proposal_role(
     // our own `committed` is always `None` there, so comparing would refuse
     // to join a proposal every voter accepts over a hash nobody reads.
     if terminal {
-        let loaded = match load_outputs(perspective, &atom.outputs).await {
+        let loaded = match load_outputs(&shared, &atom.outputs).await {
             Ok(loaded) => loaded,
             // The failure is about the FOREIGN atom's outputs (e.g. a class
             // this replica has no shape for); erroring the whole call would

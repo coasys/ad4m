@@ -2,7 +2,8 @@
 //!
 //! One rule shapes this file: **a replica may only ever refuse its own
 //! action.** So this is where a proposal's evidence seal is re-checked —
-//! before we sign, on our own graph — rather than at fire time on whichever
+//! before we sign, on our own replica's shared graphs, the ones every peer
+//! can read — rather than at fire time on whichever
 //! replica happened to run the sweep. If the cited content changed since the
 //! mint, we decline to co-sign and write nothing; we never delete somebody
 //! else's proposal because our copy of the graph is behind.
@@ -16,8 +17,8 @@
 //! A proposal into a **terminal** state is checked for one more thing before
 //! we sign: its outputs commitment (#1104). The proposer names the run's
 //! outputs as `(class, id)` pairs and signs `outputs_hash` over their content
-//! next to the seal. We load each named output through its class on our own
-//! graph ([`load_outputs`]), refuse one that is not an instance of that
+//! next to the seal. We load each named output through its class on the same
+//! shared graphs ([`load_outputs`]), refuse one that is not an instance of that
 //! class, and recompute the hash over what we read
 //! ([`check_outputs_commitment`]). An output edited since the proposal no
 //! longer hashes the same, so we decline, exactly as for a stale seal. A
@@ -31,8 +32,8 @@
 //! and it is the one that runs here.
 
 use super::atom::{
-    check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
-    FLOW_INSTANCE_PREDICATE,
+    check_outputs_commitment, retain_shared_status, signed_by, OutputRef, TransitionAtom,
+    ACCEPTED_BY_PREDICATE, FLOW_INSTANCE_PREDICATE,
 };
 use super::pass::{run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
@@ -62,10 +63,14 @@ pub async fn accept_flow_proposal(
     proposal_uri: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<FireOutcome>> {
-    // Shared graphs only, as the fold reads it (`FlowInstance::read_set`): a
-    // proposal or vote in a Local graph counts for nothing there, so it must
-    // neither be one we can vote on nor stand in for the vote we write.
-    let links = proposal_links(&perspective.clone().for_shared_reads(), proposal_uri).await?;
+    // Shared material only, as the fold reads it (`FlowInstance::read_set`): a
+    // proposal or vote that is Local counts for nothing there, so it must
+    // neither be one we can vote on nor stand in for the vote we write. The
+    // guard and the outputs we sign are read the same way: a Local item would
+    // let us co-sign a seal no peer can reproduce.
+    let shared = perspective.clone().for_shared_reads();
+    let mut links = proposal_links(&shared, proposal_uri).await?;
+    retain_shared_status(&mut links);
     let Some(instance_uri) = links.iter().find_map(|l| {
         (l.data.predicate.as_deref() == Some(FLOW_INSTANCE_PREDICATE))
             .then(|| l.data.target.clone())
@@ -111,7 +116,7 @@ pub async fn accept_flow_proposal(
         ..record.clone()
     };
     let recomputed = recompute_evidence_hash(
-        perspective,
+        &shared,
         flow,
         &record_now,
         &atom.to_state,
@@ -130,7 +135,7 @@ pub async fn accept_flow_proposal(
     // Into a terminal state the vote also agrees to the run's outputs.
     let terminal = is_terminal_state(flow, &atom.to_state);
     let loaded = if terminal {
-        load_outputs(&*perspective, &atom.outputs).await?
+        load_outputs(&shared, &atom.outputs).await?
     } else {
         HashMap::new()
     };
