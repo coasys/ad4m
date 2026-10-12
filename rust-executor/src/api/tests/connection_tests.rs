@@ -202,7 +202,7 @@ async fn query_updates_reach_a_socket_without_a_watch() {
 
     let sub = uuid::Uuid::new_v4().to_string();
     perspective
-        .send_subscription_update(sub.clone(), "[]".into(), None)
+        .send_subscription_update(sub.clone(), Some(DID.into()), "[]".into(), None)
         .await;
 
     let got = socket.next_of(|m| m["subscriptionId"] == sub).await;
@@ -246,7 +246,8 @@ async fn a_watch_cannot_reach_another_users_link_events() {
 
 #[tokio::test]
 async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
-    // The update goes to the perspective's owners, read when it is published.
+    // The update goes to its subscriber among the perspective's owners, read when it is
+    // published.
     let p = registered_perspective(&[]).await;
     let perspective = owned_by_alice(&p.0).await;
     let mut bob = Socket::open_as("did:key:bob").await;
@@ -254,7 +255,7 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
 
     let sub = uuid::Uuid::new_v4().to_string();
     perspective
-        .send_subscription_update(sub.clone(), "[]".into(), None)
+        .send_subscription_update(sub.clone(), Some(DID.into()), "[]".into(), None)
         .await;
 
     let got = alice.next_of(|m| m["subscriptionId"] == sub).await;
@@ -268,6 +269,37 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
         leaked.is_err(),
         "Bob got Alice's live-query update: {leaked:?}"
     );
+}
+
+#[tokio::test]
+async fn query_updates_of_a_co_owned_perspective_reach_only_the_subscriber() {
+    // A live query runs as its subscriber (the SDNA is filtered by owner), so its results are
+    // the subscriber's: they went to every owner, and co-owner Bob got Alice's.
+    let bob_did = "did:key:bob";
+    let p = registered_perspective(&[]).await;
+    let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
+    perspective.persisted.lock().await.owners = Some(vec![DID.into(), bob_did.into()]);
+    let mut sockets = [Socket::open().await, Socket::open_as(bob_did).await];
+
+    for (subscriber, first) in [(DID, true), (bob_did, false)] {
+        let [alice, bob] = &mut sockets;
+        let (receiver, other) = if first { (alice, bob) } else { (bob, alice) };
+        let sub = uuid::Uuid::new_v4().to_string();
+        perspective
+            .send_subscription_update(sub.clone(), Some(subscriber.into()), "[]".into(), None)
+            .await;
+        let got = receiver.next_of(|m| m["subscriptionId"] == sub).await;
+        assert_eq!(got["perspectiveUuid"], p.0, "{subscriber} subscribed");
+        let leaked = tokio::time::timeout(
+            Duration::from_millis(500),
+            other.next_of(|m| m["subscriptionId"] == sub),
+        )
+        .await;
+        assert!(
+            leaked.is_err(),
+            "a co-owner got {subscriber}'s live-query update: {leaked:?}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -92,20 +92,24 @@ from the global config where `agent.requestCapability` uses it.
   (or one whose owner list is empty), read when the event is published. No per-perspective event
   goes to `Everyone`. Each goes out once, to all recipients (`perspectives::publish_to_owners`),
   and no payload names an `owner`: `perspective-added/-updated/-removed`, `sync-state-change`,
-  `link-added/-removed/-updated` and `query-subscription-update` (published by
-  `PerspectiveInstance::send_subscription_update`, which reads the recipients before its task).
+  `link-added/-removed/-updated`. `query-subscription-update`
+  (`PerspectiveInstance::send_subscription_update`, which reads the recipients before its task)
+  goes only to the subscriber (`SubscribedQuery::agent_did`, the main agent for `None`) when it
+  is one of them: the query ran as the subscriber, so a co-owner must not get its results.
   `signal` goes to its `recipient` (`perspectives::signal_event`); one without a recipient goes
   once to each of `event_recipients`, each copy naming that DID as `recipient`
   (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
   `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
   only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
-  never to co-owners. `auto-processor-event` goes to the pass owner when it is one of
+  never to co-owners, and needs the query capability on its perspective (its `triggerMatch` is
+  query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
   `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
   `auto-processor-neighbourhood-state` to `event_recipients` (empty for an unknown
   perspective). `auto_processor::events::emit` reads the handle when it publishes, so no emitter
-  may hold the perspective's handle lock while it emits. `hosting-user-info-changed` goes to the
-  user's DID (looked up by email at publish) and the main agent's (the operator and apps see
-  every user's). `model-loading-status` goes to everyone; `transcription-text` to the stream
+  may hold the perspective's handle lock while it emits. `hosting-user-info-changed` goes out twice
+  (`Event::hosting_user_info`): to the user's DID (looked up by email in the local users table
+  at publish, never imported) with RUNTIME_HOSTING_READ, and to the main agent's with
+  RUNTIME_USER_MANAGEMENT_READ (the operator and apps that may list users see every user's). `model-loading-status` goes to everyone; `transcription-text` to the stream
   owner's DID. `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` (`Event::apps_changed`) and the approval exceptions (`CapabilityRequested`,

@@ -740,7 +740,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     free_access,
                 };
 
-                pubsub.publish_event(Event::hosting_user_info(&info));
+                for event in Event::hosting_user_info(&info) {
+                    pubsub.publish_event(event);
+                }
             }
         }
     });

@@ -1020,14 +1020,18 @@ mod socket_tests {
         }
 
         // Publish until the admin socket sees an event, so both streams had time to subscribe.
+        // The event needs a capability the tokenless session holds (AGENT_AUTH), so
+        // `may_receive` would let it through: only the gate in `handle_ws` keeps it out.
         let event = json!({ "model": "socket-test", "status": "loading" });
+        assert!(
+            crate::agent::capabilities::anonymous_capabilities().contains(&AGENT_AUTH_CAPABILITY)
+        );
         let seen = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                get_global_pubsub().await.publish_event(Event::new(
-                    Topic::AiModelLoadingStatus,
-                    Audience::Everyone,
-                    &event,
-                ));
+                get_global_pubsub().await.publish_event(Event {
+                    capability: AGENT_AUTH_CAPABILITY.clone(),
+                    ..Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &event)
+                });
                 if let Ok(Some(Ok(WsMessage::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(200), admin.next()).await
                 {

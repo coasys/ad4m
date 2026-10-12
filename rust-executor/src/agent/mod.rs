@@ -772,6 +772,14 @@ impl AgentService {
         Ok(did)
     }
 
+    /// The DID of the managed agent of the user `user_email` in this executor's `users` table,
+    /// without importing from a shared database: for publishers, which must not create users.
+    pub fn local_did_for_email(user_email: &str) -> Option<String> {
+        Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok())
+            .map(|user| user.did)
+            .filter(|did| !did.is_empty())
+    }
+
     /// The email of the user who owns the managed agent `did`: the address to write to, and
     /// the name of the user's profile directory. Not an identity: everything else names the
     /// agent by its DID.
