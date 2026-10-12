@@ -105,7 +105,8 @@ impl Topic {
             Topic::AgentStatusChanged | Topic::AgentUpdated => caps::AGENT_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
-            // `hosting.info`.
+            // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead
+            // (`Event::hosting_user_info`).
             Topic::HostingUserInfoChanged => caps::RUNTIME_HOSTING_READ_CAPABILITY.clone(),
             // `perspective.get`, `perspective.queryLinks`, `perspective.subscribeQuery`.
             Topic::PerspectiveAdded
@@ -117,7 +118,10 @@ impl Topic {
             | Topic::LinkUpdated
             | Topic::PerspectiveQuerySubscription
             | Topic::AutoProcessorEvent
-            | Topic::AutoProcessorNeighbourhoodState => {
+            | Topic::AutoProcessorNeighbourhoodState
+            // `runtime.notifications` checks AGENT_UPDATE, but a triggered notification carries
+            // `triggerMatch`: query results from its perspective.
+            | Topic::RuntimeNotificationTriggered => {
                 caps::perspective_query_capability(on_perspective())
             }
             // `neighbourhood.onlineAgents` / `otherAgents` check NEIGHBOURHOOD_READ; a signal
@@ -129,8 +133,6 @@ impl Topic {
                 },
                 can: vec![caps::READ.to_string()],
             },
-            // `runtime.notifications`.
-            Topic::RuntimeNotificationTriggered => caps::AGENT_UPDATE_CAPABILITY.clone(),
             // The exception subscription's capability; approval exceptions need AGENT_PERMIT
             // instead (`Event::approval_request`).
             Topic::ExceptionOccurred => caps::RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
@@ -237,20 +239,27 @@ impl Event {
         Event::new(Topic::AgentUpdated, audience, agent)
     }
 
-    /// `hosting-user-info-changed` for `info`: to the user it is about, and to the operator
-    /// and apps (they act as the main agent). `matches_hosting_user` let every session
-    /// without a user email through, and a user's session only for its own email. The
-    /// info names its user by the account's email, so the user's DID is resolved here.
-    pub fn hosting_user_info(info: &HostingUserInfo) -> Event {
-        let user = AgentService::did_for_email(&info.email);
-        if let Err(e) = &user {
-            log::warn!(
-                "hosting-user-info-changed: no DID for the user, so no user session gets it: {e}"
-            );
+    /// `hosting-user-info-changed` for `info`, as two events. The user's copy goes to the user
+    /// it is about with RUNTIME_HOSTING_READ (`hosting.info`, which shows a session its own
+    /// account only). The main agent's copy goes to its sessions that may list the users
+    /// (`user.list`, `user.wallet`: RUNTIME_USER_MANAGEMENT_READ), not to every app that
+    /// reads hosting: the info names the user's email, credits and wallet. The info names its
+    /// user by email; the DID comes from this executor's users table, which a publish never
+    /// imports into.
+    pub fn hosting_user_info(info: &HostingUserInfo) -> [Event; 2] {
+        let user = AgentService::local_did_for_email(&info.email);
+        if user.is_none() {
+            log::warn!("hosting-user-info-changed: no local user has an agent for the email");
         }
         let main = did_for_context(&AgentContext::main_agent()).ok();
-        let dids = user.ok().into_iter().chain(main).collect();
-        Event::new(Topic::HostingUserInfoChanged, Audience::Dids(dids), info)
+        let topic = Topic::HostingUserInfoChanged;
+        [
+            Event::new(topic, Audience::Dids(user.into_iter().collect()), info),
+            Event {
+                capability: caps::RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone(),
+                ..Event::new(topic, Audience::Dids(main.into_iter().collect()), info)
+            },
+        ]
     }
 
     /// `apps-changed` for `apps`, an app approved for agent `target`: to `target`'s
@@ -401,8 +410,7 @@ mod tests {
 
     // A per-perspective topic needs its capability on the event's perspective: a grant on that
     // perspective covers it, a grant on another does not, and an event without a perspective
-    // needs a grant on every perspective. A notification needs `runtime.notifications`'
-    // capability, which names no perspective.
+    // needs a grant on every perspective.
     #[test]
     fn a_per_perspective_topic_needs_its_capability_on_that_perspective() {
         let grant_on = |cap: &Capability, uuid: &str| Capability {
@@ -415,7 +423,7 @@ mod tests {
         for spec in crate::api::events_ws::event_specs() {
             let topic = spec.topic;
             let on_p = topic.capability(Some("p"));
-            if !spec.scoped || topic == Topic::RuntimeNotificationTriggered {
+            if !spec.scoped {
                 assert_eq!(on_p.with.pointers, vec![caps::WILD_CARD], "{topic}");
                 continue;
             }

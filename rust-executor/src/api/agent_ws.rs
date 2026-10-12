@@ -1349,6 +1349,39 @@ mod revoke_token_tests {
         revoke(&bob_token).await.unwrap();
         assert!(is_refused(&bob_token));
     }
+
+    // D14: an app on the main agent acts as the main agent, not as the operator. With every
+    // capability it still neither revokes nor removes a user's login.
+    #[tokio::test]
+    async fn a_main_agent_app_revokes_no_users_grant() {
+        let (_, alice_token, _) = user_with_login("main-app-alice");
+        let app = Arc::new(
+            RequestContext::open(
+                &crate::test_utils::granted_token(AuthInfo {
+                    app_name: "main-agent app with every capability".to_string(),
+                    capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                    ..AuthInfo::default()
+                }),
+                &Some("admin".into()),
+                ListenerReach::Network,
+            )
+            .unwrap(),
+        );
+        assert!(!app.is_operator());
+        let login = id_of(&alice_token).0;
+
+        let err = call_as("agent.revokeToken", json!({ "token": login }), app.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, 404, "{}", err.1);
+        let err = call_as("agent.removeApp", json!({ "id": login }), app.clone())
+            .await
+            .unwrap_err();
+        assert!(err.1.contains("not found"), "{}", err.1);
+        assert!(!is_refused(&alice_token), "alice's login still works");
+        let listed = request_ids(&call_as("agent.getApps", json!({}), app).await.unwrap());
+        assert!(!listed.contains(&login), "the app does not see her login");
+    }
 }
 
 /// #1399, executor side: an app asks to act as a managed agent, that agent's owner approves

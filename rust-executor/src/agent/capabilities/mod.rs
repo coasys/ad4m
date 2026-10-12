@@ -133,13 +133,11 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
 }
 
 /// The grant of a decoded token while it lets the token act; `Err` when the token has no
-/// grant, or its grant was revoked, removed or expired. For MCP, which resolves its tokens
-/// without a `Session`; `Session::open` reads the same grants.
+/// grant, its grant was revoked, removed or expired, its `sub` names another agent, or its
+/// agent has no identity. For MCP, which resolves its tokens without a `Session`; it applies
+/// the checks `Session::open` applies ([`crate::agent::session::grant_for`]).
 pub fn granted(claims: &Claims) -> Result<std::sync::Arc<crate::agent::grants::LiveGrant>, String> {
-    let id = crate::agent::session::TokenId(claims.nonce().to_string());
-    crate::agent::grants::Grants::global()
-        .get(&id)
-        .ok_or_else(|| "Unauthorized access".to_string())
+    crate::agent::session::grant_for(claims).map_err(|e| e.to_string())
 }
 
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).

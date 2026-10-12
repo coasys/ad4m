@@ -37,6 +37,7 @@ use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
 use crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY;
+use crate::agent::session::{AuthError, Session};
 use crate::ai_service::AIService;
 use crate::api::errors::ApiError;
 use crate::types::{ModelType, RequestContext};
@@ -70,8 +71,10 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
         return;
     }
     let session = caller.session.clone();
-    // Fires when the grant ends: the socket closes at once, not at the next message.
-    let revoked = session.ended();
+    // Completes when the grant ends or the token expires: the socket closes at once, not at
+    // the next message.
+    let over = session.over();
+    tokio::pin!(over);
     // Set when the token stopped working: the socket then closes with 1008.
     let mut token_ended = false;
 
@@ -85,13 +88,13 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
         let mut rx_taken = delta_rx.take();
 
         enum Ev {
-            Revoked,
+            Over,
             Ws(Option<Result<Message, axum::Error>>),
             Delta(Result<String, broadcast::error::RecvError>),
         }
 
         let ev = tokio::select! {
-            _ = revoked.cancelled() => Ev::Revoked,
+            _ = &mut over => Ev::Over,
             msg = socket.recv() => Ev::Ws(msg),
             text = async {
                 match rx_taken.as_mut() {
@@ -104,17 +107,21 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
         delta_rx = rx_taken;
 
         let msg = match ev {
-            Ev::Revoked => {
+            Ev::Over => {
                 token_ended = true;
                 break;
             }
             Ev::Delta(Ok(text)) => {
-                if !text.is_empty() {
-                    let delta = json!({
-                        "type": "conversation.item.input_audio_transcription.delta",
-                        "delta": text,
-                    });
-                    let _ = socket.send(Message::Text(delta.to_string().into())).await;
+                match delta_frame(&session, &text) {
+                    Ok(Some(frame)) => {
+                        let _ = socket.send(Message::Text(frame.into())).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = send_error(&mut socket, "unauthorized", &e.to_string()).await;
+                        token_ended = true;
+                        break;
+                    }
                 }
                 continue;
             }
@@ -319,6 +326,20 @@ async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
     } else {
         let _ = socket.close().await;
     }
+}
+
+/// The frame that forwards the transcription delta `text` (`None` for an empty one), or the
+/// error of a session whose token stopped holding: a transcript goes out only while it holds.
+pub(super) fn delta_frame(session: &Session, text: &str) -> Result<Option<String>, AuthError> {
+    session.check()?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let delta = json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "delta": text,
+    });
+    Ok(Some(delta.to_string()))
 }
 
 async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {
