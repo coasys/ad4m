@@ -387,10 +387,10 @@ pub fn mint(
         agent.managed_did().map(str::to_string),
     )
     .map_err(|e| e.to_string())?;
-    let did = match agent.managed_did() {
-        Some(did) => did.to_string(),
-        None => claims.issuer().to_string(),
-    };
+    // A main-agent grant names no DID, as one read back from the table does: the session
+    // reads the main agent's. The issuer is the signing key, which on a shared wallet is
+    // `platform`, not the main agent.
+    let did = agent.managed_did().unwrap_or_default().to_string();
     let id = claims.nonce().to_string();
     let grant = LiveGrant::new(
         TokenId(id.clone()),
@@ -503,7 +503,10 @@ mod tests {
         let (_, grant) = mint(AgentContext::main_agent(), auth("app", vec![]), None, 3600).unwrap();
         let reloaded = LiveGrant::from_row(grant.row().unwrap()).unwrap();
         assert_eq!(grant.did, reloaded.did);
-        assert_eq!(grant.did, "", "a main-agent grant leaves its DID to the session");
+        assert_eq!(
+            grant.did, "",
+            "a main-agent grant leaves its DID to the session"
+        );
     }
 
     #[test]

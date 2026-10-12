@@ -148,19 +148,10 @@ impl Session {
             }
         })?;
 
-        // The allowlist: a token works only while its grant does. A token without one (revoked
-        // and removed, or a user token from before grants) is refused.
-        let grant = Grants::global()
-            .get(&TokenId(claims.nonce().to_string()))
-            .ok_or(AuthError::Revoked)?;
-        if !sub_names_agent(claims.sub.as_deref(), &grant.agent) {
-            return Err(AuthError::Revoked);
-        }
+        let grant = grant_for(&claims)?;
         let did = OnceLock::new();
         match grant.agent.managed_did() {
             Some(agent_did) => {
-                AgentService::wallet_key_for_did(agent_did)
-                    .map_err(|e| AuthError::NoIdentity(e.to_string()))?;
                 let _ = did.set(agent_did.to_string());
             }
             None if !grant.did.is_empty() => {
@@ -275,6 +266,25 @@ impl Session {
         }
         self.did.get().map(String::as_str)
     }
+}
+
+/// The grant that the decoded token `claims` acts within. The allowlist: a token works only
+/// while its grant does, so a token without one (revoked and removed, or a user token from
+/// before grants) is refused. Its `sub` must name the grant's agent, and a managed agent's
+/// key must derive that agent's DID. [`Session::open`] and MCP (`capabilities::granted`, until
+/// PR 6) both ask here, so the two cannot accept different tokens.
+pub(crate) fn grant_for(claims: &super::capabilities::Claims) -> Result<Arc<LiveGrant>, AuthError> {
+    let grant = Grants::global()
+        .get(&TokenId(claims.nonce().to_string()))
+        .ok_or(AuthError::Revoked)?;
+    if !sub_names_agent(claims.sub.as_deref(), &grant.agent) {
+        return Err(AuthError::Revoked);
+    }
+    if let Some(agent_did) = grant.agent.managed_did() {
+        AgentService::wallet_key_for_did(agent_did)
+            .map_err(|e| AuthError::NoIdentity(e.to_string()))?;
+    }
+    Ok(grant)
 }
 
 /// Whether a token's `sub` names the agent of its grant: none for the main agent; for a
