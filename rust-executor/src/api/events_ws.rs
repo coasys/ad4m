@@ -728,8 +728,10 @@ async fn handle_events_ws(
 ) {
     log::info!("Events WebSocket connected");
 
-    // Fires when the grant ends: the socket closes at once, not at the next event.
-    let revoked = session.ended();
+    // Completes when the grant ends or the token expires: the socket closes at once, not at
+    // the next event.
+    let over = session.over();
+    tokio::pin!(over);
 
     let interest: super::event_interest::SharedInterest = Default::default();
     let event_stream = build_event_stream(session, is_admin, can_approve_apps).await;
@@ -740,7 +742,7 @@ async fn handle_events_ws(
 
     loop {
         tokio::select! {
-            _ = revoked.cancelled() => {
+            _ = &mut over => {
                 super::ws_rpc::close_token_ended(&mut socket).await;
                 break;
             }

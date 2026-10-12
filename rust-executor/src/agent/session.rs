@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
-    require_capability, Capability, ListenerReach, ALL_CAPABILITY,
+    require_capability, Capability, ListenerReach, ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::grants::{Grants, LiveGrant};
 use super::{did_for_context, AgentContext, AgentService};
@@ -194,6 +194,26 @@ impl Session {
         match &self.grant {
             Some(grant) => grant.ended.child_token(),
             None => CancellationToken::new(),
+        }
+    }
+
+    /// Completes when the session stops holding: its grant ends or its token expires, so an
+    /// idle socket closes at expiry as it does at a revocation. Never for the operator and
+    /// anonymous callers.
+    pub fn over(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let grant = self.grant.clone();
+        async move {
+            let Some(grant) = grant else {
+                return std::future::pending().await;
+            };
+            let expired = grant
+                .expires_at
+                .saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS + 1);
+            let wait = std::time::Duration::from_secs(expired.saturating_sub(super::grants::now()));
+            tokio::select! {
+                _ = grant.ended.cancelled() => {}
+                _ = tokio::time::sleep(wait) => {}
+            }
         }
     }
 
