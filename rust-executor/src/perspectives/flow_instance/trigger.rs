@@ -383,8 +383,8 @@ impl PerspectiveInstance {
 /// must advance: **this perspective's owners, and nobody else.**
 ///
 /// `owners` is the handle's owner DID list, `main_agent_did` this executor's
-/// main agent's DID, and `managed_users` the `(did, email)` of the executor's
-/// managed users. An owner DID is the main agent's, or a managed user's, or
+/// main agent's DID, and `managed_agents` the DIDs of the executor's managed
+/// agents. An owner DID is the main agent's, or a managed user's, or
 /// neither — and *neither* is skipped: it names an agent this executor does
 /// not act for, whose bookkeeping is kept on its own executor.
 ///

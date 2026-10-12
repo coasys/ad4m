@@ -305,8 +305,8 @@ describe("Multi-User Simple integration tests", () => {
             const user1Payload = JSON.parse(atob(user1Token.split('.')[1]));
             const user2Payload = JSON.parse(atob(user2Token.split('.')[1]));
 
-            expect(user1Payload.sub).to.equal("alice@example.com");
-            expect(user2Payload.sub).to.equal("bob@example.com");
+            expect(user1Payload.sub).to.equal(user1Result.did);
+            expect(user2Payload.sub).to.equal(user2Result.did);
         })
 
         it("should return correct user DID in agent.me", async () => {
