@@ -560,11 +560,14 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .auth_info
         .try_into()
         .map_err(|e: String| WsRpcError::bad_request(e))?;
+    crate::agent::capabilities::check_auth_info_bounds(&auth_info)
+        .map_err(WsRpcError::bad_request)?;
     // Dev-mode auto-permit speaks for the operator, who owns only the main agent: a request
     // on a managed agent always waits for that agent's owner (#1399).
     let operator_owns_target = target.is_main_agent();
-    let request_id =
-        crate::agent::capabilities::request_capability(auth_info.clone(), target).await;
+    let request_id = crate::agent::capabilities::request_capability(auth_info.clone(), target)
+        .await
+        .map_err(WsRpcError::internal)?;
 
     if operator_owns_target && crate::config::auto_permit_cap_requests() {
         log::debug!(
@@ -1737,14 +1740,47 @@ mod capability_request_tests {
         assert_eq!(err.0, 400, "{}", err.1);
     }
 
+    // The app's name, description, domain and URL are the caller's to choose, anonymous
+    // callers included, and go into memory and approval prompts: each is bounded.
+    #[tokio::test]
+    async fn a_request_with_an_overlong_app_field_is_refused() {
+        setup();
+        let long = "x".repeat(crate::agent::capabilities::MAX_AUTH_INFO_FIELD_BYTES + 1);
+        for field in ["appName", "appDesc", "appDomain", "appUrl"] {
+            let mut auth = auth_info(&[AGENT_READ_CAPABILITY.clone()]);
+            auth[field] = json!(long);
+            let err = call(
+                "agent.requestCapability",
+                json!({ "authInfo": auth }),
+                anonymous(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, 400, "{field}: {}", err.1);
+            assert!(err.1.contains(field), "{field}: {}", err.1);
+        }
+        let mut auth = auth_info(&[AGENT_READ_CAPABILITY.clone()]);
+        auth["appName"] = json!(&long[1..]);
+        call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth }),
+            anonymous(),
+        )
+        .await
+        .expect("a field of the limit's length is taken");
+    }
+
     // D16: an email resolves to its user's DID at the edge. An email no user has is taken
     // all the same, so the answer does not tell an anonymous caller which emails have
     // accounts; the request reaches nobody and no user may approve it.
     #[tokio::test]
     async fn a_request_for_an_email_without_a_user_is_taken_and_reaches_nobody() {
         setup();
-        let (_, alice) = user("nobody-alice");
+        let (alice_email, alice) = user("nobody-alice");
         let caps = [AGENT_READ_CAPABILITY.clone()];
+        // Every event published from here on, whatever its audience: the operator's and the
+        // main agent's streams included.
+        let mut events = get_global_pubsub().await.subscribe_events();
         let params = json!({
             "authInfo": auth_info(&caps),
             "agent": "no-such-user@example.org",
@@ -1760,6 +1796,27 @@ mod capability_request_tests {
         let refused = permit(alice, request_id, &caps).await.unwrap_err();
         assert_eq!(refused.0, 404, "{}", refused.1);
         assert!(!PendingRequests::global().is_approved(request_id));
+
+        // No approval request goes out: not to the operator, the main agent or anyone else.
+        // A request for a known user, made after it, does arrive, so the fence is not empty.
+        let known = request(Some(&alice_email), &caps).await;
+        let silent = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                let payload = event.payload.to_string();
+                if payload.contains(request_id) {
+                    return Err(event);
+                }
+                if event.topic == Topic::ExceptionOccurred && payload.contains(&known) {
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .expect("the approval request of the known user's request arrives");
+        if let Err(event) = silent {
+            panic!("a request for no agent published {:?}", event.topic);
+        }
     }
 
     // An anonymous caller declares any app name and domain it likes, so those prove nothing.

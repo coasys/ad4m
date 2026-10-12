@@ -356,7 +356,9 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         capabilities: Some(vec![ALL_CAPABILITY.clone()]),
         ..AuthInfo::default()
     };
-    let app_request = request_capability(app_auth.clone(), AgentContext::main_agent()).await;
+    let app_request = request_capability(app_auth.clone(), AgentContext::main_agent())
+        .await
+        .unwrap();
     let code = permit_capability(AuthInfoExtended {
         request_id: app_request.clone(),
         auth: app_auth.clone(),
@@ -373,7 +375,8 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         app_auth.clone(),
         crate::agent::AgentService::managed_agent_for_email(&user_email).unwrap(),
     )
-    .await;
+    .await
+    .unwrap();
     let user_app_code = answer(
         &map,
         "agent.permitCapability",

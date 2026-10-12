@@ -143,19 +143,25 @@ from the global config where `agent.requestCapability` uses it.
 - Capability flow (#1399, executor side; `agent/capabilities/mod.rs` + `pending.rs`):
   1. `agent.requestCapability { authInfo, agent? }` (anyone, AGENT_AUTH): `agent` is a managed
      user's email or an agent's DID, absent = the main agent (`requested_agent` returns a
-     `RequestTarget`: an agent keyed by DID, D16). An email resolves to its user's DID there;
-     an email no user has is still taken, as `RequestTarget::NoAgent`, so the answer reveals no
-     accounts: it reaches nobody, only the operator may approve it, its code mints nothing, and
-     it expires after 24 hours like a managed agent's. An unknown DID is 400. The request is a
-     `PendingRequest` in memory only: never on disk, 1024 at most (a new one evicts the
-     unapproved one nearest its expiry), 10 minutes for the main agent and 24 hours for a
-     managed agent, restarted at approval. Its approval request goes to the target agent's DID
+     `RequestTarget`: an agent keyed by DID, D16). An email resolves to its user's DID there,
+     read-only (`AgentService::did_for_email_read_only`: a shared database's record is read,
+     not imported; the import waits for the user's login); an email no user has is still
+     taken, as `RequestTarget::NoAgent`, so the answer reveals no accounts: it reaches nobody,
+     only the operator may approve it, its code mints nothing, and it expires after 24 hours
+     like a managed agent's. An unknown DID is 400; an app name, description, domain, URL or
+     icon over 1 KiB is 400. The request is a `PendingRequest` in memory only: never on disk,
+     1024 at most and 64 per target (all `NoAgent` requests are one target). Past a limit a
+     new request evicts an unapproved one, oldest first: for no agent, then for its own
+     target; never another agent's or an approved one, so when none may go it is refused.
+     10 minutes for the main agent and 24 hours for a managed agent, restarted at approval. Its approval request goes to the target agent's DID
      (`Event::approval_request`). Every request waits for that owner: the declared app name
      and domain are the caller's claim and approve nothing. `AuthInfo.user_email` on the
      request and the grant is only a display hint (the owner's email, from `email_for_did`).
   2. `agent.permitCapability { auth }`: the handler checks `may_approve` (the operator, or a
      session acting as the request's agent, the same DID, with AGENT_PERMIT); anyone else
-     reads the request as missing (404). The approver may grant fewer capabilities than asked; the target is
+     reads the request as missing (404). The approver may grant fewer capabilities than asked,
+     and no more than it holds (`caps_within`: each approved capability keeps its overlap with
+     the held ones, so several actions or `*` on one pointer narrow rather than drop); the target is
      fixed by the request. It returns a six-digit code, stored as a `Secret`. PR 5 moves this
      owner check into the method's guard.
   3. `agent.generateJwt { requestId, rand }` (anyone): `PendingRequests::redeem` checks the code

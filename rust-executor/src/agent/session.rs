@@ -688,7 +688,7 @@ mod resolution_tests {
             "MCP acts as the main agent on a token that names a user"
         );
         assert!(
-            crate::agent::capabilities::capabilities_from_token(legacy, admin()).is_err(),
+            crate::agent::capabilities::capabilities_from_token(legacy, &admin()).is_err(),
             "MCP grants the main agent's app capabilities to a token that names a user"
         );
     }

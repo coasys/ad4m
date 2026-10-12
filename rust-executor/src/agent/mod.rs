@@ -780,6 +780,17 @@ impl AgentService {
             .filter(|did| !did.is_empty())
     }
 
+    /// The DID of the managed agent of the user `user_email`, writing nothing: the `users`
+    /// table, else, on an executor with a shared database, the shared record read without
+    /// importing the user. For lookups that anonymous callers trigger (D15), where
+    /// [`Self::did_for_email`] would import, and so write, a user.
+    pub fn did_for_email_read_only(user_email: &str) -> Option<String> {
+        match Ad4mDb::with_global_instance(|db| db.get_user(user_email).ok()) {
+            Some(user) => Some(user.did).filter(|did| !did.is_empty()),
+            None => crate::user_management::shared_did_for_email(user_email),
+        }
+    }
+
     /// The email of the user who owns the managed agent `did`: the address to write to, and
     /// the name of the user's profile directory. Not an identity: everything else names the
     /// agent by its DID.
@@ -2279,7 +2290,7 @@ mod tests {
         assert!(matches!(err, AuthError::NoIdentity(_)), "{err:?}");
         // MCP resolves the same token without a `Session` (until PR 6): it refuses it too.
         assert!(AgentContext::from_auth_token(token.clone(), false).is_err());
-        assert!(crate::agent::capabilities::capabilities_from_token(token, None).is_err());
+        assert!(crate::agent::capabilities::capabilities_from_token(token, &None).is_err());
 
         for name in [
             crate::wallet::KEY_NAME_MAIN,
