@@ -304,6 +304,7 @@ async fn instance_writes_honour_the_local_flag() {
                 ])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -563,6 +564,7 @@ async fn instance_tools_relation_typed_properties() {
                 properties: Some(props(&[("name", json!("Geordi"))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -580,6 +582,7 @@ async fn instance_tools_relation_typed_properties() {
                 ])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -626,6 +629,7 @@ async fn instance_tools_relation_typed_properties() {
                 ])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -649,6 +653,7 @@ async fn instance_tools_relation_typed_properties() {
                 properties: Some(props(&[("text", json!("Fascinating."))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -759,6 +764,7 @@ async fn relation_targets_are_iri_gated_on_every_write_path() {
                     properties: Some(props(&[("name", json!(name))])),
                     base_uri: None,
                     parent: None,
+                    reply_to: None,
                 }))
                 .await,
         );
@@ -781,6 +787,7 @@ async fn relation_targets_are_iri_gated_on_every_write_path() {
                 ])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -814,6 +821,7 @@ async fn relation_targets_are_iri_gated_on_every_write_path() {
                 ])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -951,6 +959,7 @@ async fn instance_tools_round_trip_typed_data() {
             ])),
             base_uri: None,
             parent: None,
+            reply_to: None,
         }))
         .await;
     let created = parse(&out);
@@ -981,6 +990,7 @@ async fn instance_tools_round_trip_typed_data() {
                 properties: Some(props(&[("isPinned", json!("maybe"))])),
                 base_uri: Some("flux://never-created".into()),
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -1013,6 +1023,7 @@ async fn instance_tools_round_trip_typed_data() {
                 properties: Some(props(&[("body", json!("Hello from a static tool"))])),
                 base_uri: None,
                 parent: Some(channel.clone()),
+                reply_to: None,
             }))
             .await,
     );
@@ -1028,6 +1039,7 @@ async fn instance_tools_round_trip_typed_data() {
                 properties: Some(props(&[("body", json!("Second message"))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -1354,6 +1366,7 @@ async fn instance_remove_from_collection_removes_only_the_membership_link() {
                 properties: Some(props(&[("name", json!("general"))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -1369,6 +1382,7 @@ async fn instance_remove_from_collection_removes_only_the_membership_link() {
                     properties: Some(props(&[("body", json!(body))])),
                     base_uri: None,
                     parent: Some(channel.clone()),
+                    reply_to: None,
                 }))
                 .await,
         );
@@ -1611,6 +1625,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
                 properties: Some(props(&[("name", json!("interop"))])),
                 base_uri: None,
                 parent: Some("ad4m://self".into()),
+                reply_to: None,
             }))
             .await,
     );
@@ -1646,6 +1661,7 @@ async fn instance_transcript_reads_children_chronologically() {
                 properties: Some(props(&[("name", json!("general"))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -1660,6 +1676,7 @@ async fn instance_transcript_reads_children_chronologically() {
                     properties: Some(props(&[("body", json!(body))])),
                     base_uri: None,
                     parent: Some(channel.clone()),
+                    reply_to: None,
                 }))
                 .await,
         );
@@ -1835,6 +1852,7 @@ async fn legacy_literal_ids_round_trip_through_the_instance_tools() {
                 properties: Some(props(&[("name", json!("General"))])),
                 base_uri: Some("literal://string:my-channel".into()),
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -1868,6 +1886,7 @@ async fn legacy_literal_ids_round_trip_through_the_instance_tools() {
                 properties: Some(props(&[("body", json!("Hi"))])),
                 base_uri: None,
                 parent: Some("literal://string:my-channel".into()),
+                reply_to: None,
             }))
             .await,
     );
@@ -1943,6 +1962,7 @@ async fn removing_from_a_custom_resolve_language_collection_is_not_a_silent_no_o
                 properties: Some(props(&[("title", json!("Holodeck run 3"))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -2121,6 +2141,7 @@ async fn create_failing_after_the_subject_is_staged_leaves_no_instance() {
                 ])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -2164,6 +2185,7 @@ async fn update_failing_mid_batch_leaves_the_old_value_in_place() {
                 properties: Some(props(&[("name", json!("Original"))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -2215,6 +2237,7 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
                 properties: Some(props(&[("name", json!("General"))])),
                 base_uri: None,
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -2345,6 +2368,7 @@ async fn instance_query_follows_declared_containment() {
                 properties: Some(props(&[("body", json!("in the room"))])),
                 base_uri: Some("app://message-1".into()),
                 parent: None,
+                reply_to: None,
             }))
             .await,
     );
@@ -2428,6 +2452,7 @@ async fn instance_transcript_prints_the_declared_message_text() {
                 properties: Some(props(&[("text", json!("a declared remark"))])),
                 base_uri: Some("app://comment-1".into()),
                 parent: Some("app://thread".into()),
+                reply_to: None,
             }))
             .await,
     );
@@ -2688,4 +2713,175 @@ async fn get_replies_reads_a_declared_thread_index() {
         "{thread}"
     );
     assert!(answers.contains(&("app://indexed-only", "")), "{thread}");
+}
+
+/// Links from `source` through `predicate`, read off the perspective itself.
+async fn targets_of(uuid: &str, source: &str, predicate: &str) -> Vec<String> {
+    crate::perspectives::get_perspective(uuid)
+        .expect("perspective")
+        .get_links(&crate::types::LinkQuery {
+            source: Some(source.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect()
+}
+
+/// A reply the executor writes is linked through the reply predicate the
+/// perspective declares, and indexed under its thread's root through the
+/// declared thread index — the root, not what it answers, for a reply to a
+/// reply. Without a thread declaration no index is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_create_writes_a_reply_through_the_declared_roles() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let declare = |predicate: &str, role: &str| crate::mcp::tools::perspectives::AddLinkParams {
+        perspective_id: uuid.clone(),
+        source: predicate.into(),
+        predicate: crate::perspectives::containment::SUB_PROPERTY_OF.into(),
+        target: role.into(),
+    };
+    let create = |reply_to: Option<String>| {
+        let uuid = uuid.clone();
+        let handler = handler.clone();
+        async move {
+            parse(
+                &handler
+                    .instance_create(Parameters(InstanceCreateParams {
+                        perspective_id: uuid,
+                        class_name: "Message".to_string(),
+                        properties: Some(props(&[("body", json!("a reply"))])),
+                        base_uri: None,
+                        parent: None,
+                        reply_to,
+                    }))
+                    .await,
+            )
+        }
+    };
+
+    // Before any declaration: the base reply role, and no thread index.
+    let early = create(Some("app://other-post".into())).await;
+    assert_eq!(early["created"], true, "{early}");
+    let early_id = early["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(
+        early["reply_predicate"],
+        crate::perspectives::replies::HAS_REPLY,
+        "{early}"
+    );
+    assert!(early.get("thread_root").is_none(), "{early}");
+    assert_eq!(
+        targets_of(
+            &uuid,
+            "app://other-post",
+            crate::perspectives::replies::HAS_REPLY
+        )
+        .await,
+        vec![early_id]
+    );
+
+    for (predicate, role) in [
+        ("app://response", crate::perspectives::replies::HAS_REPLY),
+        (
+            "app://thread",
+            crate::perspectives::replies::HAS_THREAD_MEMBER,
+        ),
+    ] {
+        let declared = parse(&handler.add_link(Parameters(declare(predicate, role))).await);
+        assert_eq!(declared["success"], true, "{declared}");
+    }
+
+    let comment = create(Some("app://post".into())).await;
+    assert_eq!(comment["created"], true, "{comment}");
+    let comment_id = comment["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(comment["reply_predicate"], "app://response", "{comment}");
+    assert_eq!(comment["thread_root"], "app://post", "{comment}");
+
+    // A reply to the reply: answers the comment, indexed under the post.
+    let answer = create(Some(comment_id.clone())).await;
+    assert_eq!(answer["created"], true, "{answer}");
+    let answer_id = answer["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(answer["thread_root"], "app://post", "{answer}");
+
+    assert_eq!(
+        targets_of(&uuid, "app://post", "app://response").await,
+        vec![comment_id.clone()]
+    );
+    assert_eq!(
+        targets_of(&uuid, &comment_id, "app://response").await,
+        vec![answer_id.clone()]
+    );
+    let mut thread = targets_of(&uuid, "app://post", "app://thread").await;
+    thread.sort();
+    let mut expected = vec![comment_id, answer_id];
+    expected.sort();
+    assert_eq!(thread, expected);
+}
+
+/// `parent=` and `add_child` write the containment predicate the perspective
+/// declares when it declares exactly one, so what a bot writes is what the
+/// app reads — and `has_child` with none, or with several.
+#[tokio::test(flavor = "multi_thread")]
+async fn containment_writes_use_the_single_declared_predicate() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let declare = |predicate: &str| crate::mcp::tools::perspectives::AddLinkParams {
+        perspective_id: uuid.clone(),
+        source: predicate.into(),
+        predicate: crate::perspectives::containment::SUB_PROPERTY_OF.into(),
+        target: crate::perspectives::containment::HAS_CHILD.into(),
+    };
+    let add_child = |child: &str| {
+        let uuid = uuid.clone();
+        let handler = handler.clone();
+        let child = child.to_string();
+        async move {
+            parse(
+                &handler
+                    .add_child(Parameters(AddChildParams {
+                        perspective_id: uuid,
+                        parent: "app://room".into(),
+                        child,
+                    }))
+                    .await,
+            )
+        }
+    };
+
+    assert_eq!(
+        add_child("app://a").await["link"]["predicate"],
+        "ad4m://has_child"
+    );
+
+    let declared = parse(&handler.add_link(Parameters(declare("app://child"))).await);
+    assert_eq!(declared["success"], true, "{declared}");
+    assert_eq!(
+        add_child("app://b").await["link"]["predicate"],
+        "app://child"
+    );
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Message".to_string(),
+                properties: Some(props(&[("body", json!("inside"))])),
+                base_uri: None,
+                parent: Some("app://room".into()),
+                reply_to: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    assert_eq!(created["parent_predicate"], "app://child", "{created}");
+
+    // Two declarations: the executor cannot choose between them, so `has_child`.
+    let second = parse(&handler.add_link(Parameters(declare("app://part"))).await);
+    assert_eq!(second["success"], true, "{second}");
+    assert_eq!(
+        add_child("app://c").await["link"]["predicate"],
+        "ad4m://has_child"
+    );
 }

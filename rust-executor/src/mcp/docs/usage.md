@@ -138,7 +138,9 @@ containment — a document's parts, and the posts in a feed — declares each, s
 it can keep them apart while every read here follows both: `get_children`,
 `instance_query(parent=…)`, `instance_transcript`, child subscriptions, and the
 parents and ancestors in a wake event. Writes (`add_child`,
-`instance_create(parent=…)`) still write `ad4m://has_child`.
+`instance_create(parent=…)`) use the declared predicate when the schema
+declares exactly one, so what you write is what the app reads; with none, or
+several, they write `ad4m://has_child`.
 
 The same way, a schema says which of its predicates hold message text:
 `<app://body> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf>
@@ -175,6 +177,14 @@ does not. `get_children` never lists a reply.
 In a wake event, a reply's `Parents` include what it answers, so the walk up
 from a mention inside a discussion reaches the item the discussion is about,
 and what holds that.
+
+To answer something in a space that keeps replies, write a reply rather than a
+child: `instance_create(…, reply_to=<what you are answering>)`. It is linked
+through the declared reply predicate (or `ad4m://has_reply`), and indexed under
+the thread's root where the schema declares a thread index — the same links
+the app writes for a person's reply, so yours appears in the discussion where
+theirs would. A reply needs no `parent`. In a space whose messages simply sit
+in a channel, with no reply declared, answer into the same parent instead.
 
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple
