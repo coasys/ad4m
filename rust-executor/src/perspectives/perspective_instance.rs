@@ -513,10 +513,10 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
-    /// The one debounced flow consensus pass this perspective may have
-    /// queued for inbound neighbourhood links — see
-    /// `flow_instance::trigger`. A std mutex: held for a field swap, never
-    /// across an await.
+    /// The one debounced flow pass this perspective may have queued, for
+    /// inbound neighbourhood links and for deferred flow jobs such as an
+    /// interpretation pass's — see `flow_instance::trigger`. A std mutex:
+    /// held for a field swap, never across an await.
     pub(crate) flow_pass_queue:
         Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
