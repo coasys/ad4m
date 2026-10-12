@@ -2269,6 +2269,9 @@ mod tests {
             .unwrap();
         let err = Session::open(&token, &None, ListenerReach::Network).unwrap_err();
         assert!(matches!(err, AuthError::NoIdentity(_)), "{err:?}");
+        // MCP resolves the same token without a `Session` (until PR 6): it refuses it too.
+        assert!(AgentContext::from_auth_token(token.clone(), false).is_err());
+        assert!(crate::agent::capabilities::capabilities_from_token(token, None).is_err());
 
         for name in [
             crate::wallet::KEY_NAME_MAIN,

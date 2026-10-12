@@ -494,6 +494,18 @@ mod tests {
         ))
     }
 
+    // A grant on the main agent names no DID, as minted and as read back after a restart: a
+    // session reads the main agent's. The token's issuer is the signing key, which is not the
+    // main agent on a shared wallet (`platform`), so a session must never take it as its DID.
+    #[test]
+    fn a_main_agent_grant_names_the_same_did_minted_and_reloaded() {
+        setup();
+        let (_, grant) = mint(AgentContext::main_agent(), auth("app", vec![]), None, 3600).unwrap();
+        let reloaded = LiveGrant::from_row(grant.row().unwrap()).unwrap();
+        assert_eq!(grant.did, reloaded.did);
+        assert_eq!(grant.did, "", "a main-agent grant leaves its DID to the session");
+    }
+
     #[test]
     fn a_minted_token_has_an_active_grant_with_the_apps_capabilities() {
         setup();

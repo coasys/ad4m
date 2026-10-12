@@ -613,6 +613,36 @@ mod resolution_tests {
         assert!(crate::user_management::generate_user_jwt("ghost@example.org", "test").is_err());
     }
 
+    // MCP resolves its tokens without a `Session` until PR 6 (`AgentContext::from_auth_token`,
+    // `capabilities_from_token`), and must refuse every token `Session::open` refuses. Here:
+    // a grant on the main agent whose token names a user, as an app approved with
+    // `userEmail` before grants has (its token's `sub` is the user; the migration puts its
+    // grant on the main agent). Acting on it would turn a user's app into a main-agent app.
+    #[test]
+    fn mcp_refuses_a_token_whose_sub_names_another_agent_than_its_grant() {
+        setup_wallet();
+        setup_agent();
+        let email = crate::test_utils::managed_user("session.mcp.sub");
+        let app = crate::test_utils::granted_token(AuthInfo {
+            app_name: "an app approved for a user before grants".into(),
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+            ..AuthInfo::default()
+        });
+        let legacy = crate::test_utils::resigned_token(&app, |claims| {
+            claims["sub"] = serde_json::json!(email)
+        });
+        let err = Session::open(&legacy, &admin(), ListenerReach::Network).unwrap_err();
+        assert_eq!(err, AuthError::Revoked);
+        assert!(
+            AgentContext::from_auth_token(legacy.clone(), false).is_err(),
+            "MCP acts as the main agent on a token that names a user"
+        );
+        assert!(
+            crate::agent::capabilities::capabilities_from_token(legacy, admin()).is_err(),
+            "MCP grants the main agent's app capabilities to a token that names a user"
+        );
+    }
+
     /// D16: user tokens minted before agents were keyed by DID carry the user's email in
     /// `sub`; tokens minted since carry the agent's DID. Both open a session acting as the
     /// same agent.
