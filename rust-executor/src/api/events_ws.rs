@@ -52,9 +52,9 @@ use crate::pubsub::get_global_pubsub;
 
 use crate::types::{
     AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
-    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveLinkUpdatedWithOwner,
-    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveRemovedWithOwner,
-    PerspectiveStateFilter, PerspectiveWithOwner, TranscriptionTextFilter,
+    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
+    PerspectiveLinkUpdatedEvent, PerspectiveQuerySubscriptionFilter, PerspectiveRemovedEvent,
+    PerspectiveStateFilter, TranscriptionTextFilter,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -107,13 +107,13 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<AgentUpdatedEvent>(AgentUpdated, false),
         EventSpec::of::<Apps>(AppsChanged, false),
         EventSpec::of::<HostingUserInfo>(HostingUserInfoChanged, false),
-        EventSpec::of::<PerspectiveWithOwner>(PerspectiveAdded, true),
-        EventSpec::of::<PerspectiveRemovedWithOwner>(PerspectiveRemoved, true),
-        EventSpec::of::<PerspectiveWithOwner>(PerspectiveUpdated, true),
+        EventSpec::of::<PerspectiveEvent>(PerspectiveAdded, true),
+        EventSpec::of::<PerspectiveRemovedEvent>(PerspectiveRemoved, true),
+        EventSpec::of::<PerspectiveEvent>(PerspectiveUpdated, true),
         EventSpec::of::<PerspectiveStateFilter>(PerspectiveSyncStateChange, true),
-        EventSpec::of::<PerspectiveLinkWithOwner>(LinkAdded, true),
-        EventSpec::of::<PerspectiveLinkWithOwner>(LinkRemoved, true),
-        EventSpec::of::<PerspectiveLinkUpdatedWithOwner>(LinkUpdated, true),
+        EventSpec::of::<PerspectiveLinkEvent>(LinkAdded, true),
+        EventSpec::of::<PerspectiveLinkEvent>(LinkRemoved, true),
+        EventSpec::of::<PerspectiveLinkUpdatedEvent>(LinkUpdated, true),
         EventSpec::of::<NeighbourhoodSignalFilter>(NeighbourhoodSignal, true),
         EventSpec::of::<NotificationTriggeredEvent>(RuntimeNotificationTriggered, true),
         EventSpec::of::<ExceptionOccurredEvent>(ExceptionOccurred, false),
@@ -1737,11 +1737,11 @@ mod event_spec_tests {
             ..Default::default()
         };
         let scoped = [
-            uuid_of(PerspectiveWithOwner {
+            uuid_of(PerspectiveEvent {
                 perspective_uuid: p(),
                 perspective: handle.clone(),
             }),
-            uuid_of(PerspectiveRemovedWithOwner {
+            uuid_of(PerspectiveRemovedEvent {
                 perspective_uuid: p(),
                 uuid: p(),
             }),
@@ -1750,11 +1750,11 @@ mod event_spec_tests {
                 state: PerspectiveState::Private,
                 perspective: handle.clone(),
             }),
-            uuid_of(PerspectiveLinkWithOwner {
+            uuid_of(PerspectiveLinkEvent {
                 perspective_uuid: p(),
                 ..Default::default()
             }),
-            uuid_of(PerspectiveLinkUpdatedWithOwner {
+            uuid_of(PerspectiveLinkUpdatedEvent {
                 perspective_uuid: p(),
                 ..Default::default()
             }),

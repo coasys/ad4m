@@ -4,4 +4,4 @@ import type { PerspectiveHandle } from "./PerspectiveHandle";
 /**
  * `perspective-added` / `perspective-updated`: one event to all of the perspective's owners.
  */
-export type PerspectiveWithOwner = { perspectiveUuid: string, perspective: PerspectiveHandle, };
+export type PerspectiveEvent = { perspectiveUuid: string, perspective: PerspectiveHandle, };

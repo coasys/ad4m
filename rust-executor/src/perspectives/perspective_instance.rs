@@ -22,9 +22,8 @@ use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, OnlineAgent,
-    PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
-    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
-    PerspectiveStateFilter,
+    PerspectiveExpression, PerspectiveHandle, PerspectiveLinkEvent, PerspectiveLinkUpdatedEvent,
+    PerspectiveQuerySubscriptionFilter, PerspectiveState, PerspectiveStateFilter,
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
@@ -1794,7 +1793,7 @@ impl PerspectiveInstance {
         ];
         for (topic, links) in changes {
             for link in links {
-                let payload = PerspectiveLinkWithOwner {
+                let payload = PerspectiveLinkEvent {
                     perspective_uuid: self.uuid.clone(),
                     link: link.clone(),
                 };
@@ -2139,7 +2138,7 @@ impl PerspectiveInstance {
             super::publish_to_owners(
                 Topic::LinkUpdated,
                 super::event_recipients(&handle),
-                PerspectiveLinkUpdatedWithOwner {
+                PerspectiveLinkUpdatedEvent {
                     perspective_uuid: handle.uuid.clone(),
                     old_link: decorated_old_link.clone(),
                     new_link: decorated_new_link_expression.clone(),
@@ -9396,7 +9395,7 @@ mod tests {
         };
 
         // Sanity-check the payload references the link we committed: a
-        // PerspectiveLinkWithOwner with the perspective uuid + the decorated link.
+        // PerspectiveLinkEvent with the perspective uuid + the decorated link.
         assert!(
             msg.contains(&link.target),
             "The published link-added event should reference the committed link's target ({}), got: {}",

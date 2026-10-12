@@ -4,4 +4,4 @@ import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 /**
  * `link-added` / `link-removed`: one event to all of the perspective's owners.
  */
-export type PerspectiveLinkWithOwner = { perspectiveUuid: string, link: DecoratedLinkExpression, };
+export type PerspectiveLinkEvent = { perspectiveUuid: string, link: DecoratedLinkExpression, };

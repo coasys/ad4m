@@ -11,12 +11,12 @@ import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
-import type { PerspectiveLinkUpdatedWithOwner } from "./PerspectiveLinkUpdatedWithOwner";
-import type { PerspectiveLinkWithOwner } from "./PerspectiveLinkWithOwner";
+import type { PerspectiveEvent } from "./PerspectiveEvent";
+import type { PerspectiveLinkEvent } from "./PerspectiveLinkEvent";
+import type { PerspectiveLinkUpdatedEvent } from "./PerspectiveLinkUpdatedEvent";
 import type { PerspectiveQuerySubscriptionFilter } from "./PerspectiveQuerySubscriptionFilter";
-import type { PerspectiveRemovedWithOwner } from "./PerspectiveRemovedWithOwner";
+import type { PerspectiveRemovedEvent } from "./PerspectiveRemovedEvent";
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
-import type { PerspectiveWithOwner } from "./PerspectiveWithOwner";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -25,13 +25,13 @@ export interface EventMap {
   "agent-updated": AgentUpdatedEvent;
   "apps-changed": Apps;
   "hosting-user-info-changed": HostingUserInfo;
-  "perspective-added": PerspectiveWithOwner;
-  "perspective-removed": PerspectiveRemovedWithOwner;
-  "perspective-updated": PerspectiveWithOwner;
+  "perspective-added": PerspectiveEvent;
+  "perspective-removed": PerspectiveRemovedEvent;
+  "perspective-updated": PerspectiveEvent;
   "sync-state-change": PerspectiveStateFilter;
-  "link-added": PerspectiveLinkWithOwner;
-  "link-removed": PerspectiveLinkWithOwner;
-  "link-updated": PerspectiveLinkUpdatedWithOwner;
+  "link-added": PerspectiveLinkEvent;
+  "link-removed": PerspectiveLinkEvent;
+  "link-updated": PerspectiveLinkUpdatedEvent;
   "signal": NeighbourhoodSignalFilter;
   "notification-triggered": NotificationTriggeredEvent;
   "exception-occurred": ExceptionOccurredEvent;

@@ -876,7 +876,7 @@ pub struct NeighbourhoodSignalFilter {
 /// `link-added` / `link-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkWithOwner {
+pub struct PerspectiveLinkEvent {
     pub perspective_uuid: String,
     pub link: DecoratedLinkExpression,
 }
@@ -884,7 +884,7 @@ pub struct PerspectiveLinkWithOwner {
 /// `link-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkUpdatedWithOwner {
+pub struct PerspectiveLinkUpdatedEvent {
     pub perspective_uuid: String,
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
@@ -1044,7 +1044,7 @@ where
 /// `perspective-added` / `perspective-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveWithOwner {
+pub struct PerspectiveEvent {
     pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
 }
@@ -1052,7 +1052,7 @@ pub struct PerspectiveWithOwner {
 /// `perspective-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveRemovedWithOwner {
+pub struct PerspectiveRemovedEvent {
     pub perspective_uuid: String,
     pub uuid: String,
 }

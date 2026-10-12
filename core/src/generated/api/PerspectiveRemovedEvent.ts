@@ -3,4 +3,4 @@
 /**
  * `perspective-removed`: one event to all of the perspective's owners.
  */
-export type PerspectiveRemovedWithOwner = { perspectiveUuid: string, uuid: string, };
+export type PerspectiveRemovedEvent = { perspectiveUuid: string, uuid: string, };

@@ -36,8 +36,8 @@ pub mod sparql_store;
 pub mod subject_classes_of;
 pub mod utils;
 use crate::types::{
-    LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,
-    PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveWithOwner,
+    LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveEvent, PerspectiveExpression,
+    PerspectiveHandle, PerspectiveRemovedEvent, PerspectiveState,
 };
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
@@ -262,7 +262,7 @@ pub async fn add_perspective(
     publish_to_owners(
         Topic::PerspectiveAdded,
         event_recipients(&handle),
-        PerspectiveWithOwner {
+        PerspectiveEvent {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
         },
@@ -363,7 +363,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
     publish_to_owners(
         Topic::PerspectiveUpdated,
         event_recipients(handle),
-        PerspectiveWithOwner {
+        PerspectiveEvent {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
         },
@@ -430,7 +430,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         publish_to_owners(
             Topic::PerspectiveRemoved,
             recipients,
-            PerspectiveRemovedWithOwner {
+            PerspectiveRemovedEvent {
                 perspective_uuid: uuid.to_string(),
                 uuid: uuid.to_string(),
             },
