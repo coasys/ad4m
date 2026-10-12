@@ -1,17 +1,10 @@
 use crate::events::Event;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tokio::sync::broadcast;
-use tokio::sync::Mutex;
-
-type Topic = String;
-type Message = String;
 
 pub struct PubSub {
-    /// String topics. One is left: [`PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC`].
-    subscribers: Mutex<HashMap<Topic, broadcast::Sender<Message>>>,
     /// Typed events, every topic on one channel: each socket decides per event.
     events: broadcast::Sender<Arc<Event>>,
 }
@@ -19,7 +12,6 @@ pub struct PubSub {
 impl PubSub {
     pub fn new() -> Self {
         Self {
-            subscribers: Mutex::new(HashMap::new()),
             events: broadcast::channel(10000).0,
         }
     }
@@ -34,30 +26,10 @@ impl PubSub {
     pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<Event>> {
         self.events.subscribe()
     }
-
-    pub async fn subscribe(&self, topic: &Topic) -> broadcast::Receiver<Message> {
-        let mut subscribers = self.subscribers.lock().await;
-        let sender = subscribers
-            .entry(topic.to_owned())
-            .or_insert_with(|| broadcast::channel(10000).0);
-        sender.subscribe()
-    }
-
-    pub async fn publish(&self, topic: &Topic, message: &Message) {
-        let subscribers = self.subscribers.lock().await;
-        if let Some(sender) = subscribers.get(topic) {
-            let _ = sender.send(message.clone()); // Ignore if no receivers
-        }
-    }
 }
 
 lazy_static::lazy_static! {
     static ref GLOBAL_PUB_SUB: Arc<PubSub> = Arc::new(PubSub::new());
-
-    /// The one string topic: live query updates. They go out to the perspective's owners
-    /// (`events_ws::matches_perspective_owner`) until live queries belong to a connection
-    /// (#1207), and then become a typed event to `Audience::Connection`.
-    pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

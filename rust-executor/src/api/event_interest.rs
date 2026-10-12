@@ -1,6 +1,5 @@
-//! Event interest: `events.watch` / `events.unwatch`, on both the RPC socket
-//! and the events socket. A socket gets no events until it calls
-//! `events.watch`.
+//! Event interest: `events.watch` / `events.unwatch` on the RPC socket. A
+//! socket gets no events until it calls `events.watch`.
 //!
 //! Request: `{ "id": "...", "type": "events.watch", "params": { "<event type>": null | ["<perspective uuid>", ...] } }`
 //! Reply:   `{ "id": "...", "result": true }`
@@ -12,10 +11,13 @@
 //! - Live query updates (`query-subscription-update`) are not filtered: a
 //!   socket keeps getting the updates of its owner's live queries without a
 //!   watch.
+//! - A list matches an event about a listed perspective (`Event::perspective`, the
+//!   payload's `perspectiveUuid`). Events about no perspective carry none, so a list
+//!   never takes them.
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use super::ws_handler::ParamExt;
 use crate::events::{Event, Topic};
@@ -28,15 +30,6 @@ pub type EventInterest = HashMap<Topic, Option<HashSet<String>>>;
 
 /// Per-connection interest; empty = no events.
 pub type SharedInterest = Arc<RwLock<EventInterest>>;
-
-/// The topics whose events carry `perspectiveUuid` (`EventSpec.scoped`).
-static SCOPED: LazyLock<HashSet<Topic>> = LazyLock::new(|| {
-    super::events_ws::event_specs()
-        .into_iter()
-        .filter(|s| s.scoped)
-        .filter_map(|s| Topic::from_wire(s.name))
-        .collect()
-});
 
 /// The TypeScript type of `events.watch` params: event name → the
 /// perspectives wanted (`null`: all). `EventName` comes from `Events.ts`.
@@ -80,13 +73,10 @@ pub(crate) fn wants(interest: &SharedInterest, event: &Event) -> bool {
     {
         None => false,
         Some(None) => true,
-        Some(Some(wanted)) => {
-            SCOPED.contains(&event.topic)
-                && event
-                    .perspective
-                    .as_deref()
-                    .is_some_and(|p| wanted.contains(p))
-        }
+        Some(Some(wanted)) => event
+            .perspective
+            .as_deref()
+            .is_some_and(|p| wanted.contains(p)),
     }
 }
 
@@ -133,7 +123,7 @@ mod tests {
     }
 
     fn link(perspective: &str) -> Event {
-        let payload = json!({ "perspectiveUuid": perspective, "owner": "did:x", "link": {} });
+        let payload = json!({ "perspectiveUuid": perspective, "link": {} });
         event(Topic::LinkAdded, payload)
     }
 
@@ -227,13 +217,13 @@ mod tests {
     }
 
     // Every topic, with and without a perspective, under every kind of watch: `null` takes
-    // the topic whole; a list takes a scoped topic's events about a listed perspective only.
+    // the topic whole; a list takes the topic's events about a listed perspective only (an
+    // unscoped topic's payload names none: `events_ws::event_spec_tests`).
     #[test]
     fn each_kind_of_watch_narrows_every_topic() {
         for topic in Topic::ALL {
             let t = topic.as_str();
             let query = topic == Topic::PerspectiveQuerySubscription;
-            let scoped = SCOPED.contains(&topic);
             for (payload, about_a) in [
                 (json!({ "perspectiveUuid": "A" }), true),
                 (json!({}), false),
@@ -242,8 +232,8 @@ mod tests {
                 for (params, expected) in [
                     (json!({}), false),
                     (json!({ t: null }), true),
-                    (json!({ t: ["A"] }), scoped && about_a),
-                    (json!({ t: ["B", "A"] }), scoped && about_a),
+                    (json!({ t: ["A"] }), about_a),
+                    (json!({ t: ["B", "A"] }), about_a),
                     (json!({ t: ["B"] }), false),
                 ] {
                     let i = SharedInterest::default();
@@ -267,7 +257,7 @@ mod tests {
         assert!(handle_control("ping", &Value::Null, &json!({}), &Default::default()).is_none());
     }
 
-    // The perspective comes from the flat `perspectiveUuid`, and only for scoped topics.
+    // The perspective comes from the flat `perspectiveUuid`, not from a nested one.
     #[test]
     fn perspective_extraction_per_event_type() {
         use Topic::*;
@@ -281,7 +271,7 @@ mod tests {
             ),
             (
                 PerspectiveRemoved,
-                json!({ "perspectiveUuid": "P", "uuid": "P", "owner": "o" }),
+                json!({ "perspectiveUuid": "P", "uuid": "P" }),
                 true,
             ),
             (
@@ -300,7 +290,7 @@ mod tests {
                 json!({ "exception": { "uuid": "P" } }),
                 false,
             ),
-            (AgentUpdated, json!({ "perspectiveUuid": "P" }), false),
+            (AgentUpdated, json!({ "did": "P" }), false),
         ];
         for (topic, payload, scoped) in cases {
             let i = SharedInterest::default();

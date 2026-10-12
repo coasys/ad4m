@@ -31,8 +31,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   write is held across `PrologService` awaits on purpose. Never hold `persisted` across an await;
   the idiom is `let h = self.persisted.lock().await.clone();`.
 - Every link write goes: persist to `SparqlStore` → Prolog facts (no-op when disabled) →
-  typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one per owner via
-  `publish_to_each_owner`, the main agent if unowned) → commit to
+  typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
+  `publish_to_owners`, the main agent if unowned) → commit to
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
 - SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
   invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.

@@ -594,11 +594,10 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
         }
         // The most a caller without a token holds: multi-user mode on adds signing up,
         // logging in and verifying an email.
-        Caller::Anonymous => {
-            RequestContext::for_test(crate::agent::session::Principal::Anonymous {
-                caps: anonymous_capabilities_when(true),
-            })
-        }
+        Caller::Anonymous => RequestContext::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Anonymous)
+                .with_caps(anonymous_capabilities_when(true)),
+        ),
     }
 }
 
@@ -1072,7 +1071,7 @@ async fn open_and_operator_guards_run_the_handler_for_the_callers_they_name() {
     let mut map = HandlerMap::new();
     register_test_methods(&mut map, &calls);
     let anonymous = Arc::new(RequestContext::for_test(
-        crate::agent::session::Principal::Anonymous { caps: vec![] },
+        crate::agent::session::Principal::Anonymous,
     ));
     let operator = Arc::new(RequestContext::operator_for_test());
     assert_eq!(

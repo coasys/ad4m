@@ -15,7 +15,6 @@
 //!
 //! No new dependencies: we reuse the existing `reqwest` client.
 
-use crate::api::auth::AuthContext;
 use crate::db::Ad4mDb;
 use crate::types::{ModelApiType, ModelType};
 
@@ -31,10 +30,7 @@ pub enum TtsPassthroughError {
 /// Forward a `/v1/audio/speech` request to a configured upstream and
 /// return the raw audio bytes.  Returns [`TtsPassthroughError::NotConfigured`]
 /// when no upstream is registered.
-pub async fn synthesize(
-    _auth: &AuthContext,
-    req: &SpeechRequest,
-) -> Result<Vec<u8>, TtsPassthroughError> {
+pub async fn synthesize(req: &SpeechRequest) -> Result<Vec<u8>, TtsPassthroughError> {
     let upstream = find_tts_upstream(&req.model)?;
 
     let body = serde_json::json!({

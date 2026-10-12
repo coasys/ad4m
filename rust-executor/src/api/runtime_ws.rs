@@ -219,7 +219,7 @@ async fn verify_signature(params: Value, _ctx: Arc<RequestContext>) -> Result<Va
 }
 
 // ── Friends & Messages ──
-// The friend list and the outbox belong to the executor's main agent; a user session has
+// The friend list and the outbox belong to the main agent; a user session has
 // neither of its own here, so it may not read or change them.
 
 async fn list_friends(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -309,11 +309,8 @@ async fn check_notification_perspectives(
     ctx: &RequestContext,
 ) -> Result<(), WsRpcError> {
     for uuid in perspective_ids {
-        check_capability(
-            &ctx.capabilities,
-            &perspective_query_capability(vec![uuid.clone()]),
-        )
-        .map_err(|e| WsRpcError::forbidden(e))?;
+        ctx.require(&perspective_query_capability(vec![uuid.clone()]))
+            .map_err(|e| WsRpcError::forbidden(e))?;
 
         let perspective = match get_perspective_or_404(uuid).await {
             Ok(perspective) => perspective,

@@ -504,7 +504,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 // This endpoint receives raw PCM Float32 LE bytes via HTTP POST.
 // It cannot go through WS JSON, so it stays as a regular Axum handler.
 
-use super::auth::{AppState, AuthContext};
+use super::auth::AppState;
 use super::errors::ApiError;
 use axum::extract::State;
 use axum::response::Json;
@@ -515,12 +515,12 @@ use axum::response::Json;
 /// Stream IDs are passed via `X-Stream-Ids` header (comma-separated).
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    context: RequestContext,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    context
+        .require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
     check_compute_credits_ws(context.user_email()).map_err(|e| ApiError::Forbidden(e.message))?;
 

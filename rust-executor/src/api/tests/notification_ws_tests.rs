@@ -18,11 +18,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, perspective_query_capability, Capability, ListenerReach,
+    get_user_default_capabilities, perspective_query_capability, Capability,
     AGENT_UPDATE_CAPABILITY, ALL_CAPABILITY,
 };
 use crate::agent::session::{Principal, Session};
-use crate::agent::AgentService;
+use crate::agent::{AgentContext, AgentService};
 use crate::api::events_ws::build_event_stream;
 use crate::api::ws_handler::{build_handler_map, WsRpcError};
 use crate::db::Ad4mDb;
@@ -731,13 +731,12 @@ async fn fire_to(owner: &str, webhook_url: &str) {
 
 /// A session of the managed user `email`, whose DID is `did`.
 fn user_session(email: &str, did: &str) -> Arc<Session> {
-    let user = Principal::User {
-        token_id: crate::agent::session::TokenId(format!("notifications-{email}")),
-        email: email.to_string(),
-        did: did.to_string(),
-        caps: get_user_default_capabilities(),
-    };
-    Arc::new(Session::for_test(user, ListenerReach::Network))
+    let user = Principal::Agent(AgentContext::for_user_email(email.to_string()));
+    Arc::new(
+        Session::for_test(user)
+            .with_caps(get_user_default_capabilities())
+            .with_did(did),
+    )
 }
 
 /// The next `notification-triggered` message on `stream`, if one arrives in time.
@@ -774,14 +773,11 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     let alice_did = user(ALICE);
     let bob_did = user(BOB);
     let all = crate::api::event_interest::watching_all;
-    let operator = Arc::new(Session::for_test(
-        Principal::Operator,
-        ListenerReach::Loopback,
-    ));
+    let operator = Arc::new(Session::for_test(Principal::Operator));
     let alice_session = user_session(ALICE, &alice_did);
-    let mut alice = build_event_stream(alice_session, all(), None).await;
-    let mut bob = build_event_stream(user_session(BOB, &bob_did), all(), None).await;
-    let mut main = build_event_stream(operator, all(), None).await;
+    let mut alice = build_event_stream(alice_session, all()).await;
+    let mut bob = build_event_stream(user_session(BOB, &bob_did), all()).await;
+    let mut main = build_event_stream(operator, all()).await;
 
     fire(&alice_did).await;
     let a = next(&mut alice).await;
@@ -820,12 +816,9 @@ async fn the_install_request_and_the_list_never_carry_the_webhook_credential() {
     setup();
     let mut perspectives = Perspectives::default();
     let main = perspectives.add(None);
-    let operator = Arc::new(Session::for_test(
-        Principal::Operator,
-        ListenerReach::Loopback,
-    ));
+    let operator = Arc::new(Session::for_test(Principal::Operator));
     let all = crate::api::event_interest::watching_all;
-    let mut stream = build_event_stream(operator, all(), None).await;
+    let mut stream = build_event_stream(operator, all()).await;
 
     let id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
     let request = next_containing(&mut stream, "INSTALL_NOTIFICATION_REQUEST")

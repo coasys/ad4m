@@ -9,14 +9,15 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::agent::capabilities::{get_user_default_capabilities, ListenerReach, ALL_CAPABILITY};
-use crate::agent::session::{Principal, Session, TokenId};
-use crate::api::events_ws::build_event_stream_for;
+use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
+use crate::agent::session::{Principal, Session};
+use crate::agent::AgentContext;
+use crate::api::events_ws::build_event_stream;
 use crate::api::tests::support::{admin_ctx, registered_perspective};
 use crate::api::ws_handler::build_handler_map;
 use crate::api::ws_rpc::{serve, Connection};
 use crate::events::{Audience, Event, Topic};
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use crate::types::RequestContext;
 
 const DID: &str = "did:key:alice";
@@ -24,13 +25,12 @@ const DID: &str = "did:key:alice";
 /// The event stream's session: the user `did`, whose token nobody revokes and which never
 /// expires.
 fn listener(did: &str) -> Arc<Session> {
-    let user = Principal::User {
-        token_id: TokenId(format!("listener-{did}")),
-        email: format!("{did}@example.org"),
-        did: did.to_string(),
-        caps: get_user_default_capabilities(),
-    };
-    Arc::new(Session::for_test(user, ListenerReach::Network))
+    let user = Principal::Agent(AgentContext::for_user_email(format!("{did}@example.org")));
+    Arc::new(
+        Session::for_test(user)
+            .with_caps(get_user_default_capabilities())
+            .with_did(did),
+    )
 }
 
 struct Socket {
@@ -54,7 +54,7 @@ impl Socket {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
         let conn = Connection::new(Arc::new(build_handler_map()), ctx, tx);
-        let events = build_event_stream_for(listener(did), conn.interest(), Some(did.into())).await;
+        let events = build_event_stream(listener(did), conn.interest()).await;
         let served = tokio::spawn(serve(conn, UnboundedReceiverStream::new(incoming), events));
         Self {
             input: Some(input),
@@ -181,21 +181,28 @@ async fn closing_the_socket_ends_the_event_task() {
     );
 }
 
+/// Perspective `uuid`, now owned by `DID`.
+async fn owned_by_alice(
+    uuid: &str,
+) -> crate::perspectives::perspective_instance::PerspectiveInstance {
+    let inst = crate::perspectives::get_perspective(uuid).unwrap();
+    inst.persisted.lock().await.owners = Some(vec![DID.to_string()]);
+    inst
+}
+
 #[tokio::test]
 async fn query_updates_reach_a_socket_without_a_watch() {
     // A live query update as the perspective publishes it: every socket of
     // the owner gets it, whatever the socket watches.
     let p = registered_perspective(&[]).await;
+    let perspective = owned_by_alice(&p.0).await;
     let mut socket = Socket::open().await;
     socket.send(json!({ "id": "w", "type": "events.watch", "params": { "agent-updated": null } }));
     socket.reply("w").await;
 
     let sub = uuid::Uuid::new_v4().to_string();
-    let update =
-        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
-    get_global_pubsub()
-        .await
-        .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
+    perspective
+        .send_subscription_update(sub.clone(), "[]".into(), None)
         .await;
 
     let got = socket.next_of(|m| m["subscriptionId"] == sub).await;
@@ -239,22 +246,15 @@ async fn a_watch_cannot_reach_another_users_link_events() {
 
 #[tokio::test]
 async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
-    // `query_updates_reach_a_socket_without_a_watch` uses an unowned
-    // perspective, so it never reaches the owner check. This one does.
+    // The update goes to the perspective's owners, read when it is published.
     let p = registered_perspective(&[]).await;
-    {
-        let inst = crate::perspectives::get_perspective(&p.0).unwrap();
-        inst.persisted.lock().await.owners = Some(vec![DID.to_string()]);
-    }
+    let perspective = owned_by_alice(&p.0).await;
     let mut bob = Socket::open_as("did:key:bob").await;
     let mut alice = Socket::open().await;
 
     let sub = uuid::Uuid::new_v4().to_string();
-    let update =
-        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
-    get_global_pubsub()
-        .await
-        .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
+    perspective
+        .send_subscription_update(sub.clone(), "[]".into(), None)
         .await;
 
     let got = alice.next_of(|m| m["subscriptionId"] == sub).await;
@@ -298,14 +298,11 @@ async fn a_token_that_expired_gets_401_and_ends_the_connection() {
         .unwrap()
         .as_secs()
         - 3600;
-    let app = Principal::App {
-        token_id: TokenId("expired-jwt".into()),
-        caps: vec![ALL_CAPABILITY.clone()],
-    };
-    let expired = RequestContext {
-        session: Arc::new(Session::for_test_expiring(app, an_hour_ago)),
-        ..RequestContext::app_for_test(vec![ALL_CAPABILITY.clone()])
-    };
+    let expired = RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(vec![ALL_CAPABILITY.clone()])
+            .expiring_at(an_hour_ago),
+    );
     let mut socket = Socket::open_with(DID, Arc::new(expired)).await;
     socket.send(json!({ "id": "1", "type": "agent.status" }));
     assert_eq!(socket.reply("1").await["error"]["code"], 401);

@@ -9,7 +9,7 @@ use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
 use crate::types::*;
 
-use super::guards::{session_agent_context, Guard};
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -229,13 +229,9 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::internal(format!("Failed to serialize language input: {}", e)))?;
 
     // Users template link languages to create neighbourhoods, so this call stays open to
-    // them. A user session publishes as the user, never as the executor's main agent.
+    // them. A user session publishes as the user, never as the main agent.
     controller
-        .expression_create(
-            &language_language_address,
-            content,
-            &session_agent_context(&ctx),
-        )
+        .expression_create(&language_language_address, content, &ctx.acts_as())
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
 

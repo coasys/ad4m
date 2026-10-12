@@ -2390,11 +2390,12 @@ impl AIService {
         }
 
         // A caller without a user acts as the main agent. The session already resolved and
-        // checked it: the operator and an app may reach any stream, an anonymous caller none.
+        // checked it: the operator and a grant on the main agent may reach any stream, an
+        // anonymous caller none.
         let Some(caller_email) = caller.user_email() else {
-            return match caller.session.principal {
-                crate::agent::session::Principal::Operator
-                | crate::agent::session::Principal::App { .. } => Ok(()),
+            return match &caller.session.principal {
+                crate::agent::session::Principal::Operator => Ok(()),
+                crate::agent::session::Principal::Agent(agent) if agent.is_main_agent() => Ok(()),
                 _ => Err(anyhow!(
                     "Authorization error: caller does not own this transcription stream"
                 )),
@@ -3074,7 +3075,7 @@ mod stream_ownership_tests {
         let bob = RequestContext::user_for_test("bob@example.org", "did:key:bob", vec![]);
         let operator = RequestContext::operator_for_test();
         let app = RequestContext::app_for_test(vec![]);
-        let anonymous = RequestContext::for_test(Principal::Anonymous { caps: vec![] });
+        let anonymous = RequestContext::for_test(Principal::Anonymous);
 
         let alices = stream_of(Some("alice@example.org"));
         let main_agents = stream_of(None);
@@ -3090,7 +3091,7 @@ mod stream_ownership_tests {
         assert!(reaches(&main_agents, &operator));
         assert!(
             reaches(&alices, &app),
-            "an app acts as the main agent, as before"
+            "a grant on the main agent reaches any stream, as before"
         );
         assert!(
             !reaches(&main_agents, &anonymous),
@@ -3145,12 +3146,14 @@ mod transcription_owner_tests {
         setup_agent();
         let _multi_user = MultiUserMode::on();
         let token = crate::test_utils::expired_user_token("expired@example.org");
-        let auth = crate::api::auth::AuthContext::open(
+        let refused = crate::types::RequestContext::open(
             &token,
             &Some("the-admin-credential".into()),
-            false,
             crate::agent::capabilities::ListenerReach::Network,
         );
-        assert_eq!(auth.err(), Some(crate::agent::session::AuthError::Expired));
+        assert_eq!(
+            refused.err(),
+            Some(crate::agent::session::AuthError::Expired)
+        );
     }
 }

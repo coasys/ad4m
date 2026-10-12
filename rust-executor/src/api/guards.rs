@@ -1,11 +1,11 @@
 //! Who may call a method, on whose data.
 //!
-//! On a multi-user executor, a user session (a JWT whose `sub` names a user) acts for that
-//! user only. Calls that change or use the executor's own identity, wallet, files or
-//! executor-wide settings belong to the executor's operator: the admin credential, or an app
-//! the operator approved. Those calls refuse user sessions, whatever capabilities the user
-//! token carries, because the default user capabilities overlap the ones these calls
-//! check.
+//! On a multi-user executor, a session on a managed agent (a JWT whose `sub` names a user)
+//! acts for that user only. Calls that change or use the main agent's identity, wallet,
+//! files or executor-wide settings belong to the operator: the admin credential, or a grant
+//! on the main agent the operator approved. Those calls refuse sessions on managed agents,
+//! whatever capabilities the user token carries, because the default user capabilities
+//! overlap the ones these calls check.
 //!
 //! A method declares its [`Guard`] where it registers (`map.method(..).guard(..)`), and the
 //! dispatcher runs it before the handler. Every method has one: `build_handler_map` panics on
@@ -14,8 +14,7 @@
 //! touch. Two guards check no capability: [`Guard::Open`] (the handler decides) and
 //! [`Guard::Operator`] (the operator holds every capability).
 
-use crate::agent::capabilities::{check_capability, Capability};
-use crate::agent::AgentContext;
+use crate::agent::capabilities::Capability;
 use crate::api::ws_handler::WsRpcError;
 use crate::types::RequestContext;
 use serde_json::Value;
@@ -30,22 +29,22 @@ pub enum Guard {
     Open,
     /// The executor's operator only ([`RequestContext::is_operator`]: the admin credential, or
     /// no token on a loopback listener of an executor without one). Every other caller gets 403
-    /// "Admin credential required", whatever its capabilities: no app token is the operator.
+    /// "Admin credential required", whatever its capabilities: no grant is the operator.
     Operator,
     /// Callers without a token too: requesting a capability, signing up, logging in. The
     /// capability must be one that anonymous callers hold (`anonymous_capabilities`).
     Anonymous(Capability),
-    /// Acts on the executor itself. The operator, an app or an anonymous caller that holds the
-    /// capability; never a user session, whatever its capabilities: the default user
-    /// capabilities overlap the ones these methods check.
+    /// Acts on the executor itself. The operator, a grant on the main agent or an anonymous
+    /// caller that holds the capability; never a session on a managed agent, whatever its
+    /// capabilities: the default user capabilities overlap the ones these methods check.
     Executor(Capability),
     /// Acts on the caller's own agent or user record, which the handler takes from
     /// `ctx.acts_as()`. An anonymous caller has no agent of its own, so it gets 403.
     SelfAgent(Capability),
     /// Acts on the perspective that `uuid` reads from the params. The operator reaches every
-    /// perspective; a user only those it owns; an app or anonymous caller the unowned ones and
-    /// those the main agent owns (`helpers::can_access_perspective_with_did`). A missing
-    /// perspective is 404.
+    /// perspective; a user only those it owns; a grant on the main agent or an anonymous
+    /// caller the unowned ones and those the main agent owns
+    /// (`helpers::can_access_perspective_with_did`). A missing perspective is 404.
     Perspective {
         /// The capability for the perspective, built from its uuid
         /// (`perspective_query_capability` and its siblings).
@@ -59,8 +58,8 @@ pub enum Guard {
     /// Acts on the AI task whose id `task_id` reads from the params. A user session reaches
     /// only the tasks it created (`tasks.user_email`): another user's task, an operator task
     /// and a missing one are all 404, so a user cannot learn which task ids exist. The
-    /// operator and apps reach every task, and the handler answers for a missing one. An
-    /// anonymous caller gets 403, as for [`Guard::SelfAgent`].
+    /// operator and grants on the main agent reach every task, and the handler answers for a
+    /// missing one. An anonymous caller gets 403, as for [`Guard::SelfAgent`].
     Task {
         capability: Capability,
         /// The task's id in the params.
@@ -140,7 +139,7 @@ impl Guard {
                 _ => None,
             };
         if let Some(capability) = self.capability(uuid.as_deref().unwrap_or_default()) {
-            check_capability(&ctx.capabilities, &capability).map_err(WsRpcError::forbidden)?;
+            ctx.require(&capability).map_err(WsRpcError::forbidden)?;
         }
 
         match self {
@@ -151,7 +150,7 @@ impl Guard {
                 }
             }
             Guard::Executor(_) => {
-                if ctx.user_email().is_some() {
+                if !ctx.acts_as().is_main_agent() {
                     return Err(WsRpcError::forbidden(format!(
                         "{method} acts on the executor itself, so a user session may not call it"
                     )));
@@ -170,12 +169,12 @@ impl Guard {
                         "{method} acts on the caller's own AI task, so it needs a token"
                     )));
                 }
-                if let Some(email) = ctx.user_email() {
+                if let Some(email) = ctx.acts_as().user_email {
                     let id = task_id.expect("a task guard reads a task id");
                     let owner =
                         crate::db::Ad4mDb::with_global_instance(|db| db.get_task_owner(&id))
                             .map_err(|e| WsRpcError::internal(e.to_string()))?;
-                    if owner.flatten().as_deref() != Some(email) {
+                    if owner.flatten().as_deref() != Some(email.as_str()) {
                         return Err(WsRpcError::not_found(format!("Task {id} not found")));
                     }
                 }
@@ -197,23 +196,9 @@ impl Guard {
     }
 }
 
-/// The agent a session signs and publishes as: the user of a user session, otherwise the
-/// executor's main agent.
-pub fn session_agent_context(ctx: &RequestContext) -> AgentContext {
-    ctx.acts_as()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A user session for `user_email`, else an app token.
-    fn ctx(user_email: Option<&str>) -> RequestContext {
-        match user_email {
-            Some(email) => RequestContext::user_for_test(email, "did:key:guarded-user", vec![]),
-            None => RequestContext::app_for_test(vec![]),
-        }
-    }
 
     #[tokio::test]
     async fn an_executor_guard_refuses_user_sessions_and_names_the_method() {
@@ -240,22 +225,6 @@ mod tests {
         assert_eq!(
             lock.admit("agent.lock", &Value::Null, &app).await.unwrap(),
             Admission::Granted
-        );
-    }
-
-    #[test]
-    fn a_user_session_acts_as_its_user() {
-        assert_eq!(
-            session_agent_context(&ctx(Some("alice@example.org"))),
-            AgentContext::for_user_email("alice@example.org".to_string())
-        );
-    }
-
-    #[test]
-    fn an_operator_session_acts_as_the_main_agent() {
-        assert_eq!(
-            session_agent_context(&ctx(None)),
-            AgentContext::main_agent()
         );
     }
 }

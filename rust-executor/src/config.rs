@@ -31,6 +31,17 @@ pub fn configured_admin_credential() -> Option<Secret> {
         .and_then(|config| config.admin_credential.clone())
 }
 
+/// Whether the executor permits capability requests without the operator (development
+/// only). `false` without a global config. Never panics.
+pub fn auto_permit_cap_requests() -> bool {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|config| config.auto_permit_cap_requests)
+        .unwrap_or(false)
+}
+
 /// Get a clone of the global Ad4mConfig.
 /// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
