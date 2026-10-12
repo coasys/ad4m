@@ -748,6 +748,7 @@ Notes:
         ...sub,
         query,
         ...(Array.isArray(data.containment_predicates) ? { containment: data.containment_predicates } : {}),
+        ...(Array.isArray(data.reply_predicates) ? { replies: data.reply_predicates } : {}),
       };
     }
     if (sub.type === "channel-messages" && sub.channel) {
@@ -790,8 +791,9 @@ Notes:
       channel: "",
       query: data.query ?? data.subscription?.query,
       neighbourhood: data.neighbourhood,
-      // Every predicate the perspective treats as containment, for the parent walk.
+      // Every predicate the perspective treats as containment, and as a reply, for the parent walk.
       ...(Array.isArray(data.containment_predicates) ? { containment: data.containment_predicates } : {}),
+      ...(Array.isArray(data.reply_predicates) ? { replies: data.reply_predicates } : {}),
     };
 
     if (!subscription.query) {

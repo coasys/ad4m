@@ -24,6 +24,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
 - `instance_transcript` — the newest N instances of one class under a parent as a readable transcript (the way to read a channel, see Rule 6)
 - `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (`get_children` takes `parent`, not `id` — see `ad4m_get_documentation(topic="usage")`)
+- `get_replies` — what answers an item, through `ad4m://has_reply` and the replies a space declares; `thread=true` for a whole discussion. Replies are not children
 - `add_link` / `query_links` — raw link access (rarely needed, see Rule 4)
 - `neighbourhood_join_from_url` / `neighbourhood_publish_from_perspective`
 - `add_perspective` / `list_perspectives`
@@ -244,7 +245,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### The wake event hands you addresses, not types
 
-`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
+`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under — and, for a reply, what it answers — and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
 
 ### Step 1: work out what you are looking at
 

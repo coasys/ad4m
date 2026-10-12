@@ -2514,3 +2514,178 @@ async fn mention_relations_are_the_declared_ones() {
     // Another role's declaration is not a mention relation.
     assert!(perspective.message_text_predicates().await.is_empty());
 }
+
+/// `get_replies` reads what answers an item through every reply predicate the
+/// perspective declares — and replies are never children: `get_children` on
+/// the same item lists its parts alone. With `thread`, a perspective that
+/// declares no thread index is walked through the replies, so a reply to a
+/// reply is found and says what it answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_replies_follows_declared_replies_and_walks_a_thread() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let link = |source: &str, predicate: &str, target: &str| {
+        crate::mcp::tools::perspectives::AddLinkParams {
+            perspective_id: uuid.clone(),
+            source: source.into(),
+            predicate: predicate.into(),
+            target: target.into(),
+        }
+    };
+    let replies = |handler: &Ad4mMcpHandler, thread: bool| {
+        let uuid = uuid.clone();
+        let handler = handler.clone();
+        async move {
+            parse(
+                &handler
+                    .get_replies(Parameters(GetRepliesParams {
+                        perspective_id: uuid,
+                        item: "app://post".into(),
+                        thread: Some(thread),
+                        limit: None,
+                    }))
+                    .await,
+            )
+        }
+    };
+    for (source, predicate, target) in [
+        ("app://post", "ad4m://has_child", "app://part"),
+        ("app://post", "app://response", "app://comment"),
+        ("app://comment", "app://response", "app://answer"),
+    ] {
+        let added = parse(
+            &handler
+                .add_link(Parameters(link(source, predicate, target)))
+                .await,
+        );
+        assert_eq!(added["success"], true, "{added}");
+    }
+
+    // Before the declaration the app's predicate is nothing the executor knows.
+    assert_eq!(replies(&handler, false).await["count"], 0);
+
+    let declared = parse(
+        &handler
+            .add_link(Parameters(link(
+                "app://response",
+                crate::perspectives::containment::SUB_PROPERTY_OF,
+                crate::perspectives::replies::HAS_REPLY,
+            )))
+            .await,
+    );
+    assert_eq!(declared["success"], true, "{declared}");
+
+    // The direct replies: the comment, not the answer to it.
+    let direct = replies(&handler, false).await;
+    assert_eq!(direct["count"], 1, "{direct}");
+    assert_eq!(direct["replies"][0]["id"], "app://comment", "{direct}");
+
+    // The whole thread, walked: both, each saying what it answers.
+    let thread = replies(&handler, true).await;
+    assert_eq!(thread["count"], 2, "{thread}");
+    let answers: Vec<(&str, &str)> = thread["replies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap(),
+                r["in_reply_to"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        answers.contains(&("app://comment", "app://post")),
+        "{thread}"
+    );
+    assert!(
+        answers.contains(&("app://answer", "app://comment")),
+        "{thread}"
+    );
+
+    // A reply is not a child.
+    let children = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: "app://post".into(),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(children["count"], 1, "{children}");
+    assert_eq!(children["children"][0]["id"], "app://part", "{children}");
+}
+
+/// With a declared thread index, `thread=true` reads the root's index in one
+/// hop rather than walking: a member the index holds is listed even where no
+/// reply link reaches it, and says it answers nothing the page knows.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_replies_reads_a_declared_thread_index() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let link = |source: &str, predicate: &str, target: &str| {
+        crate::mcp::tools::perspectives::AddLinkParams {
+            perspective_id: uuid.clone(),
+            source: source.into(),
+            predicate: predicate.into(),
+            target: target.into(),
+        }
+    };
+    let sub = crate::perspectives::containment::SUB_PROPERTY_OF;
+    for (source, predicate, target) in [
+        (
+            "app://response",
+            sub,
+            crate::perspectives::replies::HAS_REPLY,
+        ),
+        (
+            "app://thread",
+            sub,
+            crate::perspectives::replies::HAS_THREAD_MEMBER,
+        ),
+        ("app://post", "app://response", "app://comment"),
+        ("app://comment", "app://response", "app://answer"),
+        ("app://post", "app://thread", "app://comment"),
+        ("app://post", "app://thread", "app://answer"),
+        // Indexed, with no reply link reaching it: only the index can list it.
+        ("app://post", "app://thread", "app://indexed-only"),
+    ] {
+        let added = parse(
+            &handler
+                .add_link(Parameters(link(source, predicate, target)))
+                .await,
+        );
+        assert_eq!(added["success"], true, "{added}");
+    }
+
+    let thread = parse(
+        &handler
+            .get_replies(Parameters(GetRepliesParams {
+                perspective_id: uuid.clone(),
+                item: "app://post".into(),
+                thread: Some(true),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(thread["count"], 3, "{thread}");
+    let answers: Vec<(&str, &str)> = thread["replies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap(),
+                r["in_reply_to"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        answers.contains(&("app://comment", "app://post")),
+        "{thread}"
+    );
+    assert!(
+        answers.contains(&("app://answer", "app://comment")),
+        "{thread}"
+    );
+    assert!(answers.contains(&("app://indexed-only", "")), "{thread}");
+}

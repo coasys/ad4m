@@ -33,6 +33,7 @@ pub mod ordering;
 pub mod perspective_instance;
 #[cfg(test)]
 mod read_back_round_trip_tests;
+pub mod replies;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;

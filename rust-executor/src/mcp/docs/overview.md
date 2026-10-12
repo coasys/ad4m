@@ -83,6 +83,7 @@ cardinality, so fix what the error says rather than guessing.
 | --- | --- |
 | `add_child(perspective_id, parent, child)` | Link any two nodes with `ad4m://has_child` (class-agnostic; e.g. a Channel under `ad4m://self`) |
 | `get_children(perspective_id, parent, limit?)` | Children of any node with timestamp and author, oldest first |
+| `get_replies(perspective_id, item, thread?, limit?)` | What answers an item: its direct replies, or with `thread=true` every reply under it with what each answers |
 | `add_link` / `query_links` | Raw triples — rarely needed, see "classes, not links" below |
 | `execute_commands` | Run raw SDNA actions on an instance (escape hatch) *(direct MCP only)* |
 

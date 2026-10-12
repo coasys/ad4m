@@ -154,6 +154,28 @@ mention subscription there follows those links to your DID and does not read
 text at all. Without one, it matches `@name` or your DID in message text,
 never a bare name.
 
+## Replies
+
+A reply is not inside what it answers, so it is not a child. Replies are two
+roles of their own, declared under the same signing rule:
+
+- `<app://reply> rdfs:subPropertyOf <ad4m://has_reply>` — from an item to each
+  direct reply to it. A reply to a reply hangs off the reply.
+- `<app://thread> rdfs:subPropertyOf <ad4m://has_thread_member>` — from a
+  thread's root (the first item above a reply that is not itself a reply) to
+  every reply under it, at any depth. Optional: it is an index of what the
+  replies already say.
+
+`get_replies(perspective_id, item, thread?, limit?)` reads them, whatever the
+classes are called: the direct replies by default, or with `thread=true` every
+reply under the item, each with `in_reply_to`, so the discussion can be rebuilt.
+It reads the thread index when the space has one and walks the replies when it
+does not. `get_children` never lists a reply.
+
+In a wake event, a reply's `Parents` include what it answers, so the walk up
+from a mention inside a discussion reaches the item the discussion is about,
+and what holds that.
+
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple
 bot-to-bot spaces. Check `describe_perspective` and do not assume a `parent` is
