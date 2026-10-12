@@ -63,14 +63,10 @@ impl RequestContext {
         self.session.acts_as()
     }
 
-    /// The email of the user the session names, if it names one.
-    pub fn user_email(&self) -> Option<&str> {
-        self.session.user().map(|(email, _)| email)
-    }
-
-    /// The DID of the user the session names, if it names one.
+    /// The DID of the managed agent the session acts as, if it acts as one: the session of
+    /// a user. `None` for the main agent, the operator and anonymous callers.
     pub fn user_did(&self) -> Option<&str> {
-        self.session.user().map(|(_, did)| did)
+        self.session.managed_did()
     }
 
     /// Whether the caller is the executor's operator: the admin credential, or no token on a
@@ -112,11 +108,11 @@ impl RequestContext {
         )
     }
 
-    /// A grant on the managed agent of `email`, whose DID is `did`, limited to `caps`.
-    pub(crate) fn user_for_test(email: &str, did: &str, caps: Vec<Capability>) -> RequestContext {
+    /// A grant on the managed agent `did`, limited to `caps`.
+    pub(crate) fn user_for_test(did: &str, caps: Vec<Capability>) -> RequestContext {
         Self::for_session(
             crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
-                crate::agent::AgentContext::for_user_email(email.to_string()),
+                crate::agent::AgentContext::managed(did.to_string()),
             ))
             .with_caps(caps)
             .with_did(did),

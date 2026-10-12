@@ -140,8 +140,8 @@ pub async fn completions(
         .map_err(OpenAIError::invalid_request)?;
     let messages = vec![("user".to_string(), prompt)];
 
-    if let Some(email) = auth.user_email() {
-        check_compute_credits(email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -152,7 +152,7 @@ pub async fn completions(
         .prompt_messages(
             model_id,
             messages,
-            auth.user_email().map(str::to_string),
+            auth.user_did().map(str::to_string),
             None,
         )
         .await
@@ -190,8 +190,8 @@ async fn chat_oneshot(
     // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
     // /v1 billing is correct for the public API surface; the WS-RPC gap
     // should be aligned in a separate PR against dev.
-    if let Some(email) = auth.user_email() {
-        check_compute_credits(email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -202,7 +202,7 @@ async fn chat_oneshot(
         .prompt_messages(
             model_id,
             messages,
-            auth.user_email().map(str::to_string),
+            auth.user_did().map(str::to_string),
             constraint,
         )
         .await
@@ -263,8 +263,8 @@ async fn chat_stream(
     constraint: Option<ArcParser<()>>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(email) = auth.user_email() {
-        check_compute_credits(email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -275,7 +275,7 @@ async fn chat_stream(
         .prompt_messages_stream(
             model_id,
             messages,
-            auth.user_email().map(str::to_string),
+            auth.user_did().map(str::to_string),
             constraint,
         )
         .await

@@ -239,9 +239,10 @@ impl Event {
 
     /// `hosting-user-info-changed` for `info`: to the user it is about, and to the operator
     /// and apps (they act as the main agent). `matches_hosting_user` let every session
-    /// without a user email through, and a user's session only for its own email.
+    /// without a user email through, and a user's session only for its own email. The
+    /// info names its user by the account's email, so the user's DID is resolved here.
     pub fn hosting_user_info(info: &HostingUserInfo) -> Event {
-        let user = AgentService::get_user_did_by_email(&info.email);
+        let user = AgentService::did_for_email(&info.email);
         if let Err(e) = &user {
             log::warn!(
                 "hosting-user-info-changed: no DID for the user, so no user session gets it: {e}"
@@ -358,9 +359,8 @@ mod tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let email = format!("approval-target-{}@example.org", uuid::Uuid::new_v4());
-        AgentService::ensure_user_key_exists(&email).unwrap();
-        let did = AgentService::get_user_did_by_email(&email).unwrap();
-        let user = AgentContext::for_user_email(email);
+        let did = crate::test_utils::create_test_user(&email);
+        let user = AgentContext::managed(did.clone());
         let info = ExceptionInfo {
             r#type: ExceptionType::CapabilityRequested,
             ..Default::default()

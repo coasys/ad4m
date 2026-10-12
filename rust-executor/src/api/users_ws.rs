@@ -117,7 +117,7 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     if user_exists {
         match um::verify_credentials(&email, &body.password) {
             Ok(()) => {
-                let did = crate::agent::AgentService::get_user_did_by_email(&email)
+                let did = crate::agent::AgentService::did_for_email(&email)
                     .map_err(|e| WsRpcError::internal(e.to_string()))?;
                 return Ok(serde_json::json!({ "did": did, "success": true }));
             }
@@ -143,12 +143,11 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             direct_message_language: None,
             perspective: Some(DomainPerspective { links: vec![] }),
         };
-        AgentService::with_global_instance(|svc| svc.store_user_agent_profile(&email, &agent))
-            .map_err(|e| {
-                WsRpcError::internal(format!("Failed to store user agent profile: {}", e))
-            })?;
+        AgentService::store_managed_agent_profile(&did, &agent).map_err(|e| {
+            WsRpcError::internal(format!("Failed to store user agent profile: {}", e))
+        })?;
 
-        let ctx = AgentContext::for_user_email(email.clone());
+        let ctx = AgentContext::managed(did.clone());
         if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
             log::warn!("Failed to publish new user to agent language: {}", e);
         }
@@ -342,16 +341,25 @@ async fn logout(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpc
 async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UsersRevokeAllSessionsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    // The email names the user's agent: it resolves to the DID here, once. `None` when no
+    // user with an agent has it.
+    let did_of = |email: &str| {
+        crate::db::Ad4mDb::with_global_instance(|db| db.get_user(email).ok())
+            .map(|user| user.did)
+            .filter(|did| !did.is_empty())
+    };
     let named = body.email.map(|email| email.trim().to_lowercase());
-    let email = match (ctx.user_email(), named) {
+    let did = match (ctx.user_did(), named) {
         (Some(own), None) => own.to_string(),
-        (Some(own), Some(named)) if named == own => named,
+        (Some(own), Some(named)) if did_of(&named).as_deref() == Some(own) => own.to_string(),
         (Some(_), Some(_)) => {
             return Err(WsRpcError::forbidden(
                 "A user may revoke only their own sessions",
             ))
         }
-        (None, Some(named)) if ctx.is_operator() => named,
+        (None, Some(named)) if ctx.is_operator() => {
+            did_of(&named).ok_or_else(|| WsRpcError::not_found("No user has this email"))?
+        }
         (None, None) if ctx.is_operator() => {
             return Err(WsRpcError::bad_request(
                 "'email' required: name the user whose sessions to revoke",
@@ -363,12 +371,8 @@ async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<
             ))
         }
     };
-    let exists = crate::db::Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
-    if !exists {
-        return Err(WsRpcError::not_found("No user has this email"));
-    }
     crate::agent::grants::Grants::global()
-        .revoke_agent(&crate::agent::AgentContext::for_user_email(email))
+        .revoke_agent(&crate::agent::AgentContext::managed(did))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(true))
 }
@@ -582,12 +586,15 @@ mod session_revocation_tests {
         let token = generate_user_jwt(&email, "Flux").unwrap();
         let session = open(&token).unwrap();
         let grant = session.grant().expect("a login has a grant");
-        assert_eq!(grant.agent, AgentContext::for_user_email(email.clone()));
+        assert_eq!(
+            grant.agent,
+            AgentContext::managed(crate::agent::AgentService::did_for_email(&email).unwrap())
+        );
         assert_eq!(grant.app_name(), "Flux");
         assert_eq!(grant.request_id, grant.id.0, "a login answers no request");
         assert_eq!(
             grant.did,
-            crate::agent::AgentService::get_user_did_by_email(&email).unwrap()
+            crate::agent::AgentService::did_for_email(&email).unwrap()
         );
     }
 
@@ -665,7 +672,8 @@ mod session_revocation_tests {
     async fn a_second_revoke_all_ends_a_login_made_after_the_first() {
         setup();
         let email = managed_user("revoke-all-twice");
-        let agent = AgentContext::for_user_email(email.clone());
+        let agent =
+            AgentContext::managed(crate::agent::AgentService::did_for_email(&email).unwrap());
         let first = generate_user_jwt(&email, "test").unwrap();
         Grants::global().revoke_agent(&agent).unwrap();
         let between = generate_user_jwt(&email, "test").unwrap();
@@ -754,7 +762,9 @@ mod session_revocation_tests {
         let reloaded = Grants::default();
         Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
         assert!(reloaded.get(&id).is_none());
-        let listed = reloaded.list(&AgentContext::for_user_email(email));
+        let listed = reloaded.list(&AgentContext::managed(
+            crate::agent::AgentService::did_for_email(&email).unwrap(),
+        ));
         assert_eq!(listed.len(), 1);
         assert!(listed[0].is_ended());
     }

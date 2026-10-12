@@ -28,8 +28,41 @@ pub const MANAGED_AGENT_REQUEST_TTL_SECONDS: u64 = 24 * 60 * 60;
 /// approves, so a flood of requests evicts no approved one while unapproved ones remain.
 pub const MAX_PENDING_REQUESTS: usize = 1024;
 
+/// The agent a capability request is for (D16: an agent is its DID).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestTarget {
+    /// An agent on this executor: the main agent, or a managed agent by its DID.
+    Agent(AgentContext),
+    /// An email that no user of this executor has, so no agent. The request is taken all the
+    /// same, so that the answer does not tell the caller which emails have accounts. Its
+    /// approval request reaches nobody, only the operator may approve it, its code redeems
+    /// nothing, and it expires like a request for a managed agent.
+    NoAgent,
+}
+
+impl RequestTarget {
+    /// Whether the request is for the main agent.
+    pub fn is_main_agent(&self) -> bool {
+        matches!(self, RequestTarget::Agent(agent) if agent.is_main_agent())
+    }
+
+    /// The agent the request is for; `None` for an email without one.
+    pub fn agent(&self) -> Option<&AgentContext> {
+        match self {
+            RequestTarget::Agent(agent) => Some(agent),
+            RequestTarget::NoAgent => None,
+        }
+    }
+}
+
+impl From<AgentContext> for RequestTarget {
+    fn from(agent: AgentContext) -> Self {
+        RequestTarget::Agent(agent)
+    }
+}
+
 /// How long a request for `target` waits, from the request and again from the approval.
-pub fn request_ttl(target: &AgentContext) -> u64 {
+pub fn request_ttl(target: &RequestTarget) -> u64 {
     if target.is_main_agent() {
         MAIN_AGENT_REQUEST_TTL_SECONDS
     } else {
@@ -49,7 +82,7 @@ struct PendingRequest {
     /// What the app asked for; after the approval, what the approver granted.
     auth: AuthInfo,
     /// The agent the grant will act as. Fixed at the request: an approval cannot move it.
-    target: AgentContext,
+    target: RequestTarget,
     /// Set by the approval; goes to the approver only. Always six digits ([`is_code`]).
     code: Option<Secret>,
     attempts: u8,
@@ -116,7 +149,14 @@ impl PendingRequests {
     }
 
     /// Records a new request of the app `auth` for the agent `target`.
-    pub fn request(&self, request_id: String, auth: AuthInfo, target: AgentContext, now: u64) {
+    pub fn request(
+        &self,
+        request_id: String,
+        auth: AuthInfo,
+        target: impl Into<RequestTarget>,
+        now: u64,
+    ) {
+        let target = target.into();
         let mut pending = self.lock_swept(now);
         if pending.len() >= MAX_PENDING_REQUESTS {
             let nearest = pending
@@ -142,7 +182,7 @@ impl PendingRequests {
 
     /// The agent that the unexpired request `request_id` is for: whoever approves it must own
     /// that agent.
-    pub fn target(&self, request_id: &str, now: u64) -> Option<AgentContext> {
+    pub fn target(&self, request_id: &str, now: u64) -> Option<RequestTarget> {
         self.lock_swept(now)
             .get(request_id)
             .map(|request| request.target.clone())
@@ -203,15 +243,18 @@ impl PendingRequests {
             Some(request) => match &request.code {
                 // Before the approval there is no code to guess, so nothing is counted.
                 None => Err(RedeemError::NotPermitted),
-                Some(expected) if expected.expose_for_compare(code) => {
-                    match mint(&request.target, &request.auth) {
+                Some(expected) if expected.expose_for_compare(code) => match &request.target {
+                    RequestTarget::Agent(target) => match mint(target, &request.auth) {
                         Ok(minted) => {
                             pending.remove(request_id);
                             Ok(minted)
                         }
                         Err(e) => Err(RedeemError::Mint(e)),
-                    }
-                }
+                    },
+                    RequestTarget::NoAgent => Err(RedeemError::Mint(
+                        "No agent on this executor has the name this request gave".to_string(),
+                    )),
+                },
                 Some(_) => {
                     request.attempts += 1;
                     if request.attempts >= MAX_CODE_ATTEMPTS {
@@ -308,7 +351,7 @@ mod tests {
     #[test]
     fn redeeming_mints_on_the_requested_target_with_the_approved_auth() {
         let pending = PendingRequests::default();
-        let alice = AgentContext::for_user_email("alice@example.org".into());
+        let alice = AgentContext::managed("did:key:z6MkAlice".into());
         let asked = AuthInfo {
             app_name: "asked".into(),
             ..AuthInfo::default()
@@ -362,7 +405,7 @@ mod tests {
     #[test]
     fn a_request_for_a_managed_agent_waits_a_day_and_one_for_the_main_agent_ten_minutes() {
         let pending = PendingRequests::default();
-        let alice = AgentContext::for_user_email("alice@example.org".into());
+        let alice = AgentContext::managed("did:key:z6MkAlice".into());
         pending.request("main".into(), AuthInfo::default(), main(), 0);
         pending.request("managed".into(), AuthInfo::default(), alice, 0);
         assert_eq!(pending.expires_at("main"), Some(10 * 60));
@@ -381,6 +424,32 @@ mod tests {
             .unwrap();
         assert_eq!(pending.expires_at("managed"), Some(47 * 60 * 60));
         assert!(redeem(&pending, "managed", "123456", 47 * 60 * 60 - 1).is_ok());
+    }
+
+    // An email no user has: the request waits as one for a managed agent would, so neither
+    // its answer nor its lifetime says the email has no account, but its code mints nothing.
+    #[test]
+    fn a_request_for_no_agent_waits_like_a_managed_one_and_redeems_nothing() {
+        let pending = PendingRequests::default();
+        pending.request(
+            "nobody".into(),
+            AuthInfo::default(),
+            RequestTarget::NoAgent,
+            0,
+        );
+        assert_eq!(pending.expires_at("nobody"), Some(24 * 60 * 60));
+        assert_eq!(pending.target("nobody", 0), Some(RequestTarget::NoAgent));
+
+        pending
+            .approve("nobody", AuthInfo::default(), "123456".into(), 0)
+            .unwrap();
+        let mut minted = false;
+        let result = pending.redeem("nobody", "123456", 1, |_, _| {
+            minted = true;
+            Ok(())
+        });
+        assert!(matches!(result, Err(RedeemError::Mint(_))), "{result:?}");
+        assert!(!minted, "nothing is minted for no agent");
     }
 
     #[test]

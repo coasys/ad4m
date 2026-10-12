@@ -93,8 +93,8 @@ pub async fn transcriptions(
 
     let samples = audio_decode(&bytes, content_type.as_deref())?;
 
-    if let Some(email) = auth.user_email() {
-        check_compute_credits(email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -119,11 +119,11 @@ pub async fn speech(
     auth.require(&AI_PROMPT_CAPABILITY)
         .map_err(OpenAIError::forbidden)?;
 
-    if let Some(email) = auth.user_email() {
-        check_compute_credits(email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
         let amount = billing_amounts::speech_amount(req.input.chars().count());
-        bill_compute(email, amount, "ai_tts", Some("v1/audio/speech"))?;
+        bill_compute(agent_did, amount, "ai_tts", Some("v1/audio/speech"))?;
     }
 
     let response_format = req

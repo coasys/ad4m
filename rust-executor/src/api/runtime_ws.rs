@@ -667,29 +667,37 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let email = compute_log_email(params.opt_str("userEmail"), &ctx)?;
+    let Some(agent_did) = compute_log_agent(params.opt_str("userEmail"), &ctx)? else {
+        // No such user: an empty log, as before agents were keyed by DID.
+        return Ok(serde_json::json!([]));
+    };
     let since = params.opt_str("since");
     let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
 
     let logs =
-        Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since.as_deref(), limit))
+        Ad4mDb::with_global_instance(|db| db.get_compute_log(&agent_did, since.as_deref(), limit))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(logs).unwrap_or_default())
 }
 
-/// Whose compute log a `runtime.computeLog` call reads. A user session reads only its own
+/// Whose compute log a `runtime.computeLog` call reads, by agent DID. `requested` names a
+/// user by email and resolves to that user's agent here. A user session reads only its own
 /// log, and an omitted `userEmail` means its own. The operator may read any user's log.
-fn compute_log_email(
+/// `None`: no user has that email.
+fn compute_log_agent(
     requested: Option<String>,
     ctx: &RequestContext,
-) -> Result<String, WsRpcError> {
-    match (ctx.user_email().map(str::to_string), requested) {
-        (Some(own), Some(requested)) if requested != own => Err(WsRpcError::forbidden(
-            "A user session may read only its own compute log",
-        )),
-        (Some(own), _) => Ok(own),
-        (None, requested) => Ok(requested.unwrap_or_default()),
+) -> Result<Option<String>, WsRpcError> {
+    let requested_did = requested
+        .as_deref()
+        .map(|email| crate::agent::AgentService::did_for_email(email).ok());
+    match (ctx.user_did().map(str::to_string), requested_did) {
+        (Some(own), Some(requested)) if requested.as_deref() != Some(own.as_str()) => Err(
+            WsRpcError::forbidden("A user session may read only its own compute log"),
+        ),
+        (Some(own), _) => Ok(Some(own)),
+        (None, requested) => Ok(requested.flatten()),
     }
 }
 
