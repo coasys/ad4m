@@ -141,7 +141,7 @@ export async function runSetup(
   const pluginCfg = openclawConfig?.plugins?.entries?.ad4m?.config ?? {};
   const runHolochain = pluginCfg.runHolochain !== false; // default true
   // Multi-user external: the assistant provisions its OWN user (distinct DID)
-  // via signup/login rather than a capability against the node's base agent.
+  // via signup/login rather than a capability against the executor's main agent.
   const multiUser = pluginCfg.multiUser === true;
   const agentEmail = pluginCfg.email || `openclaw-${generateRandomPassphrase(8)}@agent.local`;
   // Password resolves env var → config field → interactive stdin (setup only).
@@ -351,12 +351,12 @@ async function setupExternalMode(
     const initResp = await mcpInitialize(endpoint);
 
     // Multi-user executor: provision the assistant's OWN user identity (distinct DID)
-    // via signup + login, rather than a capability against the node's base agent.
+    // via signup + login, rather than a capability against the executor's main agent.
     if (multiUser && email && password) {
       logger.info(`[ad4m-setup] Multi-user executor — provisioning own identity (${email})...`);
       // mcpCallTool returns a JSON-RPC error as result text rather than throwing,
       // so inspect the result — the catch alone only sees transport failures.
-      // Did *this* run create the account? If so the node has just emailed a
+      // Did *this* run create the account? If so the executor has just emailed a
       // `signup`-typed code, and that is the one to verify with.
       let justSignedUp = false;
       try {
@@ -582,9 +582,9 @@ export async function loginViaEmailVerification(
     } catch (e: any) {
       logger.info(`[ad4m-setup] request_login_verification: ${e.message}`);
     }
-    logger.info("[ad4m-setup] A verification code has been sent to your email (if the node has SMTP configured).");
+    logger.info("[ad4m-setup] A verification code has been sent to your email (if the executor has SMTP configured).");
   } else {
-    logger.info("[ad4m-setup] signup sent a verification code to your email (if the node has SMTP configured).");
+    logger.info("[ad4m-setup] signup sent a verification code to your email (if the executor has SMTP configured).");
   }
   const code = await readCode();
   if (!code) {
