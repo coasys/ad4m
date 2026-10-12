@@ -147,8 +147,8 @@ fn close_reason(reason: &str) -> String {
 
 async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<RequestContext>) {
     // Track last_seen at connect time (also updated on each RPC call below)
-    if let Some(email) = ctx.user_email() {
-        track_last_seen(email).await;
+    if let Some(did) = ctx.user_did() {
+        track_last_seen(did).await;
     }
 
     let (mut ws_sink, ws_stream) = socket.split();
@@ -387,8 +387,8 @@ impl Connection {
             // Refresh last_seen on every RPC dispatch so long-lived
             // connections don't appear stale. Internally throttled to one
             // DB write per 5 minutes per user.
-            if let Some(email) = base_ctx.user_email() {
-                track_last_seen(email).await;
+            if let Some(did) = base_ctx.user_did() {
+                track_last_seen(did).await;
             }
 
             // Build a per-request context that carries the cancel token,
@@ -468,7 +468,6 @@ mod connection_context_tests {
     //! The context a connection keeps comes from its session. How each kind of token
     //! resolves is pinned in `session::resolution_tests`.
     use super::*;
-    use crate::agent::AgentService;
     use crate::test_utils::{setup_agent, setup_wallet};
 
     const ADMIN: &str = "the-admin-credential";
@@ -529,11 +528,11 @@ mod connection_context_tests {
     }
 
     #[test]
-    fn a_session_connection_acts_as_the_agent_its_email_names() {
+    fn a_session_connection_acts_as_the_agent_its_token_names() {
         setup_wallet();
         setup_agent();
         let user = "context.actsas@example.org";
-        AgentService::ensure_user_key_exists(user).unwrap();
+        let user_did = crate::test_utils::create_test_user(user);
         let tokens = [
             ADMIN.to_string(),
             jwt(None),
@@ -543,7 +542,7 @@ mod connection_context_tests {
         let expected = [
             crate::agent::AgentContext::main_agent(),
             crate::agent::AgentContext::main_agent(),
-            crate::agent::AgentContext::for_user_email(user.to_string()),
+            crate::agent::AgentContext::managed(user_did),
         ];
         for (token, expected) in tokens.iter().zip(expected) {
             let ctx = connection_context(token, &Some(ADMIN.to_string()), ListenerReach::Network)
@@ -594,7 +593,7 @@ mod event_gate_tests {
         };
         assert!(narrow_app.session.may_receive(&link("some-uuid")));
         assert!(!narrow_app.session.may_receive(&link("other-uuid")));
-        let user = RequestContext::user_for_test("u@example.org", "did:key:u", vec![]);
+        let user = RequestContext::user_for_test("did:key:u", vec![]);
         assert!(user.session.is_authenticated());
         assert!(gets_events(ADMIN, Some(ADMIN), ListenerReach::Network));
         // No token on a loopback listener of a node without an admin credential (#1059).

@@ -45,9 +45,7 @@ pub(super) fn literal(s: &str) -> String {
 /// with the returned context carry a DID that verifies — a stub DID string
 /// would be dropped by every authorship check the fold makes.
 pub(super) fn second_agent(user_email: &str) -> AgentContext {
-    crate::agent::AgentService::ensure_user_key_exists(user_email)
-        .unwrap_or_else(|e| panic!("ensure_user_key_exists({user_email}): {e:#}"));
-    AgentContext::for_user_email(user_email.to_string())
+    AgentContext::managed(crate::test_utils::create_test_user(user_email))
 }
 
 /// Two-state Delivery flow (`identified → scoped`) whose `scoped` state

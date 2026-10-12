@@ -53,8 +53,8 @@ where
         })?;
 
         // Track last_seen for multi-user mode
-        if let Some(email) = ctx.user_email() {
-            crate::agent::capabilities::track_last_seen(email).await;
+        if let Some(did) = ctx.user_did() {
+            crate::agent::capabilities::track_last_seen(did).await;
         }
 
         Ok(ctx)
@@ -122,9 +122,8 @@ mod session_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let email = "rest.session@example.org";
-        AgentService::ensure_user_key_exists(email).unwrap();
+        let did = crate::test_utils::create_test_user(email);
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
-        let did = AgentService::get_user_did_by_email(email).unwrap();
 
         let request = axum::http::Request::builder()
             .uri("/v1/models")
@@ -140,14 +139,18 @@ mod session_tests {
             .await
             .unwrap_or_else(|_| panic!("the extractor accepts a user token"));
 
-        assert_eq!(ctx.session.user(), Some((email, did.as_str())));
+        assert_eq!(ctx.session.managed_did(), Some(did.as_str()));
         assert!(!ctx.is_operator());
         assert_eq!(ctx.auth_token, token);
-        assert_eq!(ctx.user_email(), Some(email));
         assert_eq!(ctx.user_did(), Some(did.as_str()));
         assert_eq!(
             ctx.acts_as(),
-            crate::agent::AgentContext::for_user_email(email.to_string())
+            crate::agent::AgentContext::managed(did.clone())
+        );
+        assert_eq!(
+            AgentService::email_for_did(&did).unwrap(),
+            email,
+            "the agent's account is still the user's"
         );
     }
 
@@ -171,7 +174,9 @@ mod session_tests {
     fn a_user_without_a_loadable_identity_opens_no_request_context() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        let token = crate::test_utils::token_of_a_user_without_a_key("rest.nokey@example.org");
+        // A user whose agent no wallet key derives: the token names it, the session cannot
+        // sign as it.
+        let token = crate::test_utils::keyless_user_token("rest.nokey@example.org");
         let refused = RequestContext::open(
             &token,
             &Some("the-admin-credential".to_string()),

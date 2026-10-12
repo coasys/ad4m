@@ -570,7 +570,7 @@ impl Ad4mMcpHandler {
         // A token that no longer works reaches nothing, not the main agent's perspectives.
         let token = self.get_auth_token().await.unwrap_or_default();
         match self.agent_context_for(&token) {
-            Ok(context) => crate::helpers::can_access_perspective(&context.user_email, perspective),
+            Ok(context) => crate::helpers::can_access_perspective(&context, perspective),
             Err(_) => false,
         }
     }
@@ -592,7 +592,7 @@ impl Ad4mMcpHandler {
 
         // Check perspective ownership/access (multi-user isolation)
         let handle = perspective.persisted.lock().await.clone();
-        if !crate::helpers::can_access_perspective(&agent_context.user_email, &handle) {
+        if !crate::helpers::can_access_perspective(&agent_context, &handle) {
             return Err(
                 json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string(),
             );
@@ -882,11 +882,10 @@ mod agent_context_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        // A login's grant names the user's DID, so the user has a key.
-        crate::agent::AgentService::ensure_user_key_exists("mcp.user@example.org").unwrap();
+        let did = crate::test_utils::create_test_user("mcp.user@example.org");
         let token =
             crate::user_management::generate_user_jwt("mcp.user@example.org", "test").unwrap();
         let context = handler(&token).get_agent_context().await.unwrap();
-        assert_eq!(context.user_email.as_deref(), Some("mcp.user@example.org"));
+        assert_eq!(context, AgentContext::managed(did));
     }
 }

@@ -40,6 +40,13 @@ explicit comment saying why not) and take `AgentContext` from the session
 (`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
 
+**An agent is its DID.** A user session is known by its managed agent's DID
+(`ctx.user_did()`); there is no `ctx.user_email()`. Bill, own, filter and log by that DID. A
+parameter that names a user by email (`runtime.computeLog { userEmail }`, the operator's
+`user.*` calls) resolves to the DID at the handler with `AgentService::did_for_email`; a reply
+field that shows an address (`hosting.info`'s `email`, the compute log's `userEmail`) reads it
+back with `AgentService::email_for_did` or a join on `users.did`.
+
 `RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`,
 the per-request `cancel_token`, and `auth_token` (read only by the interpretation pass; Plan 20
 PR 6 removes it). The RPC socket opens one per connection (`RequestContext::open`); REST and the

@@ -54,8 +54,8 @@ pub async fn chat_with_native_tools(
     tools: &[ToolDef],
     stream: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(email) = auth.user_email() {
-        check_compute_credits(email)
+    if let Some(agent_did) = auth.user_did() {
+        check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -73,12 +73,7 @@ pub async fn chat_with_native_tools(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     // Billing happens inside prompt_with_tools, on success only.
     let reply = service
-        .prompt_with_tools(
-            model_id,
-            turns,
-            specs,
-            auth.user_email().map(str::to_string),
-        )
+        .prompt_with_tools(model_id, turns, specs, auth.user_did().map(str::to_string))
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 

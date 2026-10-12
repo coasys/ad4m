@@ -302,8 +302,8 @@ mod app_approval_event_tests {
         crate::test_utils::ensure_test_db();
         let operator = Arc::new(Session::for_test(Principal::Operator));
         let user = |name: &str, caps: Vec<Capability>| {
-            Session::for_test(Principal::Agent(AgentContext::for_user_email(format!(
-                "approval.{name}@example.org"
+            Session::for_test(Principal::Agent(AgentContext::managed(format!(
+                "did:key:approval-{name}"
             ))))
             .with_caps(caps)
             .with_did(&format!("did:key:approval-{name}"))
@@ -539,8 +539,8 @@ mod audience_matrix_tests {
     /// A perspective the "P reader" app may not query.
     const Q: &str = "matrix-perspective-q";
 
-    fn user(name: &str, did: &str) -> Session {
-        let agent = AgentContext::for_user_email(format!("matrix.{name}@example.org"));
+    fn user(did: &str) -> Session {
+        let agent = AgentContext::managed(did.to_string());
         Session::for_test(Principal::Agent(agent))
             .with_caps(get_user_default_capabilities())
             .with_did(did)
@@ -573,8 +573,8 @@ mod audience_matrix_tests {
                 "permit app",
                 app("permit-app", vec![ALL_CAPABILITY.clone()]),
             ),
-            ("user A", user("a", A)),
-            ("user B", user("b", B)),
+            ("user A", user(A)),
+            ("user B", user(B)),
             ("AI app", app("ai-app", ai)),
             ("P reader", app("p-reader", p_reader)),
             ("anonymous", Session::for_test(Principal::Anonymous)),
@@ -1344,13 +1344,10 @@ mod audience_matrix_tests {
         crate::test_utils::setup_agent();
         database();
         let email = format!("hosting-{}@example.org", uuid::Uuid::new_v4());
-        crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
-        let did = crate::agent::AgentService::get_user_did_by_email(&email).unwrap();
-        let hosted = Session::for_test(Principal::Agent(AgentContext::for_user_email(
-            email.clone(),
-        )))
-        .with_caps(get_user_default_capabilities())
-        .with_did(&did);
+        let did = crate::test_utils::create_test_user(&email);
+        let hosted = Session::for_test(Principal::Agent(AgentContext::managed(did.clone())))
+            .with_caps(get_user_default_capabilities())
+            .with_did(&did);
         let mut sessions = sessions();
         sessions.push(("hosted user", Arc::new(hosted)));
 
@@ -1630,7 +1627,7 @@ mod token_expiry_tests {
             .unwrap()
             .as_secs()
             - 3600;
-        let user = Principal::Agent(AgentContext::for_user_email(USER.into()));
+        let user = Principal::Agent(AgentContext::managed("did:key:events-user".into()));
         let expired = Session::for_test(user)
             .with_caps(get_user_default_capabilities())
             .with_did("did:key:events-user")
@@ -1643,7 +1640,7 @@ mod token_expiry_tests {
     #[tokio::test]
     async fn a_revoked_grant_ends_the_event_stream_without_another_event() {
         use crate::agent::grants::LiveGrant;
-        let agent = AgentContext::for_user_email(USER.into());
+        let agent = AgentContext::managed("did:key:events-user".into());
         let grant = Arc::new(LiveGrant::for_test(
             "revoked-events",
             agent.clone(),
@@ -1667,7 +1664,7 @@ mod token_expiry_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        crate::agent::AgentService::ensure_user_key_exists(USER).unwrap();
+        crate::test_utils::create_test_user(USER);
         let token = crate::user_management::generate_user_jwt(USER, "test").unwrap();
         let session = Session::open(&token, &None, ListenerReach::Network).unwrap();
         assert!(next_event(session).await.is_some());

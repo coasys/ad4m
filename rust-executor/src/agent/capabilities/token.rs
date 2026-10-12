@@ -10,7 +10,7 @@ pub fn signing_key_name() -> String {
 }
 
 /// Signs a token for `audience` that expires `expiration_time` seconds from now and names the
-/// managed agent `sub` (`None`: the main agent). The token carries no capabilities: a token
+/// managed agent `sub` by its DID (`None`: the main agent). The token carries no capabilities: a token
 /// works only while its grant does, and the grant holds them. Only `agent::grants::mint`
 /// calls this, so every token has a grant.
 pub(crate) fn sign_token(

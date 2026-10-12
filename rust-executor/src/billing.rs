@@ -34,7 +34,7 @@ pub mod test_seam {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct BillCall {
-        pub email: String,
+        pub agent_did: String,
         pub amount: f64,
         pub operation: String,
         pub summary: Option<String>,
@@ -75,10 +75,10 @@ pub mod test_seam {
         FORCED_RESULT.with(|f| *f.borrow_mut() = Some(r));
     }
 
-    pub(super) fn record(email: &str, amount: f64, operation: &str, summary: Option<&str>) {
+    pub(super) fn record(agent_did: &str, amount: f64, operation: &str, summary: Option<&str>) {
         CALLS.with(|c| {
             c.borrow_mut().push(BillCall {
-                email: email.to_string(),
+                agent_did: agent_did.to_string(),
                 amount,
                 operation: operation.to_string(),
                 summary: summary.map(|s| s.to_string()),
@@ -131,7 +131,7 @@ pub fn get_link_write_rate() -> f64 {
 /// open_transcription_stream) is deliberate. Do not inline a
 /// different formula per surface — route through this helper.
 pub fn bill_ai_operation(
-    email: &str,
+    agent_did: &str,
     model_id: &str,
     operation: &str,
     unit_count: usize,
@@ -174,13 +174,13 @@ pub fn bill_ai_operation(
         rate_key = rate_key
     );
 
-    match bill_compute(email, cost, operation, Some(&summary)) {
+    match bill_compute(agent_did, cost, operation, Some(&summary)) {
         Ok(()) => Ok(()),
         Err(BillingError::InsufficientCredits) => {
             log::warn!(
-                "{}: insufficient credits for user {} — delivering already-computed result",
+                "{}: insufficient credits for agent {} — delivering already-computed result",
                 operation,
-                email
+                agent_did
             );
             Err(BillingError::InsufficientCredits)
         }
@@ -191,35 +191,35 @@ pub fn bill_ai_operation(
     }
 }
 
-/// Read-only credit check. Returns Ok(()) if the user can afford compute.
-/// Used as a pre-check before link operations; the actual deduction happens
-/// after the operation via bill_compute with the exact cost.
+/// Read-only credit check for the account that owns the agent `agent_did`. Returns Ok(()) if
+/// it can afford compute. Used as a pre-check before link operations; the actual deduction
+/// happens after the operation via bill_compute with the exact cost.
 /// No-ops (allows) if free hosting is enabled or user has free access.
-pub fn check_compute_credits(email: &str) -> Result<(), anyhow::Error> {
+pub fn check_compute_credits(agent_did: &str) -> Result<(), anyhow::Error> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))?;
+    let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(agent_did))?;
     if free {
         return Ok(());
     }
-    let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))?;
+    let credits = Ad4mDb::with_global_instance(|db| db.get_agent_credits(agent_did))?;
     if credits <= 0.0 {
         return Err(anyhow::anyhow!("Insufficient compute credits"));
     }
     Ok(())
 }
 
-/// Deduct credits and log a compute event for the given user email.
-/// No-ops if free hosting is enabled globally or the user has free access.
+/// Deduct credits from the account that owns the agent `agent_did` and log a compute event
+/// for the agent. No-ops if free hosting is enabled globally or the user has free access.
 ///
 /// This is the shared billing function callable from anywhere in the executor
 /// (e.g. AI service async tasks, perspective instance methods) without needing
 /// a REST RequestContext or auth token.
 pub fn bill_compute(
-    email: &str,
+    agent_did: &str,
     amount: f64,
     operation: &str,
     summary: Option<&str>,
@@ -229,7 +229,7 @@ pub fn bill_compute(
     // whether the underlying DB is initialised.
     #[cfg(test)]
     {
-        test_seam::record(email, amount, operation, summary);
+        test_seam::record(agent_did, amount, operation, summary);
         if let Some(forced) = test_seam::take_forced_result() {
             return forced;
         }
@@ -239,17 +239,17 @@ pub fn bill_compute(
     if global_free {
         return Ok(());
     }
-    let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))?;
+    let free = Ad4mDb::with_global_instance(|db| db.get_agent_free_access(agent_did))?;
     if free {
         return Ok(());
     }
     let result = Ad4mDb::with_global_instance(|db| {
-        db.deduct_credits_and_log(email, amount, operation, summary)
+        db.deduct_credits_and_log(agent_did, amount, operation, summary)
     });
 
     match result {
-        Ok(_) => {
-            mark_credits_dirty(email);
+        Ok((_, _, email)) => {
+            mark_credits_dirty(&email);
             Ok(())
         }
         Err(e) => {
@@ -257,7 +257,7 @@ pub fn bill_compute(
             if msg.contains("Insufficient compute credits") {
                 Err(BillingError::InsufficientCredits)
             } else if msg.starts_with("User not found") {
-                Err(BillingError::UserNotFound(email.to_string()))
+                Err(BillingError::UserNotFound(agent_did.to_string()))
             } else {
                 Err(BillingError::Other(e))
             }
