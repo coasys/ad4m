@@ -1221,7 +1221,6 @@ fn only_methods_that_check_no_capability_are_open() {
             "runtime.info",
             "runtime.tlsDomain",
             "user.logout",
-            "user.revokeAllSessions",
         ]
     );
 }

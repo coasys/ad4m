@@ -369,14 +369,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Cap(
             RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
         ));
-    // Open: a user acts on their own sessions whatever their capabilities. Only the operator
-    // may name another user. The handlers check the session's principal.
-    // Revokes the caller's user token; 400 for any other session. Answers `true`.
+    // Open: a login ends itself whatever its capabilities. The handler checks the session's
+    // principal. Revokes the caller's user token; 400 for any other session. Answers `true`.
     map.method::<NoParams, bool>("user.logout", logout)
         .guard(Guard::Open);
-    // Revokes every token of a user issued up to now. Answers `true`.
+    // Revokes every token of a user issued up to now, logins and apps. AGENT_UPDATE, as
+    // `agent.removeApp`: since #1399 an app a user approved acts as the user's agent too.
+    // Only the operator may name another user; the handler checks the session's principal.
+    // Answers `true`.
     map.method::<UsersRevokeAllSessionsParams, bool>("user.revokeAllSessions", revoke_all_sessions)
-        .guard(Guard::Open);
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     // Every user's record: the default user capabilities leave this capability out.
     map.method::<NoParams, Vec<UserStatistics>>("user.list", list_users)
         .read()

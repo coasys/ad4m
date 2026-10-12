@@ -577,12 +577,18 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
 /// Whose compute log a `runtime.computeLog` call reads, by agent DID. `requested` names a
 /// user by email and resolves to that user's agent here. A user session reads only its own
-/// log, and an omitted `userEmail` means its own. The operator may read any user's log.
-/// `None`: no user has that email.
+/// log, and an omitted `userEmail` means its own. The operator may read any user's log; an
+/// app on the main agent is not the operator and names no user. `None`: no user has that
+/// email.
 fn compute_log_agent(
     requested: Option<String>,
     ctx: &RequestContext,
 ) -> Result<Option<String>, WsRpcError> {
+    if ctx.user_did().is_none() && requested.is_some() && !ctx.is_operator() {
+        return Err(WsRpcError::forbidden(
+            "Only the operator may read a user's compute log",
+        ));
+    }
     let requested_did = requested
         .as_deref()
         .map(|email| crate::agent::AgentService::did_for_email(email).ok());
@@ -725,7 +731,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
         .read()
         .guard(Guard::Open);
-    // A user reads only its own log; the handler checks a named `userEmail`.
+    // A user reads only its own log, and only the operator names another user's; the handler
+    // checks a named `userEmail`.
     map.method::<RuntimeComputeLogParams, Vec<ComputeLogEntry>>(
         "runtime.computeLog",
         get_compute_log,
