@@ -2118,6 +2118,21 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// Store `link` as an executor before #1357 stored a Local link: in the
+    /// default graph, with `status: Local`. Such links stay there until #1359
+    /// moves them, so tests need to write one.
+    #[cfg(test)]
+    pub(crate) async fn add_pre_1357_local_link(
+        &mut self,
+        link: Link,
+        context: &AgentContext,
+    ) -> Result<DecoratedLinkExpression, AnyError> {
+        let link_expression: LinkExpression =
+            create_signed_expression(link.normalize(), context)?.into();
+        self.add_resolved_link_expression(link_expression, LinkStatus::Local, None)
+            .await
+    }
+
     /// Store `link_expression` in the graph it names, which the caller has
     /// already resolved ([`Self::resolve_write_graph`]).
     async fn add_resolved_link_expression(
