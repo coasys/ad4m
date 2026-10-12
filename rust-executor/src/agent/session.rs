@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
-    require_capability, Capability, ListenerReach, ALL_CAPABILITY,
+    require_capability, Capability, ListenerReach, ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::grants::{Grants, LiveGrant};
 use super::{did_for_context, AgentContext, AgentService};
@@ -153,19 +153,10 @@ impl Session {
             }
         })?;
 
-        // The allowlist: a token works only while its grant does. A token without one (revoked
-        // and removed, or a user token from before grants) is refused.
-        let grant = Grants::global()
-            .get(&TokenId(claims.nonce().to_string()))
-            .ok_or(AuthError::Revoked)?;
-        if !sub_names_agent(claims.sub.as_deref(), &grant.agent) {
-            return Err(AuthError::Revoked);
-        }
+        let grant = grant_for(&claims)?;
         let did = OnceLock::new();
         match grant.agent.managed_did() {
             Some(agent_did) => {
-                AgentService::wallet_key_for_did(agent_did)
-                    .map_err(|e| AuthError::NoIdentity(e.to_string()))?;
                 let _ = did.set(agent_did.to_string());
             }
             None if !grant.did.is_empty() => {
@@ -228,6 +219,26 @@ impl Session {
         match &self.grant {
             Some(grant) => grant.ended.child_token(),
             None => CancellationToken::new(),
+        }
+    }
+
+    /// Completes when the session stops holding: its grant ends or its token expires, so an
+    /// idle socket closes at expiry as it does at a revocation. Never for the operator and
+    /// anonymous callers.
+    pub fn over(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let grant = self.grant.clone();
+        async move {
+            let Some(grant) = grant else {
+                return std::future::pending().await;
+            };
+            let expired = grant
+                .expires_at
+                .saturating_add(TOKEN_EXPIRY_LEEWAY_SECONDS + 1);
+            let wait = std::time::Duration::from_secs(expired.saturating_sub(super::grants::now()));
+            tokio::select! {
+                _ = grant.ended.cancelled() => {}
+                _ = tokio::time::sleep(wait) => {}
+            }
         }
     }
 
@@ -318,6 +329,24 @@ impl Session {
         };
         in_audience && self.may(&event.capability)
     }
+}
+
+/// The grant that the decoded token `claims` acts within. The allowlist: a token works only
+/// while its grant does, so a token without one (revoked and removed, or a user token from
+/// before grants) is refused. Its `sub` must name the grant's agent, and a managed agent's
+/// key must derive that agent's DID.
+pub(crate) fn grant_for(claims: &super::capabilities::Claims) -> Result<Arc<LiveGrant>, AuthError> {
+    let grant = Grants::global()
+        .get(&TokenId(claims.nonce().to_string()))
+        .ok_or(AuthError::Revoked)?;
+    if !sub_names_agent(claims.sub.as_deref(), &grant.agent) {
+        return Err(AuthError::Revoked);
+    }
+    if let Some(agent_did) = grant.agent.managed_did() {
+        AgentService::wallet_key_for_did(agent_did)
+            .map_err(|e| AuthError::NoIdentity(e.to_string()))?;
+    }
+    Ok(grant)
 }
 
 /// Whether a token's `sub` names the agent of its grant: none for the main agent; for a
@@ -646,6 +675,25 @@ mod resolution_tests {
         );
         // Nor does a user token for an email no user has get minted at all.
         assert!(crate::user_management::generate_user_jwt("ghost@example.org", "test").is_err());
+    }
+
+    // A grant on the main agent whose token names a user is refused: acting on it would turn
+    // a user's app into a main-agent app. MCP opens the same `Session`.
+    #[test]
+    fn a_token_whose_sub_names_another_agent_than_its_grant_is_refused() {
+        setup_wallet();
+        setup_agent();
+        let email = crate::test_utils::managed_user("session.mcp.sub");
+        let app = crate::test_utils::granted_token(AuthInfo {
+            app_name: "an app approved for a user before grants".into(),
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+            ..AuthInfo::default()
+        });
+        let legacy = crate::test_utils::resigned_token(&app, |claims| {
+            claims["sub"] = serde_json::json!(email)
+        });
+        let err = Session::open(&legacy, &admin(), ListenerReach::Network).unwrap_err();
+        assert_eq!(err, AuthError::Revoked);
     }
 
     /// D16: user tokens minted before agents were keyed by DID carry the user's email in

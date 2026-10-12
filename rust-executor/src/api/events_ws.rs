@@ -128,8 +128,9 @@ pub fn event_specs() -> Vec<EventSpec> {
 /// The event stream of a session's socket: the JSON message of each event the session may
 /// receive and `interest` (what the socket asked for with `events.watch`) wants. The
 /// session's DID is read per event, so a socket opened before the main agent had a DID gets
-/// its events once it has one. The stream ends when the session's grant ends (revoked or
-/// removed, without waiting for another event), and at the first event after
+/// its events once it has one. The stream ends when the session is over (`Session::over`:
+/// its grant revoked or removed, or its token expired, without waiting for another event),
+/// and at the first event after
 /// `session.check()` fails: expiry and revocation stop events as they stop requests.
 pub(crate) async fn build_event_stream(
     session: Arc<Session>,
@@ -139,7 +140,7 @@ pub(crate) async fn build_event_stream(
 
     let events = get_global_pubsub().await.subscribe_events();
     let check = session.clone();
-    let ended = session.ended();
+    let over = session.over();
     // The session decides who, the socket's interest what. An event the session may receive
     // checks the token even when the socket does not want it.
     Box::pin(
@@ -152,7 +153,7 @@ pub(crate) async fn build_event_stream(
             })
             .take_while(move |_| ready(check.check().is_ok()))
             .filter_map(ready)
-            .take_until(ended.cancelled_owned()),
+            .take_until(over),
     )
 }
 
@@ -1357,11 +1358,58 @@ mod audience_matrix_tests {
         assert_eq!(signals(), expected);
     }
 
-    // A user's hosting info goes to that user and to the sessions that act as the main agent:
-    // `matches_hosting_user` let every session without a user email through, and a user's
-    // session only for its own email. Other users get nothing.
+    // A triggered notification carries `triggerMatch`, query results from its perspective. It
+    // needed AGENT_UPDATE only, so an app that may update the agent but query only perspective
+    // P got the results of a notification on Q. Now it needs the query capability on Q.
+    #[test]
+    fn a_notification_needs_the_query_capability_on_its_perspective() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = crate::agent::did();
+        let payload = crate::types::NotificationTriggeredEvent {
+            perspective_uuid: Q.into(),
+            notification: crate::types::TriggeredNotification {
+                notification: crate::types::Notification {
+                    id: "n".into(),
+                    granted: true,
+                    description: String::new(),
+                    app_name: String::new(),
+                    app_url: String::new(),
+                    app_icon_path: String::new(),
+                    trigger: String::new(),
+                    perspective_ids: vec![Q.into()],
+                    webhook_url: String::new(),
+                    webhook_auth: String::new(),
+                    owner_did: main.clone(),
+                },
+                perspective_id: Q.into(),
+                trigger_match: "[{\"secret\":\"q\"}]".into(),
+            },
+        };
+        let event = Event::new(
+            Topic::RuntimeNotificationTriggered,
+            Audience::Dids(vec![main]),
+            &payload,
+        );
+        let on = |uuid: &str| {
+            app(
+                "notified",
+                vec![
+                    AGENT_UPDATE_CAPABILITY.clone(),
+                    perspective_query_capability(vec![uuid.to_string()]),
+                ],
+            )
+        };
+        assert!(!on(P).may_receive(&event), "it may query P only");
+        assert!(on(Q).may_receive(&event), "it may query Q");
+    }
+
+    // A user's hosting info (email, credits, wallet) goes to that user with RUNTIME_HOSTING_READ,
+    // and to the main agent's sessions that may list users (RUNTIME_USER_MANAGEMENT_READ). It
+    // went to every main-agent app that reads hosting, while `hosting.info` shows such an app
+    // no user. Other users get nothing.
     #[tokio::test]
-    async fn hosting_user_info_reaches_the_user_and_the_main_agent() {
+    async fn hosting_user_info_reaches_the_user_and_the_main_agents_user_managers() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         database();
@@ -1372,6 +1420,13 @@ mod audience_matrix_tests {
             .with_did(&did);
         let mut sessions = sessions();
         sessions.push(("hosted user", Arc::new(hosted)));
+        let hosting = RUNTIME_HOSTING_READ_CAPABILITY.clone();
+        let users = RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone();
+        sessions.push((
+            "hosting app",
+            Arc::new(app("hosting", vec![hosting.clone()])),
+        ));
+        sessions.push(("user manager", Arc::new(app("users", vec![users.clone()]))));
 
         let info = crate::types::HostingUserInfo {
             email: email.clone(),
@@ -1379,12 +1434,25 @@ mod audience_matrix_tests {
             hot_wallet_address: None,
             free_access: false,
         };
-        let event = Event::hosting_user_info(&info);
-        assert_eq!(event.topic, Topic::HostingUserInfoChanged);
-        assert_eq!(event.payload, serde_json::to_value(&info).unwrap());
+        let [own, operator] = Event::hosting_user_info(&info);
+        let main = crate::agent::did();
+        for (event, audience, capability) in [
+            (&own, vec![did.clone()], &hosting),
+            (&operator, vec![main], &users),
+        ] {
+            assert_eq!(event.topic, Topic::HostingUserInfoChanged);
+            assert_eq!(event.audience, Audience::Dids(audience));
+            assert_eq!(&event.capability, capability);
+            assert_eq!(event.payload, serde_json::to_value(&info).unwrap());
+        }
         for (name, session) in &sessions {
-            let expected = matches!(*name, "hosted user" | "operator" | "app" | "permit app");
-            assert_eq!(session.may_receive(&event), expected, "{name}");
+            let got = [&own, &operator].map(|e| session.may_receive(e));
+            let expected = match *name {
+                "hosted user" => [true, false],
+                "operator" | "permit app" | "user manager" => [false, true],
+                _ => [false, false],
+            };
+            assert_eq!(got, expected, "{name}");
         }
     }
 
@@ -1413,9 +1481,9 @@ mod audience_matrix_tests {
             hot_wallet_address: None,
             free_access: false,
         };
-        get_global_pubsub()
-            .await
-            .publish_event(Event::hosting_user_info(&info));
+        for event in Event::hosting_user_info(&info) {
+            get_global_pubsub().await.publish_event(event);
+        }
 
         let hosting = Topic::HostingUserInfoChanged.as_str();
         let seen = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1602,9 +1670,10 @@ mod audience_matrix_tests {
         assert!(next.is_none(), "an expired session got {next:?}");
     }
 
-    // A live query update is a typed event to the perspective's owners (`event_recipients`,
-    // read when it is published) that may query it. Only they get it, and delivering it takes
-    // no lock: an owner gets it while a write holds the perspective's handle. Each socket
+    // A live query update is a typed event to its subscriber among the perspective's owners
+    // (`event_recipients`, read when it is published), if it may query it. Only it gets it,
+    // and delivering it takes no lock: the owner gets it while a write holds the perspective's
+    // handle. Each socket
     // used to wait for the handle to check ownership (`perspective_is_owned_by`), and to let
     // every update of an unowned perspective through to every session, users included.
     #[tokio::test]
@@ -1620,7 +1689,11 @@ mod audience_matrix_tests {
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
         let mut perspectives = Vec::new();
-        for (name, owners) in [("owned-by-a", Some(vec![A.to_string()])), ("unowned", None)] {
+        // Each update's subscriber is the owner: A, or the main agent (`None`).
+        for (name, owners, subscriber) in [
+            ("owned-by-a", Some(vec![A.to_string()]), Some(A.to_string())),
+            ("unowned", None, None),
+        ] {
             let handle = PerspectiveHandle {
                 uuid: format!("{run}-{name}"),
                 owners,
@@ -1628,13 +1701,13 @@ mod audience_matrix_tests {
             };
             let instance = PerspectiveInstance::new(handle.clone(), None);
             register_perspective(handle.uuid, instance.clone());
-            perspectives.push((name, instance));
+            perspectives.push((name, instance, subscriber));
         }
         let mut published = get_global_pubsub().await.subscribe_events();
         let mut writes = Vec::new();
-        for (name, instance) in &perspectives {
+        for (name, instance, subscriber) in &perspectives {
             instance
-                .send_subscription_update(tag(name), "[]".into(), None)
+                .send_subscription_update(tag(name), subscriber.clone(), "[]".into(), None)
                 .await;
             // A write holds the handle from here until every stream has its updates.
             writes.push(instance.persisted.lock().await);
@@ -1669,7 +1742,7 @@ mod audience_matrix_tests {
             assert_eq!(got, expected, "{name}");
         }
         drop(writes);
-        for (_, instance) in &perspectives {
+        for (_, instance, _) in &perspectives {
             unregister_perspective(&instance.uuid);
         }
     }
@@ -1738,6 +1811,31 @@ mod token_expiry_tests {
             .await
             .expect("the stream ends when the grant does, without another event");
         assert!(next.is_none(), "a revoked session got {next:?}");
+    }
+
+    // Expiry ends the stream at once as a revocation does: it used to wait for the next
+    // event the session may receive, so an idle stream outlived its token.
+    #[tokio::test]
+    async fn an_expiring_grant_ends_the_event_stream_without_another_event() {
+        use crate::agent::capabilities::TOKEN_EXPIRY_LEEWAY_SECONDS;
+        use crate::agent::grants::{now, LiveGrant};
+        let agent = AgentContext::managed("did:key:events-user".into());
+        // Expired, leeway included, in about a second.
+        let grant = Arc::new(LiveGrant::for_test(
+            "expiring-events",
+            agent.clone(),
+            now() - TOKEN_EXPIRY_LEEWAY_SECONDS,
+        ));
+        let session = Session::for_test(Principal::Agent(agent))
+            .with_caps(get_user_default_capabilities())
+            .with_did("did:key:events-user")
+            .with_grant(grant);
+        let mut stream =
+            build_event_stream(Arc::new(session), event_interest::watching_all()).await;
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream ends at expiry, without another event");
+        assert!(next.is_none(), "an expired session got {next:?}");
     }
 
     #[tokio::test]
