@@ -22,7 +22,7 @@ use crate::pubsub::get_global_pubsub;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::{Guard, Owner};
+use super::guards::{Guard, IdParam, Owner};
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -593,11 +593,11 @@ async fn permit_capability_handler(
 }
 
 /// The request `agent.permitCapability` approves: `requestId` in its `auth` param, a JSON
-/// string. None (400) when `auth` does not parse.
-fn permitted_request_id(params: &Value) -> Option<String> {
-    let auth: AuthInfoExtended = serde_json::from_str(params.get("auth")?.as_str()?).ok()?;
-    Some(auth.request_id)
-}
+/// string. Missing (400) when `auth` is not a JSON object with a string `requestId`.
+const PERMITTED_REQUEST_ID: IdParam = IdParam::InJson {
+    param: "auth",
+    field: "requestId",
+};
 
 /// agent.generateJwt — generate JWT
 async fn generate_jwt(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -870,7 +870,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: |params| params.get("id")?.as_str().map(str::to_string),
+            id: IdParam::Field(&["id"]),
             owner: Owner::Grant,
         });
     // An app without a token asks for one.
@@ -884,7 +884,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .guard(Guard::Owns {
         cap: |_| AGENT_PERMIT_CAPABILITY.clone(),
-        id: permitted_request_id,
+        id: PERMITTED_REQUEST_ID,
         owner: Owner::Request,
     });
     map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt)
@@ -893,7 +893,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: |params| params.get("token")?.as_str().map(str::to_string),
+            id: IdParam::Field(&["token"]),
             owner: Owner::Grant,
         });
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)

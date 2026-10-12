@@ -578,8 +578,10 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 /// Whose compute log a `runtime.computeLog` call reads, by agent DID. `requested` names a
 /// user by email and resolves to that user's agent here. A user session reads only its own
 /// log, and an omitted `userEmail` means its own. The operator may read any user's log; an
-/// app on the main agent is not the operator and names no user. `None`: no user has that
-/// email.
+/// app on the main agent is not the operator and names no user. `None`: no user of this
+/// executor has that email. The email resolves in the local `users` table only, writing
+/// nothing: the compute log is this executor's, and a user it holds entries for has logged
+/// in here, which imported them; a user only in a shared database has none to read.
 fn compute_log_agent(
     requested: Option<String>,
     ctx: &RequestContext,
@@ -591,7 +593,7 @@ fn compute_log_agent(
     }
     let requested_did = requested
         .as_deref()
-        .map(|email| crate::agent::AgentService::did_for_email(email).ok());
+        .map(crate::agent::AgentService::local_did_for_email);
     match (ctx.user_did().map(str::to_string), requested_did) {
         (Some(own), Some(requested)) if requested.as_deref() != Some(own.as_str()) => Err(
             WsRpcError::forbidden("A user session may read only its own compute log"),

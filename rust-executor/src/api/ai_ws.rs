@@ -15,7 +15,7 @@ use crate::types::{
 };
 use base64::Engine;
 
-use super::guards::{Guard, Owner};
+use super::guards::{Guard, IdParam, Owner};
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -254,23 +254,13 @@ async fn get_model_loading_status(
 // ── Tasks ──
 
 /// The id of the task `ai.prompt` runs: its `taskId` param.
-fn prompt_task_id(params: &Value) -> Option<String> {
-    params.get("taskId")?.as_str().map(str::to_string)
-}
+const PROMPT_TASK_ID: IdParam = IdParam::Field(&["taskId"]);
 
 /// The id of the task `ai.removeTask` deletes: its `id` param.
-fn removed_task_id(params: &Value) -> Option<String> {
-    params.get("id")?.as_str().map(str::to_string)
-}
+const REMOVED_TASK_ID: IdParam = IdParam::Field(&["id"]);
 
 /// The id of the task `ai.updateTask` rewrites: `task.taskId`, the row the update writes.
-fn updated_task_id(params: &Value) -> Option<String> {
-    params
-        .get("task")?
-        .get("taskId")?
-        .as_str()
-        .map(str::to_string)
-}
+const UPDATED_TASK_ID: IdParam = IdParam::Field(&["task", "taskId"]);
 
 /// The operator lists every task; any other session the tasks of the agent it acts as (a
 /// grant on the main agent the main agent's, which belong to no user), as the task guard
@@ -468,13 +458,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task)
         .guard(Guard::Owns {
             cap: |_| AI_CREATE_CAPABILITY.clone(),
-            id: updated_task_id,
+            id: UPDATED_TASK_ID,
             owner: Owner::Task,
         });
     map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
         .guard(Guard::Owns {
             cap: |_| AI_CREATE_CAPABILITY.clone(),
-            id: removed_task_id,
+            id: REMOVED_TASK_ID,
             owner: Owner::Task,
         });
     // Prompts, embeddings and transcription bill the caller's user; the handlers check its
@@ -484,7 +474,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .long()
         .guard(Guard::Owns {
             cap: |_| AI_PROMPT_CAPABILITY.clone(),
-            id: prompt_task_id,
+            id: PROMPT_TASK_ID,
             owner: Owner::Task,
         });
     // The embedding vector as JSON, zlib-deflated, base64-encoded.

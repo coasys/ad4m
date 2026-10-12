@@ -134,7 +134,9 @@ Notes on some methods:
 Which guard each method has, generated from the handler map
 (`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
 fails when it is stale; `pnpm run generate:api-types` in `core/` rewrites it with the SDK
-contracts:
+contracts. An `Owns` row names the resource, the param the guard reads its id from (an
+`IdParam`: a field path, `a|b` for aliases, `auth(JSON).requestId` for a field inside a JSON
+string param) and the capability:
 
 <!-- guard-table:start (generated from the handler map) -->
 
@@ -157,10 +159,10 @@ contracts:
 | `agent.import` | `Cap(agent:CREATE)` |
 | `agent.isLocked` | `Open` |
 | `agent.lock` | `Executor(agent:UPDATE)` |
-| `agent.permitCapability` | `Owns(Request, agent:PERMIT)` |
-| `agent.removeApp` | `Owns(Grant, agent:UPDATE)` |
+| `agent.permitCapability` | `Owns(Request auth(JSON).requestId, agent:PERMIT)` |
+| `agent.removeApp` | `Owns(Grant id, agent:UPDATE)` |
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
-| `agent.revokeToken` | `Owns(Grant, agent:UPDATE)` |
+| `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.status` | `Cap(agent:READ)` |
 | `agent.unlock` | `Executor(agent:SIGN)` |
@@ -172,15 +174,15 @@ contracts:
 | `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
 | `ai.modelLoadingStatus` | `Cap(artificial intelligence:READ)` |
 | `ai.models` | `Cap(artificial intelligence:READ)` |
-| `ai.prompt` | `Owns(Task, artificial intelligence:PROMPT)` |
+| `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
 | `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
-| `ai.removeTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
 | `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.tasks` | `Cap(artificial intelligence:READ)` |
 | `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |
 | `ai.transcriptionOpen` | `Cap(artificial intelligence:TRANSCRIBE)` |
 | `ai.updateModel` | `Executor(artificial intelligence:CREATE)` |
-| `ai.updateTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `ai.updateTask` | `Owns(Task task.taskId, artificial intelligence:CREATE)` |
 | `expression.create` | `Cap(expression:CREATE)` |
 | `expression.get` | `Cap(expression:READ)` |
 | `expression.getMany` | `Cap(expression:READ)` |
@@ -200,64 +202,64 @@ contracts:
 | `language.remove` | `Executor(language:DELETE)` |
 | `language.source` | `Cap(language:READ)` |
 | `language.writeSettings` | `Executor(language:UPDATE)` |
-| `neighbourhood.hasTelepresence` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.hasTelepresence` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
-| `neighbourhood.onlineAgents` | `Owns(Perspective, neighbourhood:READ)` |
-| `neighbourhood.otherAgents` | `Owns(Perspective, neighbourhood:READ)` |
-| `neighbourhood.publish` | `Owns(Perspective, neighbourhood:CREATE)` |
-| `neighbourhood.sendBroadcast` | `Owns(Perspective, neighbourhood:UPDATE)` |
-| `neighbourhood.sendSignal` | `Owns(Perspective, neighbourhood:UPDATE)` |
-| `neighbourhood.setOnlineStatus` | `Owns(Perspective, neighbourhood:UPDATE)` |
-| `perspective.acceptFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.acceptInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addLink` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addLinkExpression` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addLinks` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addSdna` | `Owns(Perspective, perspective:UPDATE)` |
+| `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `neighbourhood.publish` | `Owns(Perspective perspectiveUuid|perspectiveUUID, neighbourhood:CREATE)` |
+| `neighbourhood.sendBroadcast` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.sendSignal` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.setOnlineStatus` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `perspective.acceptFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.acceptInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addAutoProcessor` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.all` | `Cap(perspective:READ)` |
-| `perspective.commitBatch` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
-| `perspective.createBatch` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.createSubject` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.disposeQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.disposeSparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.evaluateGetters` | `Owns(Perspective, perspective:READ)` |
-| `perspective.executeCommands` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.flowValidOutputs` | `Owns(Perspective, perspective:READ)` |
-| `perspective.get` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
-| `perspective.getAllShacl` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getShacl` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getShaclNames` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getShaclTargetClass` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getSubjectData` | `Owns(Perspective, perspective:READ)` |
-| `perspective.interpretationOverlays` | `Owns(Perspective, perspective:READ)` |
-| `perspective.keepAliveQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.keepAliveSparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.linkMutations` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.mintFlowReceipt` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.modelQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.modelSubscribe` | `Owns(Perspective, perspective:READ)` |
-| `perspective.proposeFlowTransition` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.publishSnapshot` | `Owns(Perspective, perspective:READ)` |
-| `perspective.queryLinks` | `Owns(Perspective, perspective:READ)` |
-| `perspective.queryProlog` | `Owns(Perspective, perspective:READ)` |
-| `perspective.querySparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.rejectFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.rejectInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.remove` | `Owns(Perspective, perspective:DELETE)` |
-| `perspective.removeAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.removeLink` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.removeLinks` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.runInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.runInterpretationWithHarness` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.snapshot` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
-| `perspective.subjectClassesOf` | `Owns(Perspective, perspective:READ)` |
-| `perspective.subscribeQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.subscribeSparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.update` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.updateLink` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.verifyFlowReceipt` | `Owns(Perspective, perspective:READ)` |
+| `perspective.createBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
+| `perspective.getAllShacl` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getShacl` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.keepAliveQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.keepAliveSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.publishSnapshot` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.queryProlog` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.querySparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.rejectFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.rejectInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.remove` | `Owns(Perspective uuid, perspective:DELETE)` |
+| `perspective.removeAutoProcessor` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.removeLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
+| `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.verifyFlowReceipt` | `Owns(Perspective uuid, perspective:READ)` |
 | `runtime.addFriends` | `Executor(runtime.friends:CREATE)` |
 | `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
 | `runtime.addLinkLanguageTemplates` | `Executor(runtime.known_link_languages:CREATE)` |
