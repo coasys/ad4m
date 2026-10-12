@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { startExecutor, pollUntil, stopChildProcess } from "../utils/utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { mcpHttpRequest, callMcpTool, initializeMcp } from './mcp-utils';
 
@@ -32,11 +33,13 @@ const __dirname = path.dirname(__filename);
 // ============================================================================
 
 const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
-const MCP_PORT = 3003;
-const MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
-const API_PORT = 15800;
-const HC_ADMIN_PORT = 15801;
-const HC_APP_PORT = 15802;
+// Allocated per run: the runners share one host, so fixed ports collide when
+// this job runs for two PRs at once, or when an earlier run left an executor behind.
+let MCP_PORT: number;
+let MCP_BASE_URL: string;
+let API_PORT: number;
+let HC_ADMIN_PORT: number;
+let HC_APP_PORT: number;
 const ADMIN_CREDENTIAL = "mcp-neighbourhood-test-secret";
 
 // ============================================================================
@@ -55,6 +58,10 @@ describe("MCP Neighbourhood Integration Tests", function () {
     const bootstrapSeedPath = path.join(__dirname, "../bootstrapSeed.json");
 
     before(async () => {
+        [API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT] = await getFreePorts(4);
+        MCP_BASE_URL = `http://127.0.0.1:${MCP_PORT}/mcp`;
+        registerPorts([API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
+
         if (!fs.existsSync(path.join(TEST_DIR, 'agents'))) {
             fs.mkdirSync(path.join(TEST_DIR, 'agents'), { recursive: true });
         }
@@ -81,13 +88,17 @@ describe("MCP Neighbourhood Integration Tests", function () {
     });
 
     after(async () => {
-        if (executorProcess) {
-            await stopChildProcess(executorProcess);
-        }
         // No killByPorts here: lsof includes this process's own client
         // connections, so it would SIGTERM mocha itself (exit 143).
         // cleanup.js between test files handles residual ports, and mocha
         // runs with --exit, so no process.exit() that would hide failures.
+        if (executorProcess) {
+            await stopChildProcess(executorProcess);
+            deregisterPorts([API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
+        }
+        // Otherwise `before` timed out while startExecutor was still waiting,
+        // so there is no handle to stop. The ports stay registered and
+        // cleanup.js kills whatever is left on them.
     });
 
     // ========================================================================
