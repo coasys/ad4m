@@ -114,7 +114,7 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 /// agent.byDid — get agent by DID
@@ -547,10 +547,22 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_app_management_by_users(&ctx)?;
 
     let request_id = params.require_str("id")?;
     apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
+}
+
+/// Approved apps belong to the node's operator. The default user capabilities include
+/// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
+fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
+    if ctx.user_email.is_some() {
+        return Err(WsRpcError::forbidden(
+            "Apps belong to the node's operator; a user session may not remove or revoke them",
+        ));
+    }
+    Ok(())
 }
 
 // ── Auth ──
@@ -644,10 +656,16 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_app_management_by_users(&ctx)?;
 
+    // The SDK sends the app's request id here; the field name promises the JWT. Both work,
+    // and a value that names no app answers 404 instead of a silent success (#1060).
     let token = params.require_str("token")?;
-    apps_map::revoke_app(&token).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    apps_map::revoke_app(&token).map_err(|e| match e {
+        apps_map::RevokeError::NotFound => WsRpcError::not_found(e.to_string()),
+        apps_map::RevokeError::Store(_) => WsRpcError::internal(e.to_string()),
+    })?;
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 // ── Status ──
@@ -1081,5 +1099,143 @@ mod tests {
             link_expression_input_to_decorated(&input).status,
             Some(LinkStatus::Shared)
         );
+    }
+}
+
+#[cfg(test)]
+mod app_management_tests {
+    use crate::agent::capabilities::get_user_default_capabilities;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    // The default user capabilities include AGENT_UPDATE, which these calls check, so a user
+    // session could remove or revoke the operator's apps.
+    #[tokio::test]
+    async fn user_sessions_cannot_remove_or_revoke_apps() {
+        let user = Arc::new(RequestContext {
+            capabilities: Ok(get_user_default_capabilities()),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: false,
+            user_email: Some("apps.user@example.org".to_string()),
+            user_did: None,
+            cancel_token: None,
+        });
+        for (op, params) in [
+            ("agent.removeApp", json!({ "id": "some-request-id" })),
+            ("agent.revokeToken", json!({ "token": "some-request-id" })),
+        ] {
+            let err = build_handler_map()
+                .dispatch(op, params, user.clone())
+                .await
+                .expect_err(op);
+            assert_eq!(err.code, 403, "{op}: {}", err.message);
+        }
+    }
+}
+
+#[cfg(test)]
+mod revoke_token_tests {
+    use crate::agent::capabilities::*;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn operator() -> Arc<RequestContext> {
+        Arc::new(RequestContext {
+            capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: true,
+            user_email: None,
+            user_did: None,
+            cancel_token: None,
+        })
+    }
+
+    /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.
+    fn approved_app() -> (String, String) {
+        crate::test_utils::use_test_apps_file();
+        let request_id = format!("revoke-test-{}", uuid::Uuid::new_v4());
+        let token = format!("app-token-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        (request_id, token)
+    }
+
+    async fn revoke(value: &str) -> Result<serde_json::Value, (u16, String)> {
+        build_handler_map()
+            .dispatch("agent.revokeToken", json!({ "token": value }), operator())
+            .await
+            .map_err(|e| (e.code, e.message))
+    }
+
+    // #1060: revoking by the JWT, as the field name says, reported success and revoked
+    // nothing.
+    #[tokio::test]
+    async fn revoking_by_the_jwt_revokes_the_app() {
+        let (request_id, token) = approved_app();
+        revoke(&token).await.expect("the JWT names the app");
+        assert!(check_token_revoked(&token).is_err());
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoking_by_the_request_id_still_works() {
+        let (request_id, token) = approved_app();
+        revoke(&request_id)
+            .await
+            .expect("the SDK sends the request id");
+        assert!(check_token_revoked(&token).is_err());
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_value_that_names_no_app_is_an_error() {
+        let err = revoke("names-no-app").await.unwrap_err();
+        assert_eq!(err.0, 404, "{}", err.1);
+    }
+
+    // A failed write must not read as "no such app": the operator would stop looking, and a
+    // restart would bring the app back.
+    #[tokio::test]
+    async fn a_revoke_that_cannot_be_saved_is_a_server_error() {
+        let (request_id, token) = approved_app();
+        apps_map::set_data_file_path("/nonexistent-dir-for-revoke-test/apps.json".to_string());
+        let result = revoke(&request_id).await;
+        crate::test_utils::use_test_apps_file();
+
+        let err = result.unwrap_err();
+        assert_eq!(err.0, 500, "{}", err.1);
+        assert!(
+            check_token_revoked(&token).is_err(),
+            "the app stays revoked in memory"
+        );
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    // The reply lists every app; with tokens in it, the caller could act as any of them.
+    #[tokio::test]
+    async fn the_revoke_reply_carries_no_token() {
+        let (request_id, _token) = approved_app();
+        let reply = revoke(&request_id)
+            .await
+            .expect("the request id names the app");
+        let apps = reply.as_array().expect("the reply lists the apps");
+        assert!(apps
+            .iter()
+            .any(|app| app["requestId"] == request_id.as_str()));
+        assert!(
+            apps.iter()
+                .all(|app| app["token"].as_str().unwrap_or_default().is_empty()),
+            "{reply}"
+        );
+        apps_map::remove_app(&request_id).unwrap();
     }
 }

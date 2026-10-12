@@ -2,11 +2,11 @@ use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::parse_shacl_to_links;
+use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
-use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
+use crate::agent::{AgentContext, AgentService};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
@@ -23,6 +23,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
+use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
@@ -1890,6 +1891,9 @@ impl PerspectiveInstance {
         }
 
         link_expression.data.validate()?;
+        // A flow definition's rule this replica could not read back is
+        // refused here, not stored and refused at every edge (#1144).
+        check_consensus_rule_links([&link_expression.data])?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
@@ -1944,6 +1948,7 @@ impl PerspectiveInstance {
         for link in &links {
             link.validate()?;
         }
+        check_consensus_rule_links(&links)?;
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
@@ -2032,6 +2037,7 @@ impl PerspectiveInstance {
         for link in &addition_links {
             link.validate()?;
         }
+        check_consensus_rule_links(&addition_links)?;
         let additions = addition_links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context))
@@ -2151,6 +2157,7 @@ impl PerspectiveInstance {
             }
         };
 
+        check_consensus_rule_links([&new_link])?;
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
@@ -4286,19 +4293,21 @@ impl PerspectiveInstance {
         });
     }
 
-    fn all_notifications_for_perspective_id(uuid: String) -> Result<Vec<Notification>, AnyError> {
-        Ok(Ad4mDb::with_global_instance(|db| db.get_notifications())?
-            .into_iter()
-            .filter(|n| n.perspective_ids.contains(&uuid))
-            .collect())
-    }
-
-    async fn calc_notification_trigger_matches(
+    pub(crate) async fn calc_notification_trigger_matches(
         &self,
     ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
         let uuid = self.uuid.clone();
 
-        let notifications = Self::all_notifications_for_perspective_id(uuid.clone())?;
+        let handle = self.persisted.lock().await.clone();
+        // No agent, no owner: nothing fires.
+        let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) else {
+            return Ok(BTreeMap::new());
+        };
+        let notifications = notifications_to_fire(
+            Ad4mDb::with_global_instance(|db| db.get_notifications())?,
+            &handle,
+            &main_agent_did,
+        );
         //log::info!("🔔 NOTIFICATIONS: Found {} notifications for perspective {}", notifications.len(), uuid);
 
         //log::info!("🔔 NOTIFICATIONS: All triggers:\n{}", notifications.iter()
@@ -4306,22 +4315,19 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        // Cache key must include both trigger and user_email for deduplication
-        let mut trigger_cache: HashMap<(String, Option<String>), Vec<serde_json::Value>> =
-            HashMap::new();
+        // Notifications with the same trigger share one query result.
+        let mut trigger_cache: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
         for n in notifications {
             //log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
-            let cache_key = (n.trigger.clone(), n.user_email.clone());
+            let cache_key = n.trigger.clone();
             if let Some(cached_matches) = trigger_cache.get(&cache_key) {
                 //log::info!("🔔 NOTIFICATIONS: Using cached matches for notification for perspective {}: {}", uuid, n.trigger);
                 result_map.insert(n.clone(), cached_matches.clone());
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                // Handle errors per-notification to prevent one user's DID failure from
-                // silencing all notifications. This can happen with orphaned notifications
-                // from deleted users or corrupted data.
+                // One failing trigger must not silence the other notifications.
                 match {
                     let query = n.trigger.clone();
                     let result_json = self.sparql_store.query(&query);
@@ -4337,8 +4343,8 @@ impl PerspectiveInstance {
                     }
                     Err(e) => {
                         log::error!(
-                            "Failed to query notification for user {:?} in perspective {}: {:?}. Query: {}. Skipping this notification.",
-                            n.user_email,
+                            "Failed to query notification for owner {} in perspective {}: {:?}. Query: {}. Skipping this notification.",
+                            n.owner_did,
                             uuid,
                             e,
                             n.trigger
