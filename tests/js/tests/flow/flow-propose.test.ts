@@ -10,13 +10,13 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
+import { Ad4mClient, Link, LOCAL_GRAPH, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
 import { FlowInstance } from "@coasys/ad4m";
 import type { ConsensusRule } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import type { AgentHandle } from "../../helpers/executor.js";
-import { baseUrl } from "../../utils/utils.js";
+import { baseUrl, sleep } from "../../utils/utils.js";
 
 // ── Domain models ──────────────────────────────────────────────────────────
 
@@ -42,6 +42,13 @@ class Deliverable extends Ad4mModel {
 class ReviewNote extends Ad4mModel {
   @Property({ through: "propose-test://reviewnote_body", required: true })
   body: string = "";
+}
+
+/** A role as plain data: `fromRole` reads the DIDs in `agent`. */
+@Model({ name: "ProposeArchiver" })
+class Archiver extends Ad4mModel {
+  @Property({ through: "propose-test://archiver_agent", required: true })
+  agent: string = "";
 }
 
 // ── Flow factory ───────────────────────────────────────────────────────────
@@ -91,7 +98,29 @@ function makeFlow(doneRule: ConsensusRule): SHACLFlow {
   return flow;
 }
 
+/**
+ * Ready → Archived (under `rule`) → Closed (n:2), all guard-free. Proposing
+ * Closed is how a user who is not an owner runs a pass of their own once
+ * Archived has settled: one vote of two, so it moves nothing.
+ */
+function makeArchiveFlow(name: string, namespace: string, rule: ConsensusRule): SHACLFlow {
+  const flow = new SHACLFlow(name, namespace);
+  flow.inputTypes = ["ProposeTask"];
+  flow.consensusRule = { n: 1 };
+  flow.addState({ name: "Ready", value: 0 });
+  flow.addState({ name: "Archived", value: 50, consensusRule: rule });
+  flow.addState({ name: "Closed", value: 99, consensusRule: { n: 2 } });
+  flow.addTransition({ actionName: "Archive", fromState: "Ready", toState: "Archived", actions: [] });
+  flow.addTransition({ actionName: "Close", fromState: "Archived", toState: "Closed", actions: [] });
+  return flow;
+}
+
 const HAS_CHILD = "ad4m://has_child";
+/** The predicate of a vote on a proposal (Rust `ACCEPTED_BY_PREDICATE`). */
+const ACCEPTED_BY = "ad4m://acceptedBy";
+/** Longer than the executor's flow-pass debounce (300 ms), so a pass that a
+ *  setup write queued has run before the write under test. */
+const SETTLE_MS = 1_000;
 
 async function createUnder<T extends Ad4mModel>(
   model: any,
@@ -432,5 +461,135 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     expect(settledInst.currentStateName).to.equal("Archived");
     const archivedProposals = (await settledInst.proposals()).filter((p) => p.toState === "Archived");
     expect(archivedProposals, "one proposal, co-signed — no twin").to.have.lengthOf(1);
+  });
+
+  // ── Tests 6–8: only shared links count (#1420) ──────────────────────────
+  // A vote or role grant written as a `local` link never syncs, so no peer
+  // can count it. The executor must not count it either, not even on the
+  // writer's own replica, and each user's `currentState` is their own cache
+  // of a state derived from shared links alone.
+  //
+  // Alice owns the perspective (she created it). Bob is the admin: he can
+  // read and write it, but he is not an owner, so a flow pass records for
+  // him only when he acts himself. When Bob acts, the executor also records
+  // the instance for every owner (Alice) before the call returns. Bob's
+  // `acceptProposal` on a proposal he has already voted on writes nothing,
+  // so it re-runs the fold for both users without adding a vote. Once the
+  // edge has settled that accept is refused as stale, so Bob proposes the
+  // next edge instead.
+
+  // ── Test 6: a Local `acceptedBy` moves nothing; `acceptProposal` settles ─
+  it("a Local acceptedBy vote does not move the flow; acceptProposal settles it", async () => {
+    const { aliceP, bobP } = await sharedPerspective("flow-propose-local-vote");
+    await aliceP.addFlow("LocalVoteFlow", makeArchiveFlow("LocalVoteFlow", "local-vote://", { n: 2 }));
+    const task = (await (Task as any).create(aliceP, { title: "Local vote" })) as Task;
+    await FlowInstance.start(aliceP, "LocalVoteFlow", task.id);
+
+    const pending = await (await instanceOn(bobP, task.id)).proposeTransition("Archived");
+    expect(pending.outcomes, "one of two — not yet").to.have.lengthOf(0);
+    await sleep(SETTLE_MS);
+    expect((await instanceOn(aliceP, task.id)).currentStateName, "Alice before her vote").to.equal("Ready");
+    expect((await instanceOn(bobP, task.id)).currentStateName, "Bob before Alice's vote").to.equal("Ready");
+
+    // Alice's vote, written as a Local link: it never leaves her store.
+    await aliceP.add(new Link({ source: pending.proposalUri, predicate: ACCEPTED_BY, target: aliceDid }), "local");
+
+    const refold = await (await instanceOn(bobP, task.id)).acceptProposal(pending.proposalUri);
+    expect(refold, "a Local vote completes no quorum on Bob's replica").to.have.lengthOf(0);
+    expect(
+      (await instanceOn(aliceP, task.id)).currentStateName,
+      "a Local vote moved its writer's own currentState",
+    ).to.equal("Ready");
+    expect((await instanceOn(bobP, task.id)).currentStateName).to.equal("Ready");
+
+    // The Local vote is not "already voted": accept writes Alice's shared
+    // vote, and that one settles the edge.
+    const fired = await (await instanceOn(aliceP, task.id)).acceptProposal(pending.proposalUri);
+    expect(fired, "Alice's shared vote is the second of two").to.have.lengthOf(1);
+    expect(fired[0].toState).to.equal("Archived");
+    expect(fired[0].voters).to.have.members([aliceDid, bobDid]);
+
+    expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("Archived");
+    const bobNext = await (await instanceOn(bobP, task.id)).proposeTransition("Closed");
+    expect(bobNext.derivedState, "Bob's fold").to.equal("Archived");
+    expect((await instanceOn(bobP, task.id)).currentStateName).to.equal("Archived");
+  });
+
+  // ── Test 7: a Local `fromRole` grant does not count ─────────────────────
+  it("a Local fromRole grant does not count toward a gated edge; a shared one does", async () => {
+    const { aliceP } = await sharedPerspective("flow-propose-local-role");
+    await (Archiver as any).register(aliceP);
+    await aliceP.addFlow(
+      "LocalRoleFlow",
+      makeArchiveFlow("LocalRoleFlow", "local-role://", {
+        n: 1,
+        fromRole: { className: "ProposeArchiver", didProperty: "agent" },
+      }),
+    );
+    // A grant counts only for votes cast after it, so the control runs on a
+    // second task, after the shared grant.
+    const localTask = (await (Task as any).create(aliceP, { title: "Local grant" })) as Task;
+    const sharedTask = (await (Task as any).create(aliceP, { title: "Shared grant" })) as Task;
+    const localInst = await FlowInstance.start(aliceP, "LocalRoleFlow", localTask.id);
+    const sharedInst = await FlowInstance.start(aliceP, "LocalRoleFlow", sharedTask.id);
+
+    // Alice grants herself the role in her own Local graph.
+    await (Archiver as any).create(aliceP, { agent: aliceDid }, { graph: LOCAL_GRAPH });
+    await sleep(SETTLE_MS);
+    expect((await instanceOn(aliceP, localTask.id)).currentStateName, "before the vote").to.equal("Ready");
+
+    const local = await localInst.proposeTransition("Archived");
+    expect(local.recordedVote, "Alice's vote is written").to.be.true;
+    expect(local.outcomes, "a Local grant made Alice's vote count").to.have.lengthOf(0);
+    expect(local.derivedState).to.equal("Ready");
+    expect((await instanceOn(aliceP, localTask.id)).currentStateName).to.equal("Ready");
+
+    // Control: the same grant, shared, and the same vote.
+    await (Archiver as any).create(aliceP, { agent: aliceDid });
+    const shared = await sharedInst.proposeTransition("Archived");
+    expect(shared.outcomes, "a shared grant makes the same vote count").to.have.lengthOf(1);
+    expect(shared.outcomes[0].toState).to.equal("Archived");
+    expect((await instanceOn(aliceP, sharedTask.id)).currentStateName).to.equal("Archived");
+  });
+
+  // ── Test 8: each user reads their own `currentState` ────────────────────
+  // `currentStateName` is the reader's own cache, not a derive and not
+  // another user's cache. Between Alice's settle and Bob's next pass the two
+  // users read different values, and that gap is how this test tells a
+  // cache read from a derive. Once each has run a pass, both caches agree,
+  // because both are folded from the same shared links.
+  it("each user reads their own currentState, folded from shared links only", async () => {
+    const { aliceP, bobP } = await sharedPerspective("flow-propose-own-cache");
+    await aliceP.addFlow("OwnCacheFlow", makeArchiveFlow("OwnCacheFlow", "own-cache://", { n: 2 }));
+    const task = (await (Task as any).create(aliceP, { title: "Own cache" })) as Task;
+    await FlowInstance.start(aliceP, "OwnCacheFlow", task.id);
+
+    const pending = await (await instanceOn(bobP, task.id)).proposeTransition("Archived");
+    expect(pending.outcomes, "one of two — not yet").to.have.lengthOf(0);
+    await sleep(SETTLE_MS);
+    expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("Ready");
+    expect((await instanceOn(bobP, task.id)).currentStateName).to.equal("Ready");
+
+    // A Local vote from Alice first, then her accept.
+    await aliceP.add(new Link({ source: pending.proposalUri, predicate: ACCEPTED_BY, target: aliceDid }), "local");
+    const fired = await (await instanceOn(aliceP, task.id)).acceptProposal(pending.proposalUri);
+    expect(fired, "Alice's accept settles the edge on her replica").to.have.lengthOf(1);
+    expect((await instanceOn(aliceP, task.id)).currentStateName, "Alice's own cache").to.equal("Archived");
+    expect(
+      (await instanceOn(bobP, task.id)).currentStateName,
+      "Bob's own cache: no pass has run for him since his proposal, and a derive would say Archived",
+    ).to.equal("Ready");
+
+    // Bob's own pass. It folds the shared links, so it reaches Alice's state
+    // only if her accept wrote a shared vote.
+    let bobErr = "";
+    try {
+      const bobNext = await (await instanceOn(bobP, task.id)).proposeTransition("Closed");
+      expect(bobNext.derivedState, "Bob's fold").to.equal("Archived");
+    } catch (e: any) {
+      bobErr = String(e?.message ?? e);
+    }
+    expect(bobErr, "Bob's fold did not reach Alice's state").to.equal("");
+    expect((await instanceOn(bobP, task.id)).currentStateName, "Bob's own cache").to.equal("Archived");
   });
 });
