@@ -546,16 +546,29 @@ pub async fn load_proposal_links(
     // Half 2: raw links per proposal, never hydrated (see the doc above).
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
-        let links = perspective
+        let mut links = perspective
             .get_links(&LinkQuery {
                 source: Some(uri.clone()),
                 ..Default::default()
             })
             .await
             .map_err(|e| anyhow::anyhow!("load_proposal_links: get_links({uri}) failed: {e:#}"))?;
+        retain_shared_status(&mut links);
         out.push((uri, links));
     }
     Ok(out)
+}
+
+/// Drop every link stored with `status: Local`, for a read that counts shared
+/// consensus material only. A shared-reads view already leaves out every
+/// Local graph. This catches a Local link written before #1357, which sits in
+/// the default graph until #1359 moves it, and which that view still reads.
+/// Same rule as `perspective_instance::shareable`.
+///
+/// Only for links this replica loaded itself: a carried read-set's `status`
+/// is never read (`read_set::reverified_link`).
+pub(crate) fn retain_shared_status(links: &mut Vec<DecoratedLinkExpression>) {
+    links.retain(|l| l.status != Some(LinkStatus::Local));
 }
 
 #[cfg(test)]
