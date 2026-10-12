@@ -41,6 +41,17 @@
 //! replica's once-only [`FireOutcome`]. Local, they are exactly what they
 //! say: what *this* replica derived. The fold reads neither.
 //!
+//! ## Two views of one agent
+//!
+//! The pass folds what the agent's peers can see and records it where only
+//! the agent can. Everything the fold takes, the definitions, the instances
+//! and the read-set, comes from shared graphs only: a Local proposal, vote or
+//! role grant is no peer's to settle, so it settles nothing here either. The
+//! bookkeeping, the cache and the marks, is the agent's own Local graph
+//! (#1360), read and written there. So the cache is derived from shared
+//! graphs alone, and a reader that must not see Local material, such as the
+//! auto-processor (#1324), can read it.
+//!
 //! ## Catch-up
 //!
 //! Because the marks are per replica, a replica that joins a flow with
@@ -56,7 +67,7 @@
 //! mint, so its own first pass is not a catch-up and its first settle is
 //! reported. See `first_pass_here` in [`run_flow_consensus_pass`].
 
-use super::{fold_read_set, FlowInstance};
+use super::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{
     advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE,
@@ -65,10 +76,11 @@ use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, retain_selected_flows,
     scope_subject,
 };
-use crate::perspectives::flow_instance::atom::{FIRED_MARK, RESOLVED_AS_PREDICATE};
+use crate::perspectives::flow_instance::atom::{marked_fired, FIRED_MARK, RESOLVED_AS_PREDICATE};
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkQuery, LinkStatus};
+use std::collections::HashSet;
 
 /// One consensus event this replica recorded for the first time: the atoms
 /// that settled an edge, now marked, with the cache advanced to match.
@@ -98,25 +110,27 @@ pub async fn run_flow_consensus_pass(
     flow_filter: Option<&[String]>,
     instance_filter: Option<&[String]>,
 ) -> Vec<FireOutcome> {
-    // The pass reads as the agent it records for: another agent's Local graph
-    // stays out of the flows, instances and votes it folds. It reads its
-    // agent's own Local graph even on a shared-reads view (the auto-processor
-    // hands it one): its cache and fired marks live there (#1360), and
-    // everything it writes is Local, so nothing it reads reaches a shared graph.
-    let mut view = match crate::agent::did_for_context(context) {
+    // The pass reads as the agent it records for, through two views (module
+    // doc). `own` is the agent's own Local graph, whatever view the caller
+    // hands in (the auto-processor's reads shared graphs only): the cache and
+    // the fired marks live there (#1360), and only they are read from it.
+    // `shared` is what the fold takes: no Local graph, the agent's own
+    // included.
+    let mut own = match crate::agent::did_for_context(context) {
         Ok(did) => perspective.clone().for_own_bookkeeping(did),
         Err(e) => {
             log::warn!("run_flow_consensus_pass: no DID for the pass: {e:#}");
             return Vec::new();
         }
     };
-    let perspective = &mut view;
+    let shared = own.clone().for_shared_reads();
+    let perspective = &mut own;
     let loaded = async {
-        let mut flows_by_uri = load_shacl_flows(perspective).await?;
+        let mut flows_by_uri = load_shacl_flows(&shared).await?;
         retain_selected_flows(&mut flows_by_uri, flow_filter);
         let records = match scope {
-            Some(s) => load_flow_instances(perspective, &[scope_subject(s).to_string()]).await?,
-            None => load_all_flow_instances(perspective).await?,
+            Some(s) => load_flow_instances(&shared, &[scope_subject(s).to_string()]).await?,
+            None => load_all_flow_instances(&shared).await?,
         };
         anyhow::Ok((flows_by_uri, records))
     }
@@ -139,7 +153,7 @@ pub async fn run_flow_consensus_pass(
             continue;
         };
         let instance = FlowInstance::from_record(record, flow);
-        let read_set = match instance.read_set(perspective).await {
+        let read_set = match instance.read_set(&shared).await {
             Ok(rs) => rs,
             Err(e) => {
                 log::warn!(
@@ -179,7 +193,23 @@ pub async fn run_flow_consensus_pass(
                 continue;
             }
         };
-        let already_marked = read_set.marked_proposals();
+        // The bookkeeping, from the agent's own graph: the read-set came from
+        // shared graphs, so it carries neither the marks nor the cache.
+        let bookkeeping = async {
+            let marked = own_fired_marks(perspective, &read_set).await?;
+            let cached = local_cached_state(perspective, &record.instance_uri).await?;
+            anyhow::Ok((marked, cached))
+        };
+        let (already_marked, cached) = match bookkeeping.await {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!(
+                    "run_flow_consensus_pass: reading the cache or marks of {} failed; skipping instance this pass: {e:#}",
+                    record.instance_uri
+                );
+                continue;
+            }
+        };
 
         // Catch-up (module doc): never derived here = no Local mark and no
         // Local cache. Marks are per replica, so on a join every settled
@@ -194,17 +224,7 @@ pub async fn run_flow_consensus_pass(
         // An acting call (propose, accept) therefore runs the agent's catch-up
         // before its vote (`catch_up_before_acting`), or the pass after the
         // vote would be the catch-up and swallow the edge the vote settles.
-        let first_pass_here = already_marked.is_empty()
-            && match has_local_cache(perspective, &record.instance_uri).await {
-                Ok(cached) => !cached,
-                Err(e) => {
-                    log::warn!(
-                        "run_flow_consensus_pass: reading the cache of {} failed; skipping instance this pass: {e:#}",
-                        record.instance_uri
-                    );
-                    continue;
-                }
-            };
+        let first_pass_here = already_marked.is_empty() && cached.is_none();
 
         // An edge is new to this replica when some atom that settled it is
         // not yet marked. The mark is bookkeeping, so this comparison can
@@ -230,16 +250,16 @@ pub async fn run_flow_consensus_pass(
                 contributing_proposal_uris: edge.atom_uris.clone(),
             });
         }
-        let stale_cache = record.current_state != derived.state;
-        let write_cache = stale_cache || first_pass_here;
+        // An absent or unreadable cache is stale too, so a first pass always
+        // writes it.
+        let write_cache = cached.as_deref() != Some(derived.state.as_str());
         if !write_cache && to_mark.is_empty() {
             continue;
         }
-        if stale_cache {
+        if let Some(cached) = cached.as_deref().filter(|_| write_cache) {
             log::debug!(
-                "run_flow_consensus_pass: healing {} — cached `{}`, derived `{}`",
+                "run_flow_consensus_pass: healing {} — cached `{cached}`, derived `{}`",
                 record.instance_uri,
-                record.current_state,
                 derived.state
             );
         }
@@ -422,6 +442,30 @@ async fn has_local_cache(
     local_cached_state(perspective, instance_uri)
         .await
         .map(|o| o.is_some())
+}
+
+/// The proposals of `read_set` that carry `own`'s agent's `Local`
+/// `resolved_as → "fired"` mark. `own` must be that agent's bookkeeping view
+/// ([`PerspectiveInstance::for_own_bookkeeping`]): the read-set comes from
+/// shared graphs and carries no Local link, so the marks are read beside it.
+pub(crate) async fn own_fired_marks(
+    own: &PerspectiveInstance,
+    read_set: &ReadSet,
+) -> anyhow::Result<HashSet<String>> {
+    let mut marked = HashSet::new();
+    for proposal in &read_set.proposals {
+        let links = own
+            .get_links(&LinkQuery {
+                source: Some(proposal.uri.clone()),
+                predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?;
+        if marked_fired(&links) {
+            marked.insert(proposal.uri.clone());
+        }
+    }
+    Ok(marked)
 }
 
 /// Write the cache and the marks in one batch, so a crash between them can

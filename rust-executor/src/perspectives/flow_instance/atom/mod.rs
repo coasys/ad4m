@@ -812,10 +812,10 @@ mod tests {
     /// untouched. Only the locality claim is dropped.
     ///
     /// Killing mutation: delete `link.status = None;` from `reverified_link`.
-    /// Every other test in the crate stays green — `marked_proposals` has one
-    /// production caller (`pass`, on this replica's own store), so this is
-    /// latent rather than live, and latent is exactly what an assertion is
-    /// for. Also red if `marked_fired` is rewritten to `!= Some(Shared)`,
+    /// Every other test in the crate stays green — no production path hands
+    /// `marked_fired` a carried link (`pass` reads the marks from the agent's
+    /// own store), so this is latent rather than live, and latent is exactly
+    /// what an assertion is for. Also red if `marked_fired` is rewritten to `!= Some(Shared)`,
     /// which reads the cleared value as a mark and hands the claim back.
     #[test]
     fn a_carried_local_mark_is_not_this_replicas_mark() {
@@ -844,12 +844,12 @@ mod tests {
         };
 
         assert!(
-            arrived.marked_proposals().contains("proposal://p1"),
+            marked_fired(&arrived.proposals[0].links),
             "precondition: read as handed over, the sender's claim IS taken as \
              our mark — this is the forgery the seam exists to answer"
         );
         assert!(
-            arrived.reverified().marked_proposals().is_empty(),
+            !marked_fired(&arrived.reverified().proposals[0].links),
             "a carried `Local` mark must not count as this replica's: we have \
              marked nothing we never read"
         );

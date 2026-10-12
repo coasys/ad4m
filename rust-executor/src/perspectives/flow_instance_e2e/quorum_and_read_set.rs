@@ -89,7 +89,7 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
         TASK,
         "ns://owner",
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
     f.mint_one().await;

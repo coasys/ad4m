@@ -2,7 +2,7 @@
 //! a plain value, and the ingest seam (#1068) that re-verifies one that
 //! arrived from elsewhere. [`fold_read_set`] is pure over it.
 
-use super::atom::{marked_fired, TransitionAtom};
+use super::atom::TransitionAtom;
 use super::fold::{fold, rule_for, DerivedState, ResolvedRule, VouchedAtom};
 use super::roles::{self, eligible_votes, RoleGrant, RoleGrantEvidence};
 use crate::perspectives::flow_context::FlowInstanceRecord;
@@ -11,7 +11,6 @@ use crate::perspectives::flow_spawn::initial_state_of;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::{DecoratedLinkExpression, LinkExpression};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 /// One proposal exactly as the store returned it: every link on it, from
 /// every author, each carrying its own signature verdict.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,17 +125,6 @@ impl ReadSet {
         }
     }
 
-    /// Proposal URIs already carrying **this replica's** `Local`
-    /// `resolved_as → "fired"` mark. Bookkeeping for [`pass`](super::pass), never an
-    /// input to the fold; a peer's `Shared` mark is not counted.
-    pub fn marked_proposals(&self) -> HashSet<String> {
-        self.proposals
-            .iter()
-            .filter(|p| marked_fired(&p.links))
-            .map(|p| p.uri.clone())
-            .collect()
-    }
-
     /// The same read-set with **every carried link's per-replica read view
     /// replaced by this replica's own** — the ingest seam of #1068.
     ///
@@ -172,14 +160,17 @@ impl ReadSet {
     /// signature half is a no-op there; it costs one signature check per
     /// carried link.
     ///
-    /// The `status` half is **not** a no-op on the minting replica — it
-    /// discards real local marks. That is intended and is what keeps the two
-    /// sides folding the same input: a fold that read `status` would give the
-    /// minter an answer no verifier could ever reproduce, since the verifier
-    /// has no locality to read. Nothing in [`fold_read_set`] reads `status`;
-    /// the one gate that does, [`atom::marked_fired`](super::atom::marked_fired), is bookkeeping for
-    /// [`pass`](super::pass) and is deliberately reached through the **raw** read-set, not
-    /// through this one.
+    /// The `status` half clears a value the minting replica computed itself.
+    /// That is intended and is what keeps the two sides folding the same
+    /// input: a fold that read `status` would give the minter an answer no
+    /// verifier could ever reproduce, since the verifier has no locality to
+    /// read. Nothing in [`fold_read_set`] reads `status`, and a read-set
+    /// loaded here holds no Local link anyway
+    /// ([`FlowInstance::read_set`](super::FlowInstance::read_set) reads shared
+    /// graphs only). The one gate that reads it,
+    /// [`atom::marked_fired`](super::atom::marked_fired), is bookkeeping for
+    /// [`pass`](super::pass), which reads the agent's marks from their own
+    /// graph beside the read-set, never from it.
     ///
     /// # The three halves are treated differently, and each for a reason
     ///

@@ -29,7 +29,7 @@
 //!      Checks: proposer self-signed; all fields from proposer only; non-empty seal.
 //!      Carries NO eligibility verdict — that is decided in read_set, never here.
 //!   │
-//!   ▼ FlowInstance::read_set  ← ONLY store access in a state read
+//!   ▼ FlowInstance::read_set  ← ONLY store access in a state read; shared graphs only
 //!      ├─ proposals (TransitionAtoms from above)
 //!      └─ resolve_role_grants per gated target state  (roles.rs)
 //!         Reads each candidate's role instances and collects the links behind
@@ -183,7 +183,17 @@ impl<'a> FlowInstance<'a> {
     /// query that cannot discriminate between DIDs. The caller must abandon the
     /// read and leave the state unknown, rather than fold over an incomplete
     /// eligible set and derive a wrong answer.
+    ///
+    /// Reads **shared graphs only**, whatever view it is handed: a proposal,
+    /// vote or role grant in a Local graph is one no peer can see. Counted, it
+    /// would settle an edge on this replica that no other replica settles, and
+    /// every state derived here, the agent's cache included, would rest on
+    /// material that is private to them (#812 review). The filter is on this
+    /// replica's load, so the locality on a carried read-set is still never
+    /// read (`read_set::reverified_link`).
     pub async fn read_set(&self, perspective: &PerspectiveInstance) -> anyhow::Result<ReadSet> {
+        let shared = perspective.clone().for_shared_reads();
+        let perspective = &shared;
         let genesis = self.genesis().ok_or_else(|| {
             anyhow::anyhow!(
                 "flow `{}` has no states, so instance {} has no genesis to fold from",

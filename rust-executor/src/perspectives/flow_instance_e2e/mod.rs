@@ -25,7 +25,7 @@ use super::flow_instance::atom::{
     RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
-use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
+use super::flow_instance::pass::{own_fired_marks, run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
@@ -40,6 +40,7 @@ mod produced_by_gate;
 mod proposer_and_evidence;
 mod quorum_and_read_set;
 mod roles;
+mod shared_only_fold;
 mod state_follows_links;
 const TASK: &str = "ad4m://task/1";
 
@@ -339,6 +340,14 @@ async fn revoke_own_role(f: &mut Fixture, role_instance: &str) {
         LinkStatus::Shared,
     )
     .await;
+}
+
+/// The proposals this replica's agent has marked fired: its own `Local`
+/// marks, read beside the shared read-set as the pass reads them.
+async fn marked(f: &Fixture) -> std::collections::HashSet<String> {
+    own_fired_marks(&f.perspective, &f.read_set().await)
+        .await
+        .expect("own_fired_marks")
 }
 
 /// Whether this replica's agent has an `acceptedBy` on `proposal`.

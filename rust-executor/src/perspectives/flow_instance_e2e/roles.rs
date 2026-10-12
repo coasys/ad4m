@@ -42,7 +42,7 @@ async fn a_non_role_member_vote_does_not_count() {
         TASK,
         "ns://owner",
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
     assert_eq!(
@@ -58,7 +58,7 @@ async fn a_non_role_member_vote_does_not_count() {
         TASK,
         "ns://owner",
         &literal(&acting_did(&g)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
     g.mint_one().await;
@@ -88,7 +88,7 @@ async fn revoking_a_role_after_settlement_does_not_unsettle_the_edge() {
         TASK,
         "ns://owner",
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
     f.mint_one().await;
@@ -104,7 +104,7 @@ async fn revoking_a_role_after_settlement_does_not_unsettle_the_edge() {
         TASK,
         ROLE_GRANT_REVOKED_PREDICATE,
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
 
@@ -133,7 +133,7 @@ async fn newcomer_replica_converges_to_same_state_after_revocation() {
         TASK,
         "ns://owner",
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
     f.mint_one().await;
@@ -146,7 +146,7 @@ async fn newcomer_replica_converges_to_same_state_after_revocation() {
         TASK,
         ROLE_GRANT_REVOKED_PREDICATE,
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
 
@@ -177,7 +177,7 @@ async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
         TASK,
         "ns://owner",
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
     let seal = seal_for(&f, "scoped").await;
@@ -202,12 +202,12 @@ async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
         TASK,
         ROLE_GRANT_REVOKED_PREDICATE,
         &literal(&acting_did(&f)),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
 
     // Add Bob to the role (grant timestamp > revocation) and have Bob vote.
-    f.link(TASK, "ns://owner", &literal(&bob.did), LinkStatus::Local)
+    f.link(TASK, "ns://owner", &literal(&bob.did), LinkStatus::Shared)
         .await;
     let bob_vote = bob.sign(
         Link {
@@ -452,7 +452,7 @@ async fn a_role_gate_with_an_unknown_key_refuses_the_edge() {
             TASK,
             "ns://owner",
             &literal(&acting_did(&f)),
-            LinkStatus::Local,
+            LinkStatus::Shared,
         )
         .await;
         f.mint_one().await;
