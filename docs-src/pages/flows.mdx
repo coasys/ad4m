@@ -60,7 +60,7 @@ Three consequences, all intended:
 - **Two replicas agree without talking.** Same links in, same state out. Every choice in the walk is made by an explicit sort key, never by the order a database returned rows.
 - **A third party can check the work.** The derivation is a pure function over plain data. Hand someone the links and they can re-run it and reach your verdict.
 - **Retracting a vote moves the flow back.** Withdraw the signature that settled an edge and the flow stands where it stood before you signed. That is the semantics, not a bug. See [Reject is not cancel](#reject-is-not-cancel).
-- **Only shared links count.** A proposal, vote or role grant written as a `Local` link never syncs, so no other member can count it, and the derivation ignores it on your own replica too. `acceptProposal` and `proposeTransition` always write shared links.
+- **Only shared links count.** A proposal, vote or role grant written as a `Local` link never syncs, so no other member can count it, and the derivation ignores it on your own replica too. `acceptProposal` and `proposeTransition` always write shared links, and they check guards and outputs against shared links only. One exception remains: an older executor wrote `Local` links into the shared default graph, and a role grant among them still counts on its writer's replica until [#1359](https://github.com/coasys/ad4m/issues/1359) moves them.
 
 <Callout type="info" emoji="ℹ️">
   The engine does write a `currentState` value onto each flow instance, but it
