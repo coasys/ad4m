@@ -349,10 +349,12 @@ pub fn requested_agent(agent: Option<&str>) -> Result<RequestTarget, String> {
         return Ok(AgentContext::main_agent().into());
     };
     if !agent.starts_with("did:") {
+        // Read-only: anyone may request, so the lookup imports no user from a shared database
+        // (D15); the user is imported when they log in to approve.
         return Ok(
-            match crate::agent::AgentService::did_for_email(&agent.to_lowercase()) {
-                Ok(did) => AgentContext::managed(did).into(),
-                Err(_) => RequestTarget::NoAgent,
+            match crate::agent::AgentService::did_for_email_read_only(&agent.to_lowercase()) {
+                Some(did) => AgentContext::managed(did).into(),
+                None => RequestTarget::NoAgent,
             },
         );
     }
@@ -374,13 +376,44 @@ fn display_email(agent: &AgentContext) -> Option<String> {
         .and_then(|did| crate::agent::AgentService::email_for_did(did).ok())
 }
 
+/// Bytes an app's name, description, domain, URL or icon may have in a capability request: the
+/// caller chooses them, anonymous callers included, and they are kept in memory and shown in
+/// approval prompts.
+pub const MAX_AUTH_INFO_FIELD_BYTES: usize = 1024;
+
+/// `Err` naming the first of the app's declared fields in `auth` that is longer than
+/// [`MAX_AUTH_INFO_FIELD_BYTES`].
+pub fn check_auth_info_bounds(auth: &AuthInfo) -> Result<(), String> {
+    let fields = [
+        ("appName", Some(&auth.app_name)),
+        ("appDesc", Some(&auth.app_desc)),
+        ("appDomain", auth.app_domain.as_ref()),
+        ("appUrl", auth.app_url.as_ref()),
+        ("appIconPath", auth.app_icon_path.as_ref()),
+    ];
+    match fields
+        .iter()
+        .find(|(_, value)| value.is_some_and(|v| v.len() > MAX_AUTH_INFO_FIELD_BYTES))
+    {
+        Some((name, _)) => Err(format!(
+            "{name} is longer than {MAX_AUTH_INFO_FIELD_BYTES} bytes"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Records an app's request for capabilities on the agent `target` and returns its id. The
 /// request waits in memory ([`pending`]) for the owner of `target` to approve it: the approval
 /// request event goes to `target`'s sessions (by DID) that hold AGENT_PERMIT. A request for
 /// [`RequestTarget::NoAgent`] publishes nothing. No request is ever approved here: the app
 /// name and domain are whatever the (possibly anonymous) caller declares, so they never
-/// grant anything.
-pub async fn request_capability(auth_info: AuthInfo, target: impl Into<RequestTarget>) -> String {
+/// grant anything. `Err` when a declared field is too long ([`check_auth_info_bounds`]) or too
+/// many requests wait ([`pending::MAX_PENDING_REQUESTS`]).
+pub async fn request_capability(
+    auth_info: AuthInfo,
+    target: impl Into<RequestTarget>,
+) -> Result<String, String> {
+    check_auth_info_bounds(&auth_info)?;
     let target = target.into();
     let request_id = uuid::Uuid::new_v4().to_string();
     // The request names its agent's user in the auth info, so the approver sees whose it is.
@@ -389,10 +422,10 @@ pub async fn request_capability(auth_info: AuthInfo, target: impl Into<RequestTa
         ..auth_info
     };
     let pending = PendingRequests::global();
-    pending.request(request_id.clone(), auth.clone(), target.clone(), now());
+    pending.request(request_id.clone(), auth.clone(), target.clone(), now())?;
 
     let Some(agent) = target.agent() else {
-        return request_id;
+        return Ok(request_id);
     };
     let app_name = auth.app_name.clone();
     let auth_extended = AuthInfoExtended {
@@ -412,7 +445,7 @@ pub async fn request_capability(auth_info: AuthInfo, target: impl Into<RequestTa
         .await
         .publish_event(Event::approval_request(&exception_info, agent));
 
-    request_id
+    Ok(request_id)
 }
 
 /// The agent that the pending request `request_id` is for, while it waits.
@@ -420,16 +453,38 @@ pub fn request_target(request_id: &str) -> Option<RequestTarget> {
     PendingRequests::global().target(request_id, now())
 }
 
+/// Approves a pending request with `auth_info_extended.auth` as the operator, which holds
+/// every capability: [`permit_capability_within`] with no limit beyond the request's agent.
+/// For the operator and dev-mode auto-permit; a session approves with its own capabilities.
+pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
+    permit_capability_within(auth_info_extended, std::slice::from_ref(&*ALL_CAPABILITY))
+}
+
 /// Approves a pending request with `auth_info_extended.auth`, which may grant less than the
 /// app asked for, and returns the code the app redeems: for the approver only. The request's
 /// agent stays the one it named. The caller has checked that the approver owns that agent
 /// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`; MCP's
-/// `caller_can_permit`).
-pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
+/// `caller_can_permit`). An approver grants no more than it holds itself (`approver`, its
+/// session's capabilities): an app with AGENT_PERMIT approves only within its own grant, so
+/// it cannot mint a wider one.
+pub fn permit_capability_within(
+    auth_info_extended: AuthInfoExtended,
+    approver: &[Capability],
+) -> Result<String, String> {
+    let mut auth = auth_info_extended.auth;
+    if let Some(approved) = &auth.capabilities {
+        let caps = caps_within(approver, approved);
+        if caps.is_empty() {
+            return Err(
+                "None of the approved capabilities is within the approver's own".to_string(),
+            );
+        }
+        auth.capabilities = Some(caps);
+    }
     let code = gen_random_digits();
     PendingRequests::global().approve(
         &auth_info_extended.request_id,
-        auth_info_extended.auth,
+        auth,
         Secret::new(code.clone()),
         now(),
     )?;
@@ -438,24 +493,63 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
 
 /// What a grant on `agent` may hold of `approved` (D13): all of it on the main agent, which
 /// holds every capability; on a managed agent, only what that agent holds itself (its user's
-/// capabilities). A capability that one of the agent's covers stays; a wider one (`*`)
-/// narrows to the agent's capabilities it covers.
+/// capabilities).
 pub fn grant_caps_for(agent: &AgentContext, approved: &[Capability]) -> Vec<Capability> {
     if agent.is_main_agent() {
         return approved.to_vec();
     }
-    let own = get_user_default_capabilities();
-    let mut caps: Vec<Capability> = approved
-        .iter()
-        .filter(|cap| capability_matches(&own, cap))
-        .cloned()
-        .collect();
-    for cap in &own {
-        if capability_matches(approved, cap) && !capability_matches(&caps, cap) {
-            caps.push(cap.clone());
+    caps_within(&get_user_default_capabilities(), approved)
+}
+
+/// The part of `approved` that `held` covers: a capability that one of `held` covers stays;
+/// any other narrows to its overlap with each of `held`. A capability is the set of its
+/// pointers times its actions on its domain, so `{perspective, [p1], [READ, UPDATE]}` or
+/// `{perspective, [p1], [*]}` keeps the actions on `p1` that some held capability allows, while
+/// no single one of them holds every action. Nothing outside `held` is ever kept.
+pub fn caps_within(held: &[Capability], approved: &[Capability]) -> Vec<Capability> {
+    let mut caps: Vec<Capability> = Vec::new();
+    for cap in approved {
+        let parts = if capability_matches(held, cap) {
+            vec![cap.clone()]
+        } else {
+            held.iter()
+                .filter_map(|held| capability_overlap(held, cap))
+                .collect()
+        };
+        for part in parts {
+            if !capability_matches(&caps, &part) {
+                caps.push(part);
+            }
         }
     }
     caps
+}
+
+/// What both `a` and `b` allow, if anything: the narrower domain, and the pointers and actions
+/// in both (`*` in either is the other's).
+fn capability_overlap(a: &Capability, b: &Capability) -> Option<Capability> {
+    fn both(a: &[String], b: &[String]) -> Vec<String> {
+        if a.iter().any(|x| x == WILD_CARD) {
+            b.to_vec()
+        } else if b.iter().any(|x| x == WILD_CARD) {
+            a.to_vec()
+        } else {
+            a.iter().filter(|x| b.contains(x)).cloned().collect()
+        }
+    }
+    let domain = if a.with.domain == WILD_CARD {
+        b.with.domain.clone()
+    } else if b.with.domain == WILD_CARD || b.with.domain == a.with.domain {
+        a.with.domain.clone()
+    } else {
+        return None;
+    };
+    let pointers = both(&a.with.pointers, &b.with.pointers);
+    let can = both(&a.can, &b.can);
+    (!pointers.is_empty() && !can.is_empty()).then_some(Capability {
+        with: types::Resource { domain, pointers },
+        can,
+    })
 }
 
 /// Redeems an approved request's code for the app's token, in one step: the grant is minted
@@ -762,7 +856,9 @@ mod app_token_tests {
     }
 
     async fn permitted_request() -> (String, String) {
-        let request_id = request_capability(test_auth_info(), AgentContext::main_agent()).await;
+        let request_id = request_capability(test_auth_info(), AgentContext::main_agent())
+            .await
+            .unwrap();
         let code = permit_capability(AuthInfoExtended {
             request_id: request_id.clone(),
             auth: test_auth_info(),
@@ -1017,7 +1113,9 @@ mod app_token_tests {
         let alice_did = crate::agent::did_for_context(&alice).unwrap();
         let mut events = get_global_pubsub().await.subscribe_events();
 
-        let request_id = request_capability(test_auth_info(), alice.clone()).await;
+        let request_id = request_capability(test_auth_info(), alice.clone())
+            .await
+            .unwrap();
         assert_eq!(request_target(&request_id), Some(alice.clone().into()));
         let event = approval_request(&mut events, &request_id, Duration::from_secs(5))
             .await
@@ -1085,6 +1183,70 @@ mod app_token_tests {
         );
     }
 
+    fn perspective_cap(pointers: &[&str], can: &[&str]) -> Capability {
+        Capability {
+            with: types::Resource {
+                domain: PERSPECTIVE.into(),
+                pointers: pointers.iter().map(|p| p.to_string()).collect(),
+            },
+            can: can.iter().map(|c| c.to_string()).collect(),
+        }
+    }
+
+    // A user holds each perspective action as its own capability on `*`, so no single one
+    // covers several actions on a perspective, or `*` actions on it. The approval keeps the
+    // actions the user holds instead of dropping the capability.
+    #[test]
+    fn an_approval_of_several_actions_keeps_those_the_agent_holds() {
+        let alice = AgentContext::managed("did:key:x".into());
+        let read_update = perspective_cap(&["p1"], &[READ, UPDATE]);
+        let caps = grant_caps_for(&alice, &[read_update.clone()]);
+        assert!(!caps.is_empty());
+        for action in [READ, UPDATE] {
+            assert!(capability_matches(
+                &caps,
+                &perspective_cap(&["p1"], &[action])
+            ));
+        }
+        assert!(!capability_matches(
+            &caps,
+            &perspective_cap(&["p2"], &[READ])
+        ));
+
+        let all_on_p1 = grant_caps_for(&alice, &[perspective_cap(&["p1"], &[WILD_CARD])]);
+        for action in [READ, UPDATE, DELETE, SUBSCRIBE] {
+            assert!(
+                capability_matches(&all_on_p1, &perspective_cap(&["p1"], &[action])),
+                "{action}"
+            );
+        }
+        assert!(!capability_matches(
+            &all_on_p1,
+            &perspective_cap(&["p2"], &[READ])
+        ));
+        for cap in &all_on_p1 {
+            assert_eq!(cap.with.domain, PERSPECTIVE);
+            assert_eq!(cap.with.pointers, vec!["p1".to_string()]);
+        }
+
+        // The split grants nothing the approver lacks: one that holds only READ cannot pass
+        // UPDATE on.
+        let reader = [perspective_query_capability(vec![WILD_CARD.into()])];
+        let caps = caps_within(&reader, &[read_update]);
+        assert!(capability_matches(
+            &caps,
+            &perspective_cap(&["p1"], &[READ])
+        ));
+        assert!(!capability_matches(
+            &caps,
+            &perspective_cap(&["p1"], &[UPDATE])
+        ));
+        assert!(caps_within(&reader, &[perspective_cap(&["p1"], &[UPDATE])]).is_empty());
+        assert!(caps_within(&reader, &[AGENT_READ_CAPABILITY.clone()]).is_empty());
+        let caps = caps_within(&reader, &[ALL_CAPABILITY.clone()]);
+        assert_eq!(caps_text(&caps), caps_text(&reader));
+    }
+
     #[tokio::test]
     async fn redeeming_caps_a_wider_approval_at_the_managed_agents_capabilities() {
         setup();
@@ -1092,7 +1254,9 @@ mod app_token_tests {
             &crate::test_utils::managed_user("cap-alice"),
         )
         .unwrap();
-        let request_id = request_capability(test_auth_info(), alice.clone()).await;
+        let request_id = request_capability(test_auth_info(), alice.clone())
+            .await
+            .unwrap();
         let code = permit_capability(AuthInfoExtended {
             request_id: request_id.clone(),
             auth: test_auth_info(),
@@ -1134,7 +1298,9 @@ mod app_token_tests {
                     app_domain,
                     ..test_auth_info()
                 };
-                let request_id = request_capability(auth.clone(), target.clone()).await;
+                let request_id = request_capability(auth.clone(), target.clone())
+                    .await
+                    .unwrap();
                 assert!(
                     approval_request(&mut events, &request_id, Duration::from_secs(5))
                         .await
@@ -1194,9 +1360,17 @@ mod app_token_tests {
         assert!(requested_agent(Some("did:key:z6MkNoSuchAgent")).is_err());
         // An email without a user is taken, as one for nobody: the answer does not say
         // whether the email has an account.
+        let users = || {
+            crate::db::Ad4mDb::with_global_instance(|db| db.list_users())
+                .unwrap()
+                .len()
+        };
+        let before = users();
         assert_eq!(
             requested_agent(Some("nobody-here@example.org")).unwrap(),
             RequestTarget::NoAgent
         );
+        // Resolving the email writes nothing: anyone may request (D15).
+        assert_eq!(users(), before);
     }
 }

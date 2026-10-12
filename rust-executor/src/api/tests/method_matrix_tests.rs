@@ -675,12 +675,14 @@ impl World {
         };
         let request = |name: &str, agent: AgentContext| {
             let id = format!("{run}-{name}-request");
-            PendingRequests::global().request(
-                id.clone(),
-                AuthInfo::default(),
-                agent,
-                crate::agent::grants::now(),
-            );
+            PendingRequests::global()
+                .request(
+                    id.clone(),
+                    AuthInfo::default(),
+                    agent,
+                    crate::agent::grants::now(),
+                )
+                .expect("a pending request");
             id
         };
         let user = || AgentContext::managed(USER_DID.to_string());

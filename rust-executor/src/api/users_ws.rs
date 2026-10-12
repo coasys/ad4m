@@ -306,7 +306,10 @@ async fn logout(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpc
 
 /// user.revokeAllSessions — revokes every grant on a user's agent: logins and apps. A user
 /// revokes their own (the current one too); the operator revokes any user's, named by
-/// `email`. Logins after it work.
+/// `email`. Logins after it work. The guard (`Cap(AGENT_UPDATE)`) checked the capability, as
+/// `agent.revokeToken` and `agent.removeApp` need it: an app the user approved acts as the
+/// user's agent with only what it was granted (#1399), and a read-only one must not end
+/// every login. A login holds AGENT_UPDATE.
 async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UsersRevokeAllSessionsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;

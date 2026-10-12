@@ -4,7 +4,7 @@
 
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::{
-    defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
+    defs::ALL_CAPABILITY, generate_capability_token, permit_capability_within,
     request_capability as cap_request_capability, requested_agent, token::decode_jwt, AuthInfo,
     AuthInfoExtended, RequestTarget,
 };
@@ -125,9 +125,10 @@ impl Ad4mMcpHandler {
     /// Context-free body of [`Self::request_capability`], split out for the same reason as
     /// `check_auth_with_header`: tests cannot build an rmcp `RequestContext`. Creating the
     /// request needs only that the tool stay reachable; auto-permitting it (the inline code
-    /// that generate_jwt mints into an ALL_CAPABILITY token) needs the PERMIT capability,
-    /// which a multi-user user token does not hold. A valid header credential joins the
-    /// session first, as `call_tool` does for the other auth tools.
+    /// that generate_jwt mints into a token) needs a session that may approve the request
+    /// (`caller_can_permit`): the operator, or a session that acts as the requested agent and holds
+    /// PERMIT, as a user's own token does for that user's agent. A valid header credential
+    /// joins the session first, as `call_tool` does for the other auth tools.
     pub(crate) async fn request_capability_with_header(
         &self,
         header_token: Option<String>,
@@ -151,18 +152,20 @@ impl Ad4mMcpHandler {
     ///
     /// The request itself is always created — that publishes the capability-request
     /// exception the ADAM Launcher listens for, which is the legitimate pairing
-    /// flow. What a caller whose session lacks PERMIT must NOT get is the auto-permit and the
-    /// inline code: the code is the mint secret (`generate_jwt` exchanges it for a
-    /// signed ALL_CAPABILITY JWT valid on every executor surface), and returning it
-    /// to any caller that could reach the MCP port made `--admin-credential`
-    /// decorative (issue #851, sub-problem 3).
+    /// flow. What a caller that may not approve the request must NOT get is the auto-permit
+    /// and the inline code: the code is the mint secret (`generate_jwt` exchanges it for a
+    /// signed JWT acting as the requested agent, valid on every executor surface), and
+    /// returning it to any caller that could reach the MCP port made `--admin-credential`
+    /// decorative (issue #851, sub-problem 3). The request asks for ALL_CAPABILITY; the
+    /// approval keeps only what the approver holds (`permit_capability_within`), and a grant
+    /// on a user's agent holds no more than that user does (`grant_caps_for`).
     ///
     /// Scope: this gate protects executors that SET an admin credential.
     /// Without one, the empty token holds ALL_CAPABILITY, PERMIT included, so
-    /// any caller that reaches the MCP port still gets the inline code. On a
-    /// multi-user node that includes a user who drops their token or opens a
-    /// new session (#1059). The MCP server binds 0.0.0.0 by default; making
-    /// no-credential mode loopback-only is #1033.
+    /// any caller that reaches the MCP port still gets the inline code, for the main
+    /// agent or any user's agent. On a multi-user executor that includes a user who drops
+    /// their token or opens a new session (#1059). Without a credential the MCP server binds
+    /// loopback unless `MCP_HOST` says otherwise (#1033, `server::resolve_host`).
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
@@ -179,7 +182,10 @@ impl Ad4mMcpHandler {
             user_email: None,
         };
 
-        let request_id = cap_request_capability(auth_info.clone(), target).await;
+        let request_id = match cap_request_capability(auth_info.clone(), target).await {
+            Ok(request_id) => request_id,
+            Err(e) => return json!({"success": false, "error": e}).to_string(),
+        };
 
         if !caller_can_permit {
             return json!({
@@ -194,10 +200,16 @@ impl Ad4mMcpHandler {
             .to_string();
         }
 
-        match permit_capability(AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: auth_info,
-        }) {
+        // The caller approves as itself: no more than it holds (the admin credential and
+        // the local operator hold every capability).
+        let held = self.get_capabilities().await.unwrap_or_default();
+        match permit_capability_within(
+            AuthInfoExtended {
+                request_id: request_id.clone(),
+                auth: auth_info,
+            },
+            &held,
+        ) {
             Ok(code) => {
                 // Unified secret-log gate (rust-executor/LOGGING.md):
                 // AD4M_LOG_SECRETS=1 opts in to the raw capability code;
