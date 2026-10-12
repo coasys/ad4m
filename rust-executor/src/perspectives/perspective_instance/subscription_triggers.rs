@@ -308,6 +308,52 @@ impl super::PerspectiveInstance {
         // No class to watch: nothing to tell writes apart by.
         ModelTrigger::new(rules.unwrap_or_else(TriggerRules::every_write), result)
     }
+
+    /// Predicates a model query reads beside its classes' shapes, which a
+    /// subscription matches on the predicate alone.
+    pub(super) fn model_query_side_predicates(
+        &self,
+        shape: Option<&ModelShape>,
+        query_json: &str,
+    ) -> Vec<String> {
+        let mut predicates = Vec::new();
+
+        // `links` reaches predicates the shape does not declare (a revocation
+        // tombstone); a subscription asking for one must re-run when it lands.
+        if let Some(shape) = shape {
+            if let Ok(query) = serde_json::from_str::<
+                crate::perspectives::model_query::ModelQueryInput,
+            >(query_json)
+            {
+                predicates.extend(crate::perspectives::model_query::links_trigger_predicates(
+                    shape,
+                    &query,
+                    &self.shape_resolver(),
+                ));
+            }
+        }
+
+        if let Ok(query) = serde_json::from_str::<serde_json::Value>(query_json) {
+            // `producedByFlow` resolves through the flow's receipts and
+            // the flow catalogue, not the shape: re-run when a receipt's
+            // index entry or body lands (sync may deliver them apart) —
+            // the reads `load_flow_receipts` makes — or a flow is
+            // registered, whose definition is written with its
+            // `rdf://type ad4m://Flow` link.
+            if query
+                .get("where")
+                .and_then(|w| w.get("producedByFlow"))
+                .is_some()
+            {
+                use crate::perspectives::flow_instance::{produced, receipt};
+                predicates.push(produced::FLOW_RECEIPT_INDEX_PREDICATE.to_string());
+                predicates.push(receipt::FLOW_RECEIPT_CONTENT_PREDICATE.to_string());
+                predicates.push("rdf://type".to_string());
+            }
+        }
+
+        predicates
+    }
 }
 
 /// Build the rules for a subscription on `class_name` with `query_json`.
