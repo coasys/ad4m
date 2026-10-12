@@ -584,7 +584,6 @@ fn test_router() -> Router {
     init_test_db();
     let state = AppState {
         admin_credential: Some(TEST_ADMIN_TOKEN.to_string()),
-        auto_permit_cap_requests: true,
     };
     super::router::router().with_state(state)
 }

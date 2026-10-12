@@ -40,19 +40,19 @@ use super::types::{
     CompletionRequest, CompletionResponse, FunctionCall, FunctionCallDelta, Role, ToolCall,
     ToolCallDelta, ToolDef, Usage,
 };
-use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
+use crate::agent::capabilities::AI_PROMPT_CAPABILITY;
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
 use crate::billing::check_compute_credits;
-use crate::types::ModelType;
+use crate::types::{ModelType, RequestContext};
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
 /// and non-streaming responses.
 pub async fn chat_completions(
-    auth: AuthContext,
+    auth: RequestContext,
     OpenAIJson(req): OpenAIJson<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, OpenAIError> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    auth.require(&AI_PROMPT_CAPABILITY)
+        .map_err(OpenAIError::forbidden)?;
 
     // Resolve the OpenAI `model` string to an AD4M model_id.
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
@@ -127,10 +127,11 @@ pub async fn chat_completions(
 /// single user message with no system prompt.  Tools are not supported on
 /// the legacy endpoint.
 pub async fn completions(
-    auth: AuthContext,
+    auth: RequestContext,
     OpenAIJson(req): OpenAIJson<CompletionRequest>,
 ) -> OpenAIResult<Json<CompletionResponse>> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    auth.require(&AI_PROMPT_CAPABILITY)
+        .map_err(OpenAIError::forbidden)?;
 
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
     let prompt = req
@@ -179,7 +180,7 @@ pub async fn completions(
 }
 
 async fn chat_oneshot(
-    auth: AuthContext,
+    auth: RequestContext,
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,
@@ -255,7 +256,7 @@ async fn chat_oneshot(
 }
 
 async fn chat_stream(
-    auth: AuthContext,
+    auth: RequestContext,
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,

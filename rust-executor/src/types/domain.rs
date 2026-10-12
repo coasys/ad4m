@@ -9,10 +9,13 @@ use deno_core::error::AnyError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Who is calling, for one request: the caller's session and the request's cancel token.
+/// The RPC socket builds one per connection; REST and the OpenAI-compatible API extract one
+/// per request (`api::auth`).
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capabilities: Result<Vec<Capability>, String>,
-    pub auto_permit_cap_requests: bool,
+    /// The token the session opened with. Read only by the interpretation pass, which
+    /// hands it to the harness's MCP client; Plan 20 PR 6 passes the `Session` instead.
     pub auth_token: String,
     /// Per-request cancellation token, populated by the WS RPC dispatcher
     /// when the client may send `request.cancel`.  Handlers that want to
@@ -29,8 +32,32 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
-    /// The agent a request acts as: a user acts as that user, every other caller as the
-    /// node's main agent.
+    /// The context of a caller that presents `token` on a listener with this reach.
+    ///
+    /// Fails for a token that opens no session: invalid, expired, revoked, a user whose DID
+    /// does not load, or any token while the wallet is locked. The caller refuses such a
+    /// token where it arrives. An empty token opens a session (the operator or an anonymous
+    /// caller).
+    pub fn open(
+        token: &str,
+        admin_credential: &Option<String>,
+        reach: crate::agent::capabilities::ListenerReach,
+    ) -> Result<Self, crate::agent::session::AuthError> {
+        let session = crate::agent::session::Session::open(token, admin_credential, reach)?;
+        Ok(RequestContext {
+            auth_token: token.to_string(),
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+        })
+    }
+
+    /// `Ok` if the session may do `expected`; otherwise the error a refused call reports
+    /// (403 at every surface).
+    pub fn require(&self, expected: &Capability) -> Result<(), String> {
+        self.session.require(expected)
+    }
+
+    /// The agent a request acts as: a grant's agent, else the executor's main agent.
     pub fn acts_as(&self) -> crate::agent::AgentContext {
         self.session.acts_as()
     }
@@ -45,8 +72,8 @@ impl RequestContext {
         self.session.user().map(|(_, did)| did)
     }
 
-    /// Whether the caller is the node's operator: the admin credential, or no token on a
-    /// loopback listener of a node without one. An app token never is, whatever its
+    /// Whether the caller is the executor's operator: the admin credential, or no token on a
+    /// loopback listener of an executor without one. A grant never is, whatever its
     /// capabilities.
     pub fn is_operator(&self) -> bool {
         self.session.is_operator()
@@ -55,20 +82,18 @@ impl RequestContext {
 
 #[cfg(test)]
 impl RequestContext {
-    /// A context for `principal` on a network listener, with no token. Its capabilities are
-    /// the session's.
-    pub(crate) fn for_test(principal: crate::agent::session::Principal) -> RequestContext {
-        let session = crate::agent::session::Session::for_test(
-            principal,
-            crate::agent::capabilities::ListenerReach::Network,
-        );
+    /// A context for `session`, with no token.
+    pub(crate) fn for_session(session: crate::agent::session::Session) -> RequestContext {
         RequestContext {
-            capabilities: Ok(session.capabilities()),
-            auto_permit_cap_requests: false,
             auth_token: String::new(),
             cancel_token: None,
             session: std::sync::Arc::new(session),
         }
+    }
+
+    /// A context for `principal` (see `Session::for_test`), with no token.
+    pub(crate) fn for_test(principal: crate::agent::session::Principal) -> RequestContext {
+        Self::for_session(crate::agent::session::Session::for_test(principal))
     }
 
     /// The operator's context.
@@ -76,22 +101,25 @@ impl RequestContext {
         Self::for_test(crate::agent::session::Principal::Operator)
     }
 
-    /// An app token's context: the main agent, limited to `caps`.
+    /// A grant on the main agent, limited to `caps`.
     pub(crate) fn app_for_test(caps: Vec<Capability>) -> RequestContext {
-        Self::for_test(crate::agent::session::Principal::App {
-            token_id: crate::agent::session::TokenId("test-app".to_string()),
-            caps,
-        })
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::main_agent(),
+            ))
+            .with_caps(caps),
+        )
     }
 
-    /// A managed user's context, limited to `caps`.
+    /// A grant on the managed agent of `email`, whose DID is `did`, limited to `caps`.
     pub(crate) fn user_for_test(email: &str, did: &str, caps: Vec<Capability>) -> RequestContext {
-        Self::for_test(crate::agent::session::Principal::User {
-            token_id: crate::agent::session::TokenId("test-user".to_string()),
-            email: email.to_string(),
-            did: did.to_string(),
-            caps,
-        })
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::for_user_email(email.to_string()),
+            ))
+            .with_caps(caps)
+            .with_did(did),
+        )
     }
 }
 

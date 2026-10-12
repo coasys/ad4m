@@ -20,7 +20,7 @@ use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::{refuse_user_session, session_agent_context};
+use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -69,7 +69,7 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
 
 /// agent.get — current agent info + status + lock state
 async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode: extract user DID from JWT token if present
@@ -111,7 +111,7 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
 /// agent.apps — list registered apps
 async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     Ok(serde_json::to_value(apps_map::client_view())?)
@@ -119,7 +119,7 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 
 /// agent.byDid — get agent by DID
 async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let did = params.require_str("did")?;
@@ -181,13 +181,13 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 /// agent.updateProfile — update DM language and/or public perspective
 async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UpdateProfileRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // A user session updates the user's own profile, never the node's main agent.
+    // A user session updates the user's own profile, never the main agent's.
     if let Some(user_email) = ctx.user_email().map(str::to_string) {
         let agent = update_user_profile(user_email, body).await?;
         publish_agent_updated(&agent).await;
@@ -324,7 +324,7 @@ fn spawn_main_agent_publish() {
 
 /// agent.generate — generate agent identity
 async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
+    ctx.require(&AGENT_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "agent.generate")?;
 
@@ -395,7 +395,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
 /// agent.lock — lock agent
 async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "agent.lock")?;
 
@@ -423,7 +423,7 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
 /// agent.unlock — unlock agent
 async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
+    ctx.require(&AGENT_SIGN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "agent.unlock")?;
 
@@ -526,18 +526,15 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
 /// agent.sign — sign a message
 async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
+    ctx.require(&AGENT_SIGN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: SignMessageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // A user session signs as the user, never as the node's main agent.
-    let sig = InternalAgentSignature::from_message_for_context(
-        body.message,
-        &session_agent_context(&ctx),
-    )
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    // A user session signs as the user, never as the main agent.
+    let sig = InternalAgentSignature::from_message_for_context(body.message, &ctx.acts_as())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let out: AgentSignature = sig.into();
     Ok(serde_json::to_value(out)?)
@@ -545,7 +542,7 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
 /// agent.removeApp — remove app
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_app_management_by_users(&ctx)?;
 
@@ -554,7 +551,7 @@ async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
-/// Approved apps belong to the node's operator. The default user capabilities include
+/// Approved apps belong to the executor's operator. The default user capabilities include
 /// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
 fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
     if ctx.user_email().is_some() {
@@ -569,7 +566,7 @@ fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError
 
 /// agent.requestCapability — request capability
 async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
+    ctx.require(&AGENT_AUTH_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: RequestCapabilityRequest = serde_json::from_value(params)
@@ -581,7 +578,7 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .map_err(|e: String| WsRpcError::bad_request(e))?;
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
 
-    if ctx.auto_permit_cap_requests {
+    if crate::config::auto_permit_cap_requests() {
         log::debug!(
             "🔐 auto-permitting capability request (request_id={}, app_name={:?})",
             request_id,
@@ -625,7 +622,7 @@ async fn permit_capability_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY)
+    ctx.require(&AGENT_PERMIT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: PermitCapabilityRequest = serde_json::from_value(params)
@@ -640,7 +637,7 @@ async fn permit_capability_handler(
 
 /// agent.generateJwt — generate JWT
 async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_AUTH_CAPABILITY)
+    ctx.require(&AGENT_AUTH_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: GenerateJwtRequest = serde_json::from_value(params)
@@ -654,7 +651,7 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
 /// agent.revokeToken — revoke token
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_app_management_by_users(&ctx)?;
 
@@ -687,7 +684,7 @@ fn revoke_user_token(token: &str) -> Result<(), WsRpcError> {
 
 /// agent.status — agent status
 async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode
@@ -735,7 +732,7 @@ async fn is_locked(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
 
 /// agent.getTrustedAgents — list trusted agents
 async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
+    ctx.require(&RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
@@ -746,9 +743,9 @@ async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<
 
 /// agent.addTrustedAgents — add trusted agents
 async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
+    ctx.require(&RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node's trust list decides whose languages this node installs and runs.
+    // The executor's trust list decides whose languages this executor installs and runs.
     refuse_user_session(&ctx, "agent.addTrustedAgents")?;
 
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
@@ -769,7 +766,7 @@ async fn delete_trusted_agents(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
+    ctx.require(&RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "agent.deleteTrustedAgents")?;
 
@@ -790,9 +787,9 @@ async fn delete_trusted_agents(
 
 /// agent.getEntanglementProofs — list
 async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // The proofs belong to the node's main agent.
+    // The proofs belong to the main agent.
     refuse_user_session(&ctx, "agent.getEntanglementProofs")?;
 
     let proofs = get_entanglement_proofs();
@@ -806,7 +803,7 @@ async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 
 /// agent.addEntanglementProofs — add
 async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "agent.addEntanglementProofs")?;
 
@@ -856,7 +853,7 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 /// agent.deleteEntanglementProofs — delete
 async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "agent.deleteEntanglementProofs")?;
 
@@ -891,7 +888,7 @@ async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<
 
 /// agent.import — import agent from keystore
 async fn import_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
+    ctx.require(&AGENT_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     Err(WsRpcError::not_implemented(
@@ -904,7 +901,7 @@ async fn entanglement_proof_preflight(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "agent.entanglementProofPreflight")?;
 
