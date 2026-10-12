@@ -2975,7 +2975,9 @@ describe("Multi-User Simple integration tests", () => {
                 await managedClient.runtime.grantNotification(notificationId);
                 expect.fail("Managed user should not be able to call grantNotification");
             } catch (error: any) {
-                expect(error.message).to.include("Permission denied");
+                // runtime.grantNotification is Guard::Operator: only the admin credential.
+                expect(error.message).to.include("403");
+                expect(error.message).to.include("Admin credential required");
                 console.log("✅ Managed user correctly blocked from calling grantNotification");
             }
         });
