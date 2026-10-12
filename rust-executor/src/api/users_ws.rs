@@ -369,14 +369,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Cap(
             RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
         ));
-    // Open: a user acts on their own sessions whatever their capabilities. Only the operator
-    // may name another user. The handlers check the session's principal.
-    // Revokes the caller's user token; 400 for any other session. Answers `true`.
+    // Open: a login ends itself whatever its capabilities. The handler checks the session's
+    // principal. Revokes the caller's user token; 400 for any other session. Answers `true`.
     map.method::<NoParams, bool>("user.logout", logout)
         .guard(Guard::Open);
-    // Revokes every token of a user issued up to now. Answers `true`.
+    // Revokes every token of a user issued up to now, logins and apps. AGENT_UPDATE, as
+    // `agent.removeApp`: since #1399 an app a user approved acts as the user's agent too.
+    // Only the operator may name another user; the handler checks the session's principal.
+    // Answers `true`.
     map.method::<UsersRevokeAllSessionsParams, bool>("user.revokeAllSessions", revoke_all_sessions)
-        .guard(Guard::Open);
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     // Every user's record: the default user capabilities leave this capability out.
     map.method::<NoParams, Vec<UserStatistics>>("user.list", list_users)
         .read()
@@ -653,6 +655,27 @@ mod session_revocation_tests {
             grant.did,
             crate::agent::AgentService::did_for_email(&email).unwrap()
         );
+    }
+
+    // Since #1399 an app the user approved acts as the user's agent too, with the subset the
+    // user approved. Revoking every grant on the agent is AGENT_UPDATE, as `agent.removeApp`.
+    #[tokio::test]
+    async fn an_app_on_a_users_agent_without_agent_update_cannot_revoke_the_users_sessions() {
+        setup();
+        let email = managed_user("narrow-app");
+        let login = generate_user_jwt(&email, "test").unwrap();
+        let narrow = granted_token(AuthInfo {
+            app_name: "narrow".into(),
+            user_email: Some(email.clone()),
+            capabilities: Some(vec![
+                crate::agent::capabilities::perspective_query_capability(vec!["*".into()]),
+            ]),
+            ..AuthInfo::default()
+        });
+        let refused = call("user.revokeAllSessions", json!({}), ctx(&narrow)).await;
+        assert!(matches!(refused, Err((403, _))), "{refused:?}");
+        assert!(open(&login).is_ok(), "the user's login survives");
+        assert!(open(&narrow).is_ok(), "the app's own grant survives");
     }
 
     #[tokio::test]

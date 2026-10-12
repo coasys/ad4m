@@ -113,7 +113,9 @@ access check: a call that fails both gets the access answer.
 
 Notes on some methods:
 
-- `Open` handlers check the session's principal (`user.logout`, `user.revokeAllSessions`).
+- `Open` handlers check the session's principal (`user.logout`). `user.revokeAllSessions` is
+  `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
+  user's agent too; its handler checks the principal for a named user.
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
   and password hashes included. The stubs `user.credits` and `runtime.unyt*` answer 501 to the
   operator until each gets a handler and its real guard.
@@ -136,7 +138,7 @@ contracts:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-169 methods: Cap 54, Executor 33, Open 6, Operator 15, Owns 61.
+169 methods: Cap 55, Executor 33, Open 5, Operator 15, Owns 61.
 
 | Method | Guard |
 |---|---|
@@ -305,7 +307,7 @@ contracts:
 | `user.logout` | `Open` |
 | `user.multiUserEnabled` | `Cap(runtime.user_management[enabled]:READ)` |
 | `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
-| `user.revokeAllSessions` | `Open` |
+| `user.revokeAllSessions` | `Cap(agent:UPDATE)` |
 | `user.setMultiUserEnabled` | `Operator` |
 | `user.verifyEmail` | `Cap(runtime.user_management:VERIFY)` |
 | `user.wallet` | `Executor(runtime.user_management:READ)` |

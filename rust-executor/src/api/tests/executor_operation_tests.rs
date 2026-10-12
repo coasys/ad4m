@@ -353,6 +353,16 @@ async fn a_user_reads_only_their_own_compute_log() {
     .await
     .expect("the operator reads an empty log for an unknown email");
     assert!(owners(nobodys).is_empty());
+
+    // An app on the main agent is not the operator: AGENT_READ, the most common app
+    // capability, reads no user's log.
+    let app = Arc::new(RequestContext::app_for_test(vec![
+        crate::agent::capabilities::AGENT_READ_CAPABILITY.clone(),
+    ]));
+    match call("runtime.computeLog", json!({ "userEmail": bob }), app).await {
+        Err((403, _)) => {}
+        other => panic!("a main-agent app read a user's compute log: {other:?}"),
+    }
 }
 
 #[tokio::test]
