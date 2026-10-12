@@ -216,9 +216,7 @@ async fn a_pre_1357_cache_is_not_the_readers_own() {
             Link {
                 source: instance,
                 predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                target: Literal::from_string("scoped".to_string())
-                    .to_url()
-                    .unwrap(),
+                target: Literal::from_string("scoped".to_string()).to_url().unwrap(),
             },
             &bob,
         )
@@ -270,7 +268,10 @@ async fn a_pre_1357_fired_mark_is_not_the_readers_own() {
         .await
         .expect("Bob's pre-#1357 mark");
 
-    assert!(marked(&f).await.is_empty(), "Bob's legacy mark read as Alice's");
+    assert!(
+        marked(&f).await.is_empty(),
+        "Bob's legacy mark read as Alice's"
+    );
     let fired = consensus_pass(&mut f).await;
     assert_eq!(fired.len(), 1, "Alice's pass reported no edge: {fired:?}");
     assert_eq!(f.cached_state().await, "scoped");

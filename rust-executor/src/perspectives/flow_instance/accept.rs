@@ -115,14 +115,8 @@ pub async fn accept_flow_proposal(
         current_state: derived.state.clone(),
         ..record.clone()
     };
-    let recomputed = recompute_evidence_hash(
-        &shared,
-        flow,
-        &record_now,
-        &atom.to_state,
-        &atom.proposer,
-    )
-    .await?;
+    let recomputed =
+        recompute_evidence_hash(&shared, flow, &record_now, &atom.to_state, &atom.proposer).await?;
     // EvidenceSeal::hash() returns None for Unmet (guard not satisfied / state
     // gone). Sealed(h) and NoGuard both produce a well-defined hash, so they
     // can be compared against the proposal's stored seal.
