@@ -4,7 +4,7 @@
 
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::{
-    defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
+    defs::ALL_CAPABILITY, generate_capability_token, permit_capability_within,
     request_capability as cap_request_capability, requested_agent, token::decode_jwt, AuthInfo,
     AuthInfoExtended, RequestTarget,
 };
@@ -194,10 +194,16 @@ impl Ad4mMcpHandler {
             .to_string();
         }
 
-        match permit_capability(AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: auth_info,
-        }) {
+        // The caller approves as itself: no more than it holds (the admin credential and
+        // the local operator hold every capability).
+        let held = self.get_capabilities().await.unwrap_or_default();
+        match permit_capability_within(
+            AuthInfoExtended {
+                request_id: request_id.clone(),
+                auth: auth_info,
+            },
+            &held,
+        ) {
             Ok(code) => {
                 // Unified secret-log gate (rust-executor/LOGGING.md):
                 // AD4M_LOG_SECRETS=1 opts in to the raw capability code;
