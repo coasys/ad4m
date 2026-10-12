@@ -216,10 +216,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         .expect("union model subscribe");
     assert!(initial.contains("\"totalCount\":0"), "{initial}");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     for (class, base, props, changed, expected) in [
         (
@@ -281,10 +278,7 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         .await
         .expect("union model subscribe");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     perspective
         .create_subject(
@@ -307,9 +301,16 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
 
     let quiet = tokio::time::timeout(Duration::from_millis(1500), async {
         loop {
-            let msg = rx.recv().await.expect("pubsub receiver closed");
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("pubsub receiver closed: {e}"),
+            };
+            if event.topic != Topic::PerspectiveQuerySubscription {
+                continue;
+            }
             let filter: PerspectiveQuerySubscriptionFilter =
-                serde_json::from_str(&msg).expect("subscription push JSON");
+                serde_json::from_value(event.payload.clone()).expect("subscription push JSON");
             if filter.uuid == perspective.uuid && filter.subscription_id == id {
                 return filter;
             }
