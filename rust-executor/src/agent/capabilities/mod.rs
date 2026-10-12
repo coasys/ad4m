@@ -430,14 +430,36 @@ pub fn may_approve(session: &Session, target: &RequestTarget) -> bool {
         })
 }
 
+/// Approves a pending request with `auth_info_extended.auth` as the operator, which holds
+/// every capability: [`permit_capability_within`] with no limit beyond the request's agent.
+/// For the operator and dev-mode auto-permit; a session approves with its own capabilities.
+pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
+    permit_capability_within(auth_info_extended, &[ALL_CAPABILITY.clone()])
+}
+
 /// Approves a pending request with `auth_info_extended.auth`, which may grant less than the
 /// app asked for, and returns the code the app redeems: for the approver only. The request's
-/// agent stays the one it named. The caller has checked [`may_approve`].
-pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
+/// agent stays the one it named. The caller has checked [`may_approve`]. An approver grants
+/// no more than it holds itself (`approver`, its session's capabilities): an app with
+/// AGENT_PERMIT approves only within its own grant, so it cannot mint a wider one.
+pub fn permit_capability_within(
+    auth_info_extended: AuthInfoExtended,
+    approver: &[Capability],
+) -> Result<String, String> {
+    let mut auth = auth_info_extended.auth;
+    if let Some(approved) = &auth.capabilities {
+        let caps = caps_within(approver, approved);
+        if caps.is_empty() {
+            return Err(
+                "None of the approved capabilities is within the approver's own".to_string(),
+            );
+        }
+        auth.capabilities = Some(caps);
+    }
     let code = gen_random_digits();
     PendingRequests::global().approve(
         &auth_info_extended.request_id,
-        auth_info_extended.auth,
+        auth,
         Secret::new(code.clone()),
         now(),
     )?;
@@ -446,19 +468,23 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
 
 /// What a grant on `agent` may hold of `approved` (D13): all of it on the main agent, which
 /// holds every capability; on a managed agent, only what that agent holds itself (its user's
-/// capabilities). A capability that one of the agent's covers stays; a wider one (`*`)
-/// narrows to the agent's capabilities it covers.
+/// capabilities).
 pub fn grant_caps_for(agent: &AgentContext, approved: &[Capability]) -> Vec<Capability> {
     if agent.is_main_agent() {
         return approved.to_vec();
     }
-    let own = get_user_default_capabilities();
+    caps_within(&get_user_default_capabilities(), approved)
+}
+
+/// The part of `approved` that `held` covers: a capability that one of `held` covers stays;
+/// a wider one (`*`) narrows to the capabilities of `held` it covers.
+pub fn caps_within(held: &[Capability], approved: &[Capability]) -> Vec<Capability> {
     let mut caps: Vec<Capability> = approved
         .iter()
-        .filter(|cap| capability_matches(&own, cap))
+        .filter(|cap| capability_matches(held, cap))
         .cloned()
         .collect();
-    for cap in &own {
+    for cap in held {
         if capability_matches(approved, cap) && !capability_matches(&caps, cap) {
             caps.push(cap.clone());
         }

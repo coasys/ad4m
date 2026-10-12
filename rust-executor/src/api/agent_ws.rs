@@ -632,8 +632,17 @@ async fn permit_capability_handler(
     if !may_approve(&ctx.session, &target) {
         return Err(missing());
     }
+    // An approver grants no more than it holds itself.
+    let held = ctx.session.capabilities();
+    if let Some(approved) = &auth.auth.capabilities {
+        if crate::agent::capabilities::caps_within(&held, approved).is_empty() {
+            return Err(WsRpcError::forbidden(
+                "None of the approved capabilities is within this session's own",
+            ));
+        }
+    }
     let random_number_challenge =
-        crate::agent::capabilities::permit_capability(auth).map_err(|_| missing())?;
+        crate::agent::capabilities::permit_capability_within(auth, &held).map_err(|_| missing())?;
     Ok(Value::String(random_number_challenge))
 }
 
@@ -1575,13 +1584,24 @@ mod capability_request_tests {
         );
 
         // A request for the main agent: no user approves it; the operator and a main-agent
-        // app that holds AGENT_PERMIT do.
+        // app that holds AGENT_PERMIT do (within what the app holds itself).
         let for_main = request(None, &caps).await;
         let refused = permit(alice.clone(), &for_main, &caps).await.unwrap_err();
         assert_eq!(refused.0, 404, "{}", refused.1);
         assert!(!PendingRequests::global().is_approved(&for_main));
-        assert!(permit(
+        let refused = permit(
             main_agent_app(vec![AGENT_PERMIT_CAPABILITY.clone()]),
+            &for_main,
+            &caps,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.0, 403, "it does not hold AGENT_READ: {}", refused.1);
+        assert!(permit(
+            main_agent_app(vec![
+                AGENT_PERMIT_CAPABILITY.clone(),
+                AGENT_READ_CAPABILITY.clone()
+            ]),
             &for_main,
             &caps
         )
@@ -1617,7 +1637,10 @@ mod capability_request_tests {
     async fn an_approver_grants_no_more_than_it_holds() {
         setup();
         let (alice_email, alice) = user("attenuate-alice");
-        let narrow = [AGENT_READ_CAPABILITY.clone(), AGENT_PERMIT_CAPABILITY.clone()];
+        let narrow = [
+            AGENT_READ_CAPABILITY.clone(),
+            AGENT_PERMIT_CAPABILITY.clone(),
+        ];
         let first = request(Some(&alice_email), &narrow).await;
         let code = permit(alice, &first, &narrow).await.unwrap();
         let app = open(&redeem(&first, &code).await.unwrap());
