@@ -1601,6 +1601,22 @@ mod pass_session_tests {
         }
     }
 
+    // The pass reaches its own perspective, not the rest of its user's: a class named `List`
+    // offers `list_perspectives` through the class-prefix filter, and the perspective's
+    // config and SHACL are shared graph state that neighbourhood peers write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_pass_lists_no_other_perspective_of_its_user() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let other = fixture("Diary", DIARY_SDNA, Some(A_DID)).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        let listed = handler
+            .call_tool_by_name("list_perspectives", json!({}))
+            .await
+            .unwrap_or_else(|e| e.to_string());
+        assert!(!listed.contains(&other.uuid), "{listed}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_pass_on_an_unowned_perspective_cannot_reach_a_users_perspective() {
         let unowned = fixture("Note", NOTE_SDNA, None).await;
