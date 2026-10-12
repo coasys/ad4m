@@ -1299,11 +1299,14 @@ pub(crate) async fn pass_mcp_context(
 /// operator.
 ///
 /// - a managed user who owns it (the pass's own user, if it is one of them) acts as that
-///   user's agent, with the default user capabilities;
+///   user's agent;
 /// - otherwise (unowned, owned by the main agent, or by a DID that is no managed user) the
-///   main agent, limited to querying this perspective. The perspective guard lets the main
-///   agent reach its own and unowned perspectives only, so the pass reaches no user's
-///   perspective.
+///   main agent. The perspective guard lets the main agent reach its own and unowned
+///   perspectives only, so the pass reaches no user's perspective.
+///
+/// Either way the session may only query this perspective: a tool outside it (a static tool
+/// whose name shares an offered class's prefix, `list_perspectives` for a class `List`)
+/// reaches nothing else of the agent's. The pass writes through its proposal buffer.
 ///
 /// [`Session::in_process`]: crate::agent::session::Session::in_process
 async fn pass_owner_session(
@@ -1331,18 +1334,12 @@ async fn pass_owner_session(
         .iter()
         .find(|did| context.managed_did() == Some(did.as_str()));
     let owner = own_user.or_else(|| users.first().filter(|_| !main_owns));
+    let caps = vec![crate::agent::capabilities::perspective_query_capability(
+        vec![handle.uuid],
+    )];
     match owner {
-        Some(did) => Session::in_process(
-            AgentContext::managed(did.clone()),
-            crate::agent::capabilities::get_user_default_capabilities(),
-        )
-        .with_did(did),
-        None => Session::in_process(
-            AgentContext::main_agent(),
-            vec![crate::agent::capabilities::perspective_query_capability(
-                vec![handle.uuid],
-            )],
-        ),
+        Some(did) => Session::in_process(AgentContext::managed(did.clone()), caps).with_did(did),
+        None => Session::in_process(AgentContext::main_agent(), caps),
     }
 }
 
@@ -1599,6 +1596,22 @@ mod pass_session_tests {
             assert!(!answer.contains(B_SECRET), "{tool} read B: {answer}");
             assert!(!answer.contains(&b.uuid), "{tool} named B: {answer}");
         }
+    }
+
+    // The pass reaches its own perspective, not the rest of its user's: a class named `List`
+    // offers `list_perspectives` through the class-prefix filter, and the perspective's
+    // config and SHACL are shared graph state that neighbourhood peers write.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_pass_lists_no_other_perspective_of_its_user() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let other = fixture("Diary", DIARY_SDNA, Some(A_DID)).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        let listed = handler
+            .call_tool_by_name("list_perspectives", json!({}))
+            .await
+            .unwrap_or_else(|e| e.to_string());
+        assert!(!listed.contains(&other.uuid), "{listed}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
