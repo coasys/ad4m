@@ -288,11 +288,16 @@ pub async fn run_flow_consensus_pass(
     outcomes
 }
 
-/// Read this replica's own cached state for `instance_uri` — the value
-/// carried by the `Local` `currentState` link, if one is present.
+/// Read the viewer's own cached state for `instance_uri` — the value
+/// carried by the `Local` `currentState` link in the viewer's own Local
+/// graph, if one is present.
 ///
-/// `None` means the cache is absent: either no `currentState` link at all,
-/// or only `Shared` links a peer wrote before #987.
+/// `None` means the cache is absent: no `currentState` link in that graph,
+/// or `perspective` has no viewer. A `Shared` link a peer wrote before #987
+/// is not a cache, and neither is a `Local` one written before #1357: that
+/// one sits in the default graph, where every co-owner's view reads it, and
+/// it may be another co-owner's. Read as absent, it costs one silent
+/// catch-up, and the rewrite removes it (`write_local_current_state`).
 ///
 /// This read is raw links because it predates #1028.  Since #1028 landed on
 /// `dev`, hydration enforces the class's `local: true` flag itself — it drops
@@ -313,6 +318,9 @@ pub(crate) async fn local_cached_state(
     instance_uri: &str,
 ) -> anyhow::Result<Option<String>> {
     use ad4m_client::literal::{Literal, LiteralValue};
+    let Some(own_graph) = own_local_graph(perspective) else {
+        return Ok(None);
+    };
     let links = perspective
         .get_links(&LinkQuery {
             source: Some(instance_uri.to_string()),
@@ -322,7 +330,9 @@ pub(crate) async fn local_cached_state(
         .await?;
     let mut local_targets: Vec<String> = links
         .into_iter()
-        .filter(|l| l.status == Some(LinkStatus::Local))
+        .filter(|l| {
+            l.status == Some(LinkStatus::Local) && l.graph.as_deref() == Some(own_graph.as_str())
+        })
         .map(|l| l.data.target.clone())
         .collect();
     match local_targets.len() {
@@ -448,24 +458,40 @@ async fn has_local_cache(
 /// `resolved_as → "fired"` mark. `own` must be that agent's bookkeeping view
 /// ([`PerspectiveInstance::for_own_bookkeeping`]): the read-set comes from
 /// shared graphs and carries no Local link, so the marks are read beside it.
+///
+/// Only marks in the agent's own Local graph count. A mark written before
+/// #1357 sits in the default graph and may be another co-owner's, so it is
+/// read as absent, as [`local_cached_state`] reads a cache of that age.
 pub(crate) async fn own_fired_marks(
     own: &PerspectiveInstance,
     read_set: &ReadSet,
 ) -> anyhow::Result<HashSet<String>> {
     let mut marked = HashSet::new();
+    let Some(own_graph) = own_local_graph(own) else {
+        return Ok(marked);
+    };
     for proposal in &read_set.proposals {
-        let links = own
+        let mut links = own
             .get_links(&LinkQuery {
                 source: Some(proposal.uri.clone()),
                 predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
                 ..Default::default()
             })
             .await?;
+        links.retain(|l| l.graph.as_deref() == Some(own_graph.as_str()));
         if marked_fired(&links) {
             marked.insert(proposal.uri.clone());
         }
     }
     Ok(marked)
+}
+
+/// The Local graph of `perspective`'s viewer, where their cache and marks
+/// live (#1360). `None` without a viewer.
+fn own_local_graph(perspective: &PerspectiveInstance) -> Option<String> {
+    perspective
+        .viewer()
+        .map(crate::perspectives::sparql_store::local_graph_iri)
 }
 
 /// Write the cache and the marks in one batch, so a crash between them can
