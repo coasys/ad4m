@@ -237,6 +237,61 @@ async fn get_all_shacl_names_filters_the_reply() {
     assert_eq!(none, json!([]));
 }
 
+const TAG_SDNA: &str = r#"{
+  "target_class": "test://Tag",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"test://Tag"}
+  ],
+  "properties": [
+    {"path":"test://label","name":"label","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"test://label","target":"value"}]}
+  ]
+}"#;
+
+/// Names of a `getAllShacl` reply in the order the executor returned them.
+fn shape_names_in_order(reply: &Value) -> Vec<String> {
+    reply
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn get_all_shacl_names_keeps_the_perspective_order() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA), ("Tag", TAG_SDNA)])
+        .await;
+    let all = call(
+        "perspective.getAllShacl",
+        json!({ "uuid": p.0 }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    let all_names = shape_names_in_order(&all);
+    assert_eq!(all_names.len(), 3, "{all_names:?}");
+
+    // Ask for two of the three, in the reverse of the perspective's order:
+    // the reply follows the perspective, not the request.
+    let unwanted = &all_names[1];
+    let mut requested: Vec<&String> = all_names.iter().filter(|n| *n != unwanted).collect();
+    requested.reverse();
+    let filtered = call(
+        "perspective.getAllShacl",
+        json!({ "uuid": p.0, "names": requested }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    let expected: Vec<String> = all_names
+        .iter()
+        .filter(|n| *n != unwanted)
+        .cloned()
+        .collect();
+    assert_eq!(shape_names_in_order(&filtered), expected);
+}
+
 #[tokio::test]
 async fn get_all_shacl_rejects_malformed_names() {
     let p = registered_perspective(&[]).await;
@@ -267,8 +322,13 @@ async fn agents_by_dids_aligns_with_input_and_matches_by_did() {
     let single = call("agent.byDid", json!({ "did": me }), admin_ctx())
         .await
         .unwrap();
-    // The test agent has a DID but no stored profile, so `single` may be
-    // `null`; the point is that each entry equals the single-item reply.
+    // The test agent's own DID resolves to its profile (`{did, ...}`), not
+    // `null`; asserting that keeps the comparison below from passing on two
+    // `null`s if the fixture changes. Each entry must equal the single reply.
+    assert!(
+        single.is_object() && single["did"] == json!(me),
+        "the executor's own agent resolves: {single}"
+    );
 
     let many = call(
         "agent.byDIDs",
