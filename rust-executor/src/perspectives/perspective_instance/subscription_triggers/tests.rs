@@ -751,7 +751,8 @@ async fn a_batch_without_its_links_falls_back_to_predicates() {
 
 /// A trigger over several classes (the shape #1238's union subscription
 /// hands over): a create of either class matches, a create of a third class
-/// does not. Built directly, as dev has no union subscribe.
+/// does not. Built directly; `union_model_subscription_*` in
+/// `perspective_instance_subscription_tests.rs` cover the subscribe path.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trigger_over_two_classes_matches_a_create_of_either() {
     let mut p = blog().await;

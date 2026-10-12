@@ -5976,7 +5976,11 @@ impl PerspectiveInstance {
         };
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
-        let trigger = self.build_model_trigger([class_name.as_str()], &query_json, &initial_result);
+        let trigger = self.build_model_trigger(
+            classes.names().iter().map(String::as_str),
+            &query_json,
+            &initial_result,
+        );
 
         // 3. Check for existing subscription with same params
         let existing_subscription = {

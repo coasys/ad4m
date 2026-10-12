@@ -248,11 +248,12 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
             )
             .await
             .unwrap_or_else(|e| panic!("create_subject({class}): {e}"));
-        // Only the predicate one class declares is reported as changed.
+        // Only a link on the predicate one class declares is reported as
+        // written, so the trigger must hold that class's rules.
+        let mut writes = subscription_triggers::Writes::new();
+        writes.record(base, changed, "literal://string:edited");
         perspective
-            .check_subscribed_queries(ChangedPredicates::Specific(HashSet::from([
-                changed.to_string()
-            ])))
+            .check_subscribed_queries(ChangedPredicates::Specific(writes))
             .await;
         let push = next_push_for(&mut rx, &perspective.uuid, &id).await;
         assert!(
@@ -266,7 +267,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
 /// A diff whose changed predicates are outside every requested class's trigger
 /// set does not re-run a union subscription. The Task is written for real, so
 /// the query's result *has* changed: a re-run would push it. Reporting only
-/// `ns://unrelated` must therefore produce no push, which an empty
+/// a link on `ns://unrelated` must therefore produce no push, which an empty
 /// ("re-run on every write") trigger set would.
 #[tokio::test(flavor = "multi_thread")]
 async fn union_model_subscription_ignores_a_write_outside_its_classes() {
@@ -298,9 +299,15 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         .await
         .expect("create_subject(Task)");
     perspective
-        .check_subscribed_queries(ChangedPredicates::Specific(HashSet::from([
-            "ns://unrelated".to_string(),
-        ])))
+        .check_subscribed_queries(ChangedPredicates::Specific({
+            let mut writes = subscription_triggers::Writes::new();
+            writes.record(
+                "ad4m://task/unrelated-diff",
+                "ns://unrelated",
+                "literal://string:x",
+            );
+            writes
+        }))
         .await;
 
     let quiet = tokio::time::timeout(Duration::from_millis(1500), async {
