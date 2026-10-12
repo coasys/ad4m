@@ -549,6 +549,16 @@ mod resolution_tests {
             let err = Session::open(&token, &admin(), ListenerReach::Network).unwrap_err();
             assert!(matches!(err, AuthError::NoIdentity(_)), "{ghost}: {err:?}");
         }
+        // A key named by its DID that no user owns (a signup that failed after the key was
+        // made): the key alone is no agent.
+        let orphan = crate::wallet::wallet_backend()
+            .generate_keypair_named_by_did()
+            .unwrap();
+        let orphan_token = crate::test_utils::resigned_token(&token, |claims| {
+            claims["sub"] = serde_json::json!(orphan)
+        });
+        let err = Session::open(&orphan_token, &admin(), ListenerReach::Network).unwrap_err();
+        assert!(matches!(err, AuthError::NoIdentity(_)), "{orphan}: {err:?}");
         // Nor does a user token for an email no user has get minted at all.
         assert!(crate::user_management::generate_user_jwt("ghost@example.org", "test").is_err());
     }
