@@ -9,6 +9,7 @@ use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
 use crate::types::*;
 
+use super::guards::{refuse_user_session, session_agent_context};
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -134,6 +135,9 @@ async fn get_language_source(params: Value, ctx: Arc<RequestContext>) -> Result<
 async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads `languagePath` from any path on the host and publishes the file signed by the
+    // node's main agent.
+    refuse_user_session(&ctx, "language.publish")?;
 
     let body: PublishLanguageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -242,9 +246,14 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let content = serde_json::to_value(&input)
         .map_err(|e| WsRpcError::internal(format!("Failed to serialize language input: {}", e)))?;
 
-    let agent_context = crate::agent::AgentContext::main_agent();
+    // Users template link languages to create neighbourhoods, so this call stays open to
+    // them. A user session publishes as the user, never as the node's main agent.
     controller
-        .expression_create(&language_language_address, content, &agent_context)
+        .expression_create(
+            &language_language_address,
+            content,
+            &session_agent_context(&ctx),
+        )
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
 
@@ -268,6 +277,8 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &LANGUAGE_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Installed languages and their settings are shared by every user of the node.
+    refuse_user_session(&ctx, "language.remove")?;
 
     let address = params.require_str("address")?;
     let mut controller = LanguageController::global_instance();
@@ -282,6 +293,7 @@ async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 async fn write_settings(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &LANGUAGE_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "language.writeSettings")?;
 
     let address = params.require_str("address")?;
     let body: LanguageSettingsWrapper = serde_json::from_value(params.clone())

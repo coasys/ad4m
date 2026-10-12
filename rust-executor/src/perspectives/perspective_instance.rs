@@ -2,11 +2,11 @@ use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::parse_shacl_to_links;
+use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
-use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
+use crate::agent::{AgentContext, AgentService};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
@@ -23,6 +23,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
+use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
@@ -435,7 +436,7 @@ pub struct PerspectiveMemoryStats {
 /// no JSON metadata is held here.
 #[derive(Clone)]
 struct ModelSubscriptionParams {
-    class_name: String,
+    classes: super::model_query::QueryClasses,
     query_json: String,
     /// Which writes re-run it; holds the nodes of `last_result`.
     trigger: subscription_triggers::ModelTrigger,
@@ -1895,6 +1896,9 @@ impl PerspectiveInstance {
         }
 
         link_expression.data.validate()?;
+        // A flow definition's rule this replica could not read back is
+        // refused here, not stored and refused at every edge (#1144).
+        check_consensus_rule_links([&link_expression.data])?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
@@ -1949,6 +1953,7 @@ impl PerspectiveInstance {
         for link in &links {
             link.validate()?;
         }
+        check_consensus_rule_links(&links)?;
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
@@ -2037,6 +2042,7 @@ impl PerspectiveInstance {
         for link in &addition_links {
             link.validate()?;
         }
+        check_consensus_rule_links(&addition_links)?;
         let additions = addition_links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context))
@@ -2156,6 +2162,7 @@ impl PerspectiveInstance {
             }
         };
 
+        check_consensus_rule_links([&new_link])?;
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
@@ -3912,11 +3919,35 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// [`Self::model_query`] over one class or a union of classes (#1238).
+    pub async fn model_query_classes(
+        &self,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await
+    }
+
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
     async fn model_query_within(
         &self,
         class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_classes_within(&classes, query_json, shape_wait)
+            .await
+    }
+
+    /// [`Self::model_query_within`] over one class or a union of classes
+    /// (#1238, [`super::model_query::execute_union_query`]). Every class the
+    /// union names is waited for under the one budget, as an included class is.
+    pub(super) async fn model_query_classes_within(
+        &self,
+        classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
@@ -3939,9 +3970,15 @@ impl PerspectiveInstance {
         // its includes reach get whatever this wait leaves (see the retry
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
-        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
+        let mut shapes = Vec::new();
+        for class_name in classes.names() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            shapes.push((
+                class_name.clone(),
+                self.get_shape_or_wait(class_name, remaining).await?,
+            ));
+        }
         let resolver = self.shape_resolver();
-        let shape = resolver.get_shape(class_name)?;
 
         if let Some(filter) = produced_by_flow {
             let valid = super::flow_instance::produced::flow_valid_outputs(
@@ -3950,16 +3987,18 @@ impl PerspectiveInstance {
                 filter.state.as_deref(),
             )
             .await?;
-            // Only outputs committed as the queried class pass; see
+            // Only outputs committed as a queried class pass; see
             // `output_matches_class` for why conformance alone is not enough.
             let allowed: std::collections::BTreeSet<String> = valid
                 .into_iter()
                 .filter(|v| {
-                    super::flow_instance::produced::output_matches_class(
-                        &v.output,
-                        class_name,
-                        &shape.target_class,
-                    )
+                    shapes.iter().any(|(class_name, shape)| {
+                        super::flow_instance::produced::output_matches_class(
+                            &v.output,
+                            class_name,
+                            &shape.target_class,
+                        )
+                    })
                 })
                 .map(|v| v.output.id)
                 .collect();
@@ -3994,14 +4033,27 @@ impl PerspectiveInstance {
         // `get_shape_or_wait` does not wait there.
         let mut waited_for: HashSet<String> = HashSet::new();
         let result = loop {
-            let err = match super::model_query::execute_model_query(
-                &self.sparql_store,
-                shape.as_ref(),
-                &query_input,
-                &resolver,
-            )
-            .await
-            {
+            let run = match classes {
+                super::model_query::QueryClasses::One(_) => {
+                    super::model_query::execute_model_query(
+                        &self.sparql_store,
+                        shapes[0].1.as_ref(),
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+                super::model_query::QueryClasses::Union(names) => {
+                    super::model_query::execute_union_query(
+                        &self.sparql_store,
+                        names,
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+            };
+            let err = match run {
                 Ok(result) => break result,
                 Err(err) => err,
             };
@@ -4281,19 +4333,21 @@ impl PerspectiveInstance {
         });
     }
 
-    fn all_notifications_for_perspective_id(uuid: String) -> Result<Vec<Notification>, AnyError> {
-        Ok(Ad4mDb::with_global_instance(|db| db.get_notifications())?
-            .into_iter()
-            .filter(|n| n.perspective_ids.contains(&uuid))
-            .collect())
-    }
-
-    async fn calc_notification_trigger_matches(
+    pub(crate) async fn calc_notification_trigger_matches(
         &self,
     ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
         let uuid = self.uuid.clone();
 
-        let notifications = Self::all_notifications_for_perspective_id(uuid.clone())?;
+        let handle = self.persisted.lock().await.clone();
+        // No agent, no owner: nothing fires.
+        let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) else {
+            return Ok(BTreeMap::new());
+        };
+        let notifications = notifications_to_fire(
+            Ad4mDb::with_global_instance(|db| db.get_notifications())?,
+            &handle,
+            &main_agent_did,
+        );
         //log::info!("🔔 NOTIFICATIONS: Found {} notifications for perspective {}", notifications.len(), uuid);
 
         //log::info!("🔔 NOTIFICATIONS: All triggers:\n{}", notifications.iter()
@@ -4301,22 +4355,19 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        // Cache key must include both trigger and user_email for deduplication
-        let mut trigger_cache: HashMap<(String, Option<String>), Vec<serde_json::Value>> =
-            HashMap::new();
+        // Notifications with the same trigger share one query result.
+        let mut trigger_cache: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
         for n in notifications {
             //log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
-            let cache_key = (n.trigger.clone(), n.user_email.clone());
+            let cache_key = n.trigger.clone();
             if let Some(cached_matches) = trigger_cache.get(&cache_key) {
                 //log::info!("🔔 NOTIFICATIONS: Using cached matches for notification for perspective {}: {}", uuid, n.trigger);
                 result_map.insert(n.clone(), cached_matches.clone());
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                // Handle errors per-notification to prevent one user's DID failure from
-                // silencing all notifications. This can happen with orphaned notifications
-                // from deleted users or corrupted data.
+                // One failing trigger must not silence the other notifications.
                 match {
                     let query = n.trigger.clone();
                     let result_json = self.sparql_store.query(&query);
@@ -4332,8 +4383,8 @@ impl PerspectiveInstance {
                     }
                     Err(e) => {
                         log::error!(
-                            "Failed to query notification for user {:?} in perspective {}: {:?}. Query: {}. Skipping this notification.",
-                            n.user_email,
+                            "Failed to query notification for owner {} in perspective {}: {:?}. Query: {}. Skipping this notification.",
+                            n.owner_did,
                             uuid,
                             e,
                             n.trigger
@@ -5882,18 +5933,32 @@ impl PerspectiveInstance {
     /// registers a subscription, and runs the initial model query — all in one call.
     /// When link changes match the trigger predicates, `execute_model_query` is
     /// re-run in Rust and the updated results are pushed to the client.
+    ///
+    /// `classes` is one class or a union (#1238). A union is one subscription:
+    /// it re-runs when a diff touches the trigger set of any class it names.
     pub async fn model_subscribe_and_query(
         &self,
-        class_name: String,
+        classes: super::model_query::QueryClasses,
         query_json: String,
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json).await?;
+        let initial_result = self
+            .model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await?;
 
         // 2. Build trigger SPARQL from shape predicates resolved through the cache.
-        let trigger_predicates =
-            self.build_model_trigger_predicates(&class_name, Some(&query_json));
+        //    Each class contributes its own trigger set; the matcher below is
+        //    predicate-only, so the sets meet as their union.
+        let mut trigger_predicates: Vec<String> = classes
+            .names()
+            .iter()
+            .flat_map(|class_name| {
+                self.build_model_trigger_predicates(class_name, Some(&query_json))
+            })
+            .collect();
+        trigger_predicates.sort();
+        trigger_predicates.dedup();
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
@@ -5920,7 +5985,7 @@ impl PerspectiveInstance {
                 .iter()
                 .find(|(_, q)| {
                     if let Some(ref params) = q.model_query_params {
-                        params.class_name == class_name
+                        params.classes == classes
                             && params.query_json == query_json
                             && q.user_email == user_email
                     } else {
@@ -5959,7 +6024,7 @@ impl PerspectiveInstance {
             user_email,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
-                class_name,
+                classes,
                 query_json,
                 trigger,
             }),
@@ -6202,7 +6267,11 @@ impl PerspectiveInstance {
                 // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
-                        .model_query_within(&params.class_name, &params.query_json, Duration::ZERO)
+                        .model_query_classes_within(
+                            &params.classes,
+                            &params.query_json,
+                            Duration::ZERO,
+                        )
                         .await
                     {
                         Ok(r) => r,
