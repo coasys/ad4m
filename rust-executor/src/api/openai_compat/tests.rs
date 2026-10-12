@@ -653,12 +653,12 @@ fn seam_records_calls_and_resets() {
     assert_eq!(test_seam::call_count(), 0);
 
     test_seam::force_result(test_seam::ForcedResult::Success);
-    let _ = crate::billing::bill_compute("a@ex.test", 1.5, "ai_prompt", Some("v1/chat"));
-    let _ = crate::billing::bill_compute("a@ex.test", 3.0, "ai_tts", None);
+    let _ = crate::billing::bill_compute("did:key:a", 1.5, "ai_prompt", Some("v1/chat"));
+    let _ = crate::billing::bill_compute("did:key:a", 3.0, "ai_tts", None);
 
     let calls = test_seam::calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].email, "a@ex.test");
+    assert_eq!(calls[0].agent_did, "did:key:a");
     assert_eq!(calls[0].amount, 1.5);
     assert_eq!(calls[0].operation, "ai_prompt");
     assert_eq!(calls[0].summary.as_deref(), Some("v1/chat"));
@@ -674,7 +674,7 @@ fn seam_can_force_insufficient_credits() {
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::InsufficientCredits);
 
-    let r = crate::billing::bill_compute("x@ex.test", 1.0, "ai_prompt", None);
+    let r = crate::billing::bill_compute("did:key:x", 1.0, "ai_prompt", None);
     assert!(matches!(r, Err(BillingError::InsufficientCredits)));
 
     // Even a forced-error call is still counted — that's the whole point:
@@ -765,7 +765,7 @@ async fn transcriptions_handler_does_not_bill() {
 //
 // Handler-driven router tests can't reach the billing path for speech
 // end-to-end here because the handler gates billing on the request's
-// user (`auth.user_email()`), which requires a user session — a user JWT
+// user (`auth.user_did()`), which requires a user session — a user JWT
 // and a user key in the Wallet (heavy). The admin credential token used
 // by the router tests deliberately bypasses that path.
 //
@@ -1031,7 +1031,7 @@ async fn stream_completion_bills_once_on_success() {
     // here, so nothing can decode one to find the user.
     let (tx, rx) = tokio::sync::oneshot::channel();
     AIService::bill_and_forward_stream_result(
-        Some("billing-user@ex.test".to_string()),
+        Some("did:key:billing-user".to_string()),
         "gpt-4",
         Ok(sample_prompt_result()),
         tx,
@@ -1048,7 +1048,7 @@ async fn stream_completion_bills_once_on_success() {
         1,
         "stream completion must bill exactly once; got calls: {calls:?}"
     );
-    assert_eq!(calls[0].email, "billing-user@ex.test");
+    assert_eq!(calls[0].agent_did, "did:key:billing-user");
     assert!(
         (calls[0].amount - 7.5).abs() < f64::EPSILON,
         "15 tokens @ 0.5"

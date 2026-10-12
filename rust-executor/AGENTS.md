@@ -36,7 +36,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `prolog_service/` | Scryer Prolog engine pools. **Disabled by default** (`PROLOG_MODE`), kept as an option | `src/prolog_service/AGENTS.md` |
 | `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
-| `agent/` | Agent keys/DID, signing, multi-user (managed users by email), `capabilities/` (auth tokens, capability defs) | — |
+| `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
 | `db.rs` | All SQLite access (`rusqlite`), single `impl Ad4mDb`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | — |
 | `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
 | `pubsub.rs` | Global broadcast bus + topic constants; feeds `api/events_ws.rs` | — |
@@ -59,14 +59,32 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   language runtime, so third-party language code reaches every op: an op that signs must sign as
   `get_runtime_agent_context()`, never as the main agent directly.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
-- **Agents and sessions**: an executor hosts N agents. `AgentContext` (`agent/mod.rs`) names one:
-  the main agent (agent #0, `user_email: None`, `is_main_agent()`), or a user's managed agent.
+- **Agents and sessions**: an executor hosts N agents, and **an agent is its DID**.
+  `AgentContext` (`agent/mod.rs`) is `Main` (agent #0, `is_main_agent()`) or `Managed { did }`
+  (`managed_did()`). An email is only the login name of the user account that owns a managed
+  agent: it resolves to the DID once, where a caller names an address (login, signup, email
+  verification, `runtime.computeLog { userEmail }`, the language host's `*ForUser(email)` ops) via
+  `AgentService::did_for_email` / `managed_agent_for_email`. Code that needs an address (SMTP,
+  hosting info, the profile directory) looks it up with `AgentService::email_for_did`; nothing
+  else carries an email. `users.did` is unique (partial index, empty DIDs excluded).
   `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
   credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
-  (a grant: a token without `sub` acts as the main agent, with `sub` as that user's agent), or
+  (a grant: a token without `sub` acts as the main agent; a user token's `sub` is the agent's DID,
+  or the user's email in tokens minted before D16, and `Session::open` resolves either), or
   `Principal::Anonymous`. Capabilities, token id, expiry and the agent's DID are `Session` fields.
-  Read identity with `acts_as()` / `acts_as_did()` / `user()` / `is_operator()`; never decode the
-  token again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+  Read identity with `acts_as()` / `acts_as_did()` / `managed_did()` / `is_operator()`; never
+  decode the token again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+- **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
+  `AgentService::create_managed_agent_key` creates one under its DID,
+  `AgentService::wallet_key_for_did` finds it (cached; it accepts a key under the user's email only
+  if that key derives the DID: a shared wallet cannot rename keys). On every unlock
+  `migrate_managed_key_names` renames keys an older executor named by email: copy under the DID,
+  check the copy derives it, save, remove the old name, save. A key that derives another DID keeps
+  its name and its user's sessions fail with `NoIdentity`.
+- **Billing** is per agent: `billing::bill_compute(agent_did, ..)`, `compute_log.agent_did`,
+  `payment_requests.agent_did` (moved from `user_email` at start by
+  `Ad4mDb::migrate_user_email_to_agent_did`). Credits stay on the user's `users` row, reached by
+  DID (`get_agent_credits`, `deduct_credits_and_log`).
 - **Capabilities**: every WS handler checks `ctx.require(&X_CAPABILITY)` itself
   (`agent/capabilities/defs.rs`); `Session::may` answers the same question as a `bool`. MCP tools
   check via `Ad4mMcpHandler::get_*_perspective`.

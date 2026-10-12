@@ -117,7 +117,7 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     if user_exists {
         match um::verify_credentials(&email, &body.password) {
             Ok(()) => {
-                let did = crate::agent::AgentService::get_user_did_by_email(&email)
+                let did = crate::agent::AgentService::did_for_email(&email)
                     .map_err(|e| WsRpcError::internal(e.to_string()))?;
                 return Ok(serde_json::json!({ "did": did, "success": true }));
             }
@@ -143,12 +143,11 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             direct_message_language: None,
             perspective: Some(DomainPerspective { links: vec![] }),
         };
-        AgentService::with_global_instance(|svc| svc.store_user_agent_profile(&email, &agent))
-            .map_err(|e| {
-                WsRpcError::internal(format!("Failed to store user agent profile: {}", e))
-            })?;
+        AgentService::store_managed_agent_profile(&did, &agent).map_err(|e| {
+            WsRpcError::internal(format!("Failed to store user agent profile: {}", e))
+        })?;
 
-        let ctx = AgentContext::for_user_email(email.clone());
+        let ctx = AgentContext::managed(did.clone());
         if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
             log::warn!("Failed to publish new user to agent language: {}", e);
         }

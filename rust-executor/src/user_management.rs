@@ -103,26 +103,13 @@ pub async fn send_verification_email(
     Ok(())
 }
 
-/// Create a new user: ensure key, get DID, save wallet, add to DB.
+/// Create a new user: create its managed agent's key, save the wallet, add the user to the DB.
+/// Returns the agent's DID.
 pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     check_executor_unlocked()?;
 
-    // Ensure user key exists
-    AgentService::ensure_user_key_exists(email)
-        .map_err(|e| format!("Failed to create user key: {}", e))?;
-
-    // Get DID
-    let did = AgentService::get_user_did_by_email(email)
-        .map_err(|e| format!("Failed to get user DID: {}", e))?;
-
-    // Save wallet
-    AgentService::with_global_instance(|s| {
-        if let Some(p) = &s.passphrase {
-            s.save(p.clone());
-        }
-    });
-
-    // Check if user already exists (local DB or shared DB)
+    // Check if user already exists (local DB or shared DB) before creating a key: a key made
+    // for an email that is taken would be an orphan in the wallet.
     let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
     if user_exists {
         return Err("User already exists".to_string());
@@ -138,6 +125,17 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
             return Err("User already exists".to_string());
         }
     }
+
+    // The agent's key, named by its DID
+    let did = AgentService::create_managed_agent_key(email)
+        .map_err(|e| format!("Failed to create user key: {}", e))?;
+
+    // Save wallet
+    AgentService::with_global_instance(|s| {
+        if let Some(p) = &s.passphrase {
+            s.save(p.clone());
+        }
+    });
 
     // Hash password once — use the same hash for both local and shared DB
     let password_hash =
@@ -200,7 +198,7 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     match local_result {
         Ok(true) => {
             // Local verification succeeded
-            if !AgentService::user_exists(email) {
+            if AgentService::managed_agent_for_email(email).is_err() {
                 return Err("User key not found on executor".to_string());
             }
             return Ok(());
@@ -215,16 +213,9 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     }
 
     // Shared DB fallback: user was created on another executor
-    let config = crate::config::get_global_config();
-    if config.db_backend.as_deref() != Some("shared") {
+    let Some(user_data) = shared_user_record(email)? else {
         return Err("Invalid credentials".to_string());
-    }
-
-    let backend = crate::db_backend::db_backend();
-    let user_data = backend
-        .get("shared:platform", "users", email)
-        .map_err(|e| format!("Shared DB lookup failed: {}", e))?
-        .ok_or_else(|| "Invalid credentials".to_string())?;
+    };
 
     // Extract password_hash from shared record and verify
     let stored_hash = user_data
@@ -238,24 +229,50 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
         return Err("Invalid credentials".to_string());
     }
 
-    // Ensure the user key exists in the shared wallet
-    if !AgentService::user_exists(email) {
-        AgentService::ensure_user_key_exists(email)
-            .map_err(|e| format!("Failed to create user key: {}", e))?;
-    }
-
-    // Import user to local DB for future logins
-    let user_did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
-    {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        if let Err(e) = db_ref.add_user_prehashed(email, user_did, stored_hash) {
-            log::warn!("Failed to import user to local DB: {}", e);
-        }
+    // Import user to local DB for future logins, then check its agent's key is reachable.
+    import_user_from_shared_db(email).map_err(|e| e.to_string())?;
+    if AgentService::managed_agent_for_email(email).is_err() {
+        return Err("User key not found on executor".to_string());
     }
 
     Ok(())
+}
+
+/// The record of `email` in the shared database, on an executor that has one.
+fn shared_user_record(email: &str) -> Result<Option<serde_json::Value>, String> {
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() != Some("shared") {
+        return Ok(None);
+    }
+    crate::db_backend::db_backend()
+        .get("shared:platform", "users", email)
+        .map_err(|e| format!("Shared DB lookup failed: {}", e))
+}
+
+/// Copies the user `email` from the shared database into the local `users` table, on an
+/// executor with a shared database, and returns the DID of the user's agent. `None` when
+/// there is no shared database or no such user there. A user created on another executor
+/// reaches this one only this way.
+pub fn import_user_from_shared_db(
+    email: &str,
+) -> Result<Option<String>, deno_core::error::AnyError> {
+    let Some(user_data) = shared_user_record(email).map_err(deno_core::anyhow::Error::msg)? else {
+        return Ok(None);
+    };
+    let did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
+    let stored_hash = user_data
+        .get("password_hash")
+        .and_then(|h| h.as_str())
+        .unwrap_or("");
+    if did.is_empty() {
+        return Ok(None);
+    }
+    if let Err(e) =
+        Ad4mDb::with_global_instance(|db| db.add_user_prehashed(email, did, stored_hash))
+    {
+        log::warn!("Failed to import user to local DB: {}", e);
+    }
+    Ok(Some(did.to_string()))
 }
 
 /// Full login flow: check multi-user, verify credentials, generate JWT.
@@ -312,7 +329,7 @@ pub fn verify_and_login(
     if !verified {
         return Err("Invalid verification code".to_string());
     }
-    if !AgentService::user_exists(email) {
+    if AgentService::managed_agent_for_email(email).is_err() {
         return Err("User key not found on executor".to_string());
     }
     generate_user_jwt(email, app_name)
@@ -325,7 +342,7 @@ pub fn user_exists(email: &str) -> Result<(), String> {
     if !db_exists {
         return Err("User not found".to_string());
     }
-    if !AgentService::user_exists(email) {
+    if AgentService::managed_agent_for_email(email).is_err() {
         return Err("User key not found on executor".to_string());
     }
     Ok(())
@@ -344,7 +361,7 @@ mod tests {
     /// long before `create_user` reaches it. Without it the *negative* direction —
     /// the run with the guard deleted, which is what proves the guard is
     /// load-bearing — panics on "AgentService not initialized" inside
-    /// `ensure_user_key_exists` and never reaches the row assertion. It would
+    /// `create_managed_agent_key` and never reaches the row assertion. It would
     /// still go red, but for the wrong reason, and a test that goes red for the
     /// wrong reason does not defend the claim in #982.
     fn setup() {

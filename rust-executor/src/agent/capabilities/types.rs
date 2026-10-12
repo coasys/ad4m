@@ -18,7 +18,9 @@ pub struct AuthInfo {
     pub app_url: Option<String>,
     pub app_icon_path: Option<String>,
     pub capabilities: Option<Vec<Capability>>,
-    pub user_email: Option<String>, // Email field for multi-user tokens
+    /// The user a multi-user token is minted for: the login name of a managed agent's
+    /// account. The token's `sub` carries the agent's DID; this stays as the account's name.
+    pub user_email: Option<String>,
 }
 
 impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
@@ -77,7 +79,9 @@ impl From<crate::types::ResourceInput> for Resource {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct Claims {
     iss: String,
-    pub sub: Option<String>, // User email - make public so we can access it
+    /// The managed agent a user token acts as: its DID. Tokens minted before agents were keyed
+    /// by DID carry the user's email here; `Session::open` resolves either.
+    pub sub: Option<String>,
     aud: String,
     exp: u64,
     iat: u64,
@@ -90,6 +94,7 @@ impl Claims {
         issuer: String,
         audience: String,
         expiration_time: u64,
+        sub: Option<String>,
         capabilities: AuthInfo,
     ) -> Self {
         let now = SystemTime::now();
@@ -102,7 +107,7 @@ impl Claims {
 
         Claims {
             iss: issuer,
-            sub: capabilities.user_email.clone(), // Set sub to user email
+            sub,
             aud: audience,
             exp: unix_timestamp + expiration_time,
             iat: unix_timestamp,

@@ -312,7 +312,11 @@ pub(crate) async fn build_event_stream_for(
     use tokio_stream::wrappers::BroadcastStream;
 
     let session_context = session.acts_as();
-    let user_email = session_context.user_email.clone();
+    // Hosting info names its user by the account's email: resolve the managed agent's once.
+    // An agent whose account does not resolve matches no user's info (fail closed).
+    let user_email = session_context
+        .managed_did()
+        .map(|did| crate::agent::AgentService::email_for_did(did).unwrap_or_default());
 
     // Clone the pre-resolved DID for each filter closure
     let d_persp_added = resolved_did.clone();
@@ -1791,7 +1795,7 @@ mod token_expiry_tests {
             .unwrap()
             .as_secs()
             - 3600;
-        let user = Principal::Agent(AgentContext::for_user_email(USER.into()));
+        let user = Principal::Agent(AgentContext::managed("did:key:events-user".into()));
         let expired = Session::for_test(user)
             .with_did("did:key:events-user")
             .expiring_at(an_hour_ago);
@@ -1803,7 +1807,7 @@ mod token_expiry_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        crate::agent::AgentService::ensure_user_key_exists(USER).unwrap();
+        crate::test_utils::create_test_user(USER);
         let token = crate::user_management::generate_user_jwt(USER, "test").unwrap();
         let session = Session::open(&token, &None, ListenerReach::Network).unwrap();
         assert!(next_event(session).await.is_some());
