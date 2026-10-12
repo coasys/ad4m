@@ -24,12 +24,12 @@ Handler shape today (`perspectives_ws.rs::add_link` is representative):
 ```rust
 async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;                       // ParamExt
-    check_capability(&ctx.capabilities, &perspective_update_capability(vec![uuid.clone()]))
+    ctx.require(&perspective_update_capability(vec![uuid.clone()]))
         .map_err(|e| WsRpcError::forbidden(e))?;                  // repeated in every handler
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = ctx.acts_as();                              // the session's user, or the main agent
+    let agent_context = ctx.acts_as();                              // the grant's agent, or the main agent
     ...
     Ok(serde_json::to_value(result)?)
 }
@@ -40,6 +40,13 @@ Until then: **every new handler must check a capability** (or be registered with
 explicit comment saying why not) and take `AgentContext` from the session
 (`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
+
+`RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`,
+the per-request `cancel_token`, and `auth_token` (read only by the interpretation pass; Plan 20
+PR 6 removes it). The RPC socket opens one per connection (`RequestContext::open`); REST and the
+OpenAI-compatible API take it as an axum extractor (`auth.rs`), which answers 401 for a token
+that opens no session and 503 while the wallet is locked. `auto_permit_cap_requests` is read
+from the global config where `agent.requestCapability` uses it.
 
 ## Protocol
 
@@ -52,7 +59,9 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   the perspective owner gets them, and the SDK routes them by `subscriptionId`.
 - Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
-  an open connection. Tests build sessions with `Session::for_test` / `for_test_expiring`.
+  an open connection. Tests build sessions with `Session::for_test(principal)` plus
+  `.with_caps(..)`, `.with_did(..)`, `.expiring_at(..)`, and contexts with
+  `RequestContext::{operator,app,user}_for_test` / `for_session`.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

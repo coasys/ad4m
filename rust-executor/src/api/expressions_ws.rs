@@ -26,7 +26,7 @@ async fn read_expression(
     ctx: Arc<RequestContext>,
     raw: bool,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
+    ctx.require(&EXPRESSION_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let url = params.require_str("url")?;
@@ -74,7 +74,7 @@ async fn get_many_expressions(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
+    ctx.require(&EXPRESSION_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: ExpressionManyRequest = serde_json::from_value(params)
@@ -111,7 +111,7 @@ async fn get_many_expressions(
 }
 
 async fn create_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_CREATE_CAPABILITY)
+    ctx.require(&EXPRESSION_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: CreateExpressionRequest = serde_json::from_value(params)
@@ -136,7 +136,7 @@ async fn create_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn get_interactions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
+    ctx.require(&EXPRESSION_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let url = params.require_str("url")?;
@@ -164,7 +164,7 @@ async fn get_interactions(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 async fn interact_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &EXPRESSION_UPDATE_CAPABILITY)
+    ctx.require(&EXPRESSION_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let url = params.require_str("url")?;

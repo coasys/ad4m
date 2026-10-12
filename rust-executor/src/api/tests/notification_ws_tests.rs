@@ -18,10 +18,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, perspective_query_capability, Capability, ListenerReach,
+    get_user_default_capabilities, perspective_query_capability, Capability,
     AGENT_UPDATE_CAPABILITY, ALL_CAPABILITY,
 };
-use crate::agent::session::{Principal, Session};
 use crate::agent::AgentService;
 use crate::api::events_ws::build_event_stream;
 use crate::api::ws_handler::{build_handler_map, WsRpcError};
@@ -727,16 +726,10 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     setup();
     let alice_did = user(ALICE);
     user(BOB);
-    // Only the stream's owner filter decides here: the session never ends.
-    let check = || {
-        Arc::new(Session::for_test(
-            Principal::Operator,
-            ListenerReach::Loopback,
-        ))
-    };
-    let mut alice = build_event_stream(check(), Some(ALICE.to_string()), false, false).await;
-    let mut bob = build_event_stream(check(), Some(BOB.to_string()), false, false).await;
-    let mut main = build_event_stream(check(), None, true, true).await;
+    // Only the stream's owner filter decides here: no session has a token that ends.
+    let mut alice = build_event_stream(user_ctx(ALICE).session, false, false).await;
+    let mut bob = build_event_stream(user_ctx(BOB).session, false, false).await;
+    let mut main = build_event_stream(admin_ctx().session, true, true).await;
     let pubsub = get_global_pubsub().await;
 
     pubsub

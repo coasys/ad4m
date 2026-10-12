@@ -1,24 +1,31 @@
 //! Who is calling: one [`Session`] per connection.
 //!
+//! An executor hosts N agents: the main agent (agent #0, owned by the operator) and one
+//! managed agent per user. Every session acts as one agent within a grant (a token and its
+//! capabilities), or is the operator, or is anonymous.
+//!
 //! [`Session::open`] is the one place that turns a token into an identity:
 //!
-//! - The admin credential is the operator. A node without one treats no token on a loopback
-//!   listener as the operator (#1059).
+//! - The admin credential is the operator. An executor without one treats no token on a
+//!   loopback listener as the operator (#1059).
 //! - Any other caller without a token is anonymous.
 //! - A token that is revoked, past its expiry or does not decode opens no session.
-//! - A token that names a user (`sub`) is that user, and the user's DID must load. Any other
-//!   token is an app. Both are limited to the token's capabilities.
+//! - A token that names a user (`sub`) acts as that user's managed agent, whose DID must
+//!   load. Any other token acts as the main agent. Both are limited to the token's
+//!   capabilities.
 //!
 //! A token that opens no session is refused where it arrives. [`Session::check`] runs again
 //! on every request and every delivered event. MCP still resolves its tokens itself
 //! (`capabilities_from_token`, `AgentContext::from_auth_token`).
 
+use std::sync::OnceLock;
+
 use super::capabilities::{
     anonymous_capabilities, capability_matches, check_token_revoked, decode_jwt,
-    is_admin_credential_token_on, Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY,
-    TOKEN_EXPIRY_LEEWAY_SECONDS,
+    is_admin_credential_token_on, require_capability, Capability, ListenerReach,
+    AGENT_AUTH_CAPABILITY, ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
-use super::AgentService;
+use super::{did_for_context, AgentContext, AgentService};
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. Revocation by id needs no
 /// change to the token format.
@@ -26,26 +33,17 @@ use super::AgentService;
 pub struct TokenId(pub String);
 
 /// The kind of caller behind a connection.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Principal {
-    /// The admin credential, or no token on a loopback listener of a node without one (#1059).
+    /// The executor's administrator role: the admin credential, or no token on a loopback
+    /// listener of an executor without one (#1059). Not an agent: it acts as the main agent,
+    /// which it owns.
     Operator,
-    /// A token without a user: an approved app. It acts as the node's agent, limited to `caps`.
-    App {
-        token_id: TokenId,
-        caps: Vec<Capability>,
-    },
-    /// A token that names a managed user. It acts as `did`, limited to `caps`, whatever the
-    /// multi-user setting says: a user token never acts as the node.
-    User {
-        token_id: TokenId,
-        email: String,
-        did: String,
-        caps: Vec<Capability>,
-    },
-    /// No token. `caps` hold what an anonymous caller may do: request a capability, and sign
-    /// up or log in when multi-user mode is on.
-    Anonymous { caps: Vec<Capability> },
+    /// A grant on one agent: a token without `sub` acts as the main agent, a token with
+    /// `sub` as that user's managed agent, whatever the multi-user setting says.
+    Agent(AgentContext),
+    /// No token: may request a capability, and sign up or log in when multi-user mode is on.
+    Anonymous,
 }
 
 /// Why a token opens no session.
@@ -59,8 +57,9 @@ pub enum AuthError {
     Invalid(String),
     /// The token names a user whose DID does not load.
     NoIdentity(String),
-    /// The node's wallet is locked, so no token can be checked yet. A state of the node, not
-    /// of the token: the token may be good, and the caller should try again after the unlock.
+    /// The executor's wallet is locked, so no token can be checked yet. A state of the
+    /// executor, not of the token: the token may be good, and the caller should try again
+    /// after the unlock.
     Locked,
 }
 
@@ -94,12 +93,12 @@ impl std::fmt::Display for AuthError {
     }
 }
 
-/// Leaves out the token: a formatted session must never carry a credential.
+/// Leaves out the raw token: a formatted session must never carry a credential.
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("principal", &self.principal)
-            .field("reach", &self.reach)
+            .field("token_id", &self.token_id)
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
     }
@@ -109,11 +108,18 @@ impl std::fmt::Debug for Session {
 #[derive(Clone)]
 pub struct Session {
     pub principal: Principal,
-    pub reach: ListenerReach,
+    /// What the session may do: every capability for the operator, the anonymous set, or the
+    /// token's capabilities.
+    caps: Vec<Capability>,
+    /// The grant's token id. `None` for the operator and anonymous callers.
+    token_id: Option<TokenId>,
+    /// The raw token: `apps_map` revokes by it, so `check` needs it. Empty without a token.
+    token: String,
     /// `None` for the operator and anonymous callers: they have no token that expires.
     expires_at: Option<u64>,
-    /// `apps_map` revokes by the raw token, so `check` needs it.
-    token: String,
+    /// The DID of the agent the session acts as. A managed agent's is set at open; the main
+    /// agent's is read once it exists (a socket can open before `agent.generate()`).
+    did: OnceLock<String>,
 }
 
 impl Session {
@@ -123,19 +129,17 @@ impl Session {
         admin_credential: &Option<String>,
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
-        let session = |principal, expires_at| Session {
-            principal,
-            reach,
-            expires_at,
-            token: token.to_string(),
-        };
-
         if is_admin_credential_token_on(token, admin_credential, reach) {
-            return Ok(session(Principal::Operator, None));
+            return Ok(Session::without_token(
+                Principal::Operator,
+                vec![ALL_CAPABILITY.clone()],
+            ));
         }
         if token.is_empty() {
-            let caps = anonymous_capabilities();
-            return Ok(session(Principal::Anonymous { caps }, None));
+            return Ok(Session::without_token(
+                Principal::Anonymous,
+                anonymous_capabilities(),
+            ));
         }
 
         // Checking a token needs the wallet's signing key. A locked wallet says nothing about
@@ -154,35 +158,47 @@ impl Session {
             }
         })?;
 
-        let token_id = TokenId(claims.nonce().to_string());
+        let token_id = Some(TokenId(claims.nonce().to_string()));
         let expires_at = Some(claims.expires_at());
-        let caps = claims
-            .capabilities
-            .capabilities
-            .unwrap_or_else(|| vec![AGENT_AUTH_CAPABILITY.clone()]);
-        let principal = match claims.sub {
+        let did = OnceLock::new();
+        let agent = match claims.sub {
             Some(email) => {
-                let did = AgentService::get_user_did_by_email(&email)
+                let user_did = AgentService::get_user_did_by_email(&email)
                     .map_err(|e| AuthError::NoIdentity(e.to_string()))?;
-                Principal::User {
-                    token_id,
-                    email,
-                    did,
-                    caps,
-                }
+                let _ = did.set(user_did);
+                AgentContext::for_user_email(email)
             }
-            None => Principal::App { token_id, caps },
+            None => AgentContext::main_agent(),
         };
-        Ok(session(principal, expires_at))
+        Ok(Session {
+            principal: Principal::Agent(agent),
+            caps: claims
+                .capabilities
+                .capabilities
+                .unwrap_or_else(|| vec![AGENT_AUTH_CAPABILITY.clone()]),
+            token_id,
+            token: token.to_string(),
+            expires_at,
+            did,
+        })
+    }
+
+    /// A session without a token: the operator or an anonymous caller.
+    fn without_token(principal: Principal, caps: Vec<Capability>) -> Session {
+        Session {
+            principal,
+            caps,
+            token_id: None,
+            token: String::new(),
+            expires_at: None,
+            did: OnceLock::new(),
+        }
     }
 
     /// Fails once the token is revoked or past its expiry. Needs no wallet: the signature was
     /// checked in [`Session::open`].
     pub fn check(&self) -> Result<(), AuthError> {
-        if matches!(
-            self.principal,
-            Principal::Operator | Principal::Anonymous { .. }
-        ) {
+        if !matches!(self.principal, Principal::Agent(_)) {
             return Ok(());
         }
         check_token_revoked(&self.token).map_err(|_| AuthError::Revoked)?;
@@ -200,64 +216,97 @@ impl Session {
 
     /// Whether the session's capabilities cover `expected`. The operator may do anything.
     pub fn may(&self, expected: &Capability) -> bool {
-        match &self.principal {
-            Principal::Operator => true,
-            Principal::App { caps, .. }
-            | Principal::User { caps, .. }
-            | Principal::Anonymous { caps } => capability_matches(caps, expected),
-        }
+        capability_matches(&self.caps, expected)
     }
 
-    /// The one test for "is this the node's owner?".
+    /// `Ok` if the session may do `expected`; otherwise the error a refused call reports.
+    pub fn require(&self, expected: &Capability) -> Result<(), String> {
+        require_capability(&self.caps, expected)
+    }
+
+    /// The one test for "is this the executor's administrator?".
     pub fn is_operator(&self) -> bool {
-        matches!(self.principal, Principal::Operator)
+        self.principal == Principal::Operator
+    }
+
+    /// Whether the caller presented a credential: the operator or a grant on an agent.
+    pub fn is_authenticated(&self) -> bool {
+        self.principal != Principal::Anonymous
     }
 
     /// The capabilities that checks run against: every capability for the operator.
     pub fn capabilities(&self) -> Vec<Capability> {
-        match &self.principal {
-            Principal::Operator => vec![ALL_CAPABILITY.clone()],
-            Principal::App { caps, .. }
-            | Principal::User { caps, .. }
-            | Principal::Anonymous { caps } => caps.clone(),
-        }
+        self.caps.clone()
     }
 
-    /// A user session's email and DID.
+    /// The email and DID of the user whose managed agent the session acts as.
     pub fn user(&self) -> Option<(&str, &str)> {
         match &self.principal {
-            Principal::User { email, did, .. } => Some((email, did)),
+            Principal::Agent(AgentContext {
+                user_email: Some(email),
+            }) => Some((email, self.acts_as_did()?)),
             _ => None,
         }
     }
 
-    /// The agent the session acts as: a user acts as that user, every other caller as the
-    /// node's main agent.
-    pub fn acts_as(&self) -> super::AgentContext {
+    /// The agent the session acts as: a grant's agent; the main agent for the operator,
+    /// which owns it, and for everyone else.
+    pub fn acts_as(&self) -> AgentContext {
         match &self.principal {
-            Principal::User { email, .. } => super::AgentContext::for_user_email(email.clone()),
-            _ => super::AgentContext::main_agent(),
+            Principal::Agent(agent) => agent.clone(),
+            Principal::Operator | Principal::Anonymous => AgentContext::main_agent(),
         }
     }
 
-    /// A session for `principal` that never expires and carries no token.
-    #[cfg(test)]
-    pub(crate) fn for_test(principal: Principal, reach: ListenerReach) -> Session {
+    /// The DID of the agent the session acts as. `None` for an anonymous caller, and for the
+    /// main agent until it has a DID.
+    pub fn acts_as_did(&self) -> Option<&str> {
+        if self.principal == Principal::Anonymous {
+            return None;
+        }
+        if self.did.get().is_none() {
+            if let Ok(did) = did_for_context(&self.acts_as()) {
+                let _ = self.did.set(did);
+            }
+        }
+        self.did.get().map(String::as_str)
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    /// A session for `principal` that never expires and carries no raw token: every
+    /// capability for the operator, none otherwise. A grant gets a token id.
+    pub(crate) fn for_test(principal: Principal) -> Session {
+        let caps = match principal {
+            Principal::Operator => vec![ALL_CAPABILITY.clone()],
+            _ => vec![],
+        };
+        let token_id = matches!(principal, Principal::Agent(_)).then(|| TokenId("test".into()));
         Session {
-            principal,
-            reach,
-            expires_at: None,
-            token: String::new(),
+            token_id,
+            ..Session::without_token(principal, caps)
         }
     }
 
-    /// A session for `principal` on a network listener whose token expires at `expires_at`
-    /// (Unix seconds). Only an app or a user session expires.
-    #[cfg(test)]
-    pub(crate) fn for_test_expiring(principal: Principal, expires_at: u64) -> Session {
+    /// This session with `caps` as its capabilities.
+    pub(crate) fn with_caps(self, caps: Vec<Capability>) -> Session {
+        Session { caps, ..self }
+    }
+
+    /// This session with `did` as the DID of the agent it acts as.
+    pub(crate) fn with_did(self, did: &str) -> Session {
+        Session {
+            did: OnceLock::from(did.to_string()),
+            ..self
+        }
+    }
+
+    /// This session with a token that expires at `expires_at` (Unix seconds).
+    pub(crate) fn expiring_at(self, expires_at: u64) -> Session {
         Session {
             expires_at: Some(expires_at),
-            ..Session::for_test(principal, ListenerReach::Network)
+            ..self
         }
     }
 }
@@ -328,7 +377,7 @@ mod resolution_tests {
 
         ensure_db();
         let remote = Session::open("", &None, ListenerReach::Network).unwrap();
-        assert!(matches!(remote.principal, Principal::Anonymous { .. }));
+        assert_eq!(remote.principal, Principal::Anonymous);
         assert!(
             !remote.may(&ALL_CAPABILITY),
             "#1059: no operator over the network"
@@ -336,11 +385,17 @@ mod resolution_tests {
     }
 
     #[test]
-    fn no_token_on_a_node_with_a_credential_is_anonymous() {
+    fn no_token_on_an_executor_with_a_credential_is_anonymous() {
         ensure_db();
         for reach in [ListenerReach::Loopback, ListenerReach::Network] {
             let session = Session::open("", &admin(), reach).unwrap();
-            assert!(matches!(session.principal, Principal::Anonymous { .. }));
+            assert_eq!(session.principal, Principal::Anonymous);
+            assert!(!session.is_authenticated());
+            assert_eq!(
+                session.acts_as_did(),
+                None,
+                "an anonymous caller acts as no agent"
+            );
             assert!(
                 session.may(&AGENT_AUTH_CAPABILITY),
                 "may request a capability"
@@ -397,12 +452,15 @@ mod resolution_tests {
     }
 
     #[test]
-    fn a_token_without_a_user_is_an_app_limited_to_its_capabilities_on_any_node() {
+    fn a_token_without_a_user_is_a_grant_on_the_main_agent_on_any_executor() {
         let token = app_token(Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
         for credential in [None, admin()] {
             for reach in [ListenerReach::Loopback, ListenerReach::Network] {
                 let session = Session::open(&token, &credential, reach).unwrap();
-                assert!(matches!(session.principal, Principal::App { .. }));
+                assert_eq!(
+                    session.principal,
+                    Principal::Agent(AgentContext::main_agent())
+                );
                 assert_eq!(
                     caps(&session),
                     caps_of(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()])
@@ -423,7 +481,7 @@ mod resolution_tests {
     }
 
     #[test]
-    fn a_user_token_is_the_user_with_their_did_whatever_the_multi_user_setting() {
+    fn a_user_token_is_a_grant_on_the_users_agent_whatever_the_multi_user_setting() {
         setup_wallet();
         setup_agent();
         let email = "session.user@example.org";
@@ -446,13 +504,12 @@ mod resolution_tests {
         drop(multi_user);
 
         for session in sessions {
-            match &session.principal {
-                Principal::User { email: e, did, .. } => {
-                    assert_eq!(e, email);
-                    assert_eq!(did, &expected_did);
-                }
-                other => panic!("expected a user, got {other:?}"),
-            }
+            assert_eq!(
+                session.principal,
+                Principal::Agent(AgentContext::for_user_email(email.to_string()))
+            );
+            assert_eq!(session.user(), Some((email, expected_did.as_str())));
+            assert_eq!(session.acts_as_did(), Some(expected_did.as_str()));
             assert_eq!(caps(&session), caps_of(get_user_default_capabilities()));
             assert!(!session.is_operator());
             assert!(
@@ -491,10 +548,10 @@ mod resolution_tests {
         assert!(matches!(err, AuthError::Invalid(_)), "{err:?}");
     }
 
-    // On a node without an admin credential, a string that is not a JWT is garbage, even
-    // the one another node uses as its credential.
+    // On an executor without an admin credential, a string that is not a JWT is garbage,
+    // even the one another executor uses as its credential.
     #[test]
-    fn a_credential_on_a_node_without_one_opens_no_session() {
+    fn a_credential_on_an_executor_without_one_opens_no_session() {
         setup_wallet();
         setup_agent();
         for reach in [ListenerReach::Loopback, ListenerReach::Network] {
@@ -515,7 +572,7 @@ mod resolution_tests {
             .unlock("session-locked-test")
             .expect("restore the shared wallet");
 
-        // A locked wallet is a state of the node, not of the token: its own outcome, with a
+        // A locked wallet is a state of the executor, not of the token: its own outcome, with a
         // close code that clients do not read as "log in again".
         let err = locked.unwrap_err();
         assert_eq!(err, AuthError::Locked);
@@ -554,19 +611,14 @@ mod resolution_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let app = || Principal::App {
-            token_id: TokenId("t".into()),
-            caps: vec![],
-        };
-        let user = || Principal::User {
-            token_id: TokenId("t".into()),
-            email: "expiring@example.org".into(),
-            did: "did:key:expiring".into(),
-            caps: vec![],
-        };
-        // Both principals that carry a token stop working at its expiry, apps and users alike.
-        for principal in [app, user] {
-            let session = |expires_at| Session::for_test_expiring(principal(), expires_at);
+        // A grant stops working at its token's expiry, on the main agent and on a managed one.
+        for agent in [
+            AgentContext::main_agent(),
+            AgentContext::for_user_email("expiring@example.org".into()),
+        ] {
+            let session = |expires_at| {
+                Session::for_test(Principal::Agent(agent.clone())).expiring_at(expires_at)
+            };
             assert!(session(now + 3600).check().is_ok());
             assert!(session(now - 10).check().is_ok(), "inside the leeway");
             let err = session(now - 3600).check().unwrap_err();
@@ -584,35 +636,89 @@ mod resolution_tests {
         let session = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
         let formatted = format!("{session:?}");
         assert!(!formatted.contains(&token), "{formatted}");
-        assert!(formatted.contains("App"), "{formatted}");
+        assert!(formatted.contains("Agent"), "{formatted}");
     }
 
     #[test]
-    fn a_user_acts_as_the_user_and_every_other_caller_as_the_main_agent() {
-        let session = |principal| Session::for_test(principal, ListenerReach::Network);
-        let user = session(Principal::User {
-            token_id: TokenId("t".into()),
-            email: "acts.as@example.org".into(),
-            did: "did:key:user".into(),
-            caps: vec![],
-        });
-        assert_eq!(
-            user.acts_as(),
-            crate::agent::AgentContext::for_user_email("acts.as@example.org".into())
-        );
+    fn a_grant_acts_as_its_agent_and_every_other_caller_as_the_main_agent() {
+        let managed = AgentContext::for_user_email("acts.as@example.org".into());
+        let user = Session::for_test(Principal::Agent(managed.clone()));
+        assert_eq!(user.acts_as(), managed);
 
         for principal in [
             Principal::Operator,
-            Principal::App {
-                token_id: TokenId("t".into()),
-                caps: vec![],
-            },
-            Principal::Anonymous { caps: vec![] },
+            Principal::Agent(AgentContext::main_agent()),
+            Principal::Anonymous,
         ] {
             assert_eq!(
-                session(principal).acts_as(),
-                crate::agent::AgentContext::main_agent()
+                Session::for_test(principal).acts_as(),
+                AgentContext::main_agent()
             );
         }
+    }
+
+    /// One agent model: a token for the main agent and a token for a managed agent open the
+    /// same kind of session, a grant on that agent. Only the agent differs. The operator is
+    /// no agent, but acts as the main agent it owns.
+    #[test]
+    fn tokens_for_the_main_agent_and_a_managed_agent_both_open_a_grant_on_their_agent() {
+        // Sets up the wallet and the agent, so the main agent's DID is read after it.
+        let main_token = app_token(Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]));
+        let main_did = AgentService::with_global_instance(|a| a.did.clone()).unwrap();
+        let email = "session.grant@example.org";
+        AgentService::ensure_user_key_exists(email).unwrap();
+        let user_did = AgentService::get_user_did_by_email(email).unwrap();
+
+        let main = Session::open(&main_token, &admin(), ListenerReach::Network).unwrap();
+        assert!(matches!(&main.principal, Principal::Agent(agent) if agent.is_main_agent()));
+        assert!(main.acts_as().is_main_agent());
+        assert_eq!(main.acts_as_did(), Some(main_did.as_str()));
+        assert_eq!(main.user(), None, "the main agent has no user");
+        assert_eq!(
+            caps(&main),
+            caps_of(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()])
+        );
+
+        let user_token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let user = Session::open(&user_token, &admin(), ListenerReach::Network).unwrap();
+        assert!(matches!(&user.principal, Principal::Agent(agent) if !agent.is_main_agent()));
+        assert_eq!(
+            user.acts_as(),
+            AgentContext::for_user_email(email.to_string())
+        );
+        assert_eq!(user.acts_as_did(), Some(user_did.as_str()));
+        assert_eq!(caps(&user), caps_of(get_user_default_capabilities()));
+
+        for grant in [&main, &user] {
+            assert!(grant.is_authenticated());
+            assert!(!grant.is_operator());
+            assert!(grant.token_id.is_some(), "a grant names its token");
+        }
+
+        let operator = Session::open(ADMIN, &admin(), ListenerReach::Network).unwrap();
+        assert!(operator.is_authenticated());
+        assert_eq!(operator.acts_as(), AgentContext::main_agent());
+        assert_eq!(operator.acts_as_did(), Some(main_did.as_str()));
+        assert_eq!(operator.user(), None);
+        assert!(operator.token_id.is_none());
+    }
+
+    #[test]
+    fn require_refuses_with_the_capability_error() {
+        let session = Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(vec![AGENT_AUTH_CAPABILITY.clone()]);
+        assert!(session.require(&AGENT_AUTH_CAPABILITY).is_ok());
+        let err = session.require(&PERSPECTIVE_CREATE_CAPABILITY).unwrap_err();
+        assert_eq!(
+            err,
+            crate::agent::capabilities::check_capability(
+                &Ok(vec![AGENT_AUTH_CAPABILITY.clone()]),
+                &PERSPECTIVE_CREATE_CAPABILITY
+            )
+            .unwrap_err()
+        );
+        assert!(Session::for_test(Principal::Operator)
+            .require(&PERSPECTIVE_CREATE_CAPABILITY)
+            .is_ok());
     }
 }

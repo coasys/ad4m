@@ -63,7 +63,7 @@ pub enum ListenerReach {
     /// proxy or tunnel running here. The API reads a request that carries a `Forwarded`,
     /// `X-Forwarded-For` or `X-Real-IP` header as `Network` (`api::auth::listener_reach`). A
     /// proxy that sets none of them (a raw TCP forward, `ssh -R`) still reads as `Loopback`,
-    /// so its remote clients are the operator: a node behind a proxy needs an admin credential.
+    /// so its remote clients are the operator: an executor behind a proxy needs an admin credential.
     Loopback,
     /// Bound to any other address: whoever can route to it connects.
     Network,
@@ -104,7 +104,14 @@ pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
     expected: &Capability,
 ) -> Result<(), String> {
-    let capabilities = capabilities.as_ref().map_err(|e| e.clone())?;
+    require_capability(capabilities.as_ref().map_err(|e| e.clone())?, expected)
+}
+
+/// `Ok` if any of `capabilities` covers `expected`; otherwise the error a refused call reports.
+pub fn require_capability(
+    capabilities: &[Capability],
+    expected: &Capability,
+) -> Result<(), String> {
     if !capability_matches(capabilities, expected) {
         return Err(format!(
             "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
@@ -321,7 +328,7 @@ pub fn capabilities_on(
     }
 
     if token.is_empty() {
-        // An anonymous caller: the node has an admin credential, or the listener is on the
+        // An anonymous caller: the executor has an admin credential, or the listener is on the
         // network.
         return Ok(anonymous_capabilities());
     }
@@ -600,7 +607,7 @@ mod tests {
     }
 
     // #1059: without an admin credential, an empty token is the operator only on loopback.
-    // On the network it gets what an anonymous caller gets on a node with a credential:
+    // On the network it gets what an anonymous caller gets on an executor with a credential:
     // enough to request a capability, nothing to read with.
     #[test]
     fn without_a_credential_an_empty_token_is_the_operator_only_on_loopback() {
