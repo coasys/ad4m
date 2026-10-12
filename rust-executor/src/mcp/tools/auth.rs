@@ -319,7 +319,8 @@ impl Ad4mMcpHandler {
             {
                 Ok(grant) => SessionToken::Valid {
                     app_name: grant.app_name().to_string(),
-                    user_email: grant.agent.user_email.clone(),
+                    // The account a login names; the grant keys its agent by DID.
+                    user_email: grant.auth.user_email.clone(),
                     has_capabilities: grant.auth.capabilities.is_some(),
                 },
                 Err(_) => SessionToken::Undecodable,

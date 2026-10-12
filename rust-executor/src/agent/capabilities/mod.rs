@@ -30,7 +30,7 @@ lazy_static! {
 }
 
 // Cache for last_seen timestamps to avoid repeated database lookups
-// Maps user_email -> (last_checked_timestamp, last_seen_value)
+// Maps agent DID -> (last_checked_timestamp, last_seen_value)
 #[derive(Clone)]
 struct LastSeenCacheEntry {
     last_checked: i64,    // When we last checked the database
@@ -149,19 +149,20 @@ pub fn granted(claims: &Claims) -> Result<std::sync::Arc<crate::agent::grants::L
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
 pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 
-/// Update the last_seen timestamp of the user the caller's session names.
+/// Update the last_seen timestamp of the account that owns the managed agent `agent_did`, the
+/// agent the caller's session acts as.
 /// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
-pub async fn track_last_seen(user_email: &str) {
+pub async fn track_last_seen(agent_did: &str) {
     use crate::db::Ad4mDb;
 
-    let user_email = user_email.to_string();
+    let agent_did = agent_did.to_string();
     let now = chrono::Utc::now().timestamp();
 
     // Check cache first (non-blocking read)
     {
         let cache = LAST_SEEN_CACHE.read().await;
-        if let Some(entry) = cache.get(&user_email) {
+        if let Some(entry) = cache.get(&agent_did) {
             let cache_age = now - entry.last_checked;
             if cache_age < CACHE_TTL_SECONDS {
                 // Cache is fresh, check if update is needed based on cached value
@@ -170,7 +171,7 @@ pub async fn track_last_seen(user_email: &str) {
                     // Still inside the throttle period, no need to update
                     log::trace!(
                         "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
-                        user_email, entry.last_seen_value, time_since_last_seen
+                        agent_did, entry.last_seen_value, time_since_last_seen
                     );
                     return;
                 }
@@ -180,10 +181,10 @@ pub async fn track_last_seen(user_email: &str) {
 
     // Cache miss or stale - need to check database
     // Use spawn_blocking to avoid blocking the async runtime
-    let user_email_clone = user_email.clone();
+    let agent_did_clone = agent_did.clone();
     let should_update = tokio::task::spawn_blocking(move || {
         Ad4mDb::with_global_instance(|db| {
-            if let Ok(user) = db.get_user(&user_email_clone) {
+            if let Ok(Some(user)) = db.get_user_by_did(&agent_did_clone) {
                 if let Some(last_seen) = user.last_seen {
                     let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
 
@@ -192,7 +193,7 @@ pub async fn track_last_seen(user_email: &str) {
                     let should_update = if last_seen > now + 60 {
                         log::warn!(
                             "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                            user_email_clone, last_seen
+                            agent_did_clone, last_seen
                         );
                         true
                     } else {
@@ -200,19 +201,19 @@ pub async fn track_last_seen(user_email: &str) {
                     };
 
                     log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                        user_email_clone, last_seen, throttle_cutoff, should_update);
+                        agent_did_clone, last_seen, throttle_cutoff, should_update);
                     (should_update, Some(last_seen))
                 } else {
                     log::debug!(
                         "last_seen tracking for {}: never seen before, updating now",
-                        user_email_clone
+                        agent_did_clone
                     );
                     (true, None) // Never updated, do it now
                 }
             } else {
                 log::warn!(
-                    "last_seen tracking: user {} not found in database",
-                    user_email_clone
+                    "last_seen tracking: no user owns the agent {}",
+                    agent_did_clone
                 );
                 (false, None) // User not found
             }
@@ -235,7 +236,7 @@ pub async fn track_last_seen(user_email: &str) {
     if let Some(last_seen_val) = last_seen_value {
         let mut cache = LAST_SEEN_CACHE.write().await;
         cache.insert(
-            user_email.clone(),
+            agent_did.clone(),
             LastSeenCacheEntry {
                 last_checked: now,
                 last_seen_value: last_seen_val,
@@ -244,12 +245,12 @@ pub async fn track_last_seen(user_email: &str) {
     }
 
     if should_update {
-        log::debug!("Updating last_seen for user: {}", user_email);
+        log::debug!("Updating last_seen for agent: {}", agent_did);
 
         // Perform the update in spawn_blocking
-        let user_email_for_update = user_email.clone();
+        let agent_did_for_update = agent_did.clone();
         let update_result = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
+            Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(&agent_did_for_update))
         })
         .await;
 
@@ -258,7 +259,7 @@ pub async fn track_last_seen(user_email: &str) {
                 // Update succeeded, refresh cache with new timestamp
                 let mut cache = LAST_SEEN_CACHE.write().await;
                 cache.insert(
-                    user_email,
+                    agent_did,
                     LastSeenCacheEntry {
                         last_checked: now,
                         last_seen_value: now,
@@ -267,15 +268,15 @@ pub async fn track_last_seen(user_email: &str) {
             }
             Ok(Err(e)) => {
                 log::error!(
-                    "Failed to update last_seen for user {}: {:?}",
-                    user_email,
+                    "Failed to update last_seen for agent {}: {:?}",
+                    agent_did,
                     e
                 );
             }
             Err(e) => {
                 log::error!(
-                    "Failed to update last_seen for user {} (spawn_blocking join error): {:?}",
-                    user_email,
+                    "Failed to update last_seen for agent {} (spawn_blocking join error): {:?}",
+                    agent_did,
                     e
                 );
             }

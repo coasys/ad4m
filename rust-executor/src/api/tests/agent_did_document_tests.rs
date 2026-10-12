@@ -330,19 +330,17 @@ async fn when_agent_json_cannot_be_rewritten_load_still_serves_no_private_key() 
     assert_eq!(entries, 1, "a failed rewrite must not leave a temp file");
 }
 
-/// Multi-user mode: `agent.status` for a managed user and the `AgentData` it
+/// Multi-user mode: `agent.status` for a managed user and the DID document it
 /// is built from.
 #[tokio::test]
 async fn agent_status_for_a_managed_user_carries_no_private_key() {
     setup_wallet();
     setup_agent();
     let email = "did-doc-1229@example.com";
-    AgentService::ensure_user_key_exists(email).unwrap();
-    let secrets = wallet_private_key_values(email);
-    let user_did = AgentService::get_user_did_by_email(email).unwrap();
+    let user_did = crate::test_utils::create_test_user(email);
+    let secrets = wallet_private_key_values(&user_did);
 
     let ctx = Arc::new(RequestContext::user_for_test(
-        email,
         &user_did,
         vec![ALL_CAPABILITY.clone()],
     ));
@@ -354,11 +352,13 @@ async fn agent_status_for_a_managed_user_carries_no_private_key() {
     assert_no_private_keys(&reply, &secrets, "agent.status for a user");
     assert_public_document_present(&reply, &user_did, "agent.status for a user");
 
-    let agent_data = AgentService::get_user_agent_data(email).unwrap();
-    assert_no_private_keys(&agent_data.did_document, &secrets, "AgentData.did_document");
-    assert_public_document_present(
-        &agent_data.did_document,
-        &user_did,
-        "AgentData.did_document",
-    );
+    let did_document = serde_json::to_string(
+        &crate::agent::did_document_for_context(&crate::agent::AgentContext::managed(
+            user_did.clone(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_no_private_keys(&did_document, &secrets, "the user's DID document");
+    assert_public_document_present(&did_document, &user_did, "the user's DID document");
 }

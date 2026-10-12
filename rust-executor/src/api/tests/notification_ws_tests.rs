@@ -45,17 +45,15 @@ fn setup() {
     AgentService::init_global_test_instance();
 }
 
-/// Creates the wallet key a managed user gets at sign-up; returns the DID.
+/// Creates the user and its managed agent, as sign-up does; returns the agent's DID.
 fn user(email: &str) -> String {
-    AgentService::ensure_user_key_exists(email).expect("user key");
-    AgentService::get_user_did_by_email(email).expect("user did")
+    crate::test_utils::create_test_user(email)
 }
 
 /// A managed user's session.
 fn user_ctx(email: &str) -> RequestContext {
     RequestContext::user_for_test(
-        email,
-        &AgentService::get_user_did_by_email(email).unwrap(),
+        &AgentService::did_for_email(email).unwrap(),
         get_user_default_capabilities(),
     )
 }
@@ -150,12 +148,14 @@ fn main_agent_did() -> String {
 /// main agent for `None`.
 fn owner(email: Option<&str>) -> String {
     email.map_or_else(main_agent_did, |email| {
-        AgentService::get_user_did_by_email(email).expect("user did")
+        AgentService::did_for_email(email).expect("user did")
     })
 }
 
 /// Writes a notification row directly, as any write path could have left it.
 fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> String {
+    // Resolved before taking the database: `owner` reads the database itself.
+    let owner_did = owner(user_email);
     Ad4mDb::with_global_instance(|db| {
         db.add_notification(
             NotificationInput {
@@ -168,7 +168,7 @@ fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> S
                 webhook_url: "https://webhook.test".to_string(),
                 webhook_auth: "secret".to_string(),
             },
-            &owner(user_email),
+            &owner_did,
             granted,
         )
     })

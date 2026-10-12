@@ -74,16 +74,14 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode: extract user DID from JWT token if present
-    if let Some(user_email) = ctx.user_email().map(str::to_string) {
-        let agent_data = AgentService::get_user_agent_data(&user_email)
+    if let Some(did) = ctx.user_did().map(str::to_string) {
+        AgentService::wallet_key_for_did(&did)
             .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
 
-        let agent = match AgentService::with_global_instance(|agent_service| {
-            agent_service.load_user_agent_profile(&user_email)
-        }) {
+        let agent = match AgentService::load_managed_agent_profile(&did) {
             Ok(Some(profile)) => profile,
             Ok(None) | Err(_) => Agent {
-                did: agent_data.did,
+                did,
                 direct_message_language: None,
                 perspective: Some(DomainPerspective { links: vec![] }),
             },
@@ -211,8 +209,8 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     // A user session updates the user's own profile, never the main agent's.
-    if let Some(user_email) = ctx.user_email().map(str::to_string) {
-        let agent = update_user_profile(user_email, body).await?;
+    if let Some(did) = ctx.user_did().map(str::to_string) {
+        let agent = update_user_profile(did, body).await?;
         publish_agent_updated(&agent).await;
         return Ok(serde_json::to_value(agent)?);
     }
@@ -272,22 +270,17 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 /// Applies an `agent.updateProfile` request to a user's own profile: one load, one store,
-/// one publish. Fields the request leaves out keep their stored values. The DID always
-/// comes from the user's key, never from the stored profile.
-async fn update_user_profile(
-    user_email: String,
-    body: UpdateProfileRequest,
-) -> Result<Agent, WsRpcError> {
-    let did = AgentService::get_user_did_by_email(&user_email)
+/// one publish. Fields the request leaves out keep their stored values. The DID is the
+/// session's agent, never the stored profile's.
+async fn update_user_profile(did: String, body: UpdateProfileRequest) -> Result<Agent, WsRpcError> {
+    AgentService::wallet_key_for_did(&did)
         .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
-    let stored = AgentService::with_global_instance(|agent_service| {
-        agent_service.load_user_agent_profile(&user_email)
-    })
-    .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
-    .unwrap_or_default();
+    let stored = AgentService::load_managed_agent_profile(&did)
+        .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
+        .unwrap_or_default();
 
     let agent = Agent {
-        did,
+        did: did.clone(),
         direct_message_language: body.dm_language.or(stored.direct_message_language),
         perspective: match body.public_perspective {
             Some(perspective) => Some(DomainPerspective {
@@ -300,14 +293,10 @@ async fn update_user_profile(
             None => stored.perspective,
         },
     };
-    AgentService::with_global_instance(|agent_service| {
-        agent_service.store_user_agent_profile(&user_email, &agent)
-    })
-    .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
+    AgentService::store_managed_agent_profile(&did, &agent)
+        .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
 
-    if let Err(e) =
-        AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email)).await
-    {
+    if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::managed(did)).await {
         log::warn!(
             "Failed to publish updated user profile to agent language: {}",
             e
@@ -696,17 +685,14 @@ async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Multi-user mode
-    if let Some(user_email) = ctx.user_email().map(str::to_string) {
-        let agent_data = AgentService::get_user_agent_data(&user_email)
-            .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
-
-        let agent_context = AgentContext::for_user_email(user_email);
+    if let Some(did) = ctx.user_did().map(str::to_string) {
+        let agent_context = AgentContext::managed(did.clone());
         let did_document = did_document_for_context(&agent_context).map_err(|e| {
             WsRpcError::internal(format!("Failed to get DID document for user: {}", e))
         })?;
 
         return Ok(serde_json::to_value(AgentStatus {
-            did: Some(agent_data.did),
+            did: Some(did),
             did_document: Some(serde_json::Value::String(
                 serde_json::to_string(&did_document).map_err(|e| {
                     WsRpcError::internal(format!("Failed to serialize DID document: {}", e))

@@ -12,7 +12,7 @@ use crate::types::RequestContext;
 
 /// Refuses the call for a session on a managed agent. `what` names the call in the error.
 pub fn refuse_user_session(ctx: &RequestContext, what: &str) -> Result<(), WsRpcError> {
-    if ctx.user_email().is_some() {
+    if ctx.user_did().is_some() {
         return Err(WsRpcError::forbidden(format!(
             "{what} acts on the node itself, so a user session may not call it"
         )));
@@ -26,8 +26,7 @@ mod tests {
 
     #[test]
     fn user_sessions_get_refused() {
-        let user =
-            RequestContext::user_for_test("alice@example.org", "did:key:guarded-user", vec![]);
+        let user = RequestContext::user_for_test("did:key:guarded-user", vec![]);
         let err = refuse_user_session(&user, "agent.lock").unwrap_err();
         assert_eq!(err.code, 403);
         assert!(err.message.contains("agent.lock"));

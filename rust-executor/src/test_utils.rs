@@ -107,36 +107,88 @@ impl Drop for MultiUserMode {
     }
 }
 
-/// A new managed user with a unique email: a wallet key and a row in the open database.
-/// Needs `setup_wallet()`, `setup_agent()` and an open database first.
+/// A new managed user with a unique email (see [`create_test_user`]). Returns the email.
+/// Needs `setup_wallet()` and `setup_agent()` first.
 pub fn managed_user(name: &str) -> String {
     let email = format!("{name}-{}@example.org", uuid::Uuid::new_v4().simple());
-    crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
-    let did = crate::agent::AgentService::get_user_did_by_email(&email).unwrap();
-    crate::db::Ad4mDb::with_global_instance(|db| db.add_user_prehashed(&email, &did, "unused"))
-        .unwrap();
+    create_test_user(&email);
     email
+}
+
+/// A user `email` with a managed agent, as `user.create` leaves one: a key in the global
+/// wallet named by the agent's DID, and a `users` row naming that DID. Returns the DID. Opens
+/// an in-memory database if none is open. Needs `setup_wallet()` first.
+pub fn create_test_user(email: &str) -> String {
+    if crate::db::Ad4mDb::global_instance()
+        .lock()
+        .expect("db lock")
+        .is_none()
+    {
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("in-memory db");
+    }
+    if let Ok(user) = crate::db::Ad4mDb::with_global_instance(|db| db.get_user(email)) {
+        let key = crate::wallet::wallet_backend().get_did_document(&user.did);
+        if key.is_some_and(|doc| doc.id == user.did) {
+            return user.did;
+        }
+    }
+    let did = AgentService::create_managed_agent_key(email).expect("managed agent key");
+    crate::db::Ad4mDb::with_global_instance(|db| {
+        // `add_user_prehashed` keeps a row whose email exists: point it at the new agent.
+        db.add_user_prehashed(email, &did, "test-hash")?;
+        db.set_user_did(email, &did)
+    })
+    .expect("users row");
+    did
+}
+
+/// A user token for `email`, whose `users` row names an agent no wallet key derives: the token
+/// is valid, and no session can act as its agent. Needs `setup_wallet()` and `setup_agent()`.
+pub fn keyless_user_token(email: &str) -> String {
+    if crate::db::Ad4mDb::global_instance()
+        .lock()
+        .expect("db lock")
+        .is_none()
+    {
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("in-memory db");
+    }
+    let keyless_did = format!("did:key:z6MkKeyless{}", email.replace(['@', '.'], ""));
+    crate::db::Ad4mDb::with_global_instance(|db| {
+        db.add_user_prehashed(email, &keyless_did, "test-hash")?;
+        db.set_user_did(email, &keyless_did)
+    })
+    .expect("users row");
+    crate::user_management::generate_user_jwt(email, "test").unwrap()
 }
 
 /// A user token the executor signed, with its expiry one hour in the past.
 /// Needs `setup_wallet()` and `setup_agent()` first.
+/// Creates the user if it does not exist.
 pub fn expired_user_token(email: &str) -> String {
-    use base64::Engine;
-    // Its grant names the user's DID, so the user needs a key.
-    crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+    create_test_user(email);
     let valid = crate::user_management::generate_user_jwt(email, "test").unwrap();
-    let payload = valid.split('.').nth(1).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    resigned_token(&valid, |claims| {
+        claims["exp"] = serde_json::json!(now - 3600)
+    })
+}
+
+/// `token`, a JWT the executor signed, with its claims changed by `edit` and signed again
+/// with the executor's key: a token of a shape the executor no longer mints, such as one
+/// from before agents were keyed by DID. Needs `setup_wallet()` and `setup_agent()` first.
+pub fn resigned_token(token: &str, edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    use base64::Engine;
+    let payload = token.split('.').nth(1).unwrap();
     let mut claims: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
             .unwrap(),
     )
     .unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    claims["exp"] = serde_json::json!(now - 3600);
+    edit(&mut claims);
     let secret = crate::wallet::wallet_backend()
         .get_secret_key(&crate::agent::capabilities::signing_key_name())
         .expect("the test wallet holds the signing key");
@@ -163,35 +215,11 @@ pub fn ensure_test_db() {
 pub fn granted_token(auth: crate::agent::capabilities::AuthInfo) -> String {
     ensure_test_db();
     let agent = match &auth.user_email {
-        Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
+        Some(email) => crate::agent::AgentContext::managed(create_test_user(email)),
         None => crate::agent::AgentContext::main_agent(),
     };
     let request_id = format!("test-{}", uuid::Uuid::new_v4());
     crate::agent::grants::mint(agent, auth, Some(request_id), 3600)
         .expect("the test wallet signs and the test database stores the grant")
         .0
-}
-
-/// A login token of `email` whose grant is stored although the user has no key: a user whose
-/// identity went after the login. Needs `setup_wallet()` and `setup_agent()` first.
-pub fn token_of_a_user_without_a_key(email: &str) -> String {
-    use crate::agent::grants::{Grants, LiveGrant};
-    let (token, claims) = crate::agent::capabilities::token::sign_token(
-        "test".to_string(),
-        3600,
-        Some(email.to_string()),
-    )
-    .unwrap();
-    Grants::global()
-        .insert(LiveGrant::new(
-            crate::agent::session::TokenId(claims.nonce().to_string()),
-            claims.nonce().to_string(),
-            crate::agent::AgentContext::for_user_email(email.to_string()),
-            "did:key:gone".to_string(),
-            crate::agent::capabilities::AuthInfo::default(),
-            claims.expires_at(),
-            claims.issued_at(),
-        ))
-        .unwrap();
-    token
 }

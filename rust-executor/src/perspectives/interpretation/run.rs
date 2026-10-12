@@ -1177,7 +1177,7 @@ pub async fn run_interpretation_with_harness_and_model(
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
     // A pass with a caller bills the user it acts as; the caller's token named that user. An
     // executor-owned pass (no caller token) bills no one.
-    let bill_to = auth_token.and(context.user_email.clone());
+    let bill_to = auth_token.and(context.managed_did().map(str::to_string));
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
