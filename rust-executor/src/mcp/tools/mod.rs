@@ -46,8 +46,7 @@ use crate::agent::capabilities::{
 };
 use crate::agent::session::{AuthError, Session};
 use crate::agent::AgentContext;
-use crate::api::guards::{Admission, Guard};
-use crate::api::perspectives_ws::ACCESS_DENIED;
+use crate::api::guards::Guard;
 use crate::api::ws_handler::{shared_handler_map, WsRpcError};
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -235,13 +234,9 @@ fn authenticated(opened: Opened) -> Result<Arc<Session>, String> {
     }
 }
 
-/// The RPC request context of `session`, as the RPC socket builds it: the session and its
-/// capabilities. MCP has no auto-permit setting and passes no raw token.
+/// The RPC request context of `session`, as the RPC socket builds it.
 pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestContext {
     crate::types::RequestContext {
-        capabilities: Ok(session.capabilities()),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
         cancel_token: None,
         session,
     }
@@ -259,27 +254,26 @@ pub(crate) async fn call_method_as(
 }
 
 /// A tool's answer when its RPC method refuses or fails: the method's message and status
-/// code, `{"error": .., "status": 401 | 403 | 404 | ..}`.
+/// code, `{"error": .., "status": 401 | 403 | 404 | ..}`. A perspective that is missing and
+/// one that is not the caller's both answer 404 "Perspective not found" from the guard (D6),
+/// so a refusal does not reveal that a perspective exists.
 pub(crate) fn method_error(e: WsRpcError) -> String {
     json!({ "error": e.message, "status": e.code }).to_string()
-}
-
-/// [`method_error`] for a method on perspective `id`. A missing perspective and one that is not
-/// the caller's both answer "Perspective not found" (404), so a refusal does not reveal that a
-/// perspective exists.
-pub(crate) fn perspective_error(id: &str, e: WsRpcError) -> String {
-    if e.code == 404 || (e.code == 403 && e.message == ACCESS_DENIED) {
-        method_error(WsRpcError::not_found(format!(
-            "Perspective not found: {id}"
-        )))
-    } else {
-        method_error(e)
-    }
 }
 
 /// Decode an RPC method's result into the type its contract names.
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|e| json!({ "error": e.to_string() }).to_string())
+}
+
+/// A failure worded `"{label}: {message}"`, for [`Ad4mMcpHandler::call`].
+pub(crate) fn labelled(label: &'static str) -> impl FnOnce(WsRpcError) -> String {
+    move |e| format!("{label}: {}", e.message)
+}
+
+/// A failure worded `{"error": "{label}: {message}"}`, for [`Ad4mMcpHandler::call`].
+pub(crate) fn labelled_json(label: &'static str) -> impl FnOnce(WsRpcError) -> String {
+    move |e| json!({ "error": format!("{label}: {}", e.message) }).to_string()
 }
 
 impl Ad4mMcpHandler {
@@ -332,13 +326,27 @@ impl Ad4mMcpHandler {
         params: &Value,
     ) -> Result<(), WsRpcError> {
         let session = self.session().await.map_err(WsRpcError::unauthorized)?;
-        match shared_handler_map()
+        shared_handler_map()
             .admit(method, params, &request_context(session))
-            .await?
-        {
-            Admission::Granted => Ok(()),
-            // A method that hides existence answers `null`: as missing to a tool.
-            Admission::Hidden => Err(WsRpcError::not_found(format!("{method}: not found"))),
+            .await
+    }
+
+    /// [`Self::call_method`], with the result decoded into the type the method's contract
+    /// names: the one path a tool takes to its RPC method. A refusal (401, 403, 404: no
+    /// session, no capability, missing or not the caller's) answers as [`method_error`]; any
+    /// other failure as `failed` words it, which keeps each tool's own text ([`labelled`], or
+    /// [`method_error`] for a tool without one). A result outside the contract answers as
+    /// [`decode`].
+    pub(crate) async fn call<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        failed: impl FnOnce(WsRpcError) -> String,
+    ) -> Result<T, String> {
+        match self.call_method(method, params).await {
+            Ok(value) => decode(value),
+            Err(e) if matches!(e.code, 401 | 403 | 404) => Err(method_error(e)),
+            Err(e) => Err(failed(e)),
         }
     }
 
@@ -524,7 +532,7 @@ impl Ad4mMcpHandler {
     // ========================================================================
 
     /// The agent the caller acts as: a user as that user, the operator and apps as the
-    /// node's main agent ([`Session::acts_as`]).
+    /// main agent ([`Session::acts_as`]).
     pub(crate) async fn get_agent_context(&self) -> Result<AgentContext, String> {
         Ok(self.session().await?.acts_as())
     }
@@ -566,8 +574,9 @@ impl Ad4mMcpHandler {
     /// (`perspective_query_capability`) or change (`perspective_update_capability`) a
     /// perspective. The operator reaches every perspective, a user only its own, an app the
     /// unowned ones and the main agent's; every caller but the operator needs the capability.
-    /// A refusal answers as [`perspective_error`]; a caller without a working, authenticated
-    /// session gets 401 (the in-process harness does not go through `call_tool`).
+    /// A refusal answers as [`method_error`] (404 for a perspective that is missing or not
+    /// the caller's); a caller without a working, authenticated session gets 401 (the
+    /// in-process harness does not go through `call_tool`).
     async fn admitted_perspective(
         &self,
         uuid: &str,
@@ -584,10 +593,13 @@ impl Ad4mMcpHandler {
                 &request_context(session.clone()),
             )
             .await
-            .map_err(|e| perspective_error(uuid, e))?;
+            .map_err(method_error)?;
         // Removed between the guard and here: missing, as the guard would answer.
-        let perspective = get_perspective(uuid)
-            .ok_or_else(|| perspective_error(uuid, WsRpcError::not_found(String::new())))?;
+        let perspective = get_perspective(uuid).ok_or_else(|| {
+            method_error(WsRpcError::not_found(format!(
+                "Perspective {uuid} not found"
+            )))
+        })?;
         Ok((perspective, session))
     }
 
@@ -795,40 +807,39 @@ impl Ad4mMcpHandler {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use crate::agent::session::{Principal, TokenId};
+    use crate::agent::session::Principal;
 
-    /// A handler whose MCP session holds a session for `principal`, on a network listener of
-    /// a node with an admin credential.
-    pub(crate) fn handler_as(principal: Principal) -> Ad4mMcpHandler {
-        let mut context = McpContext::new(Some("test-admin".into()), ListenerReach::Network, false);
-        context.caller = crate::mcp::caller::Caller::holding(Ok(Arc::new(Session::for_test(
-            principal,
-            ListenerReach::Network,
-        ))));
-        Ad4mMcpHandler::new(context)
+    /// A handler whose MCP session holds `session`, on a network listener of an executor with
+    /// an admin credential.
+    pub(crate) fn handler_as(session: Session) -> Ad4mMcpHandler {
+        Ad4mMcpHandler::new(
+            McpContext::new(Some("test-admin".into()), ListenerReach::Network, false)
+                .with_session(Arc::new(session)),
+        )
     }
 
-    pub(crate) fn app(caps: Vec<Capability>) -> Principal {
-        Principal::App {
-            token_id: TokenId("mcp-test-app".into()),
-            caps,
-        }
+    /// The operator's session.
+    pub(crate) fn operator() -> Session {
+        Session::for_test(Principal::Operator)
     }
 
-    pub(crate) fn user(email: &str, did: &str, caps: Vec<Capability>) -> Principal {
-        Principal::User {
-            token_id: TokenId(format!("mcp-test-{email}")),
-            email: email.into(),
-            did: did.into(),
-            caps,
-        }
+    /// A grant on the main agent, limited to `caps`.
+    pub(crate) fn app(caps: Vec<Capability>) -> Session {
+        Session::for_test(Principal::Agent(AgentContext::main_agent())).with_caps(caps)
+    }
+
+    /// A grant on the managed agent of `email`, whose DID is `did`, limited to `caps`.
+    pub(crate) fn user(email: &str, did: &str, caps: Vec<Capability>) -> Session {
+        Session::for_test(Principal::Agent(AgentContext::for_user_email(email.into())))
+            .with_caps(caps)
+            .with_did(did)
     }
 
     /// The wallet, the main agent and the database the tools need.
     pub(crate) fn setup() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::ensure_db();
+        crate::test_utils::ensure_test_db();
     }
 
     /// A new perspective owned by `owners` (`None`: unowned). Returns its uuid.
@@ -887,7 +898,7 @@ mod agent_context_tests {
     use super::*;
     use crate::agent::capabilities::PERSPECTIVE_CREATE_CAPABILITY;
     use crate::test_utils::{
-        ensure_db, expired_user_token, setup_agent, setup_wallet, MultiUserMode,
+        ensure_test_db, expired_user_token, setup_agent, setup_wallet, MultiUserMode,
     };
 
     fn handler(session_token: &str) -> Ad4mMcpHandler {
@@ -897,7 +908,7 @@ mod agent_context_tests {
         )
     }
 
-    // MCP tools used to act as the node's main agent once a session token stopped decoding.
+    // MCP tools used to act as the main agent once a session token stopped decoding.
     #[tokio::test]
     async fn an_expired_session_token_acts_as_nobody() {
         setup_wallet();
@@ -914,12 +925,12 @@ mod agent_context_tests {
         setup_agent();
         let _multi_user = MultiUserMode::on();
         let context = handler("test-admin").get_agent_context().await.unwrap();
-        assert!(context.is_main_agent);
+        assert!(context.is_main_agent());
     }
 
-    // Profile tools answered with the node's DID once a session token stopped decoding.
+    // Profile tools answered with the main agent's DID once a session token stopped decoding.
     #[tokio::test]
-    async fn a_profile_tool_with_an_expired_token_does_not_answer_as_the_node() {
+    async fn a_profile_tool_with_an_expired_token_does_not_answer_as_the_main_agent() {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
@@ -944,7 +955,7 @@ mod agent_context_tests {
         let handler = handler(&token);
         let context = handler.get_agent_context().await.unwrap();
         assert_eq!(context.user_email.as_deref(), Some(email));
-        // A user never acts as the node: its own DID, not the main agent's.
+        // A user never acts as the main agent: its own DID, not the main agent's.
         let did = handler.get_my_did(profile_params()).await;
         assert_eq!(
             did,
@@ -961,15 +972,11 @@ mod agent_context_tests {
     fn app_token(capabilities: Vec<Capability>) -> String {
         setup_wallet();
         setup_agent();
-        crate::agent::capabilities::token::generate_jwt(
-            "mcp session test".to_string(),
-            3600,
-            crate::agent::capabilities::AuthInfo {
-                capabilities: Some(capabilities),
-                ..Default::default()
-            },
-        )
-        .unwrap()
+        crate::test_utils::granted_token(crate::agent::capabilities::AuthInfo {
+            app_name: "mcp session test".to_string(),
+            capabilities: Some(capabilities),
+            ..Default::default()
+        })
     }
 
     // #851 2: the admin credential authenticates as the operator, as on RPC.
@@ -987,13 +994,13 @@ mod agent_context_tests {
     }
 
     #[tokio::test]
-    async fn an_app_token_is_limited_to_its_capabilities_and_acts_as_the_node() {
+    async fn an_app_token_is_limited_to_its_capabilities_and_acts_as_the_main_agent() {
         let token = app_token(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]);
         let handler = handler(&token);
         let session = handler.session().await.unwrap();
         assert!(session.may(&PERSPECTIVE_CREATE_CAPABILITY));
         assert!(!session.may(&crate::agent::capabilities::LANGUAGE_READ_CAPABILITY));
-        assert!(handler.get_agent_context().await.unwrap().is_main_agent);
+        assert!(handler.get_agent_context().await.unwrap().is_main_agent());
         assert!(!gets_mint_code(&handler).await);
     }
 
@@ -1007,6 +1014,7 @@ mod agent_context_tests {
                     app_desc: "d".into(),
                     app_domain: None,
                     app_url: None,
+                    agent: None,
                 },
             )
             .await;
@@ -1017,11 +1025,9 @@ mod agent_context_tests {
     async fn a_token_revoked_mid_session_is_refused_by_every_tool() {
         let token = app_token(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
         let handler = handler(&token);
-        let session = handler.session().await.unwrap();
-        let crate::agent::session::Principal::App { token_id, .. } = &session.principal else {
-            panic!("expected an app session");
-        };
-        crate::agent::revoked::RevokedSet::global().revoke(token_id.clone(), u64::MAX);
+        assert!(handler.session().await.is_ok());
+        let grants = crate::agent::grants::Grants::global();
+        grants.revoke(&grants.find(&token)).unwrap();
 
         let err = handler.session().await.unwrap_err();
         assert!(err.starts_with("Authentication required"), "{err}");
@@ -1035,9 +1041,10 @@ mod agent_context_tests {
         assert!(listed.contains("Authentication required"), "{listed}");
     }
 
-    // A user who logs out (their session cutoff moves past the token) loses the MCP session.
+    // A user who logs out everywhere (every grant of their agent revoked) loses the MCP
+    // session.
     #[tokio::test]
-    async fn a_user_session_ends_at_the_users_cutoff() {
+    async fn a_user_session_ends_when_the_users_grants_are_revoked() {
         setup_wallet();
         setup_agent();
         let email = "mcp.cutoff@example.org";
@@ -1046,14 +1053,16 @@ mod agent_context_tests {
         let handler = handler(&token);
         assert!(handler.session().await.is_ok());
 
-        crate::agent::revoked::SessionCutoffs::global().set(email, u64::MAX);
+        crate::agent::grants::Grants::global()
+            .revoke_agent(&AgentContext::for_user_email(email.to_string()))
+            .unwrap();
         let err = handler.get_agent_context().await.unwrap_err();
         assert!(err.contains("Unauthorized access"), "{err}");
     }
 
     #[tokio::test]
     async fn without_a_credential_no_token_is_the_operator_only_on_loopback() {
-        ensure_db();
+        ensure_test_db();
         let local = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
         assert!(local.session().await.unwrap().is_operator());
         assert!(gets_mint_code(&local).await);
@@ -1068,7 +1077,7 @@ mod agent_context_tests {
     // A proxied request reads as a network one, as on the API: no operator through a proxy.
     #[tokio::test]
     async fn a_forwarded_request_without_a_token_is_anonymous() {
-        ensure_db();
+        ensure_test_db();
         let handler = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
         let request = axum::http::Request::builder()
             .header("x-forwarded-for", "203.0.113.9")

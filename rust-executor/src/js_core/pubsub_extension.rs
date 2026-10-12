@@ -39,18 +39,15 @@ deno_core::extension!(
 #[cfg(test)]
 mod tests {
     use crate::events::Topic;
-    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+    use crate::pubsub::get_global_pubsub;
 
     /// #1371: language code called `PUBSUB.publish(topic, data)` with any topic, and the
-    /// executor published it. Now the call fails and nothing reaches the pubsub: neither a
-    /// typed event nor the one string topic left (live-query updates).
+    /// executor published it. Now the call fails and no event reaches the pubsub, live-query
+    /// updates included.
     #[tokio::test]
     async fn language_code_cannot_publish_executor_events() {
         let pubsub = get_global_pubsub().await;
         let mut typed = pubsub.subscribe_events();
-        let mut query_updates = pubsub
-            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await;
         let dir = tempfile::tempdir().unwrap();
         let runtime = crate::languages::language_runtime::LanguageRuntime::new(
             "pubsub-check".to_string(),
@@ -60,7 +57,8 @@ mod tests {
         runtime.init().await.unwrap();
 
         let forged = [
-            PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC.as_str(),
+            "perspective-query-subscription-topic",
+            Topic::PerspectiveQuerySubscription.as_str(),
             "perspective-link-added-topic",
             "apps-changed",
             "exception-occurred-topic",
@@ -80,10 +78,6 @@ mod tests {
             );
         }
 
-        assert!(
-            query_updates.try_recv().is_err(),
-            "a forged live-query update reached the pubsub"
-        );
         while let Ok(event) = typed.try_recv() {
             assert!(
                 !event

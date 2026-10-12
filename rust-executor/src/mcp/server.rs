@@ -9,9 +9,9 @@
 //! `verify_email_code`, `generate_jwt`) sets, the same way RPC does. Each MCP session has
 //! its own [`Caller`], so no token crosses from one MCP session to another.
 //!
-//! What the server binds follows from that: on a node with no admin credential a
+//! What the server binds follows from that: on an executor with no admin credential a
 //! caller without a token on a loopback listener is the operator, so the server is
-//! reachable from the node itself and nowhere else. See [`resolve_host`].
+//! reachable from the executor's machine and nowhere else. See [`resolve_host`].
 //!
 //! When the executor is configured for TLS, MCP is also served over HTTPS on
 //! `mcp_port + 1`, using the same certificate as the RPC port — see
@@ -32,7 +32,7 @@ use rmcp::transport::streamable_http_server::{
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-/// One MCP session's context: the node's admin credential, the listener's reach and the
+/// One MCP session's context: the executor's admin credential, the listener's reach and the
 /// session's caller.
 #[derive(Clone)]
 pub struct McpContext {
@@ -72,16 +72,19 @@ impl McpContext {
     }
 
     /// The same context with a caller that starts from `token`: for a session whose token
-    /// is known before any call, as in the in-process interpretation harness.
+    /// is known before any call.
     pub fn with_token(mut self, token: &str) -> Self {
         self.caller = Caller::from_token(token, &self.admin_credential, self.reach);
         self
     }
 
-    /// The same context with a caller that holds `session`, which no token opened: the
-    /// in-process session of an interpretation pass without a caller token.
-    pub fn with_session(mut self, session: crate::agent::session::Session) -> Self {
-        self.caller = Caller::holding(Ok(Arc::new(session)));
+    /// The same context with a caller that holds `session`, which no token of this context
+    /// opens: the caller's session of an interpretation pass, or the in-process session of a
+    /// pass without a caller ([`Session::in_process`]).
+    ///
+    /// [`Session::in_process`]: crate::agent::session::Session::in_process
+    pub fn with_session(mut self, session: Arc<crate::agent::session::Session>) -> Self {
+        self.caller = Caller::holding(Ok(session));
         self
     }
 
@@ -171,12 +174,12 @@ fn resolve_tls_port(plain_port: u16, rpc_tls_port: u16) -> TlsPort {
 /// Configure a credential and the default widens back to `0.0.0.0`, where a
 /// sibling container on the same Docker network can reach it.
 ///
-/// A multi-user node is **not** gated by having user accounts. A login JWT
+/// A multi-user executor is **not** gated by having user accounts. A login JWT
 /// authenticates a user; it is not an admin credential. `--enable-multi-user`
-/// without `--admin-credential` is an ungated node and binds loopback here.
+/// without `--admin-credential` is an ungated executor and binds loopback here.
 ///
 /// `MCP_HOST` is the operator saying it outright and is honoured either way.
-/// On an ungated node a non-loopback bind makes the listener a network one,
+/// On an ungated executor a non-loopback bind makes the listener a network one,
 /// so a caller there without a token is anonymous, not the operator (#1059),
 /// and every caller on it, local ones included, must present a token. That
 /// combination warns rather than passing quietly.
@@ -251,7 +254,7 @@ fn resolve_plain_host(
     }
 }
 
-/// Whether this address reaches only the node itself.
+/// Whether this address reaches only the executor's own machine.
 ///
 /// Unparseable reads as *not* loopback: the warning is the fail-safe
 /// direction, and an address that does not parse fails to bind a line later
@@ -526,7 +529,7 @@ mod tests {
 
     #[test]
     fn https_listening_narrows_the_cleartext_port_to_loopback() {
-        // The case the pairing exists for: a credentialed node with TLS up.
+        // The case the pairing exists for: a credentialed executor with TLS up.
         // Both listeners accept the same credential, so leaving plain wide
         // would let it cross the LAN in the clear on the port next door.
         assert_eq!(resolve_plain_host(None, true, true), "127.0.0.1");
@@ -825,7 +828,7 @@ mod tests {
 
     /// A plain MCP server on 127.0.0.1 and an initialized MCP session on it.
     async fn local_server_session(admin_credential: Option<Secret>) -> (String, String) {
-        crate::test_utils::ensure_db();
+        crate::test_utils::ensure_test_db();
         let (port, _) = free_adjacent_ports();
         let config = McpServerConfig {
             port,

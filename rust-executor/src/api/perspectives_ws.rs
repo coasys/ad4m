@@ -47,10 +47,12 @@ pub(crate) async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInst
         }
     }
 
-    Err(WsRpcError::not_found(format!(
-        "Perspective {} not found",
-        uuid
-    )))
+    Err(perspective_not_found(uuid))
+}
+
+/// What a missing perspective answers, and one the caller may not reach: the same 404.
+fn perspective_not_found(uuid: &str) -> WsRpcError {
+    WsRpcError::not_found(format!("Perspective {} not found", uuid))
 }
 
 /// Fetch perspective metadata from the shared backend, create it locally, and populate links.
@@ -106,12 +108,11 @@ fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveIn
     Ok(Some(p))
 }
 
-/// The 403 message of a perspective that is not the caller's.
-pub(crate) const ACCESS_DENIED: &str =
-    "Access denied: You don't have permission to access this perspective";
-
-/// The perspective `uuid` if the session may reach it: 404 when it is missing, 403 when it
-/// is not the caller's. `Guard::Perspective` runs it before every perspective method's handler.
+/// The perspective `uuid` if the session may reach it: the operator every one; a session on
+/// a managed agent those its agent owns; a grant on the main agent the main agent's and the
+/// unowned ones; an anonymous caller none. Missing and not the caller's are both 404 (D6), so
+/// a caller cannot learn which perspectives exist. `Guard::Owns` runs it before every
+/// perspective method's handler.
 pub(crate) async fn get_perspective_with_access(
     uuid: &str,
     ctx: &RequestContext,
@@ -120,8 +121,10 @@ pub(crate) async fn get_perspective_with_access(
 
     if !ctx.is_operator() {
         let handle = perspective.persisted.lock().await.clone();
-        if !can_access_perspective_with_did(ctx.user_did(), &handle) {
-            return Err(WsRpcError::forbidden(ACCESS_DENIED));
+        if !ctx.session.is_authenticated()
+            || !can_access_perspective_with_did(ctx.user_did(), &handle)
+        {
+            return Err(perspective_not_found(uuid));
         }
     }
 
@@ -264,40 +267,24 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(serde_json::to_value(filtered)?)
 }
 
-/// The perspective a guarded handler acts on. The method's `Guard::Perspective` has already
-/// checked the caller's capability and access, so this only fetches it: 404 if it went away
-/// since.
-async fn guarded_perspective(params: &Value) -> Result<PerspectiveInstance, WsRpcError> {
+/// The perspective a guarded handler acts on, by its `uuid` param. The method's
+/// `Guard::Owns` has already checked the caller's capability and access, so this only fetches
+/// it: 404 if it went away since (`null` for a method flagged `.or_null()`).
+pub(crate) async fn guarded_perspective(params: &Value) -> Result<PerspectiveInstance, WsRpcError> {
     get_perspective_or_404(&params.require_str("uuid")?).await
-}
-
-/// [`guarded_perspective`] for a method that hides existence: `None` if the perspective went
-/// away since the guard found it, so the method still answers `null`.
-async fn guarded_perspective_or_hidden(
-    params: &Value,
-) -> Result<Option<PerspectiveInstance>, WsRpcError> {
-    match guarded_perspective(params).await {
-        Ok(perspective) => Ok(Some(perspective)),
-        Err(e) if e.code == 404 => Ok(None),
-        Err(e) => Err(e),
-    }
 }
 
 async fn get_perspective_handler(
     params: Value,
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let Some(perspective) = guarded_perspective_or_hidden(&params).await? else {
-        return Ok(Value::Null);
-    };
+    let perspective = guarded_perspective(&params).await?;
     let handle = perspective.persisted.lock().await.clone();
     Ok(serde_json::to_value(handle)?)
 }
 
 async fn get_snapshot(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let Some(perspective) = guarded_perspective_or_hidden(&params).await? else {
-        return Ok(Value::Null);
-    };
+    let perspective = guarded_perspective(&params).await?;
     let links = perspective
         .get_links(&LinkQuery {
             source: None,
@@ -1404,17 +1391,10 @@ async fn run_interpretation_with_harness_handler(
         })
         .collect();
 
-    // Thread the caller's auth token into the harness so `Ad4mMcpHandler`'s
-    // tool dispatch executes with the caller's capabilities — same
-    // principle as the `/v1` openai-compat path. Empty string means a
-    // caller without a token: don't propagate that as a phantom token
-    // (a pass without one acts as the perspective's owner, see
-    // `interpretation::run::pass_mcp_context`).
-    let auth_token = if ctx.auth_token.is_empty() {
-        None
-    } else {
-        Some(ctx.auth_token.clone())
-    };
+    // The harness's `Ad4mMcpHandler` dispatches its tools as the caller's
+    // session, so the pass reaches what the caller reaches — same principle
+    // as the `/v1` openai-compat path (`interpretation::run::pass_mcp_context`).
+    let caller = Some(ctx.session.clone());
 
     // Live-debug event surface: same shape as the classic single-shot
     // handler. `observation_id` names both `processor_id` and `batch_key`
@@ -1468,7 +1448,7 @@ async fn run_interpretation_with_harness_handler(
             body.existing_scope.as_ref(),
             None,
             body.max_tool_calls,
-            auth_token,
+            caller,
             emit_ctx.as_ref(),
             // WS-RPC is the one-shot path — dedup-on-drain stays off; the
             // caller reaches for the harness specifically to trust the LLM
@@ -2290,20 +2270,21 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // caller's user owns (no owner for the operator and apps).
     map.method::<NoParams, Vec<PerspectiveHandle>>("perspective.all", list_perspectives)
         .read()
-        .guard(Guard::SelfAgent(perspective_query_capability(vec![
-            WILD_CARD.to_string(),
+        .guard(Guard::Cap(perspective_query_capability(vec![
+            WILD_CARD.to_string()
         ])));
     map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>(
         "perspective.get",
         get_perspective_handler,
     )
     .read()
-    .guard(Guard::perspective_or_null(perspective_query_capability));
+    .or_null()
+    .guard(query());
     map.method::<CreatePerspectiveRequest, PerspectiveHandle>(
         "perspective.create",
         create_perspective,
     )
-    .guard(Guard::SelfAgent(PERSPECTIVE_CREATE_CAPABILITY.clone()));
+    .guard(Guard::Cap(PERSPECTIVE_CREATE_CAPABILITY.clone()));
     map.method::<PerspectiveUpdateParams, PerspectiveHandle>(
         "perspective.update",
         update_perspective_handler,
@@ -2316,7 +2297,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         get_snapshot,
     )
     .read()
-    .guard(Guard::perspective_or_null(perspective_query_capability));
+    .or_null()
+    .guard(query());
     // Always answers 501; the result type is the snapshot URL it would return.
     map.method::<PerspectiveUuidParams, String>("perspective.publishSnapshot", publish_snapshot)
         .guard(query());

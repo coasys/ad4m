@@ -152,22 +152,23 @@ themselves.
 - **Admin credential** — if the executor was started with
   `AD4M_ADMIN_CREDENTIAL` / `--admin-credential`, send the credential as an
   `Authorization: Bearer <credential>` header. It authenticates you as the
-  node's operator, with every capability, exactly as on the executor's RPC
+  executor's operator, with every capability, exactly as on the executor's RPC
   API. The first call that carries it stores it in the session.
 - **No admin credential** — on an executor started without one, a caller
   with no token on the executor's own machine is the operator; nothing to do.
-- **Multi-user node** — `signup(email, password)` once, then
+- **Multi-user executor** — `signup(email, password)` once, then
   `login_email(email, password)` returns a JWT that authenticates the rest of
-  the session. `verify_email_code` is only needed if the node enforces email
+  the session. `verify_email_code` is only needed if the executor enforces email
   verification; try `login_email` first rather than assuming it does.
-- **Capability flow** (one shared node identity, not a per-agent account) —
+- **Capability flow** (the executor's main agent, or the agent you name) —
   `request_capability(app_name, app_desc)` returns a `request_id`. When your
   session may grant capabilities (the operator), it also auto-permits the
-  request and returns the `code`; otherwise the node's operator approves the
+  request and returns the `code`; otherwise the agent's owner (the executor's
+  operator for the main agent, the user for theirs) approves the
   request and gives you the code. Pass both to `generate_jwt`, which stores
   the resulting JWT in the session for every later call.
 
-Both JWT paths need an unlocked executor: right after a restart the node's
+Both JWT paths need an unlocked executor: right after a restart the executor's
 operator has to run `agent.unlock` first, otherwise `login_email` and
 `generate_jwt` fail with a "key not found" error.
 

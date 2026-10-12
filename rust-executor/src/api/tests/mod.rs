@@ -11,6 +11,8 @@ pub mod connection_tests;
 #[cfg(test)]
 pub mod error_tests;
 #[cfg(test)]
+pub mod executor_operation_tests;
+#[cfg(test)]
 pub mod flow_ws_tests;
 #[cfg(test)]
 pub mod handler_table_tests;
@@ -22,8 +24,6 @@ pub mod method_matrix_tests;
 pub(crate) mod multi_user;
 #[cfg(test)]
 pub mod neighbourhood_access_tests;
-#[cfg(test)]
-pub mod node_operation_tests;
 #[cfg(test)]
 pub mod notification_ws_tests;
 #[cfg(test)]

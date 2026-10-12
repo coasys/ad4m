@@ -17,7 +17,6 @@ use crate::ai_service::harness::provider::{
 use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::secret::Secret;
 use crate::types::LinkStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1029,7 +1028,7 @@ pub async fn run_interpretation_with_harness_and_model(
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
     max_tool_calls: u32,
-    auth_token: Option<String>,
+    caller: Option<Arc<crate::agent::session::Session>>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
@@ -1093,7 +1092,8 @@ pub async fn run_interpretation_with_harness_and_model(
         .collect();
 
     // The AD4M MCP handler is the read-tool surface (see `pass_mcp_context`).
-    let mcp_context = pass_mcp_context(perspective, context, auth_token.as_deref()).await;
+    let has_caller = caller.is_some();
+    let mcp_context = pass_mcp_context(perspective, context, caller).await;
     let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
         mcp_handler,
@@ -1164,9 +1164,9 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
-    // A pass with a caller bills the user it acts as; the caller's token named that user. An
-    // executor-owned pass (no caller token) bills no one.
-    let bill_to = auth_token.and(context.user_email.clone());
+    // A pass with a caller bills the user it acts as; the caller's session named that user.
+    // An executor-owned pass (no caller) bills no one.
+    let bill_to = context.user_email.clone().filter(|_| has_caller);
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
@@ -1261,8 +1261,9 @@ pub async fn run_interpretation_with_harness_and_model(
 /// The MCP context of an interpretation pass on `perspective`. The pass runs in-process, so
 /// the reach is loopback. Its dynamic tool list names the classes of `perspective` only.
 ///
-/// - A pass with a caller token acts as that token's session, checked against the
-///   executor's configured admin credential, as on the RPC socket.
+/// - A pass with a caller acts as the caller's session: the one its RPC request arrived on,
+///   so the pass's tools reach what the caller reaches, and stop once that session's grant
+///   ends.
 /// - A pass without one (the auto-processor's) acts as the perspective's owner
 ///   ([`pass_owner_session`]), never as the operator: the transcript it reads may come from
 ///   neighbourhood peers and can steer the model, and the operator reaches every user's
@@ -1270,10 +1271,15 @@ pub async fn run_interpretation_with_harness_and_model(
 pub(crate) async fn pass_mcp_context(
     perspective: &PerspectiveInstance,
     context: &AgentContext,
-    auth_token: Option<&str>,
+    caller: Option<Arc<crate::agent::session::Session>>,
 ) -> crate::mcp::server::McpContext {
-    let mcp = crate::mcp::server::McpContext::new(
-        harness_admin_credential(),
+    let session = match caller {
+        Some(session) => session,
+        None => Arc::new(pass_owner_session(perspective, context).await),
+    };
+    crate::mcp::server::McpContext::new(
+        // The pass holds its session; no token arrives that a credential would decide.
+        None,
         crate::agent::capabilities::ListenerReach::Loopback,
         // The harness reaches tools through `list_tool_schemas` /
         // `call_tool_by_name`, which always include the dynamic per-class
@@ -1281,24 +1287,22 @@ pub(crate) async fn pass_mcp_context(
         // Set explicitly so the intent is visible at the construction site.
         true,
     )
-    .scoped_to(&perspective.uuid);
-    match auth_token {
-        Some(token) => mcp.with_token(token),
-        None => mcp.with_session(pass_owner_session(perspective, context).await),
-    }
+    .scoped_to(&perspective.uuid)
+    .with_session(session)
 }
 
-/// The session a pass without a caller token acts as, from the owners of `perspective`:
+/// The session a pass without a caller acts as, from the owners of `perspective`. Always an
+/// in-process session ([`Session::in_process`]): one of the executor's agents, never the
+/// operator.
 ///
 /// - a managed user who owns it (the pass's own user, if it is one of them) acts as that
-///   user, with the default user capabilities ([`Session::in_process_user`]);
+///   user's agent, with the default user capabilities;
 /// - otherwise (unowned, owned by the main agent, or by a DID that is no managed user) the
-///   main agent, as an app that may only query this perspective
-///   ([`Session::in_process_app`]). The perspective guard lets an app reach unowned and
-///   main-agent perspectives only, so the pass reaches no user's perspective.
+///   main agent, limited to querying this perspective. The perspective guard lets the main
+///   agent reach its own and unowned perspectives only, so the pass reaches no user's
+///   perspective.
 ///
-/// [`Session::in_process_user`]: crate::agent::session::Session::in_process_user
-/// [`Session::in_process_app`]: crate::agent::session::Session::in_process_app
+/// [`Session::in_process`]: crate::agent::session::Session::in_process
 async fn pass_owner_session(
     perspective: &PerspectiveInstance,
     context: &AgentContext,
@@ -1328,36 +1332,17 @@ async fn pass_owner_session(
         .find(|(email, _)| context.user_email.as_ref() == Some(email));
     let owner = own_user.or_else(|| users.first().filter(|_| !main_owns));
     match owner {
-        Some((email, did)) => Session::in_process_user(email.clone(), did.clone()),
-        None => Session::in_process_app(vec![
-            crate::agent::capabilities::perspective_query_capability(vec![handle.uuid]),
-        ]),
-    }
-}
-
-/// The admin credential the MCP handler of a pass with a caller token compares the token
-/// with: the executor's configured one, so an admin caller acts as on the RPC socket.
-fn harness_admin_credential() -> Option<Secret> {
-    // An empty env credential is none, as in `Ad4mConfig::prepare`.
-    crate::config::configured_admin_credential()
-        .or_else(|| Secret::non_empty(std::env::var("AD4M_ADMIN_CREDENTIAL").ok()))
-}
-
-#[cfg(test)]
-mod harness_credential_tests {
-    use super::harness_admin_credential;
-    use crate::config::{set_global_config, Ad4mConfig};
-
-    #[test]
-    fn a_pass_with_a_caller_token_checks_it_against_the_configured_credential() {
-        let config = Ad4mConfig {
-            admin_credential: Some("configured-admin".into()),
-            ..Ad4mConfig::default()
-        };
-        set_global_config(config);
-        let credential = harness_admin_credential();
-        assert!(credential.is_some_and(|c| c.expose_for_compare("configured-admin")));
-        set_global_config(Ad4mConfig::default());
+        Some((email, did)) => Session::in_process(
+            AgentContext::for_user_email(email.clone()),
+            crate::agent::capabilities::get_user_default_capabilities(),
+        )
+        .with_did(did),
+        None => Session::in_process(
+            AgentContext::main_agent(),
+            vec![crate::agent::capabilities::perspective_query_capability(
+                vec![handle.uuid],
+            )],
+        ),
     }
 }
 
@@ -1452,7 +1437,9 @@ mod pass_session_tests {
     async fn b_perspective() -> Fixture {
         managed_user(B_EMAIL, B_DID);
         let b = fixture("Diary", DIARY_SDNA, Some(B_DID)).await;
-        let operator = crate::mcp::tools::test_support::handler_as(Principal::Operator);
+        let operator = crate::mcp::tools::test_support::handler_as(
+            crate::mcp::tools::test_support::operator(),
+        );
         let created = operator
             .call_tool_by_name(
                 "instance_create",
@@ -1542,7 +1529,8 @@ mod pass_session_tests {
             .iter()
             .filter(|(_, answer)| {
                 answer.contains(B_SECRET)
-                    || !(answer.contains(&format!("Perspective not found: {b}"))
+                    || !((answer.contains(&format!("Perspective {b} not found"))
+                        && answer.contains("\"status\":404"))
                         || answer.contains("\"status\":403")
                         || answer.contains("\"status\":401")
                         || answer.starts_with("Unknown tool:"))
@@ -1620,7 +1608,14 @@ mod pass_session_tests {
         let handler = pass_handler(&unowned, &AgentContext::main_agent()).await;
         let session = handler.session().await.unwrap();
         assert!(!session.is_operator());
-        assert!(matches!(session.principal, Principal::App { .. }));
+        assert_eq!(
+            session.principal,
+            Principal::Agent(AgentContext::main_agent())
+        );
+        assert!(
+            session.grant().is_none(),
+            "an in-process session has no grant"
+        );
 
         let described = handler
             .call_tool_by_name(
@@ -1646,17 +1641,12 @@ mod pass_session_tests {
             tools.into_iter().map(|t| t.name).collect::<Vec<_>>()
         };
         let tokenless = pass_handler(&a, &AgentContext::for_user_email(A_EMAIL.into())).await;
-        // A pass with the operator's token reaches every perspective; its list is scoped too.
-        // (Built as `pass_mcp_context` builds it, with a test credential in place of the
-        // configured one.)
+        // A pass run by the operator reaches every perspective; its list is scoped too.
+        let operator = Arc::new(crate::agent::session::Session::for_test(
+            Principal::Operator,
+        ));
         let operator_pass = Ad4mMcpHandler::new(
-            crate::mcp::server::McpContext::new(
-                Some("pass-test-admin".into()),
-                crate::agent::capabilities::ListenerReach::Loopback,
-                true,
-            )
-            .scoped_to(&a.uuid)
-            .with_token("pass-test-admin"),
+            pass_mcp_context(&a.perspective, &AgentContext::main_agent(), Some(operator)).await,
         );
         assert!(operator_pass.session().await.unwrap().is_operator());
 

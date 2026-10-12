@@ -57,26 +57,55 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
   `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every JS runtime is a
   language runtime, so third-party language code reaches every op: an op that signs must sign as
-  `get_runtime_agent_context()`, never as the node directly.
+  `get_runtime_agent_context()`, never as the main agent directly.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
+- **Agents and sessions**: an executor hosts N agents. `AgentContext` (`agent/mod.rs`) names one:
+  the main agent (agent #0, `user_email: None`, `is_main_agent()`), or a user's managed agent.
+  `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
+  credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
+  (a grant on the main agent or on a user's agent), or `Principal::Anonymous`. Capabilities, the
+  grant and the agent's DID are `Session` fields. Read identity with `acts_as()` /
+  `acts_as_did()` / `user()` / `is_operator()`; never decode the token again. Any
+  signing/DID/billing path takes the `AgentContext` explicitly.
+- **Grants** (`agent/grants.rs`, table `grants` in `db/grants.rs`) are the one allowlist of
+  tokens: a token (id = its `nonce`) opens a session only while its grant exists, is active and
+  has not expired, and the session's capabilities are the grant's (tokens carry `iss, aud, iat,
+  exp, nonce, sub` only). Both mint paths go through `grants::mint`: the app capability flow (a
+  grant on the main agent) and a user login (an auto-approved grant on that user's agent). The
+  admin credential is no token. Revoking or removing a grant cancels its `ended` token, which
+  every socket of the session watches through `Session::ended()`. Start-up moves the old app
+  registry (`apps_data.json`, renamed `.migrated`) into grant rows and drops expired rows. Tests
+  mint with `test_utils::granted_token(auth)`; a token signed without a grant is refused.
 - **Capabilities**: every WS method declares a guard where it registers (`api/guards.rs`); the
   dispatcher checks its capability (`agent/capabilities/defs.rs`) and ownership rule before the
-  handler runs. MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
-- **App approval**: `agent.requestCapability` records a `PendingApproval` by request id
-  (`agent/capabilities/pending.rs`); `agent.permitCapability` sets its code; `agent.generateJwt`
-  redeems it once. A request expires 10 minutes after the request or the approval; five wrong
-  codes delete it. The JWT goes only to the redeeming caller: the app registry
-  (`apps_map.rs`, `apps_data.json`) keeps the token's id and expiry, never the token, and
-  `getApps` sends `token: ""`. Older registry files with raw tokens are migrated on load.
-- **Secrets** (`secret.rs`): credentials are `Secret`s (no `Serialize`). `api/tests/secret_leak_tests.rs`
-  calls every read method as each principal and fails if a seeded secret reaches a reply or an
-  event; a new read method needing parameters gets them in its `params` table.
-- **Multi-user**: `AgentContext` (`agent/mod.rs`) carries main-agent vs managed-user (by email).
-  Any signing/DID/billing path takes it explicitly.
-- **Per-user objects**: a user session reaches only its own. Perspectives are owned by DID
-  (`owners`), AI tasks by email (`tasks.user_email`). A WS method that names one declares
-  `Guard::Perspective` or `Guard::Task` (`api/AGENTS.md`). The capability check alone does not
+  handler runs. A handler calls `ctx.require(&X_CAPABILITY)` only for a check its guard does not
+  make; `Session::may` answers the same question as a `bool`. MCP tools check via
+  `Ad4mMcpHandler::get_*_perspective`.
+- **Per-agent objects**: a session reaches only its agent's; the operator reaches all.
+  Perspectives are owned by DID (`owners`; none = the main agent), AI tasks by email
+  (`tasks.user_email`; none = the main agent), grants and capability requests by their agent.
+  A WS method that names one declares `Guard::Owns` (`api/AGENTS.md`); missing and not yours
+  are both 404. The capability check alone does not
   separate users: user tokens hold wildcard perspective, neighbourhood and AI capabilities.
+- **Capability requests** (#1399, executor side): `agent.requestCapability(authInfo, agent?)`
+  names a target agent (a managed user's email; absent = the main agent) and records a
+  `PendingRequest` in memory only (`agent/capabilities/pending.rs`: never on disk, anonymous
+  callers create them; 1024 at most, unapproved evicted first). The approval request event goes to
+  the target agent's DID with `AGENT_PERMIT`. `agent.permitCapability` (the operator, or a
+  session acting as the target managed agent) approves it, possibly with fewer capabilities, and
+  gets a six-digit code (a `Secret`). `agent.generateJwt` redeems the code once, in one locked
+  step: the grant is minted on the target agent with the approved capabilities capped at that
+  agent's own (`grant_caps_for`); a failed mint leaves the request approved and redeemable. Five
+  wrong codes delete a request; it lives 10 minutes (main agent) or 24 hours (managed agent),
+  restarted at approval. No request is approved at the request: the app name and domain are
+  whatever the (anonymous) caller declares, so they never grant anything. Only a six-digit code
+  approves or redeems (`pending::is_code`); the empty code is refused before any comparison.
+  The request flow is in `api/AGENTS.md`.
+- **Secrets** (`secret.rs`): credentials are `Secret`s (no `Serialize`): the admin credential,
+  AI provider keys (results carry `hasApiKey`), webhook credentials (`hasWebhookAuth`) and
+  capability codes. `api/tests/secret_leak_tests.rs` calls every read method as each principal
+  and fails if a seeded secret reaches a reply or an event; a new read method needing parameters
+  gets them in its `params` table.
 - **Notifications** post perspective data to any webhook URL. Their grant, update and delivery
   rules live in `runtime_service/notification_access.rs`: a notification fires only when granted
   and its owner may read the perspective. The owner is a DID (`owner_did`: a managed user's, or the

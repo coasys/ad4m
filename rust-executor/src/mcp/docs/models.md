@@ -161,7 +161,7 @@ stored two different ways. Declare it once on the property shape instead.
 
 `describe_perspective` reports a local property with `"local": true` and a
 `local_note` explaining the reach, so a client can tell before writing that the
-value will not leave this node.
+value will not leave this executor.
 
 Use it for per-replica derived state — caches, local marks, anything each agent
 should recompute for itself rather than receive. Do not use it for privacy

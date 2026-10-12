@@ -5,7 +5,7 @@
 //! `agent.updateProfile` and `expression.create`, called through the handler map, so those
 //! methods' guards apply.
 
-use super::{decode, method_error, Ad4mMcpHandler};
+use super::{labelled_json, method_error, Ad4mMcpHandler};
 use crate::agent::{create_signed_expression, AgentContext};
 use crate::api::ws_handler::WsRpcError;
 use crate::languages::LanguageController;
@@ -103,31 +103,25 @@ fn make_profile_link(
     })
 }
 
-/// A tool's answer when `agent.get` or `agent.updateProfile` fails: a refusal as the method
-/// gave it, any other failure under `what`.
-fn agent_error(what: &str, e: WsRpcError) -> String {
-    match e.code {
-        401 | 403 => method_error(e),
-        _ => json!({ "error": format!("{what}: {}", e.message) }).to_string(),
-    }
-}
-
 impl Ad4mMcpHandler {
-    /// The caller's own agent (`agent.get`): a user's, or the node's main agent.
-    async fn current_agent(&self) -> Result<Agent, WsRpcError> {
-        let agent = self.call_method("agent.get", json!({})).await?;
-        decode(agent).map_err(WsRpcError::internal)
+    /// The caller's own agent (`agent.get`): a user's, or the main agent. A failure that is
+    /// not a refusal answers `{"error": "{failed}: .."}`.
+    async fn current_agent(&self, failed: &'static str) -> Result<Agent, String> {
+        self.call("agent.get", json!({}), labelled_json(failed))
+            .await
     }
 
     /// Replace the caller's public perspective with `links` (`agent.updateProfile`). The
-    /// method verifies every link's signature again.
+    /// method verifies every link's signature again. A failure that is not a refusal answers
+    /// `{"error": "{failed}: .."}`.
     async fn set_public_links(
         &self,
         links: &[DecoratedLinkExpression],
-    ) -> Result<Agent, WsRpcError> {
+        failed: &'static str,
+    ) -> Result<Agent, String> {
         let params = json!({ "publicPerspective": { "links": links } });
-        let agent = self.call_method("agent.updateProfile", params).await?;
-        decode(agent).map_err(WsRpcError::internal)
+        self.call("agent.updateProfile", params, labelled_json(failed))
+            .await
     }
 
     /// The caller's agent, to sign profile links as.
@@ -148,9 +142,9 @@ impl Ad4mMcpHandler {
         description = "Get the DID (Decentralized Identifier) of the current agent. Use this to identify your own messages when filtering — compare the 'author' field in message data against your DID."
     )]
     pub async fn get_my_did(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        match self.current_agent().await {
+        match self.current_agent("Failed to get agent").await {
             Ok(agent) => agent.did,
-            Err(e) => agent_error("Failed to get agent", e),
+            Err(e) => e,
         }
     }
 
@@ -159,9 +153,9 @@ impl Ad4mMcpHandler {
         description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and human users see in neighbourhoods."
     )]
     pub async fn get_agent_profile(&self, _params: Parameters<GetAgentProfileParams>) -> String {
-        let agent = match self.current_agent().await {
+        let agent = match self.current_agent("Failed to get agent").await {
             Ok(a) => a,
-            Err(e) => return agent_error("Failed to get agent", e),
+            Err(e) => return e,
         };
 
         let mut profile = json!({"did": agent.did});
@@ -192,9 +186,9 @@ impl Ad4mMcpHandler {
         description = "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and to the human users of whichever app renders the neighbourhood. Only provided fields are updated; omitted fields keep their current values."
     )]
     pub async fn set_agent_profile(&self, params: Parameters<SetAgentProfileParams>) -> String {
-        let agent = match self.current_agent().await {
+        let agent = match self.current_agent("Failed to get agent").await {
             Ok(a) => a,
-            Err(e) => return agent_error("Failed to get agent", e),
+            Err(e) => return e,
         };
         let context = match self.signer().await {
             Ok(context) => context,
@@ -249,7 +243,10 @@ impl Ad4mMcpHandler {
             }
         }
 
-        match self.set_public_links(&all_links).await {
+        match self
+            .set_public_links(&all_links, "Failed to update profile")
+            .await
+        {
             Ok(_) => {
                 let mut updated = json!({"success": true});
                 for ((_, field), value) in PROFILE_FIELDS.iter().zip([
@@ -265,7 +262,7 @@ impl Ad4mMcpHandler {
                 }
                 updated.to_string()
             }
-            Err(e) => agent_error("Failed to update profile", e),
+            Err(e) => e,
         }
     }
 
@@ -303,18 +300,22 @@ impl Ad4mMcpHandler {
             }
         }
 
-        let profile_img: String = match self.call_method("expression.create", create).await {
-            Ok(address) => match decode(address) {
-                Ok(address) => address,
-                Err(e) => return e,
-            },
-            Err(e) => return agent_error("Failed to upload image", e),
+        let profile_img: String = match self
+            .call(
+                "expression.create",
+                create,
+                labelled_json("Failed to upload image"),
+            )
+            .await
+        {
+            Ok(address) => address,
+            Err(e) => return e,
         };
 
         // Get current agent and rebuild links with the new profile image
-        let agent = match self.current_agent().await {
+        let agent = match self.current_agent("Failed to get agent").await {
             Ok(a) => a,
-            Err(e) => return agent_error("Failed to get agent", e),
+            Err(e) => return e,
         };
         let context = match self.signer().await {
             Ok(context) => context,
@@ -351,14 +352,17 @@ impl Ad4mMcpHandler {
             }
         }
 
-        match self.set_public_links(&all_links).await {
+        match self
+            .set_public_links(&all_links, "Failed to update profile")
+            .await
+        {
             Ok(_) => json!({
                 "success": true,
                 "profile_image": profile_img,
                 "message": "Profile picture updated. Use a square image for best results — apps usually crop it to a circle."
             })
             .to_string(),
-            Err(e) => agent_error("Failed to update profile", e),
+            Err(e) => e,
         }
     }
 
@@ -373,15 +377,18 @@ impl Ad4mMcpHandler {
         let agent = match &params.0.did {
             // Another agent, through the agent language (the main agent's own DID answers
             // locally).
-            Some(did) => match self.call_method("agent.byDid", json!({ "did": did })).await {
-                Ok(agent) => decode::<Option<Agent>>(agent),
-                Err(e) => return agent_error("Failed to get agent perspective", e),
-            },
-            None => self
-                .current_agent()
+            Some(did) => {
+                self.call::<Option<Agent>>(
+                    "agent.byDid",
+                    json!({ "did": did }),
+                    labelled_json("Failed to get agent perspective"),
+                )
                 .await
-                .map(Some)
-                .map_err(|e| agent_error("Failed to get agent perspective", e)),
+            }
+            None => self
+                .current_agent("Failed to get agent perspective")
+                .await
+                .map(Some),
         };
         match agent {
             Ok(Some(agent)) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
@@ -403,84 +410,52 @@ impl Ad4mMcpHandler {
             Err(e) => return json!({"error": format!("Invalid links JSON: {}", e)}).to_string(),
         };
 
-        match self.set_public_links(&links).await {
+        match self
+            .set_public_links(&links, "Failed to update agent perspective")
+            .await
+        {
             Ok(agent) => serde_json::to_string(&agent).unwrap_or_else(|_| "null".into()),
-            Err(e) => agent_error("Failed to update agent perspective", e),
+            Err(e) => e,
         }
     }
 }
 
-/// The tools answer as their RPC methods' guards do (#851).
+/// What a profile write leaves behind, read back as the operator: the method matrix through
+/// MCP compares only who may call the profile tools (#851).
 #[cfg(test)]
-mod guard_tests {
+mod profile_tests {
     use super::*;
     use crate::agent::capabilities::{AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY};
-    use crate::agent::session::Principal;
-    use crate::mcp::tools::test_support::{app, handler_as, setup, status};
-
-    fn no_params() -> Parameters<GetAgentProfileParams> {
-        Parameters(GetAgentProfileParams {})
-    }
-
-    // The profile tools checked no capability: any app token read and wrote the node's
-    // profile.
-    #[tokio::test]
-    async fn reading_the_profile_needs_the_agent_read_capability() {
-        setup();
-        let refused = handler_as(app(vec![])).get_my_did(no_params()).await;
-        assert_eq!(status(&refused), Some(403), "{refused}");
-        let refused = handler_as(app(vec![])).get_agent_profile(no_params()).await;
-        assert_eq!(status(&refused), Some(403), "{refused}");
-
-        let reader = handler_as(app(vec![AGENT_READ_CAPABILITY.clone()]));
-        assert_eq!(reader.get_my_did(no_params()).await, crate::agent::did());
-        assert_eq!(
-            handler_as(Principal::Operator)
-                .get_my_did(no_params())
-                .await,
-            crate::agent::did()
-        );
-    }
+    use crate::mcp::tools::test_support::{app, handler_as, operator, setup};
 
     #[tokio::test]
-    async fn writing_the_profile_needs_the_agent_update_capability() {
+    async fn an_app_sets_the_main_agents_profile_and_the_operator_reads_it() {
         setup();
-        let set = |principal| async move {
-            handler_as(principal)
-                .set_agent_profile(Parameters(SetAgentProfileParams {
-                    username: Some("mcp-name".into()),
-                    given_name: None,
-                    family_name: None,
-                    email: None,
-                    bio: None,
-                }))
-                .await
-        };
-        let read_only = set(app(vec![AGENT_READ_CAPABILITY.clone()])).await;
-        assert_eq!(status(&read_only), Some(403), "{read_only}");
-        assert!(
-            read_only.contains("Capability is not matched"),
-            "{read_only}"
-        );
-
-        let refused = handler_as(app(vec![AGENT_READ_CAPABILITY.clone()]))
-            .set_agent_public_perspective(Parameters(SetAgentPublicPerspectiveParams {
-                links_json: "[]".into(),
-            }))
-            .await;
-        assert_eq!(status(&refused), Some(403), "{refused}");
-
-        let updated = set(app(vec![
+        let updated = handler_as(app(vec![
             AGENT_READ_CAPABILITY.clone(),
             AGENT_UPDATE_CAPABILITY.clone(),
         ]))
+        .set_agent_profile(Parameters(SetAgentProfileParams {
+            username: Some("mcp-name".into()),
+            given_name: None,
+            family_name: None,
+            email: None,
+            bio: None,
+        }))
         .await;
         let updated: serde_json::Value = serde_json::from_str(&updated).expect(&updated);
         assert_eq!(updated["success"], true, "{updated}");
         assert_eq!(updated["username"], "mcp-name");
-        let profile = handler_as(Principal::Operator)
-            .get_agent_profile(no_params())
+        let operator = handler_as(operator());
+        let profile = operator
+            .get_agent_profile(Parameters(GetAgentProfileParams {}))
             .await;
         assert!(profile.contains("mcp-name"), "{profile}");
+        assert_eq!(
+            operator
+                .get_my_did(Parameters(GetAgentProfileParams {}))
+                .await,
+            crate::agent::did()
+        );
     }
 }

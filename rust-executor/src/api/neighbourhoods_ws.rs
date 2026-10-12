@@ -1,6 +1,6 @@
 //! Neighbourhood WS-native handlers.
 //!
-//! Every method that names a perspective declares `Guard::Perspective`, as the
+//! Every method that names a perspective declares `Guard::Owns` on it, as the
 //! `perspective.*` methods do: a user who learns another user's perspective uuid must not
 //! publish it (which adds the caller to its owners), signal or broadcast through it, or read
 //! who is in it.
@@ -13,21 +13,13 @@ use ts_rs::TS;
 use crate::agent::capabilities::*;
 use crate::agent::{create_signed_expression, AgentContext};
 use crate::neighbourhoods::{self, install_neighbourhood_with_context};
-use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::Guard;
-use super::perspectives_ws::get_perspective_or_404;
+use super::guards::{Guard, Owner};
+use super::perspectives_ws::guarded_perspective;
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
-
-/// The perspective a guarded handler acts on. The method's `Guard::Perspective` has already
-/// checked the caller's capability and access, so this only fetches it: 404 if it went away
-/// since.
-async fn guarded_perspective(params: &Value) -> Result<PerspectiveInstance, WsRpcError> {
-    get_perspective_or_404(&params.require_str("uuid")?).await
-}
+use super::ws_handler::{HandlerMap, WsRpcError};
 
 // The neighbourhood capabilities name no perspective; the guard's rule adds the owner check.
 fn neighbourhood_create(_: Vec<String>) -> Capability {
@@ -213,17 +205,17 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         join_neighbourhood,
     )
     .long()
-    .guard(Guard::SelfAgent(NEIGHBOURHOOD_READ_CAPABILITY.clone()));
+    .guard(Guard::Cap(NEIGHBOURHOOD_READ_CAPABILITY.clone()));
     // Publishing adds the caller to the perspective's owners, so it needs the perspective.
     map.method::<PublishNeighbourhoodRequest, String>(
         "neighbourhood.publish",
         publish_neighbourhood,
     )
     .long()
-    .guard(Guard::Perspective {
-        capability: neighbourhood_create,
-        uuid: published_perspective,
-        hides_existence: false,
+    .guard(Guard::Owns {
+        cap: neighbourhood_create,
+        id: published_perspective,
+        owner: Owner::Perspective,
     });
     // The perspective that holds the neighbourhood decides who may use it.
     map.method::<NeighbourhoodBroadcastParams, bool>("neighbourhood.sendBroadcast", send_broadcast)

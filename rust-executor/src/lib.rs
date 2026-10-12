@@ -540,19 +540,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .into_owned(),
     );
 
-    agent::capabilities::apps_map::set_data_file_path(
+    // Grants are the allowlist of tokens: load them before the API serves. The app registry of
+    // executors before grants (`apps_data.json`) moves into them once.
+    let apps_file = std::path::Path::new(
         config
             .app_data_path
             .as_ref()
-            .map(|path| {
-                std::path::Path::new(path)
-                    .join("apps_data.json")
-                    .to_string_lossy()
-                    .into_owned()
-            })
             .expect("App data path not set in Ad4mConfig"),
-    );
-    agent::revoked::load_at_start().expect("Failed to load revoked tokens");
+    )
+    .join("apps_data.json");
+    agent::grants::load_at_start(&apps_file).expect("Failed to load the grants");
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).

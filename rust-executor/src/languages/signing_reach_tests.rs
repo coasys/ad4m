@@ -66,21 +66,21 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
         "a language running for alice signed as bob"
     );
 
-    // These signed as the node, over a string the language chose, whoever the call ran
-    // for. A signature over `JSON.stringify(data) + timestamp` is a valid proof for a
-    // node-authored Expression, so they forged the node's expressions.
+    // These signed as the main agent, over a string the language chose, whoever the call
+    // ran for. A signature over `JSON.stringify(data) + timestamp` is a valid proof for a
+    // main-agent-authored Expression, so they forged the main agent's expressions.
     let reach = run_as(
         &handle,
         &as_alice,
         r#"(() => {
   const ops = (globalThis.Deno && Deno.core && Deno.core.ops) || {};
-  const nodeSigningOps = ["sign_string", "sign_device_key", "generate_entanglement_proof",
+  const mainAgentSigningOps = ["sign_string", "sign_device_key", "generate_entanglement_proof",
     "add_entanglement_proofs", "delete_entanglement_proofs", "wallet_sign"];
   return JSON.stringify({
     entanglementService: typeof globalThis.ENTANGLEMENT_SERVICE,
     holochainSignString: typeof HOLOCHAIN_SERVICE.signString,
     holochainCallZome: typeof HOLOCHAIN_SERVICE.callZomeFunction,
-    rawOps: nodeSigningOps.filter((name) => typeof ops[name] === "function"),
+    rawOps: mainAgentSigningOps.filter((name) => typeof ops[name] === "function"),
   });
 })()"#,
     )

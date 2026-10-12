@@ -109,28 +109,28 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    // The node's rates and version, and the caller's own record for a user session.
+    // The executor's rates and version, and the caller's own record for a user session.
     map.method::<NoParams, HostingInfoResult>("hosting.info", get_hosting_info)
         .read()
-        .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
-    // The node's own ledger: reading it can also create the node's ledger key.
+        .guard(Guard::Cap(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+    // The executor's own ledger: reading it can also create the executor's ledger key.
     map.method::<NoParams, HostingWalletResult>("hosting.wallet", get_hosting_wallet)
         .read()
-        .guard(Guard::Node(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
     // The Unyt zome's `get_history` output, passed through unparsed.
     map.method::<NoParams, Value>("hosting.walletHistory", get_hosting_wallet_history)
         .read()
-        .guard(Guard::Node(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
     // Echoes the amount: nothing is paid yet.
     map.method::<RequestPaymentRequest, HostingRequestPaymentResult>(
         "hosting.requestPayment",
         request_payment,
     )
-    .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     // Sets the caller's own wallet address. The handler refuses a session without a user
     // (403): the operator and apps have no hosting record.
     map.method::<SetHotWalletAddressRequest, bool>("hosting.setHotWallet", set_hot_wallet)
-        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
 }
 
 // ── Contracts ───────────────────────────────────────────────────────────────

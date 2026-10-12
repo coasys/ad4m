@@ -244,7 +244,7 @@ const LOCAL_CACHE_SDNA: &str = r#"{
 }"#;
 
 /// `describe_perspective` is the only place a client can learn that a property
-/// stays on this node. Until `ShapeProperty` carried `local`, the model-query
+/// stays on this executor. Until `ShapeProperty` carried `local`, the model-query
 /// layer parsed the flag out of the SHACL graph and threw it away, so the
 /// description could not say it at all.
 #[tokio::test(flavor = "multi_thread")]

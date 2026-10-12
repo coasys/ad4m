@@ -1,6 +1,6 @@
 //! The secret-leak test (Plan 20 §8.3): no seeded secret reaches a response or an event.
 //!
-//! The test seeds the node with one known value of each kind of secret: the admin
+//! The test seeds the executor with one known value of each kind of secret: the admin
 //! credential, an app token, a user's token and password, a webhook credential and an AI
 //! provider API key. It then calls every read method of the handler map as each principal
 //! (operator, app, user, anonymous), and captures every event on the operator's and the
@@ -25,8 +25,7 @@ use crate::agent::capabilities::{
     generate_capability_token, permit_capability, request_capability, AuthInfo, AuthInfoExtended,
     ListenerReach, ALL_CAPABILITY,
 };
-use crate::agent::AgentService;
-use crate::api::auth::AuthContext;
+use crate::agent::{AgentContext, AgentService};
 use crate::api::event_interest::watching_all;
 use crate::api::events_ws::build_event_stream;
 use crate::api::ws_handler::{build_handler_map, HandlerMap};
@@ -38,7 +37,7 @@ use crate::perspectives::{register_perspective, unregister_perspective};
 use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::RuntimeService;
 use crate::secret::Secret;
-use crate::test_utils::{setup_agent, setup_wallet, use_test_apps_file, MultiUserMode};
+use crate::test_utils::{ensure_test_db, setup_agent, setup_wallet, MultiUserMode};
 use crate::types::{
     ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState, RequestContext,
 };
@@ -64,7 +63,7 @@ const READ_ONLY_UNFLAGGED: &[&str] = &[
 /// Read methods left out by design.
 const EXCLUDED: &[(&str, &str)] = &[(
     "runtime.exportData",
-    "an operator backup: it writes the node's data, secrets included, to a file the operator \
+    "an operator backup: it writes the executor's data, secrets included, to a file the operator \
      names, by design",
 )];
 
@@ -240,9 +239,9 @@ fn collect(
 }
 
 fn context(token: &str, admin: &Option<Secret>) -> Arc<RequestContext> {
-    let auth = AuthContext::open(token, admin, false, ListenerReach::Network)
+    let ctx = RequestContext::open(token, admin, ListenerReach::Network)
         .unwrap_or_else(|e| panic!("the token opens a session: {e}"));
-    Arc::new(auth.to_request_context())
+    Arc::new(ctx)
 }
 
 /// A call that gave the client no answer.
@@ -276,7 +275,7 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     let _multi_user = MultiUserMode::on();
     setup_wallet();
     setup_agent();
-    use_test_apps_file();
+    ensure_test_db();
     let _runtime = RuntimeServiceGuard::start();
     let id = || uuid::Uuid::new_v4().simple().to_string();
 
@@ -298,15 +297,8 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     let operator = context(&admin_credential, &admin);
     let user = context(&user_token, &admin);
     let operator_events =
-        collect(build_event_stream(operator.session.clone(), watching_all(), None).await);
-    let user_events = collect(
-        build_event_stream(
-            user.session.clone(),
-            watching_all(),
-            Some(user_email.clone()),
-        )
-        .await,
-    );
+        collect(build_event_stream(operator.session.clone(), watching_all()).await);
+    let user_events = collect(build_event_stream(user.session.clone(), watching_all()).await);
 
     // Seeded while the streams listen: seeding publishes the events that leaked before.
     let provider_key = format!("sk-leak-provider-key-{}", id());
@@ -364,16 +356,43 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         capabilities: Some(vec![ALL_CAPABILITY.clone()]),
         ..AuthInfo::default()
     };
-    let app_request = request_capability(app_auth.clone()).await;
+    let app_request = request_capability(app_auth.clone(), AgentContext::main_agent()).await;
     let code = permit_capability(AuthInfoExtended {
         request_id: app_request.clone(),
-        auth: app_auth,
+        auth: app_auth.clone(),
     })
     .unwrap();
     let app_token = generate_capability_token(app_request.clone(), code)
         .await
         .unwrap()
         .expose_once();
+
+    // An app on the user's agent (#1399): the user approves it through the API and the app
+    // redeems; the approval request and `apps-changed` reach the user's stream.
+    let user_app_request = request_capability(
+        app_auth.clone(),
+        AgentContext::for_user_email(user_email.clone()),
+    )
+    .await;
+    let user_app_code = answer(
+        &map,
+        "agent.permitCapability",
+        json!({ "auth": serde_json::to_string(&AuthInfoExtended {
+            request_id: user_app_request.clone(),
+            auth: app_auth,
+        })
+        .unwrap() }),
+        user.clone(),
+    )
+    .await
+    .expect("the user approves a request for their own agent");
+    let user_app_token = generate_capability_token(
+        user_app_request.clone(),
+        user_app_code.as_str().unwrap().to_string(),
+    )
+    .await
+    .unwrap()
+    .expose_once();
     let app = context(&app_token, &admin);
     let anonymous = context("", &admin);
 
@@ -384,6 +403,8 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         ("admin credential", admin_credential.clone()),
         ("app token", app_token.clone()),
         ("app token's signature", signature(&app_token)),
+        ("user's app token", user_app_token.clone()),
+        ("user's app token's signature", signature(&user_app_token)),
         ("user token", user_token.clone()),
         ("user token's signature", signature(&user_token)),
         ("user password", password.clone()),
@@ -490,6 +511,16 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     assert!(operator_events
         .iter()
         .any(|e| e.contains("apps-changed") && e.contains(&app_request)));
+    let user_events = user_events.lock().unwrap();
+    assert!(user_events
+        .iter()
+        .any(|e| e.contains("exception-occurred") && e.contains(&user_app_request)));
+    assert!(user_events
+        .iter()
+        .any(|e| e.contains("apps-changed") && e.contains(&user_app_request)));
+    assert!(!operator_events
+        .iter()
+        .any(|e| e.contains(&user_app_request)));
     assert!(operator_events
         .iter()
         .any(|e| e.contains(&notifications[0]) && e.contains("hasWebhookAuth")));

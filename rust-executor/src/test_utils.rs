@@ -85,16 +85,8 @@ pub fn setup_agent() {
         .as_mut()
         .expect("Must be some because was initalized above")
         .create_new_keys();
-}
-
-/// Opens an in-memory database when no test has opened one, so it does not wipe one another
-/// test is using.
-pub fn ensure_db() {
-    let db = crate::db::Ad4mDb::global_instance();
-    let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if db.is_none() {
-        *db = Some(crate::db::Ad4mDb::new(":memory:").expect("an in-memory database"));
-    }
+    // Minting a token stores its grant.
+    ensure_test_db();
 }
 
 /// Turns multi-user mode on, on a fresh in-memory database, and off again when dropped,
@@ -126,10 +118,12 @@ pub fn managed_user(name: &str) -> String {
     email
 }
 
-/// A user token the node signed, with its expiry one hour in the past.
+/// A user token the executor signed, with its expiry one hour in the past.
 /// Needs `setup_wallet()` and `setup_agent()` first.
 pub fn expired_user_token(email: &str) -> String {
     use base64::Engine;
+    // Its grant names the user's DID, so the user needs a key.
+    crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
     let valid = crate::user_management::generate_user_jwt(email, "test").unwrap();
     let payload = valid.split('.').nth(1).unwrap();
     let mut claims: serde_json::Value = serde_json::from_slice(
@@ -154,28 +148,50 @@ pub fn expired_user_token(email: &str) -> String {
     .unwrap()
 }
 
-/// Points the app registry at one temp file for the whole test process. Tests that insert
-/// apps call this and use their own unique keys: a temp dir per test would race when tests
-/// run in parallel, because the registry's file path is global. Also opens an in-memory
-/// database for the revoked tokens when no test has opened one.
-pub fn use_test_apps_file() {
-    ensure_db();
-    static APPS_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    let dir =
-        APPS_DIR.get_or_init(|| tempfile::tempdir().expect("a temp dir for the app registry"));
-    crate::agent::capabilities::apps_map::set_data_file_path(
-        dir.path().join("apps.json").to_string_lossy().into(),
-    );
+/// Opens an in-memory database for the grants when no test has opened one. Tests that mint
+/// tokens call this: a token works only while the database holds its grant.
+pub fn ensure_test_db() {
+    let db = crate::db::Ad4mDb::global_instance();
+    let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if db.is_none() {
+        *db = Some(crate::db::Ad4mDb::new(":memory:").expect("an in-memory database"));
+    }
 }
 
-/// Registers an approved app for `token`, as `agent.generateJwt` does: under the token's id.
-pub fn insert_app_with_token(
-    request_id: String,
-    info: crate::agent::capabilities::AuthInfoExtended,
-    token: &str,
-) {
-    let (id, expires_at) =
-        crate::agent::capabilities::read_stored_token_id(token).expect("a token this node issued");
-    crate::agent::capabilities::apps_map::insert_app(request_id, info, id, expires_at)
-        .expect("the app registry takes the app");
+/// A token for the app `auth`, with its grant: on the managed agent of `auth.user_email`, or
+/// on the main agent. Valid for an hour. Needs `setup_wallet()` and `setup_agent()` first.
+pub fn granted_token(auth: crate::agent::capabilities::AuthInfo) -> String {
+    ensure_test_db();
+    let agent = match &auth.user_email {
+        Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
+        None => crate::agent::AgentContext::main_agent(),
+    };
+    let request_id = format!("test-{}", uuid::Uuid::new_v4());
+    crate::agent::grants::mint(agent, auth, Some(request_id), 3600)
+        .expect("the test wallet signs and the test database stores the grant")
+        .0
+}
+
+/// A login token of `email` whose grant is stored although the user has no key: a user whose
+/// identity went after the login. Needs `setup_wallet()` and `setup_agent()` first.
+pub fn token_of_a_user_without_a_key(email: &str) -> String {
+    use crate::agent::grants::{Grants, LiveGrant};
+    let (token, claims) = crate::agent::capabilities::token::sign_token(
+        "test".to_string(),
+        3600,
+        Some(email.to_string()),
+    )
+    .unwrap();
+    Grants::global()
+        .insert(LiveGrant::new(
+            crate::agent::session::TokenId(claims.nonce().to_string()),
+            claims.nonce().to_string(),
+            crate::agent::AgentContext::for_user_email(email.to_string()),
+            "did:key:gone".to_string(),
+            crate::agent::capabilities::AuthInfo::default(),
+            claims.expires_at(),
+            claims.issued_at(),
+        ))
+        .unwrap();
+    token
 }

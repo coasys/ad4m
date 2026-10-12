@@ -1,18 +1,18 @@
-pub mod apps_map;
 pub mod defs;
 pub mod pending;
 pub mod token;
 pub mod types;
 
 pub use defs::*;
-use pending::PendingApprovals;
+use pending::PendingRequests;
 pub use pending::MAX_CODE_ATTEMPTS;
 pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
-use crate::agent::revoked::now;
-use crate::events::{Audience, Event, Topic};
+use crate::agent::grants::now;
+use crate::agent::AgentContext;
+use crate::events::Event;
 use crate::pubsub::get_global_pubsub;
 use crate::secret::Secret;
 use crate::types::*;
@@ -56,7 +56,7 @@ pub enum ListenerReach {
     /// proxy or tunnel running here. The API reads a request that carries a `Forwarded`,
     /// `X-Forwarded-For` or `X-Real-IP` header as `Network` (`api::auth::listener_reach`). A
     /// proxy that sets none of them (a raw TCP forward, `ssh -R`) still reads as `Loopback`,
-    /// so its remote clients are the operator: a node behind a proxy needs an admin credential.
+    /// so its remote clients are the operator: an executor behind a proxy needs an admin credential.
     Loopback,
     /// Bound to any other address: whoever can route to it connects.
     Network,
@@ -91,7 +91,14 @@ pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
     expected: &Capability,
 ) -> Result<(), String> {
-    let capabilities = capabilities.as_ref().map_err(|e| e.clone())?;
+    require_capability(capabilities.as_ref().map_err(|e| e.clone())?, expected)
+}
+
+/// `Ok` if any of `capabilities` covers `expected`; otherwise the error a refused call reports.
+pub fn require_capability(
+    capabilities: &[Capability],
+    expected: &Capability,
+) -> Result<(), String> {
     if !capability_matches(capabilities, expected) {
         return Err(format!(
             "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
@@ -282,15 +289,47 @@ pub fn anonymous_capabilities_when(multi_user_enabled: bool) -> Vec<Capability> 
     }
 }
 
-pub async fn request_capability(auth_info: AuthInfo) -> String {
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let app_name = auth_info.app_name.clone();
+/// The agent that a capability request names (#1399, D11): `agent` is a managed user's email
+/// or an agent's DID; absent or empty, the main agent. An email is taken as it is, whether or
+/// not a user has it: anyone may request, and an answer that differed would tell them which
+/// emails have accounts. A request for an email without a user reaches no one and expires. A
+/// DID (public anyway) must be the main agent's or a user's.
+pub fn requested_agent(agent: Option<&str>) -> Result<AgentContext, String> {
+    let Some(agent) = agent.map(str::trim).filter(|agent| !agent.is_empty()) else {
+        return Ok(AgentContext::main_agent());
+    };
+    if !agent.starts_with("did:") {
+        return Ok(AgentContext::for_user_email(agent.to_lowercase()));
+    }
+    if crate::agent::did_for_context(&AgentContext::main_agent()).is_ok_and(|did| did == agent) {
+        return Ok(AgentContext::main_agent());
+    }
+    crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(agent))
+        .map_err(|e| e.to_string())?
+        .map(AgentContext::for_user_email)
+        .ok_or_else(|| format!("No agent on this executor has the DID {agent}"))
+}
 
+/// Records an app's request for capabilities on the agent `target` and returns its id. The
+/// request waits in memory ([`pending`]) for the owner of `target` to approve it: the approval
+/// request event goes to `target`'s sessions that hold AGENT_PERMIT. No request is ever
+/// approved here: the app name and domain are whatever the (possibly anonymous) caller
+/// declares, so they never grant anything.
+pub async fn request_capability(auth_info: AuthInfo, target: AgentContext) -> String {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    // The request names its agent in the auth info, so the approver sees whose it is.
+    let auth = AuthInfo {
+        user_email: target.user_email.clone(),
+        ..auth_info
+    };
+    let pending = PendingRequests::global();
+    pending.request(request_id.clone(), auth.clone(), target.clone(), now());
+
+    let app_name = auth.app_name.clone();
     let auth_extended = AuthInfoExtended {
         request_id: request_id.clone(),
-        auth: auth_info,
+        auth,
     };
-
     let exception_info = ExceptionInfo {
         title: "Request to authenticate application".to_string(),
         message: format!(
@@ -300,80 +339,97 @@ pub async fn request_capability(auth_info: AuthInfo) -> String {
         r#type: ExceptionType::CapabilityRequested,
         addon: Some(serde_json::to_string(&auth_extended).unwrap()),
     };
-
-    PendingApprovals::global().request(request_id.clone(), auth_extended.auth, now());
     get_global_pubsub()
         .await
-        .publish_event(Event::exception(&exception_info));
+        .publish_event(Event::approval_request(&exception_info, &target));
 
     request_id
 }
 
-/// The operator approves a pending request: returns the code the app redeems, for the
-/// operator only.
+/// The agent that the pending request `request_id` is for, while it waits.
+pub fn request_target(request_id: &str) -> Option<AgentContext> {
+    PendingRequests::global().target(request_id, now())
+}
+
+/// Approves a pending request with `auth_info_extended.auth`, which may grant less than the
+/// app asked for, and returns the code the app redeems: for the approver only. The request's
+/// agent stays the one it named. The caller has checked that the approver owns that agent
+/// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`; MCP's
+/// `caller_can_permit`).
 pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
     let code = gen_random_digits();
-    PendingApprovals::global().approve(
+    PendingRequests::global().approve(
         &auth_info_extended.request_id,
         auth_info_extended.auth,
-        code.clone(),
+        Secret::new(code.clone()),
         now(),
     )?;
     Ok(code)
 }
 
-/// Redeems a permitted request's code for the app's token. The token goes only to the
-/// caller: the app registry keeps its id.
-pub async fn generate_capability_token(request_id: String, rand: String) -> Result<Secret, String> {
-    let pending = PendingApprovals::global();
-    let approval = pending
-        .redeem(&request_id, &rand, now())
-        .map_err(|e| e.to_string())?;
-    let auth = approval.auth().clone();
-
-    let issued = match token::issue_jwt(
-        auth.app_name.clone(),
-        DEFAULT_TOKEN_VALID_PERIOD,
-        auth.clone(),
-    ) {
-        Ok(issued) => issued,
-        Err(e) => {
-            pending.restore(request_id, approval);
-            return Err(e.to_string());
-        }
-    };
-
-    let auth_for_publish = auth.clone();
-
-    // A registry that does not take the app leaves no record of it; the token is dropped
-    // undelivered, and the app retries with the same code.
-    if let Err(e) = apps_map::insert_app(
-        request_id.clone(),
-        AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth,
-        },
-        issued.id,
-        issued.expires_at,
-    ) {
-        pending.restore(request_id, approval);
-        return Err(e);
+/// What a grant on `agent` may hold of `approved` (D13): all of it on the main agent, which
+/// holds every capability; on a managed agent, only what that agent holds itself (its user's
+/// capabilities). A capability that one of the agent's covers stays; a wider one (`*`)
+/// narrows to the agent's capabilities it covers.
+pub fn grant_caps_for(agent: &AgentContext, approved: &[Capability]) -> Vec<Capability> {
+    if agent.is_main_agent() {
+        return approved.to_vec();
     }
+    let own = get_user_default_capabilities();
+    let mut caps: Vec<Capability> = approved
+        .iter()
+        .filter(|cap| capability_matches(&own, cap))
+        .cloned()
+        .collect();
+    for cap in &own {
+        if capability_matches(approved, cap) && !capability_matches(&caps, cap) {
+            caps.push(cap.clone());
+        }
+    }
+    caps
+}
 
-    // The event reaches every session that can approve apps; the token goes only to the caller.
-    let apps_changed = Apps {
-        auth: auth_for_publish,
-        request_id: request_id.clone(),
-        revoked: Some(false),
-        token: String::new(),
-    };
-    get_global_pubsub().await.publish_event(Event::new(
-        Topic::AppsChanged,
-        Audience::Approvers,
-        Some(apps_changed),
-    ));
+/// Redeems an approved request's code for the app's token, in one step: the grant is minted
+/// on the request's agent with the approved capabilities, capped by [`grant_caps_for`], and
+/// only then does the request go. A mint that fails (a locked wallet, a database that does
+/// not take the grant) leaves the request approved, and the same code redeems later. The
+/// token goes only to the caller; the grant keeps its id.
+pub async fn generate_capability_token(request_id: String, code: String) -> Result<Secret, String> {
+    let (token, grant) = PendingRequests::global()
+        .redeem(&request_id, &code, now(), |target, auth| {
+            let capabilities = match &auth.capabilities {
+                Some(approved) => {
+                    let caps = grant_caps_for(target, approved);
+                    if caps.is_empty() {
+                        return Err("None of the approved capabilities is within the agent's \
+                                    own; the request must be approved again"
+                            .to_string());
+                    }
+                    Some(caps)
+                }
+                None => None,
+            };
+            let auth = AuthInfo {
+                capabilities,
+                user_email: target.user_email.clone(),
+                ..auth.clone()
+            };
+            crate::agent::grants::mint(
+                target.clone(),
+                auth,
+                Some(request_id.clone()),
+                DEFAULT_TOKEN_VALID_PERIOD,
+            )
+        })
+        .map_err(|e| e.to_string())?;
 
-    Ok(issued.jwt)
+    // The event reaches the sessions that may approve apps for the agent the app acts as;
+    // the token goes only to the caller.
+    get_global_pubsub()
+        .await
+        .publish_event(Event::apps_changed(&grant.as_app(), &grant.agent));
+
+    Ok(Secret::new(token))
 }
 
 pub fn gen_random_digits() -> String {
@@ -523,7 +579,7 @@ mod tests {
     }
 
     // #1059: without an admin credential, an empty token is the operator only on loopback.
-    // On the network it gets what an anonymous caller gets on a node with a credential:
+    // On the network it gets what an anonymous caller gets on an executor with a credential:
     // enough to request a capability, nothing to read with.
     #[test]
     fn without_a_credential_an_empty_token_is_the_operator_only_on_loopback() {
@@ -591,6 +647,8 @@ mod tests {
 #[cfg(test)]
 mod app_token_tests {
     use super::*;
+    use crate::agent::grants::Grants;
+    use crate::events::{Audience, Topic};
     use std::time::Duration;
 
     fn test_auth_info() -> AuthInfo {
@@ -605,8 +663,14 @@ mod app_token_tests {
         }
     }
 
+    fn setup() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+    }
+
     async fn permitted_request() -> (String, String) {
-        let request_id = request_capability(test_auth_info()).await;
+        let request_id = request_capability(test_auth_info(), AgentContext::main_agent()).await;
         let code = permit_capability(AuthInfoExtended {
             request_id: request_id.clone(),
             auth: test_auth_info(),
@@ -615,15 +679,57 @@ mod app_token_tests {
         (request_id, code)
     }
 
+    fn wrong(code: &str) -> String {
+        if code == "100000" { "100001" } else { "100000" }.to_string()
+    }
+
+    /// Whether `token` opens a session.
+    fn opens(token: &str) -> bool {
+        crate::agent::session::Session::open(token, &None, ListenerReach::Loopback).is_ok()
+    }
+
+    fn grant_of(token: &str) -> std::sync::Arc<crate::agent::grants::LiveGrant> {
+        let claims = decode_jwt(token.to_string()).unwrap();
+        Grants::global()
+            .get(&crate::agent::session::TokenId(claims.nonce().to_string()))
+            .expect("the token has an active grant")
+    }
+
+    fn caps_text(caps: &[Capability]) -> Vec<String> {
+        let mut text: Vec<String> = caps.iter().map(|c| format!("{c:?}")).collect();
+        text.sort();
+        text
+    }
+
+    /// The approval request of `request_id` among the events `events` receives, if one
+    /// arrives within `wait`.
+    async fn approval_request(
+        events: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<Event>>,
+        request_id: &str,
+        wait: Duration,
+    ) -> Option<std::sync::Arc<Event>> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .ok()?
+                .ok()?;
+            if event.topic == Topic::ExceptionOccurred
+                && event.payload.to_string().contains(request_id)
+            {
+                return Some(event);
+            }
+        }
+    }
+
     // The code has six digits. Without a limit, anyone who learned a request id could try
     // every code and receive the app's token.
     #[tokio::test]
     async fn a_request_stops_accepting_codes_after_too_many_wrong_ones() {
         let (request_id, code) = permitted_request().await;
-        let wrong = if code == "100000" { "100001" } else { "100000" };
         let mut last_err = String::new();
         for _ in 0..MAX_CODE_ATTEMPTS {
-            last_err = generate_capability_token(request_id.clone(), wrong.to_string())
+            last_err = generate_capability_token(request_id.clone(), wrong(&code))
                 .await
                 .unwrap_err();
         }
@@ -644,19 +750,18 @@ mod app_token_tests {
                 .unwrap_err();
             assert_eq!(err, "Can't find permitted request");
         }
-        assert!(!ids.iter().any(|id| PendingApprovals::global().contains(id)));
+        assert!(!ids.iter().any(|id| PendingRequests::global().contains(id)));
     }
 
     // The request goes once it runs out of code attempts.
     #[tokio::test]
     async fn a_locked_out_request_is_deleted() {
         let (request_id, code) = permitted_request().await;
-        assert!(PendingApprovals::global().contains(&request_id));
-        let wrong = if code == "100000" { "100001" } else { "100000" };
+        assert!(PendingRequests::global().contains(&request_id));
         for _ in 0..MAX_CODE_ATTEMPTS {
-            let _ = generate_capability_token(request_id.clone(), wrong.to_string()).await;
+            let _ = generate_capability_token(request_id.clone(), wrong(&code)).await;
         }
-        assert!(!PendingApprovals::global().contains(&request_id));
+        assert!(!PendingRequests::global().contains(&request_id));
     }
 
     // Request ids are UUIDs, which contain dashes; requests used to be stored under
@@ -664,9 +769,7 @@ mod app_token_tests {
     // that request out.
     #[tokio::test]
     async fn wrong_codes_for_a_prefix_of_an_id_leave_that_request_alone() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+        setup();
         let (request_id, code) = permitted_request().await;
         let prefix = request_id.split('-').next().unwrap().to_string();
         assert_ne!(prefix, request_id);
@@ -678,17 +781,12 @@ mod app_token_tests {
 
     #[tokio::test]
     async fn a_correct_code_after_a_few_wrong_ones_still_works() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+        setup();
         let (request_id, code) = permitted_request().await;
-        let wrong = if code == "100000" { "100001" } else { "100000" };
         for _ in 0..MAX_CODE_ATTEMPTS - 1 {
-            assert!(
-                generate_capability_token(request_id.clone(), wrong.to_string())
-                    .await
-                    .is_err()
-            );
+            assert!(generate_capability_token(request_id.clone(), wrong(&code))
+                .await
+                .is_err());
         }
         assert!(generate_capability_token(request_id, code).await.is_ok());
     }
@@ -697,9 +795,7 @@ mod app_token_tests {
     // the app retries with the same code.
     #[tokio::test]
     async fn a_code_redeems_once_and_a_locked_wallet_keeps_the_request() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+        setup();
         let (request_id, code) = permitted_request().await;
 
         let backend = crate::wallet::wallet_backend();
@@ -709,57 +805,50 @@ mod app_token_tests {
             .unlock("pending-locked-test")
             .expect("restore the shared wallet");
         assert!(locked.unwrap_err().contains("Executor is locked"));
-        assert!(PendingApprovals::global().contains(&request_id));
+        assert!(PendingRequests::global().has_code(&request_id, &code));
 
         assert!(generate_capability_token(request_id.clone(), code.clone())
             .await
             .is_ok());
-        assert!(!PendingApprovals::global().contains(&request_id));
+        assert!(!PendingRequests::global().contains(&request_id));
         assert_eq!(
             generate_capability_token(request_id.clone(), code)
                 .await
                 .unwrap_err(),
             "Can't find permitted request"
         );
-        apps_map::remove_app(&request_id).unwrap();
     }
 
-    // A registry file that does not take the app: the token is never delivered, so no record
-    // may name it, and the app retries with the same code.
+    // A database that does not take the grant: the token is never delivered, so no grant may
+    // name it, and the app retries with the same code.
     #[tokio::test]
-    async fn a_registry_that_cannot_be_saved_keeps_the_request_and_no_app() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+    async fn a_database_that_does_not_take_the_grant_keeps_the_request_and_no_grant() {
+        setup();
         let (request_id, code) = permitted_request().await;
 
-        apps_map::set_data_file_path("/nonexistent-dir-for-insert-test/apps.json".to_string());
+        let db = crate::db::Ad4mDb::global_instance();
+        let taken = db.lock().unwrap().take();
         let unsaved = generate_capability_token(request_id.clone(), code.clone()).await;
-        crate::test_utils::use_test_apps_file();
+        *db.lock().unwrap() = taken;
 
         assert!(unsaved.is_err());
-        assert!(apps_map::get_app(&request_id).unwrap().is_none());
-        assert!(PendingApprovals::global().has_code(&request_id, &code));
+        assert!(Grants::global().find(&request_id).is_empty());
+        assert!(PendingRequests::global().has_code(&request_id, &code));
 
         let token = generate_capability_token(request_id.clone(), code)
             .await
-            .expect("the same code redeems once the registry saves")
+            .expect("the same code redeems once the database takes the grant")
             .expose_once();
-        assert!(apps_map::get_app(&request_id).unwrap().is_some());
-        assert!(
-            crate::agent::session::Session::open(&token, &None, ListenerReach::Loopback).is_ok()
-        );
-        apps_map::remove_app(&request_id).unwrap();
+        assert_eq!(Grants::global().find(&request_id).len(), 1);
+        assert!(opens(&token));
     }
 
     // The `apps-changed` event and the app list reach sessions other than the app, so
-    // neither may carry the token. The executor does not store it either: the registry
-    // keeps the token's id, which is enough to revoke it.
+    // neither may carry the token. The executor does not store it either: the grant keeps
+    // the token's id, which is enough to revoke it.
     #[tokio::test]
-    async fn app_events_the_app_list_and_the_registry_carry_no_token() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+    async fn app_events_the_app_list_and_the_grants_carry_no_token() {
+        setup();
         let mut events = get_global_pubsub().await.subscribe_events();
 
         let (request_id, code) = permitted_request().await;
@@ -777,16 +866,22 @@ mod app_token_tests {
             if event.topic != Topic::AppsChanged {
                 continue;
             }
-            assert_eq!(event.audience, Audience::Approvers);
             if let Ok(Some(app)) = serde_json::from_value::<Option<Apps>>(event.payload.clone()) {
                 if app.request_id == request_id {
+                    let main = crate::agent::did();
+                    assert_eq!(event.audience, Audience::Dids(vec![main]));
+                    assert_eq!(event.capability, *AGENT_PERMIT_CAPABILITY);
                     break app;
                 }
             }
         };
         assert!(event.token.is_empty(), "the event carried the app token");
 
-        let apps = apps_map::get_apps();
+        let apps: Vec<Apps> = Grants::global()
+            .list(&AgentContext::main_agent())
+            .iter()
+            .map(|grant| grant.as_app())
+            .collect();
         let listed = apps
             .iter()
             .find(|app| app.request_id == request_id)
@@ -796,16 +891,220 @@ mod app_token_tests {
             "the app list carried the app token"
         );
         assert!(!serde_json::to_string(&apps).unwrap().contains(&token));
-        let record = apps_map::get_app(&request_id).unwrap().unwrap();
-        assert!(!format!("{record:?}").contains(&token));
-        let file = std::fs::read_to_string(apps_map::get_data_file_path()).unwrap();
-        assert!(file.contains(&request_id) && !file.contains(&token));
+        let rows = crate::db::Ad4mDb::with_global_instance(|db| db.grants()).unwrap();
+        assert!(rows.iter().any(|row| row.request_id == request_id));
+        assert!(!format!("{rows:?}").contains(&token));
 
-        let open = |token: &str| {
-            crate::agent::session::Session::open(token, &None, ListenerReach::Loopback)
-        };
-        assert!(open(&token).is_ok());
-        apps_map::revoke_app(&request_id).unwrap();
-        assert!(open(&token).is_err());
+        assert!(opens(&token));
+        let grants = Grants::global();
+        grants.revoke(&grants.find(&request_id)).unwrap();
+        assert!(!opens(&token));
+    }
+
+    // A removed app's token has no grant and opens no session (#396), and neither does a
+    // token that never had one. MCP opens its sessions the same way.
+    #[test]
+    fn a_token_without_an_active_grant_opens_no_session() {
+        setup();
+        let token = crate::test_utils::granted_token(test_auth_info());
+        assert!(opens(&token));
+
+        let grants = Grants::global();
+        let found = grants.find(&token);
+        grants.revoke(&found).unwrap();
+        grants.remove(&found).unwrap();
+        assert!(!opens(&token));
+
+        let (ungranted, _) = token::sign_token("no grant".to_string(), 3600, None).unwrap();
+        assert!(!opens(&ungranted));
+    }
+
+    // #1399 (D11, D13, D14): a request names a managed agent. Its approval request goes to
+    // that agent, the approver narrows it, and the grant acts as that agent with only the
+    // approved capabilities.
+    #[tokio::test]
+    async fn a_request_for_a_managed_agent_mints_a_grant_on_it_with_the_approved_subset() {
+        setup();
+        let alice = AgentContext::for_user_email(crate::test_utils::managed_user("req-alice"));
+        let alice_did = crate::agent::did_for_context(&alice).unwrap();
+        let mut events = get_global_pubsub().await.subscribe_events();
+
+        let request_id = request_capability(test_auth_info(), alice.clone()).await;
+        assert_eq!(request_target(&request_id), Some(alice.clone()));
+        let event = approval_request(&mut events, &request_id, Duration::from_secs(5))
+            .await
+            .expect("the approval request is published");
+        assert_eq!(event.audience, Audience::Dids(vec![alice_did.clone()]));
+        assert_eq!(event.capability, *AGENT_PERMIT_CAPABILITY);
+        assert!(
+            event
+                .payload
+                .to_string()
+                .contains(alice.user_email.as_deref().unwrap()),
+            "the approver sees whose agent the request is for: {}",
+            event.payload
+        );
+
+        let subset = vec![AGENT_READ_CAPABILITY.clone()];
+        let code = permit_capability(AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo {
+                capabilities: Some(subset.clone()),
+                ..test_auth_info()
+            },
+        })
+        .unwrap();
+        let token = generate_capability_token(request_id.clone(), code)
+            .await
+            .unwrap()
+            .expose_once();
+
+        let grant = grant_of(&token);
+        assert_eq!(grant.agent, alice);
+        assert_eq!(grant.did, alice_did);
+        assert_eq!(caps_text(&grant.caps), caps_text(&subset));
+        assert_eq!(
+            decode_jwt(token).unwrap().sub.as_deref(),
+            alice.user_email.as_deref(),
+            "the token names the agent it acts as"
+        );
+    }
+
+    // D13: whatever the approver grants, a grant on a managed agent holds no capability its
+    // user lacks. `*` narrows to the user's set; a capability outside it is dropped.
+    #[test]
+    fn a_grant_on_a_managed_agent_is_capped_at_its_users_capabilities() {
+        let alice = AgentContext::for_user_email("alice@example.org".into());
+        let user = get_user_default_capabilities();
+        assert_eq!(
+            caps_text(&grant_caps_for(&alice, &[ALL_CAPABILITY.clone()])),
+            caps_text(&user)
+        );
+        assert!(!capability_matches(&user, &AGENT_LOCK_CAPABILITY));
+        assert_eq!(
+            caps_text(&grant_caps_for(
+                &alice,
+                &[AGENT_LOCK_CAPABILITY.clone(), AGENT_READ_CAPABILITY.clone()]
+            )),
+            caps_text(&[AGENT_READ_CAPABILITY.clone()])
+        );
+        assert!(grant_caps_for(&alice, &[AGENT_LOCK_CAPABILITY.clone()]).is_empty());
+
+        // The main agent holds every capability.
+        assert_eq!(
+            caps_text(&grant_caps_for(
+                &AgentContext::main_agent(),
+                &[ALL_CAPABILITY.clone()]
+            )),
+            caps_text(&[ALL_CAPABILITY.clone()])
+        );
+    }
+
+    #[tokio::test]
+    async fn redeeming_caps_a_wider_approval_at_the_managed_agents_capabilities() {
+        setup();
+        let alice = AgentContext::for_user_email(crate::test_utils::managed_user("cap-alice"));
+        let request_id = request_capability(test_auth_info(), alice.clone()).await;
+        let code = permit_capability(AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: test_auth_info(),
+        })
+        .unwrap();
+        let token = generate_capability_token(request_id, code)
+            .await
+            .unwrap()
+            .expose_once();
+        let grant = grant_of(&token);
+        assert_eq!(grant.agent, alice);
+        assert_eq!(
+            caps_text(&grant.caps),
+            caps_text(&get_user_default_capabilities()),
+            "ALL narrows to the user's capabilities"
+        );
+    }
+
+    // An app's name and domain are whatever the requester declares, so they grant nothing:
+    // whatever app a request claims to be, for the main agent or a managed one, the owner is
+    // asked, and neither the empty code nor a guess redeems it. Only the owner's code does.
+    #[tokio::test]
+    async fn no_app_name_skips_the_owners_approval() {
+        setup();
+        let alice = AgentContext::for_user_email(crate::test_utils::managed_user("claim-alice"));
+        let mut events = get_global_pubsub().await.subscribe_events();
+
+        for target in [AgentContext::main_agent(), alice] {
+            for (name, app_domain) in [
+                ("ADAM Launcher", Some("localhost".to_string())),
+                ("Flux", Some("app.flux.social".to_string())),
+                ("Any app", None),
+            ] {
+                let auth = AuthInfo {
+                    app_name: name.into(),
+                    app_domain,
+                    ..test_auth_info()
+                };
+                let request_id = request_capability(auth.clone(), target.clone()).await;
+                assert!(
+                    approval_request(&mut events, &request_id, Duration::from_secs(5))
+                        .await
+                        .is_some(),
+                    "{name}: the owner is asked"
+                );
+                assert!(
+                    !PendingRequests::global().is_approved(&request_id),
+                    "{name}: a request is never approved at the request"
+                );
+                for code in ["", "000000"] {
+                    assert_eq!(
+                        generate_capability_token(request_id.clone(), code.to_string())
+                            .await
+                            .unwrap_err(),
+                        "Can't find permitted request",
+                        "{name}: {code:?} redeems nothing"
+                    );
+                }
+
+                let code = permit_capability(AuthInfoExtended {
+                    request_id: request_id.clone(),
+                    auth,
+                })
+                .unwrap();
+                assert_eq!(
+                    generate_capability_token(request_id.clone(), String::new())
+                        .await
+                        .unwrap_err(),
+                    "Can't find permitted request",
+                    "{name}: the empty code does not redeem an approved request"
+                );
+                let token = generate_capability_token(request_id, code)
+                    .await
+                    .expect("the owner's code redeems")
+                    .expose_once();
+                assert_eq!(grant_of(&token).agent, target);
+            }
+        }
+    }
+
+    #[test]
+    fn a_request_names_its_agent_by_email_or_did() {
+        setup();
+        assert_eq!(requested_agent(None).unwrap(), AgentContext::main_agent());
+        assert_eq!(
+            requested_agent(Some(" ")).unwrap(),
+            AgentContext::main_agent()
+        );
+        assert_eq!(
+            requested_agent(Some(&crate::agent::did())).unwrap(),
+            AgentContext::main_agent()
+        );
+        let email = crate::test_utils::managed_user("named");
+        let alice = AgentContext::for_user_email(email.clone());
+        assert_eq!(
+            requested_agent(Some(&format!(" {} ", email.to_uppercase()))).unwrap(),
+            alice
+        );
+        let did = crate::agent::did_for_context(&alice).unwrap();
+        assert_eq!(requested_agent(Some(&did)).unwrap(), alice);
+        assert!(requested_agent(Some("did:key:z6MkNoSuchAgent")).is_err());
     }
 }

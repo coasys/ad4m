@@ -9,7 +9,7 @@ use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
 use crate::types::*;
 
-use super::guards::{session_agent_context, Guard};
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -229,13 +229,9 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::internal(format!("Failed to serialize language input: {}", e)))?;
 
     // Users template link languages to create neighbourhoods, so this call stays open to
-    // them. A user session publishes as the user, never as the node's main agent.
+    // them. A user session publishes as the user, never as the main agent.
     controller
-        .expression_create(
-            &language_language_address,
-            content,
-            &session_agent_context(&ctx),
-        )
+        .expression_create(&language_language_address, content, &ctx.acts_as())
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
 
@@ -296,32 +292,32 @@ async fn write_settings(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    // The node's installed languages, which users read too.
+    // The executor's installed languages, which users read too.
     map.method::<LanguageListParams, Vec<LanguageHandle>>("language.all", list_languages)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, LanguageHandle>("language.get", get_language)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, LanguageMeta>("language.meta", get_language_meta)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, String>("language.source", get_language_source)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     // Reads `languagePath` from any path on the host and publishes the file signed by the
-    // node's main agent.
+    // executor's main agent.
     map.method::<PublishLanguageRequest, LanguageMeta>("language.publish", publish_language)
         .long()
-        .guard(Guard::Node(LANGUAGE_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(LANGUAGE_CREATE_CAPABILITY.clone()));
     map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
         .long()
-        .guard(Guard::SelfAgent(LANGUAGE_CREATE_CAPABILITY.clone()));
-    // Installed languages and their settings are shared by every user of the node.
+        .guard(Guard::Cap(LANGUAGE_CREATE_CAPABILITY.clone()));
+    // Installed languages and their settings are shared by every user of the executor.
     map.method::<LanguageAddressParams, bool>("language.remove", remove_language)
-        .guard(Guard::Node(LANGUAGE_DELETE_CAPABILITY.clone()));
+        .guard(Guard::Executor(LANGUAGE_DELETE_CAPABILITY.clone()));
     map.method::<LanguageWriteSettingsParams, bool>("language.writeSettings", write_settings)
-        .guard(Guard::Node(LANGUAGE_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(LANGUAGE_UPDATE_CAPABILITY.clone()));
 }
 
 // ── Contracts ──

@@ -1,86 +1,107 @@
 //! Who may call a method, on whose data.
 //!
-//! On a multi-user node, a user session (a JWT whose `sub` names a user) acts for that
-//! user only. Calls that change or use the node's own identity, wallet, files or
-//! node-wide settings belong to the node's operator: the admin credential, or an app the
-//! operator approved. Those calls refuse user sessions, whatever capabilities the user
-//! token carries, because the default user capabilities overlap the ones these calls
-//! check.
+//! An executor hosts many agents. The main agent is the operator's; every other agent is a
+//! user's managed agent. A session acts as one agent within a grant (its token and
+//! capabilities), or is the operator (the executor's administrator role), or is anonymous.
+//! Calls that change or use the executor itself (the main agent's keys, wallet, files,
+//! executor-wide settings) belong to the operator and to grants on the main agent the
+//! operator approved; they refuse sessions on managed agents whatever capabilities those
+//! carry, because the default user capabilities overlap the ones these calls check.
 //!
 //! A method declares its [`Guard`] where it registers (`map.method(..).guard(..)`), and the
 //! dispatcher runs it before the handler. Every method has one: `build_handler_map` panics on
 //! a method without a guard, so the executor does not start. A guard is a capability check
-//! first, then an ownership rule: capabilities stay, the guard adds whose data the call may
-//! touch. Two guards check no capability: [`Guard::Open`] (the handler decides) and
-//! [`Guard::Operator`] (the operator holds every capability).
+//! first, then a rule: capabilities stay, the guard adds whose data the call may touch. Two
+//! guards check no capability: [`Guard::Open`] (the handler decides) and [`Guard::Operator`]
+//! (the operator holds every capability).
+//!
+//! Missing and not yours are one answer, 404, on every resource a guard names (perspective,
+//! AI task, grant, capability request), so a caller cannot learn which ids exist. A method
+//! flagged `.or_null()` (`perspective.get`, `perspective.snapshot`) answers `null` instead.
 
-use crate::agent::capabilities::{check_capability, Capability};
-use crate::agent::AgentContext;
+use crate::agent::capabilities::Capability;
+use crate::agent::grants::Grants;
 use crate::api::ws_handler::WsRpcError;
 use crate::types::RequestContext;
 use serde_json::Value;
 
 /// Who may call a method. The dispatcher checks the capability (403), then the rule of the
-/// variant (403, or `null` for a perspective method that hides existence).
+/// variant (403 for [`Guard::Operator`] and [`Guard::Executor`], 404 for [`Guard::Owns`]).
 #[derive(Clone, Debug)]
 pub enum Guard {
     /// No check: every caller reaches the handler, anonymous ones included, and the handler
-    /// decides. For the methods that check no capability: public node facts
-    /// (`runtime.info`), calls on the caller's own session (`user.logout`), stubs that answer
-    /// every caller alike.
+    /// decides. For the methods that check no capability: public executor facts
+    /// (`runtime.info`) and calls on the caller's own session (`user.logout`).
     Open,
-    /// The node's operator only ([`RequestContext::is_operator`]: the admin credential, or no
-    /// token on a loopback listener of a node without one). Every other caller gets 403
-    /// "Admin credential required", whatever its capabilities: no app token is the operator.
+    /// The executor's operator only ([`RequestContext::is_operator`]: the admin credential, or
+    /// no token on a loopback listener of an executor without one). Every other caller gets 403
+    /// "Admin credential required", whatever its capabilities: no grant is the operator.
     Operator,
-    /// Callers without a token too: requesting a capability, signing up, logging in. The
-    /// capability must be one that anonymous callers hold (`anonymous_capabilities`).
-    Anonymous(Capability),
-    /// Acts on the node itself. The operator, an app or an anonymous caller that holds the
-    /// capability; never a user session, whatever its capabilities: the default user
-    /// capabilities overlap the ones these methods check.
-    Node(Capability),
-    /// Acts on the caller's own agent or user record, which the handler takes from
-    /// `ctx.acts_as()`. An anonymous caller has no agent of its own, so it gets 403.
-    SelfAgent(Capability),
-    /// Acts on the perspective that `uuid` reads from the params. The operator reaches every
-    /// perspective; a user only those it owns; an app or anonymous caller the unowned ones and
-    /// those the main agent owns (`helpers::can_access_perspective_with_did`). A missing
-    /// perspective is 404.
-    Perspective {
-        /// The capability for the perspective, built from its uuid
-        /// (`perspective_query_capability` and its siblings).
-        capability: fn(Vec<String>) -> Capability,
-        /// The perspective's uuid in the params, e.g. [`uuid_param`].
-        uuid: fn(&Value) -> Option<String>,
-        /// The method answers `null` for a perspective that is missing or not the caller's,
-        /// so a caller cannot learn that it exists. The handler does not run.
-        hides_existence: bool,
+    /// The capability alone. Any caller that holds it: an anonymous caller only for the
+    /// capabilities of the anonymous set (requesting a capability, signing up, logging in);
+    /// a grant for its agent, which the handler takes from `ctx.acts_as()`.
+    Cap(Capability),
+    /// Acts on the executor itself: the capability, then the operator or a grant on the main
+    /// agent. Never a session on a managed agent, whatever its capabilities, nor an anonymous
+    /// caller. A grant on the main agent passes: an app the operator approved administers
+    /// the executor (WE web holds `*` on a local executor).
+    Executor(Capability),
+    /// Acts on one resource that `id` reads from the params: the capability, then the owner
+    /// rule. The operator reaches every resource; any other session only those its agent
+    /// owns ([`Owner`]). Missing and not yours are both 404.
+    Owns {
+        /// The capability, built from the resource's id (a perspective's capability names
+        /// its uuid; the others ignore it).
+        cap: fn(Vec<String>) -> Capability,
+        /// The resource's id in the params, e.g. [`uuid_param`]. None is 400.
+        id: fn(&Value) -> Option<String>,
+        owner: Owner,
     },
-    /// Acts on the AI task whose id `task_id` reads from the params. A user session reaches
-    /// only the tasks it created (`tasks.user_email`): another user's task, an operator task
-    /// and a missing one are all 404, so a user cannot learn which task ids exist. The
-    /// operator and apps reach every task, and the handler answers for a missing one. An
-    /// anonymous caller gets 403, as for [`Guard::SelfAgent`].
-    Task {
-        capability: Capability,
-        /// The task's id in the params.
-        task_id: fn(&Value) -> Option<String>,
-    },
+}
+
+/// The kind of resource a [`Guard::Owns`] names, and how its owning agent is found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    /// A perspective: its owners (DIDs); one without owners is the main agent's
+    /// (`helpers::can_access_perspective_with_did`).
+    Perspective,
+    /// An AI task: its `user_email`; none is the main agent's.
+    Task,
+    /// A grant, named by its token or its request id (`Grants::find`): the grant's agent.
+    Grant,
+    /// A pending capability request (`PendingRequests`): the agent it asks to act as (D12).
+    Request,
+}
+
+impl Owner {
+    fn noun(self) -> &'static str {
+        match self {
+            Owner::Perspective => "perspective",
+            Owner::Task => "AI task",
+            Owner::Grant => "app",
+            Owner::Request => "capability request",
+        }
+    }
+
+    /// The 404 for `id`, missing or not the caller's. A grant's id may be its token, so the
+    /// answer does not repeat it.
+    fn not_found(self, id: &str) -> WsRpcError {
+        WsRpcError::not_found(match self {
+            Owner::Perspective => format!("Perspective {id} not found"),
+            Owner::Task => format!("Task {id} not found"),
+            Owner::Grant => {
+                "App not found: no app of yours matches this token or request id".to_string()
+            }
+            Owner::Request => "Capability request not found: it may have expired. The app must \
+                               request access again"
+                .to_string(),
+        })
+    }
 }
 
 /// What [`Guard::Operator`] answers every other caller, as the handlers did before it
 /// (`anonymous_access_tests` pins it).
 pub const OPERATOR_ONLY: &str = "Admin credential required";
-
-/// What a guard lets the dispatcher do.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Admission {
-    /// Run the handler.
-    Granted,
-    /// Answer `null` without running the handler: the method hides that the resource exists.
-    Hidden,
-}
 
 /// The `uuid` field of the params: where most perspective methods name their perspective.
 pub fn uuid_param(params: &Value) -> Option<String> {
@@ -88,33 +109,22 @@ pub fn uuid_param(params: &Value) -> Option<String> {
 }
 
 impl Guard {
-    /// [`Guard::Perspective`] on the perspective the `uuid` param names.
-    pub fn perspective(capability: fn(Vec<String>) -> Capability) -> Guard {
-        Guard::Perspective {
-            capability,
-            uuid: uuid_param,
-            hides_existence: false,
-        }
-    }
-
-    /// [`Guard::perspective`] for a method that answers `null` when the perspective is
-    /// missing or not the caller's.
-    pub fn perspective_or_null(capability: fn(Vec<String>) -> Capability) -> Guard {
-        Guard::Perspective {
-            capability,
-            uuid: uuid_param,
-            hides_existence: true,
+    /// [`Guard::Owns`] on the perspective the `uuid` param names.
+    pub fn perspective(cap: fn(Vec<String>) -> Capability) -> Guard {
+        Guard::Owns {
+            cap,
+            id: uuid_param,
+            owner: Owner::Perspective,
         }
     }
 
     /// The capability the guard checks first, `None` for [`Guard::Open`] and
-    /// [`Guard::Operator`]. For a perspective guard, it names the perspective `uuid`.
-    pub fn capability(&self, uuid: &str) -> Option<Capability> {
+    /// [`Guard::Operator`]. For [`Guard::Owns`], built from the resource's `id`.
+    pub fn capability(&self, id: &str) -> Option<Capability> {
         match self {
             Guard::Open | Guard::Operator => None,
-            Guard::Anonymous(cap) | Guard::Node(cap) | Guard::SelfAgent(cap) => Some(cap.clone()),
-            Guard::Task { capability, .. } => Some(capability.clone()),
-            Guard::Perspective { capability, .. } => Some(capability(vec![uuid.to_string()])),
+            Guard::Cap(cap) | Guard::Executor(cap) => Some(cap.clone()),
+            Guard::Owns { cap, .. } => Some(cap(vec![id.to_string()])),
         }
     }
 
@@ -124,100 +134,90 @@ impl Guard {
         method: &str,
         params: &Value,
         ctx: &RequestContext,
-    ) -> Result<Admission, WsRpcError> {
-        let uuid = match self {
-            Guard::Perspective { uuid, .. } => Some(uuid(params).ok_or_else(|| {
-                WsRpcError::bad_request(format!("{method} needs the perspective's uuid"))
-            })?),
+    ) -> Result<(), WsRpcError> {
+        let resource = match self {
+            Guard::Owns { id, owner, .. } => Some((
+                *owner,
+                id(params).ok_or_else(|| {
+                    WsRpcError::bad_request(format!("{method} needs the {}'s id", owner.noun()))
+                })?,
+            )),
             _ => None,
         };
-        let task_id =
-            match self {
-                Guard::Task { task_id, .. } => Some(task_id(params).ok_or_else(|| {
-                    WsRpcError::bad_request(format!("{method} needs the task's id"))
-                })?),
-                _ => None,
-            };
-        if let Some(capability) = self.capability(uuid.as_deref().unwrap_or_default()) {
-            check_capability(&ctx.capabilities, &capability).map_err(WsRpcError::forbidden)?;
+        let id = resource.as_ref().map(|(_, id)| id.as_str());
+        if let Some(capability) = self.capability(id.unwrap_or_default()) {
+            ctx.require(&capability).map_err(WsRpcError::forbidden)?;
         }
 
         match self {
-            Guard::Open | Guard::Anonymous(_) => {}
-            Guard::Operator => {
-                if !ctx.is_operator() {
-                    return Err(WsRpcError::forbidden(OPERATOR_ONLY));
-                }
-            }
-            Guard::Node(_) => {
-                if ctx.user_email().is_some() {
-                    return Err(WsRpcError::forbidden(format!(
-                        "{method} acts on the node itself, so a user session may not call it"
-                    )));
-                }
-            }
-            Guard::SelfAgent(_) => {
-                if !ctx.session.is_authenticated() {
-                    return Err(WsRpcError::forbidden(format!(
-                        "{method} acts on the caller's own agent, so it needs a token"
-                    )));
-                }
-            }
-            Guard::Task { .. } => {
-                if !ctx.session.is_authenticated() {
-                    return Err(WsRpcError::forbidden(format!(
-                        "{method} acts on the caller's own AI task, so it needs a token"
-                    )));
-                }
-                if let Some(email) = ctx.user_email() {
-                    let id = task_id.expect("a task guard reads a task id");
-                    let owner =
-                        crate::db::Ad4mDb::with_global_instance(|db| db.get_task_owner(&id))
-                            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-                    if owner.flatten().as_deref() != Some(email) {
-                        return Err(WsRpcError::not_found(format!("Task {id} not found")));
-                    }
-                }
-            }
-            Guard::Perspective {
-                hides_existence, ..
-            } => {
-                let uuid = uuid.expect("a perspective guard reads a uuid");
-                match crate::api::perspectives_ws::get_perspective_with_access(&uuid, ctx).await {
-                    Ok(_) => {}
-                    Err(e) if *hides_existence && (e.code == 403 || e.code == 404) => {
-                        return Ok(Admission::Hidden)
-                    }
-                    Err(e) => return Err(e),
-                }
+            Guard::Open | Guard::Cap(_) => Ok(()),
+            Guard::Operator if ctx.is_operator() => Ok(()),
+            Guard::Operator => Err(WsRpcError::forbidden(OPERATOR_ONLY)),
+            Guard::Executor(_) if !ctx.session.is_authenticated() => Err(WsRpcError::forbidden(
+                format!("{method} acts on the executor itself, so it needs a token"),
+            )),
+            Guard::Executor(_) if !ctx.acts_as().is_main_agent() => Err(WsRpcError::forbidden(
+                format!("{method} acts on the executor itself, so a user session may not call it"),
+            )),
+            Guard::Executor(_) => Ok(()),
+            Guard::Owns { .. } => {
+                let (owner, id) = resource.expect("an owner guard reads an id");
+                owns(ctx, owner, &id).await
             }
         }
-        Ok(Admission::Granted)
     }
 }
 
-/// The agent a session signs and publishes as: the user of a user session, otherwise the
-/// node's main agent.
-pub fn session_agent_context(ctx: &RequestContext) -> AgentContext {
-    ctx.acts_as()
+/// The owner rule of [`Guard::Owns`]: `Ok` if the resource `id` exists and the operator or
+/// the agent `ctx` acts as owns it; 404 otherwise, missing or not, so a caller cannot learn
+/// which ids exist. An anonymous caller owns nothing.
+pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), WsRpcError> {
+    let not_found = || owner.not_found(id);
+    let agent = ctx.acts_as();
+    let owned = match owner {
+        // One rule for the guard and for the handlers that name a perspective in a param
+        // they read themselves (`runtime.exportData`).
+        Owner::Perspective => {
+            return crate::api::perspectives_ws::get_perspective_with_access(id, ctx)
+                .await
+                .map(|_| ())
+        }
+        Owner::Task => {
+            let task_owner = crate::db::Ad4mDb::with_global_instance(|db| db.get_task_owner(id))
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            // The outer `None`: no such task. The inner one: a task of the main agent.
+            let Some(task_owner) = task_owner else {
+                return Err(not_found());
+            };
+            task_owner == agent.user_email
+        }
+        Owner::Grant => {
+            let grants = Grants::global().find(id);
+            if grants.is_empty() {
+                return Err(not_found());
+            }
+            grants.iter().all(|grant| grant.agent == agent)
+        }
+        Owner::Request => match crate::agent::capabilities::request_target(id) {
+            None => return Err(not_found()),
+            Some(target) => target == agent,
+        },
+    };
+    if ctx.is_operator() || (ctx.session.is_authenticated() && owned) {
+        Ok(())
+    } else {
+        Err(not_found())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A user session for `user_email`, else an app token.
-    fn ctx(user_email: Option<&str>) -> RequestContext {
-        match user_email {
-            Some(email) => RequestContext::user_for_test(email, "did:key:guarded-user", vec![]),
-            None => RequestContext::app_for_test(vec![]),
-        }
-    }
-
     #[tokio::test]
-    async fn a_node_guard_refuses_user_sessions_and_names_the_method() {
+    async fn an_executor_guard_refuses_user_sessions_and_names_the_method() {
         let update = crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone();
-        let lock = Guard::Node(update.clone());
+        let lock = Guard::Executor(update.clone());
         let user = RequestContext::user_for_test(
             "alice@example.org",
             "did:key:alice",
@@ -227,29 +227,15 @@ mod tests {
             .admit("agent.lock", &Value::Null, &user)
             .await
             .unwrap_err();
-        assert_eq!(err.code, 403);
-        assert!(err.message.contains("agent.lock"), "{}", err.message);
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (
+                403,
+                "agent.lock acts on the executor itself, so a user session may not call it"
+            )
+        );
 
         let app = RequestContext::app_for_test(vec![update]);
-        assert_eq!(
-            lock.admit("agent.lock", &Value::Null, &app).await.unwrap(),
-            Admission::Granted
-        );
-    }
-
-    #[test]
-    fn a_user_session_acts_as_its_user() {
-        assert_eq!(
-            session_agent_context(&ctx(Some("alice@example.org"))),
-            AgentContext::for_user_email("alice@example.org".to_string())
-        );
-    }
-
-    #[test]
-    fn an_operator_session_acts_as_the_main_agent() {
-        assert_eq!(
-            session_agent_context(&ctx(None)),
-            AgentContext::main_agent()
-        );
+        assert!(lock.admit("agent.lock", &Value::Null, &app).await.is_ok());
     }
 }

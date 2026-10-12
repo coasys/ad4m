@@ -128,7 +128,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                 WsRpcError::bad_request("perspective_uuid required for perspective export")
             })?;
             // The guard admits apps, which reach only the unowned and the main agent's
-            // perspectives: the rule `Guard::Perspective` applies (a "db" export names none).
+            // perspectives: the rule `Guard::Owns` applies (a "db" export names none).
             let perspective =
                 super::perspectives_ws::get_perspective_with_access(uuid, &ctx).await?;
             let links = perspective
@@ -159,17 +159,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(Value::Bool(true))
 }
 
-async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // An import writes rows as they are in the file: notifications with their `granted` flag
-    // and `owner_did`, and users with their password hashes. With AGENT_UPDATE alone, an app
-    // token or a managed user could import a granted notification on someone else's
-    // perspectives. Only the operator imports, as only the operator grants notifications.
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden(
-            "Permission denied: only the node operator (admin credential) can import data",
-        ));
-    }
-
+async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -229,7 +219,7 @@ async fn verify_signature(params: Value, _ctx: Arc<RequestContext>) -> Result<Va
 }
 
 // ── Friends & Messages ──
-// The friend list and the outbox belong to the node's main agent; a user session has
+// The friend list and the outbox belong to the main agent; a user session has
 // neither of its own here, so it may not read or change them.
 
 async fn list_friends(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -319,11 +309,8 @@ async fn check_notification_perspectives(
     ctx: &RequestContext,
 ) -> Result<(), WsRpcError> {
     for uuid in perspective_ids {
-        check_capability(
-            &ctx.capabilities,
-            &perspective_query_capability(vec![uuid.clone()]),
-        )
-        .map_err(|e| WsRpcError::forbidden(e))?;
+        ctx.require(&perspective_query_capability(vec![uuid.clone()]))
+            .map_err(|e| WsRpcError::forbidden(e))?;
 
         let perspective = match get_perspective_or_404(uuid).await {
             Ok(perspective) => perspective,
@@ -421,16 +408,7 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(Value::Bool(true))
 }
 
-async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // Only the operator approves notifications: the launcher holds the admin credential. An
-    // app token with AGENT_UPDATE must not approve the notification it created, and managed
-    // users hold no admin credential either.
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden(
-            "Permission denied: only the node operator (admin credential) can grant notifications",
-        ));
-    }
-
+async fn grant_notification(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     let body: NotificationGrantRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -712,28 +690,29 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read()
         .guard(Guard::Open);
     map.method::<NoParams, bool>("runtime.quit", quit_runtime)
-        .guard(Guard::Node(RUNTIME_QUIT_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_QUIT_CAPABILITY.clone()));
     // Always errors: status updates have no implementation yet. The contract
     // is the SDK's call.
     map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status)
-        .guard(Guard::SelfAgent(
-            RUNTIME_MY_STATUS_UPDATE_CAPABILITY.clone(),
-        ));
-    // Opens a browser on the node's host.
+        .guard(Guard::Cap(RUNTIME_MY_STATUS_UPDATE_CAPABILITY.clone()));
+    // Opens a browser on the executor's host.
     map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link)
         .guard(Guard::Operator);
-    // Read or write any path on the host and the whole node database. A perspective export
+    // Read or write any path on the host and the whole executor database. A perspective export
     // also checks the perspective's owner in the handler.
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
+    // An import writes rows as they are in the file: notifications with their `granted` flag
+    // and `owner_did`, users with their password hashes. Only the operator imports, as only
+    // the operator grants notifications.
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
-        .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Operator);
     map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
         .long()
         .guard(Guard::Operator);
     map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
         .read()
-        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // Always `null`, open to every caller.
     map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
         .read()
@@ -744,99 +723,94 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         get_compute_log,
     )
     .read()
-    .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+    .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // Friends & messages: the friend list and the outbox belong to the main agent.
     map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
         .read()
-        .guard(Guard::Node(RUNTIME_FRIENDS_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_FRIENDS_READ_CAPABILITY.clone()));
     map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends)
-        .guard(Guard::Node(RUNTIME_FRIENDS_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_FRIENDS_CREATE_CAPABILITY.clone()));
     map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends)
-        .guard(Guard::Node(RUNTIME_FRIENDS_DELETE_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_FRIENDS_DELETE_CAPABILITY.clone()));
     // Always errors: friend status has no implementation yet. Users get the 501 too.
     map.method::<RuntimeFriendStatusParams, Option<PerspectiveExpression>>(
         "runtime.friendStatus",
         get_friend_status,
     )
     .read()
-    .guard(Guard::SelfAgent(
-        RUNTIME_FRIEND_STATUS_READ_CAPABILITY.clone(),
-    ));
+    .guard(Guard::Cap(RUNTIME_FRIEND_STATUS_READ_CAPABILITY.clone()));
     map.method::<RuntimeSendFriendMessageParams, bool>(
         "runtime.sendFriendMessage",
         send_friend_message,
     )
-    .guard(Guard::Node(RUNTIME_MESSAGES_CREATE_CAPABILITY.clone()));
+    .guard(Guard::Executor(RUNTIME_MESSAGES_CREATE_CAPABILITY.clone()));
     // Always empty: the inbox has no implementation yet. Users get the empty list too.
     map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
         .read()
-        .guard(Guard::SelfAgent(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
     map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
         .read()
-        .guard(Guard::Node(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
+        .guard(Guard::Executor(RUNTIME_MESSAGES_READ_CAPABILITY.clone()));
     // Notifications: each caller's own (`notification_dids`); the handlers check the
     // perspectives a notification names and who may change a stored one.
     map.method::<NoParams, Vec<NotificationView>>("runtime.notifications", list_notifications)
         .read()
-        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NotificationInput, String>("runtime.createNotification", create_notification)
-        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<RuntimeUpdateNotificationParams, bool>(
         "runtime.updateNotification",
         update_notification,
     )
-    .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
-    // Approving a notification is the operator's: the handler refuses every other session
-    // with its own message (`ctx.is_operator()`). `Node` would answer a user session with
-    // the guard's message instead.
+    .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // Approving a notification is the operator's: an app must not approve the notification
+    // it created, and a managed user holds no admin credential.
     map.method::<RuntimeGrantNotificationParams, bool>(
         "runtime.grantNotification",
         grant_notification,
     )
-    .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Operator);
     map.method::<RuntimeNotificationIdParams, bool>(
         "runtime.deleteNotification",
         delete_notification,
     )
-    .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
-    // Link language templates. The node's list, which users read too.
+    .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // Link language templates. The executor's list, which users read too.
     map.method::<NoParams, Vec<String>>(
         "runtime.linkLanguageTemplates",
         get_link_language_templates,
     )
     .read()
-    .guard(Guard::SelfAgent(
+    .guard(Guard::Cap(
         RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY.clone(),
     ));
-    // The node's templates, offered to every user.
+    // The executor's templates, offered to every user.
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.addLinkLanguageTemplates",
         add_link_language_templates,
     )
-    .guard(Guard::Node(
+    .guard(Guard::Executor(
         RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY.clone(),
     ));
     map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.removeLinkLanguageTemplates",
         remove_link_language_templates,
     )
-    .guard(Guard::Node(
+    .guard(Guard::Executor(
         RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY.clone(),
     ));
     // Holochain. The conductor's peer records and metrics, which users read too.
     map.method::<NoParams, Vec<String>>("runtime.hcAgentInfos", get_hc_agent_infos)
         .read()
-        .guard(Guard::SelfAgent(
-            RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone(),
-        ));
-    // Injects peer records into the node's Holochain conductor.
+        .guard(Guard::Cap(RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone()));
+    // Injects peer records into the executor's Holochain conductor.
     map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos)
-        .guard(Guard::Node(RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(
+            RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY.clone(),
+        ));
     map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
         .read()
-        .guard(Guard::SelfAgent(
-            RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone(),
-        ));
+        .guard(Guard::Cap(RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone()));
     // Hosting flags. Every caller may read it, with or without capabilities.
     map.method::<NoParams, bool>("runtime.freeHostingEnabled", get_free_hosting_enabled)
         .read()
@@ -845,13 +819,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "runtime.setFreeHostingEnabled",
         set_free_hosting_enabled,
     )
-    // A billing decision for the whole node: the admin credential only, like
+    // A billing decision for the whole executor: the admin credential only, like
     // `user.setMultiUserEnabled` (#1328).
-    .guard(Guard::Node(ALL_CAPABILITY.clone()));
-    // The node's rates and Unyt version, which users read too.
+    .guard(Guard::Executor(ALL_CAPABILITY.clone()));
+    // The executor's rates and Unyt version, which users read too.
     map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
         .read()
-        .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
     map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates)
         .guard(Guard::Operator);
     map.method::<SetUnytMembraneProofRequest, bool>(
@@ -861,25 +835,26 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(Guard::Operator);
     map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
         .read()
-        .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
-    // Always error: the remaining unyt endpoints have no implementation yet. Every caller
-    // gets the 501.
+        .guard(Guard::Cap(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+    // Always error: the remaining unyt endpoints have no implementation yet. The operator
+    // gets the 501, every other caller the guard's 403.
+    // Operator until implemented: set the real guard with the handler.
     map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl)
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
         .read()
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
     map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl)
-        .guard(Guard::Open);
+        .guard(Guard::Operator);
 }
 
 // ── Contracts ──

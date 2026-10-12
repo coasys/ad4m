@@ -7,8 +7,7 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) |
-| `GET /api/v1/ws/events` | `events_ws.rs` | Standalone event stream (same content as above; candidate for removal, spec D3) |
+| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`); the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
 
@@ -26,7 +25,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let mut perspective = guarded_perspective(&params).await?;     // the guard checked access
-    let agent_context = ctx.acts_as();                              // the session's user, or the main agent
+    let agent_context = ctx.acts_as();                              // the grant's agent, or the main agent
     ...
     Ok(serde_json::to_value(result)?)
 }
@@ -41,6 +40,13 @@ takes `AgentContext` from the session
 (`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
 
+`RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`,
+the per-request `cancel_token`, and `auth_token` (read only by the interpretation pass; Plan 20
+PR 6 removes it). The RPC socket opens one per connection (`RequestContext::open`); REST and the
+OpenAI-compatible API take it as an axum extractor (`auth.rs`), which answers 401 for a token
+that opens no session and 503 while the wallet is locked. `auto_permit_cap_requests` is read
+from the global config where `agent.requestCapability` uses it.
+
 ## Guards (`guards.rs`)
 
 A method declares who may call it where it registers:
@@ -48,89 +54,271 @@ A method declares who may call it where it registers:
 ```rust
 map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>("perspective.get", handler)
     .read()
-    .guard(Guard::perspective_or_null(perspective_query_capability));
-map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
-    .guard(Guard::Node(AGENT_UPDATE_CAPABILITY.clone()));
+    .or_null()
+    .guard(Guard::perspective(perspective_query_capability));
+map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
+map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
+    .guard(Guard::Owns { cap: |_| AI_CREATE_CAPABILITY.clone(), id: removed_task_id, owner: Owner::Task });
 ```
 
-`Guard::perspective(cap)` and `Guard::perspective_or_null(cap)` build `Guard::Perspective` on
-the `uuid` param (`hides_existence` false and true).
+`Guard::perspective(cap)` builds `Guard::Owns { owner: Perspective }` on the `uuid` param.
 
 `HandlerMap::dispatch` runs, in order: find the method (404) → params deserialize into `P`
-(400) → the guard's capability (403) → the guard's rule (403, or `null` without running the
-handler when `hides_existence` is set and the perspective is missing or not the caller's) → the
+(400) → the guard's capability (403) → the guard's rule (403, or 404 for a resource) → the
 handler. `HandlerMap::admit` runs the steps before the handler alone.
 
 | Guard | Rule after the capability |
 |---|---|
 | `Open` | no capability and no rule: every caller, anonymous included, reaches the handler, which decides |
-| `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of a node without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
-| `Anonymous(cap)` | none; `cap` must be one anonymous callers hold |
-| `Node(cap)` | no user session: 403 naming the method, whatever the user's capabilities; the operator, apps and anonymous callers pass |
-| `SelfAgent(cap)` | an authenticated session; the handler acts on `ctx.acts_as()` |
-| `Perspective { .. }` | `get_perspective_with_access`: the operator reaches all; a user its own; an app the unowned and the main agent's; 404 when missing |
-| `Task { .. }` | an authenticated session; a user reaches only its own AI tasks (`tasks.user_email`), and gets 404 for any other id, its own missing or not; the operator and apps reach every task |
+| `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
+| `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
+| `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
+| `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
+
+`Owns` per `Owner` (who owns the resource; the operator reaches all):
+
+- `Perspective`: its `owners` DIDs; none = the main agent (`get_perspective_with_access`).
+  A grant on the main agent reaches the main agent's and the unowned perspectives.
+- `Task`: `tasks.user_email`; none = the main agent. A grant on the main agent reaches the main
+  agent's tasks only, not a managed agent's.
+- `Grant`: the agent of the grant a token or request id names (`Grants::find`), for
+  `agent.revokeToken` and `agent.removeApp` (D14). `agent.getApps` is `Cap`: it lists only the
+  grants of `ctx.acts_as()` (the main agent's for the operator and main-agent apps).
+- `Request`: the target agent of a pending capability request (`PendingRequests`), for
+  `agent.permitCapability` (D12): a user approves requests for their own agent, the operator
+  any.
+
+**Missing and not yours are one answer: 404** (D6), on every perspective, task, grant and
+request, so a caller cannot learn which ids exist. A method flagged `.or_null()` answers `null`
+in place of 404 (the guard's or a handler's, e.g. a perspective removed between the guard and
+the handler) without running the handler: only `perspective.get` and `perspective.snapshot`,
+whose SDK results are optional. A perspective handler fetches with `guarded_perspective`.
 
 Capabilities stay: every guard but `Open` and `Operator` checks one first, and the rule adds
 whose data the call may touch. A method takes exactly one guard. A second panics where it
 registers. A method without one makes `build_handler_map` panic, naming it
 (`HandlerMap::require_guards`): the API thread builds the map before it serves, so the executor
 binary exits at start. Dispatch also refuses (500) a method without a guard in a map built
-without that check. A guard runs before the handler's own checks, so adding one changes nothing for callers the
-handler already refuses with the same code. A handler check that is not part of the guard
-(compute credits, param validation beyond the contract type) now runs after the access check:
-a call that fails both gets the access answer.
+without that check. A guard runs before the handler's own checks. A handler check that is not
+part of the guard (compute credits, param validation beyond the contract type) runs after the
+access check: a call that fails both gets the access answer.
 
-Which guard each method has:
+Notes on some methods:
 
-- `Open`: the methods that check no capability: `agent.isLocked`, `runtime.info`,
-  `runtime.tlsDomain`, `runtime.freeHostingEnabled`, the `runtime.unyt*` stubs (501),
-  `user.credits` (501), `user.logout` and `user.revokeAllSessions` (their handlers check the
-  session's principal).
-- `Operator`: `runtime.openLink`, `runtime.restartHolochain`, `runtime.setHostRates`,
-  `runtime.setUnytMembraneProof`, `user.setMultiUserEnabled`, `user.freeAccess`.
-- `Node`: the node-wide methods that refuse user sessions (agent keys, apps, trust list and
-  entanglement writes, `agent.permitCapability`, AI models, hosting wallet, language
-  publish/remove/settings, export/import, friends and outbox, link-language template writes,
-  `runtime.addHcAgentInfos`, `runtime.setFreeHostingEnabled`, `runtime.quit`, `user.list`,
-  `user.wallet`, `user.emailTest`). `runtime.importData` keeps its handler's
-  `ctx.is_operator()` check: the guard admits apps. `runtime.exportData` of one perspective
-  checks `get_perspective_with_access` in its handler (a `db` export names none), so an app
-  exports only the unowned and the main agent's perspectives.
-- `Anonymous`: `agent.requestCapability`, `agent.generateJwt`, `user.create`, `user.login`,
-  `user.verifyEmail`, `user.requestVerification`, `user.multiUserEnabled`.
-- `SelfAgent`: the methods any authenticated caller with the capability may call, users
-  included. Most act as the caller (profile, sign, notifications, embeddings, expressions,
-  `neighbourhood.join`, `ai.addTask`, which records the caller's user as the task's owner,
-  `perspective.create`, which the caller's user owns, `hosting.setHotWallet`, which also
-  refuses a session without a user). `perspective.all` lists the caller's own perspectives
-  (every one to the operator).
-  `runtime.grantNotification` keeps its handler's `ctx.is_operator()` check, so a user gets
-  the handler's message.
-  `ai.tasks` lists a user's own tasks, and every task to the operator and apps.
-  Some read node-wide data that users read today: `agent.getApps`,
-  `agent.getTrustedAgents`, `ai.models`, `language.*` reads, link-language templates,
-  `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Node` would refuse
+- `Open` handlers check the session's principal (`user.logout`, `user.revokeAllSessions`).
+- `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
+  and password hashes included. The stubs `user.credits` and `runtime.unyt*` answer 501 to the
+  operator until each gets a handler and its real guard.
+- `runtime.exportData` (`Executor`) of one perspective checks `get_perspective_with_access` in
+  its handler (a `db` export names none), so an app exports only the main agent's perspectives.
+- `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
+  `ai.models`, `language.*` reads, link-language templates,
+  `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
   users there, a behaviour change.
-- `Perspective`: every `perspective.*` method that names one perspective, and every
-  `neighbourhood.*` method that names one (`publish` by `perspectiveUuid`, the others by
-  `uuid`), on the neighbourhood capability: the perspective that holds a neighbourhood decides
-  who may use it.
-- `Task`: `ai.updateTask` (`task.taskId`, the row it rewrites), `ai.removeTask` (`id`) and
-  `ai.prompt` (`taskId`).
+- `perspective.all` lists the caller's agent's perspectives, `ai.tasks` its tasks (every one to
+  the operator); `ai.addTask` and `perspective.create` record the caller's agent as owner.
+- `neighbourhood.*` methods that name a perspective (`publish` by `perspectiveUuid`, the others
+  by `uuid`) use `Owns { Perspective }` on the neighbourhood capability: the perspective that
+  holds a neighbourhood decides who may use it.
+
+Which guard each method has, generated from the handler map
+(`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
+fails when it is stale; `pnpm run generate:api-types` in `core/` rewrites it with the SDK
+contracts:
+
+<!-- guard-table:start (generated from the handler map) -->
+
+169 methods: Cap 54, Executor 33, Open 6, Operator 15, Owns 61.
+
+| Method | Guard |
+|---|---|
+| `agent.addEntanglementProofs` | `Executor(agent:UPDATE)` |
+| `agent.addTrustedAgents` | `Executor(runtime.trusted_agents:CREATE)` |
+| `agent.byDid` | `Cap(agent:READ)` |
+| `agent.deleteEntanglementProofs` | `Executor(agent:UPDATE)` |
+| `agent.deleteTrustedAgents` | `Executor(runtime.trusted_agents:DELETE)` |
+| `agent.entanglementProofPreflight` | `Executor(agent:READ)` |
+| `agent.generate` | `Executor(agent:CREATE)` |
+| `agent.generateJwt` | `Cap(agent:AUTHENTICATE)` |
+| `agent.get` | `Cap(agent:READ)` |
+| `agent.getApps` | `Cap(agent:READ)` |
+| `agent.getEntanglementProofs` | `Executor(agent:READ)` |
+| `agent.getTrustedAgents` | `Cap(runtime.trusted_agents:READ)` |
+| `agent.import` | `Cap(agent:CREATE)` |
+| `agent.isLocked` | `Open` |
+| `agent.lock` | `Executor(agent:UPDATE)` |
+| `agent.permitCapability` | `Owns(Request, agent:PERMIT)` |
+| `agent.removeApp` | `Owns(Grant, agent:UPDATE)` |
+| `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
+| `agent.revokeToken` | `Owns(Grant, agent:UPDATE)` |
+| `agent.sign` | `Cap(agent:SIGN)` |
+| `agent.status` | `Cap(agent:READ)` |
+| `agent.unlock` | `Executor(agent:SIGN)` |
+| `agent.updateProfile` | `Cap(agent:UPDATE)` |
+| `ai.addModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.addTask` | `Cap(artificial intelligence:CREATE)` |
+| `ai.discoverModels` | `Executor(artificial intelligence:CREATE)` |
+| `ai.embed` | `Cap(artificial intelligence:PROMPT)` |
+| `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
+| `ai.modelLoadingStatus` | `Cap(artificial intelligence:READ)` |
+| `ai.models` | `Cap(artificial intelligence:READ)` |
+| `ai.prompt` | `Owns(Task, artificial intelligence:PROMPT)` |
+| `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.removeTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.tasks` | `Cap(artificial intelligence:READ)` |
+| `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |
+| `ai.transcriptionOpen` | `Cap(artificial intelligence:TRANSCRIBE)` |
+| `ai.updateModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.updateTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `expression.create` | `Cap(expression:CREATE)` |
+| `expression.get` | `Cap(expression:READ)` |
+| `expression.getMany` | `Cap(expression:READ)` |
+| `expression.getRaw` | `Cap(expression:READ)` |
+| `expression.interact` | `Cap(expression:UPDATE)` |
+| `expression.interactions` | `Cap(expression:READ)` |
+| `hosting.info` | `Cap(runtime.hosting:READ)` |
+| `hosting.requestPayment` | `Cap(agent:UPDATE)` |
+| `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
+| `hosting.wallet` | `Executor(runtime.hosting:READ)` |
+| `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `language.all` | `Cap(language:READ)` |
+| `language.applyTemplate` | `Cap(language:CREATE)` |
+| `language.get` | `Cap(language:READ)` |
+| `language.meta` | `Cap(language:READ)` |
+| `language.publish` | `Executor(language:CREATE)` |
+| `language.remove` | `Executor(language:DELETE)` |
+| `language.source` | `Cap(language:READ)` |
+| `language.writeSettings` | `Executor(language:UPDATE)` |
+| `neighbourhood.hasTelepresence` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.join` | `Cap(neighbourhood:READ)` |
+| `neighbourhood.onlineAgents` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.otherAgents` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.publish` | `Owns(Perspective, neighbourhood:CREATE)` |
+| `neighbourhood.sendBroadcast` | `Owns(Perspective, neighbourhood:UPDATE)` |
+| `neighbourhood.sendSignal` | `Owns(Perspective, neighbourhood:UPDATE)` |
+| `neighbourhood.setOnlineStatus` | `Owns(Perspective, neighbourhood:UPDATE)` |
+| `perspective.acceptFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.acceptInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addLink` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addLinkExpression` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addLinks` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addSdna` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.all` | `Cap(perspective:READ)` |
+| `perspective.commitBatch` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.create` | `Cap(perspective:CREATE)` |
+| `perspective.createBatch` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.createSubject` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.disposeQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.disposeSparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.evaluateGetters` | `Owns(Perspective, perspective:READ)` |
+| `perspective.executeCommands` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.flowValidOutputs` | `Owns(Perspective, perspective:READ)` |
+| `perspective.get` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
+| `perspective.getAllShacl` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getShacl` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getShaclNames` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getShaclTargetClass` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getSubjectData` | `Owns(Perspective, perspective:READ)` |
+| `perspective.interpretationOverlays` | `Owns(Perspective, perspective:READ)` |
+| `perspective.keepAliveQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.keepAliveSparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.linkMutations` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.mintFlowReceipt` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.modelQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.modelSubscribe` | `Owns(Perspective, perspective:READ)` |
+| `perspective.proposeFlowTransition` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.publishSnapshot` | `Owns(Perspective, perspective:READ)` |
+| `perspective.queryLinks` | `Owns(Perspective, perspective:READ)` |
+| `perspective.queryProlog` | `Owns(Perspective, perspective:READ)` |
+| `perspective.querySparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.rejectFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.rejectInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.remove` | `Owns(Perspective, perspective:DELETE)` |
+| `perspective.removeAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.removeLink` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.removeLinks` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.runInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.runInterpretationWithHarness` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.snapshot` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
+| `perspective.subjectClassesOf` | `Owns(Perspective, perspective:READ)` |
+| `perspective.subscribeQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.subscribeSparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.update` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.updateLink` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.verifyFlowReceipt` | `Owns(Perspective, perspective:READ)` |
+| `runtime.addFriends` | `Executor(runtime.friends:CREATE)` |
+| `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
+| `runtime.addLinkLanguageTemplates` | `Executor(runtime.known_link_languages:CREATE)` |
+| `runtime.computeLog` | `Cap(agent:READ)` |
+| `runtime.createNotification` | `Cap(agent:UPDATE)` |
+| `runtime.deleteNotification` | `Cap(agent:UPDATE)` |
+| `runtime.exportData` | `Executor(agent:UPDATE)` |
+| `runtime.freeHostingEnabled` | `Open` |
+| `runtime.friendStatus` | `Cap(runtime.friend_status:READ)` |
+| `runtime.friends` | `Executor(runtime.friends:READ)` |
+| `runtime.grantNotification` | `Operator` |
+| `runtime.hcAgentInfos` | `Cap(runtime.hc_agent_info:READ)` |
+| `runtime.hostRates` | `Cap(runtime.hosting:READ)` |
+| `runtime.importData` | `Operator` |
+| `runtime.inbox` | `Cap(runtime.messages:READ)` |
+| `runtime.info` | `Open` |
+| `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
+| `runtime.notifications` | `Cap(agent:UPDATE)` |
+| `runtime.openLink` | `Operator` |
+| `runtime.outbox` | `Executor(runtime.messages:READ)` |
+| `runtime.quit` | `Executor(runtime:QUIT)` |
+| `runtime.removeFriends` | `Executor(runtime.friends:DELETE)` |
+| `runtime.removeLinkLanguageTemplates` | `Executor(runtime.known_link_languages:DELETE)` |
+| `runtime.restartHolochain` | `Operator` |
+| `runtime.sendFriendMessage` | `Executor(runtime.messages:CREATE)` |
+| `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
+| `runtime.setHostRates` | `Operator` |
+| `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
+| `runtime.setUnytMembraneProof` | `Operator` |
+| `runtime.tlsDomain` | `Open` |
+| `runtime.unytAgentKey` | `Operator` |
+| `runtime.unytHotAgentPubkey` | `Operator` |
+| `runtime.unytReinstallDna` | `Operator` |
+| `runtime.unytSendHot` | `Operator` |
+| `runtime.unytVersionInfo` | `Cap(runtime.hosting:READ)` |
+| `runtime.unytWalletBalance` | `Operator` |
+| `runtime.unytWalletHistory` | `Operator` |
+| `runtime.updateNotification` | `Cap(agent:UPDATE)` |
+| `runtime.verifySignature` | `Cap(agent:READ)` |
+| `user.create` | `Cap(runtime.user_management:CREATE)` |
+| `user.credits` | `Operator` |
+| `user.emailTest` | `Executor(*:*)` |
+| `user.freeAccess` | `Operator` |
+| `user.list` | `Executor(runtime.user_management:READ)` |
+| `user.login` | `Cap(runtime.user_management:LOGIN)` |
+| `user.logout` | `Open` |
+| `user.multiUserEnabled` | `Cap(runtime.user_management[enabled]:READ)` |
+| `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
+| `user.revokeAllSessions` | `Open` |
+| `user.setMultiUserEnabled` | `Operator` |
+| `user.verifyEmail` | `Cap(runtime.user_management:VERIFY)` |
+| `user.wallet` | `Executor(runtime.user_management:READ)` |
+
+<!-- guard-table:end -->
 
 `tests/method_matrix_tests.rs` walks every method in `build_handler_map()` (one without a
 guard fails it; `every_registered_method_has_a_guard` says so on its own) and calls
-`admit` as each kind of caller (operator, app with and without the capability, user, another
-user, anonymous) on its own, others', unowned, the main agent's and missing perspectives, and
-on the user's own, an operator's and a missing AI task. A new guard is covered without a new
-test; a method whose params need more than `uuid` adds an entry to `EXTRA_PARAMS`, with
-`TARGET` where it names the row's perspective or task in another param.
+`admit` as each kind of caller (operator, app on the main agent with and without the
+capability, user, another user, anonymous). `Cap` rows admit an anonymous caller exactly when
+the anonymous set covers the capability. `Owns` rows name the user's own, the main agent's,
+an unowned (perspectives) and a missing resource of the guard's `Owner`. A new guard is
+covered without a new test; a method whose params need more than `uuid` adds an entry to
+`EXTRA_PARAMS`, with `TARGET` where it names the row's resource in another param.
 
 The MCP tools that wrap an RPC method dispatch through the same map
-(`ws_handler::shared_handler_map`, `mcp::tools::call_method`), so the guards hold on MCP too.
-`tests/method_matrix_mcp_tests.rs` runs each of them as every matrix caller and checks it
-against `admit` of its methods (see `mcp/AGENTS.md`). The MCP tools with no RPC method that
+(`ws_handler::shared_handler_map`, `mcp::tools::Ad4mMcpHandler::call`), so the guards hold on
+MCP too, 404 included: MCP remaps no refusal. `tests/method_matrix_mcp_tests.rs` runs each of
+them as every matrix caller on the rows' resources (`World::id`) and checks it against `admit`
+of its methods and the rows' `Expect` (see `mcp/AGENTS.md`). The MCP tools with no RPC method that
 take a perspective run `Guard::perspective(perspective_query_capability)` (read) or
 `Guard::perspective(perspective_update_capability)` (write) themselves; the same file checks
 them against those two guards.
@@ -141,69 +329,99 @@ them against those two guards.
   discovery and no compatibility modes.
 - Events: a socket gets no events until it sends `events.watch { "<type>": null | [perspective
   uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
-  inline on both sockets (per-connection state, like `request.cancel`).
+  inline on the RPC socket (per-connection state, like `request.cancel`). A list matches events
+  whose `Event::perspective` (the payload's `perspectiveUuid`) it names; unscoped payloads carry
+  none. There is no separate events socket (`/api/v1/ws/events` was removed).
 - Live query updates (`query-subscription-update`) pass `events.watch` untouched: every socket of
   the perspective owner gets them, and the SDK routes them by `subscriptionId`.
 - One event path. A publisher calls `pubsub.publish_event(Event::new(Topic, Audience, payload))`
-  (`src/events.rs`); there is no default audience. A socket's stream
-  (`events_ws::build_event_stream_for`) delivers it when `Session::may_receive` and
+  (`src/events.rs`); there is no default audience. Wire names live in `Topic::as_str` only;
+  `events_ws::event_specs()` is keyed by `Topic`. A socket's stream
+  (`events_ws::build_event_stream`) delivers an event when `Session::may_receive` and
   `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`.
-  `may_receive` needs both: the session is in the audience (`Session::in_audience`), and it holds
-  `Topic::capability(perspective)`, the capability of the RPC method that reads the same data
-  (#1284). Per-perspective topics name the event's perspective (`perspective.queryLinks`'
-  `perspective_query_capability([uuid])`; a signal: neighbourhood READ on it); an event without a
-  perspective needs the grant on `*`. An app acts as the main agent, so without the capability an
-  app approved for AI or one perspective got every perspective's events. A user token holds every
-  topic's capability (`get_user_default_capabilities`) and the operator may do anything, so only
-  narrower tokens lose events. A new topic picks its capability in the same exhaustive `match`. No
-  check takes a lock or parses the payload. The stream builder takes the socket's interest, so
-  callers pass it (`Connection::interest()` on the RPC socket). Only authenticated sessions
-  (`Session::is_authenticated`: not anonymous) get a stream on the RPC socket. The stream ends at
-  the first event after `Session::check()` fails. `audience_matrix_tests` in `events_ws.rs` pins
-  who receives each audience; a new topic or audience adds its cases there.
-- One string topic remains: live query updates (`PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC`, sent as
-  `query-subscription-update`). `events_ws::query_updates` checks the session may query the
-  perspective (the topic's capability), then waits for the perspective handle to check that the
-  session owns it (`matches_perspective_owner`, spawned so a parked stream cannot hold the
-  handle). It stays until live queries belong to a connection (#1207); it then becomes a typed
-  event to `Audience::Connection`. Language code cannot publish anything
-  (`js_core/pubsub_extension.rs`).
+- `Audience = Everyone | Dids(Vec<String>)`. `may_receive` needs both: the session is in the
+  audience (everyone, or `Session::acts_as_did` is one of the DIDs; a grant acts as its agent,
+  the operator as the main agent it owns), and it holds `Event::capability`. `Event::new` fills
+  the capability from `Topic::capability(perspective)`, the capability of the RPC method that
+  reads the same data (#1284): per-perspective topics name the event's perspective
+  (`perspective.queryLinks`' `perspective_query_capability([uuid])`; a signal: neighbourhood READ
+  on it); an event without a perspective needs the grant on `*`. Approval requests carry
+  AGENT_PERMIT instead (`Event::approval_request`). An app acts as the main agent, so without the
+  capability an app approved for AI or one perspective got every perspective's events. A user
+  token holds every topic's capability (AGENT_PERMIT on its own agent included, #1399) and the
+  operator may do anything, so only narrower tokens lose events. A new topic picks its capability in the same
+  exhaustive `match`. No check takes a lock or parses the payload. The stream builder takes the
+  socket's interest (`Connection::interest()`). Only authenticated sessions
+  (`Session::is_authenticated`: not anonymous) get a stream. The stream ends at the first event
+  the session may receive after `Session::check()` fails. `audience_matrix_tests` in
+  `events_ws.rs` pins who receives each audience; a new topic or audience adds its cases there.
+- The operator has no view of other agents' events: it receives what the main agent receives.
 - Audiences. Every per-perspective topic reads its recipients from one helper,
   `perspectives::event_recipients`: the owners, or the main agent for an unowned perspective
   (or one whose owner list is empty), read when the event is published. No per-perspective event
-  goes to `Everyone`. `sync-state-change` goes out once, to all recipients.
-  `perspective-added/-updated/-removed` and `link-added/-removed/-updated` go out once per
-  recipient (`perspectives::publish_to_each_owner`), each to that DID, with the DID in the
-  payload's `owner`. `signal` goes to its `recipient` (`perspectives::signal_event`); one without
-  a recipient goes once to each of `event_recipients`, each copy naming that DID as `recipient`
-  (`perspectives::publish_telepresence_signal`, used by both link-language paths).
-  `notification-triggered` goes to the notification's `ownerDid`, never to co-owners.
-  `auto-processor-event` goes to `Audience::OperatorAndDids([pass owner])` when the owner is one
-  of `event_recipients`, else to the operator; `auto-processor-neighbourhood-state` to the
-  operator and `event_recipients`. `auto_processor::events::emit` reads the handle when it
-  publishes, so no emitter may hold the perspective's handle lock while it emits.
-  `hosting-user-info-changed` goes to the user's DID (looked up by email at publish) and the main
-  agent's (the operator and apps see every user's). `message-received` has no publisher; a new
-  one names the receiving agent (`Audience::Dids`), never the operator or every session.
-  `model-loading-status` goes to everyone; `transcription-text` to the stream owner's DID.
-  `agent-status-changed` and `agent-updated` go to the DID the payload names
+  goes to `Everyone`. Each goes out once, to all recipients (`perspectives::publish_to_owners`),
+  and no payload names an `owner`: `perspective-added/-updated/-removed`, `sync-state-change`,
+  `link-added/-removed/-updated` and `query-subscription-update` (published by
+  `PerspectiveInstance::send_subscription_update`, which reads the recipients before its task).
+  `signal` goes to its `recipient` (`perspectives::signal_event`); one without a recipient goes
+  once to each of `event_recipients`, each copy naming that DID as `recipient`
+  (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
+  `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
+  only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
+  never to co-owners. `auto-processor-event` goes to the pass owner when it is one of
+  `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
+  `auto-processor-neighbourhood-state` to `event_recipients` (empty for an unknown
+  perspective). `auto_processor::events::emit` reads the handle when it publishes, so no emitter
+  may hold the perspective's handle lock while it emits. `hosting-user-info-changed` goes to the
+  user's DID (looked up by email at publish) and the main agent's (the operator and apps see
+  every user's). `model-loading-status` goes to everyone; `transcription-text` to the stream
+  owner's DID. `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
-  `apps-changed` and the approval exceptions (`CapabilityRequested`,
-  `InstallNotificationRequest`) go to `Audience::Approvers`: the sessions whose capabilities
-  cover `AGENT_PERMIT` (the operator, and apps whose token holds it), not only the operator.
-  Other exceptions go to everyone (`Audience::for_exception`). "Everyone" still means every
-  session that holds the topic's capability.
-- Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
+  `apps-changed` (`Event::apps_changed`) and the approval exceptions (`CapabilityRequested`,
+  `InstallNotificationRequest`, `Event::approval_request`) go to the DID of the agent the
+  approval is for (the agent a capability request names, #1399) with capability AGENT_PERMIT:
+  for the main agent the operator and main-agent apps whose token holds it, for a managed agent
+  that user's sessions (users hold AGENT_PERMIT), whether or not they subscribe to exceptions. Other exceptions go to everyone (`Event::exception`) with the
+  exception subscription's capability.
+- Every socket (RPC, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
-  an open connection. Tests build sessions with `Session::for_test` / `for_test_expiring`.
-- App and user sockets also register in `agent::session_registry` while open (an RAII guard).
-  `revoked::revoke` and `revoked::revoke_all_sessions` cancel their token, and the socket closes
-  at once with `ws_rpc::token_ended_frame()` (1008), the same frame a failed check sends. Only
-  the socket's own task writes the close frame. The RPC socket first delivers in-flight replies
-  for up to `REPLY_GRACE`, so `user.logout` gets its answer. A new socket type must register too.
-- User revocation: `user.logout` revokes the caller's token id; `user.revokeAllSessions` sets a
-  per-user cutoff (`users.sessions_valid_after`, cached in `revoked::SessionCutoffs`) that refuses
-  every token with `iat` at or before it. `generate_user_jwt` issues later tokens after the cutoff.
+  an open connection. Tests build sessions with `Session::for_test(principal)` plus
+  `.with_caps(..)`, `.with_did(..)`, `.with_grant(..)`, `.expiring_at(..)`, and contexts with
+  `RequestContext::{operator,app,user}_for_test` / `for_session`.
+- Each socket's "session over" token is `ctx.session.ended()`: a child of the grant's `ended`
+  token (a token that never fires for the operator and anonymous callers). Revoking or removing
+  the grant cancels it, and the socket closes at once with `ws_rpc::token_ended_frame()` (1008),
+  the same frame a failed check sends. A grant revoked before the socket starts serving gives an
+  already-cancelled child, so there is no race to check. Only the socket's own task writes the
+  close frame. The RPC socket first delivers in-flight replies for up to `REPLY_GRACE`, so
+  `user.logout` gets its answer. A new socket type must take `session.ended()` too.
+- Revocation is on grants (`agent::grants::Grants`): `agent.revokeToken` (by request id or by
+  the token) and `agent.removeApp` act on grants of the caller's own agent, or any for the
+  operator; another agent's grant answers as missing. `user.logout` revokes the caller's grant;
+  `user.revokeAllSessions` revokes every grant on that user's agent. `agent.getApps` lists the
+  grants of `acts_as()`.
+- Capability flow (#1399, executor side; `agent/capabilities/mod.rs` + `pending.rs`):
+  1. `agent.requestCapability { authInfo, agent? }` (anyone, AGENT_AUTH): `agent` is a managed
+     user's email or an agent's DID, absent = the main agent (`requested_agent`; an unknown DID
+     is 400, an email is never checked so the answer reveals no accounts). The request is a
+     `PendingRequest` in memory only: never on disk, 1024 at most (a new one evicts the
+     unapproved one nearest its expiry), 10 minutes for the main agent and 24 hours for a
+     managed agent, restarted at approval. Its approval request goes to the target agent
+     (`Event::approval_request`). Every request waits for that owner: the declared app name
+     and domain are the caller's claim and approve nothing.
+  2. `agent.permitCapability { auth }`: its guard, `Owns { owner: Request }`, admits the
+     operator or a session acting as the request's agent with AGENT_PERMIT; anyone else gets
+     404, as for a missing request. The approver may grant fewer capabilities than asked; the
+     target is fixed by the request. It returns a six-digit code, stored as a `Secret`.
+  3. `agent.generateJwt { requestId, rand }` (anyone): `PendingRequests::redeem` checks the code
+     and mints the grant on the request's agent in one locked step, with the approved
+     capabilities capped at that agent's own (`grant_caps_for`: a managed agent holds its user's
+     capabilities). The request goes only when the grant exists; a failed mint (locked wallet,
+     database) leaves it approved and redeemable. Five wrong codes delete it; a code redeems
+     once. `apps-changed` then goes to the grant's agent.
+  `capabilities::request_capability`, `permit_capability` and `generate_capability_token` are the
+  same steps for MCP (`mcp/tools/auth.rs`, which auto-permits only when `caller_can_permit` says
+  the caller may approve for the target) and the dev-mode auto-permit.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and
@@ -232,7 +450,8 @@ grammar, used by `perspectives/interpretation/run.rs`. They move to `agentic/`
 ## Tests
 
 `tests/` (`types_tests.rs`, `shacl_ws_tests.rs`) and `openai_compat/tests.rs`.
-`tests/multi_user.rs` starts a multi-user node and opens sessions from tokens the node signs,
+`tests/multi_user.rs` starts a multi-user executor and opens sessions from tokens the executor
+signs,
 as the WS upgrade does; the `*_access_tests.rs` files drive `build_handler_map().dispatch` as
 different users with it. Behaviour changes to any handler also need the JS integration suite (`pnpm run
 test-main` at repo root).

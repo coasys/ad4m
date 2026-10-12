@@ -350,10 +350,10 @@ async function setupExternalMode(
     // Initialize MCP session (no auth needed)
     const initResp = await mcpInitialize(endpoint);
 
-    // Multi-user node: provision the assistant's OWN user identity (distinct DID)
+    // Multi-user executor: provision the assistant's OWN user identity (distinct DID)
     // via signup + login, rather than a capability against the node's base agent.
     if (multiUser && email && password) {
-      logger.info(`[ad4m-setup] Multi-user node — provisioning own identity (${email})...`);
+      logger.info(`[ad4m-setup] Multi-user executor — provisioning own identity (${email})...`);
       // mcpCallTool returns a JSON-RPC error as result text rather than throwing,
       // so inspect the result — the catch alone only sees transport failures.
       // Did *this* run create the account? If so the node has just emailed a

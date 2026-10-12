@@ -24,7 +24,7 @@
 //!
 //! Auth: the WS extractor reads the bearer JWT from the
 //! `Authorization` header *or* a `?token=` query param (per
-//! `AuthContext`).  Capabilities checked: `AI_TRANSCRIBE`.
+//! `RequestContext`).  Capabilities checked: `AI_TRANSCRIBE`.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -36,18 +36,19 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
-use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
-use crate::agent::session_registry::SessionRegistry;
+use crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY;
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
 use crate::api::errors::ApiError;
-use crate::types::ModelType;
+use crate::types::{ModelType, RequestContext};
 
 /// A token that opens no session gets the upgrade, an `unauthorized` error event and a close
 /// with 1008, before any work: a browser cannot read the HTTP status of a refused upgrade.
-pub async fn realtime_ws(auth: Result<AuthContext, ApiError>, ws: WebSocketUpgrade) -> Response {
-    match auth {
-        Ok(auth) => ws.on_upgrade(move |socket| handle_socket(auth, socket)),
+pub async fn realtime_ws(
+    caller: Result<RequestContext, ApiError>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    match caller {
+        Ok(caller) => ws.on_upgrade(move |socket| handle_socket(caller, socket)),
         Err(ApiError::Unauthorized(reason)) => ws.on_upgrade(move |mut socket| async move {
             let _ = send_error(&mut socket, "unauthorized", &reason).await;
             let code = crate::api::ws_rpc::CLOSE_TOKEN_ENDED;
@@ -62,17 +63,15 @@ pub async fn realtime_ws(auth: Result<AuthContext, ApiError>, ws: WebSocketUpgra
     }
 }
 
-async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
-    if let Err(e) = check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY) {
+async fn handle_socket(caller: RequestContext, mut socket: WebSocket) {
+    if let Err(e) = caller.require(&AI_TRANSCRIBE_CAPABILITY) {
         let _ = send_error(&mut socket, "forbidden", &e).await;
         let _ = socket.close().await;
         return;
     }
-    let session = auth.session.clone();
-    let caller = auth.to_request_context();
-    // Fires when the token is revoked: the socket closes at once, not at the next message.
-    let revoked = tokio_util::sync::CancellationToken::new();
-    let _registered = SessionRegistry::global().register(&session, revoked.clone());
+    let session = caller.session.clone();
+    // Fires when the grant ends: the socket closes at once, not at the next message.
+    let revoked = session.ended();
     // Set when the token stopped working: the socket then closes with 1008.
     let mut token_ended = false;
 

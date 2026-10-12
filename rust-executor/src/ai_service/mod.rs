@@ -2390,11 +2390,12 @@ impl AIService {
         }
 
         // A caller without a user acts as the main agent. The session already resolved and
-        // checked it: the operator and an app may reach any stream, an anonymous caller none.
+        // checked it: the operator and a grant on the main agent may reach any stream, an
+        // anonymous caller none.
         let Some(caller_email) = caller.user_email() else {
-            return match caller.session.principal {
-                crate::agent::session::Principal::Operator
-                | crate::agent::session::Principal::App { .. } => Ok(()),
+            return match &caller.session.principal {
+                crate::agent::session::Principal::Operator => Ok(()),
+                crate::agent::session::Principal::Agent(agent) if agent.is_main_agent() => Ok(()),
                 _ => Err(anyhow!(
                     "Authorization error: caller does not own this transcription stream"
                 )),
@@ -3074,23 +3075,26 @@ mod stream_ownership_tests {
         let bob = RequestContext::user_for_test("bob@example.org", "did:key:bob", vec![]);
         let operator = RequestContext::operator_for_test();
         let app = RequestContext::app_for_test(vec![]);
-        let anonymous = RequestContext::for_test(Principal::Anonymous { caps: vec![] });
+        let anonymous = RequestContext::for_test(Principal::Anonymous);
 
         let alices = stream_of(Some("alice@example.org"));
-        let nodes = stream_of(None);
+        let main_agents = stream_of(None);
         let reaches = |stream, caller| AIService::verify_stream_ownership(stream, caller).is_ok();
 
         assert!(reaches(&alices, &alice), "a user reaches their own stream");
         assert!(!reaches(&alices, &bob), "not another user's");
-        assert!(!reaches(&nodes, &bob), "nor the node's");
+        assert!(!reaches(&main_agents, &bob), "nor the main agent's");
         assert!(
             reaches(&alices, &operator),
             "the operator reaches any stream"
         );
-        assert!(reaches(&nodes, &operator));
-        assert!(reaches(&alices, &app), "an app acts as the node, as before");
+        assert!(reaches(&main_agents, &operator));
         assert!(
-            !reaches(&nodes, &anonymous),
+            reaches(&alices, &app),
+            "a grant on the main agent reaches any stream, as before"
+        );
+        assert!(
+            !reaches(&main_agents, &anonymous),
             "an anonymous caller reaches none"
         );
     }
@@ -3114,7 +3118,7 @@ mod transcription_owner_tests {
     }
 
     #[test]
-    fn a_user_owns_their_stream_and_the_operator_owns_as_the_node() {
+    fn a_user_owns_their_stream_and_the_operator_owns_as_the_main_agent() {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
@@ -3142,12 +3146,14 @@ mod transcription_owner_tests {
         setup_agent();
         let _multi_user = MultiUserMode::on();
         let token = crate::test_utils::expired_user_token("expired@example.org");
-        let auth = crate::api::auth::AuthContext::open(
+        let refused = crate::types::RequestContext::open(
             &token,
             &Some("the-admin-credential".into()),
-            false,
             crate::agent::capabilities::ListenerReach::Network,
         );
-        assert_eq!(auth.err(), Some(crate::agent::session::AuthError::Expired));
+        assert_eq!(
+            refused.err(),
+            Some(crate::agent::session::AuthError::Expired)
+        );
     }
 }

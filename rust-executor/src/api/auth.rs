@@ -1,77 +1,20 @@
-use std::sync::Arc;
-
 use axum::{extract::FromRequestParts, http::request::Parts};
 
 use super::errors::ApiError;
-use crate::agent::capabilities::{Capability, ListenerReach};
-use crate::agent::session::{AuthError, Session};
+use crate::agent::capabilities::ListenerReach;
+use crate::agent::session::AuthError;
 use crate::secret::Secret;
 use crate::types::RequestContext;
-
-/// Who is calling, resolved once from the token: by the HTTP extractor (REST and the
-/// OpenAI-compatible API) per request, and by the RPC socket per connection.
-#[derive(Clone)]
-pub struct AuthContext {
-    /// The session's capabilities. Always `Ok`: a token that opens no session gets no
-    /// `AuthContext`.
-    pub capabilities: Result<Vec<Capability>, String>,
-    pub auto_permit_cap_requests: bool,
-    pub auth_token: String,
-    /// The caller's session.
-    pub session: Arc<Session>,
-}
-
-impl AuthContext {
-    /// The identity of a caller that presents `token` on a listener with this reach.
-    ///
-    /// Fails for a token that opens no [`Session`]: invalid, expired, revoked, or a user
-    /// whose DID does not load. The caller refuses such a token where it arrives. An empty
-    /// token opens a session (the operator or an anonymous caller).
-    pub fn open(
-        token: &str,
-        admin_credential: &Option<Secret>,
-        auto_permit_cap_requests: bool,
-        reach: ListenerReach,
-    ) -> Result<Self, AuthError> {
-        let session = Session::open(token, admin_credential, reach)?;
-        Ok(AuthContext {
-            capabilities: Ok(session.capabilities()),
-            auto_permit_cap_requests,
-            auth_token: token.to_string(),
-            session: Arc::new(session),
-        })
-    }
-
-    /// The email of the user the session names, if it names one.
-    pub fn user_email(&self) -> Option<&str> {
-        self.session.user().map(|(email, _)| email)
-    }
-
-    /// Whether the caller is the node's operator. See [`RequestContext::is_operator`].
-    pub fn is_operator(&self) -> bool {
-        self.session.is_operator()
-    }
-
-    /// Convert to the existing RequestContext used by internal functions.
-    pub fn to_request_context(&self) -> RequestContext {
-        RequestContext {
-            capabilities: self.capabilities.clone(),
-            auto_permit_cap_requests: self.auto_permit_cap_requests,
-            auth_token: self.auth_token.clone(),
-            cancel_token: None,
-            session: self.session.clone(),
-        }
-    }
-}
 
 /// AppState shared across all API handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub admin_credential: Option<Secret>,
-    pub auto_permit_cap_requests: bool,
 }
 
-impl<S: Send + Sync> FromRequestParts<S> for AuthContext
+/// REST and the OpenAI-compatible API open a session per request from the `Authorization`
+/// header or the `token` query parameter.
+impl<S: Send + Sync> FromRequestParts<S> for RequestContext
 where
     AppState: FromRef<S>,
 {
@@ -100,10 +43,9 @@ where
 
         // A token that opens no session gets 401: the client logs in again. A locked wallet
         // gets 503: the token may be good, and the client retries after the unlock.
-        let auth = AuthContext::open(
+        let ctx = RequestContext::open(
             &auth_header,
             &app_state.admin_credential,
-            app_state.auto_permit_cap_requests,
             listener_reach(parts),
         )
         .map_err(|e| match e {
@@ -112,11 +54,11 @@ where
         })?;
 
         // Track last_seen for multi-user mode
-        if let Some(email) = auth.user_email() {
+        if let Some(email) = ctx.user_email() {
             crate::agent::capabilities::track_last_seen(email).await;
         }
 
-        Ok(auth)
+        Ok(ctx)
     }
 }
 
@@ -194,17 +136,13 @@ mod session_tests {
         let (mut parts, _) = request.into_parts();
         let state = AppState {
             admin_credential: Some("the-admin-credential".into()),
-            auto_permit_cap_requests: false,
         };
-        let auth = AuthContext::from_request_parts(&mut parts, &state)
+        let ctx = RequestContext::from_request_parts(&mut parts, &state)
             .await
             .unwrap_or_else(|_| panic!("the extractor accepts a user token"));
 
-        assert_eq!(auth.session.user(), Some((email, did.as_str())));
-        assert_eq!(auth.user_email(), Some(email));
-        assert!(!auth.is_operator());
-
-        let ctx = auth.to_request_context();
+        assert_eq!(ctx.session.user(), Some((email, did.as_str())));
+        assert!(!ctx.is_operator());
         assert_eq!(ctx.user_email(), Some(email));
         assert_eq!(ctx.user_did(), Some(did.as_str()));
         assert_eq!(
@@ -214,7 +152,7 @@ mod session_tests {
     }
 
     /// What the HTTP extractor makes of a request that carries `token`.
-    async fn extract(token: &str) -> Result<AuthContext, ApiError> {
+    async fn extract(token: &str) -> Result<RequestContext, ApiError> {
         let mut request = axum::http::Request::builder()
             .uri("/v1/models")
             .extension(ListenerReach::Network);
@@ -224,22 +162,19 @@ mod session_tests {
         let (mut parts, _) = request.body(()).unwrap().into_parts();
         let state = AppState {
             admin_credential: Some("the-admin-credential".into()),
-            auto_permit_cap_requests: false,
         };
-        AuthContext::from_request_parts(&mut parts, &state).await
+        RequestContext::from_request_parts(&mut parts, &state).await
     }
 
     // A user whose DID does not load used to get a request context with `Err` capabilities.
     #[test]
-    fn a_user_without_a_loadable_identity_opens_no_auth_context() {
+    fn a_user_without_a_loadable_identity_opens_no_request_context() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        let token =
-            crate::user_management::generate_user_jwt("rest.nokey@example.org", "test").unwrap();
-        let refused = AuthContext::open(
+        let token = crate::test_utils::token_of_a_user_without_a_key("rest.nokey@example.org");
+        let refused = RequestContext::open(
             &token,
             &Some("the-admin-credential".into()),
-            false,
             ListenerReach::Network,
         );
         assert!(
@@ -255,23 +190,23 @@ mod session_tests {
     async fn the_http_extractor_answers_401_for_a_token_that_opens_no_session() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
-        let revoked = crate::agent::capabilities::token::generate_jwt(
-            "a revoked app".to_string(),
-            3600,
-            crate::agent::capabilities::AuthInfo::default(),
-        )
-        .unwrap();
-        let request_id = format!("extractor-{}", uuid::Uuid::new_v4());
-        let app = crate::agent::capabilities::AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: crate::agent::capabilities::AuthInfo::default(),
-        };
-        crate::test_utils::insert_app_with_token(request_id.clone(), app, &revoked);
-        crate::agent::capabilities::apps_map::revoke_app(&request_id).unwrap();
+        let revoked = crate::test_utils::granted_token(crate::agent::capabilities::AuthInfo {
+            app_name: "a revoked app".to_string(),
+            ..Default::default()
+        });
+        let grants = crate::agent::grants::Grants::global();
+        grants.revoke(&grants.find(&revoked)).unwrap();
+        let (ungranted, _) =
+            crate::agent::capabilities::token::sign_token("no grant".to_string(), 3600, None)
+                .unwrap();
 
         let expired = crate::test_utils::expired_user_token("rest.expired@example.org");
-        for token in [revoked.as_str(), expired.as_str(), "not-a-jwt"] {
+        for token in [
+            revoked.as_str(),
+            expired.as_str(),
+            ungranted.as_str(),
+            "not-a-jwt",
+        ] {
             match extract(token).await {
                 Err(ApiError::Unauthorized(reason)) => assert!(!reason.is_empty()),
                 Err(other) => panic!("token {token:.20}…: expected 401, got {other:?}"),
@@ -296,13 +231,13 @@ mod session_tests {
         {
             crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
         }
-        let auth = extract("")
+        let ctx = extract("")
             .await
             .unwrap_or_else(|e| panic!("refused: {e:?}"));
-        assert!(!auth.is_operator());
-        assert!(matches!(
-            auth.session.principal,
-            crate::agent::session::Principal::Anonymous { .. }
-        ));
+        assert!(!ctx.is_operator());
+        assert_eq!(
+            ctx.session.principal,
+            crate::agent::session::Principal::Anonymous
+        );
     }
 }

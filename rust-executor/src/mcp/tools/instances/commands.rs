@@ -11,7 +11,6 @@
 //! method's guard applies.
 
 use super::{error_json, pretty, Ad4mMcpHandler};
-use crate::mcp::tools::perspective_error;
 use crate::perspectives::perspective_instance::{Command, Parameter};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -55,55 +54,18 @@ impl Ad4mMcpHandler {
             "expression": p.expression_address,
             "parameters": p.parameters,
         });
-        match self
-            .call_method("perspective.executeCommands", params)
-            .await
-        {
+        let executed = self
+            .call::<serde_json::Value>("perspective.executeCommands", params, |e| {
+                error_json(format!("Error executing commands: {}", e.message))
+            })
+            .await;
+        match executed {
             Ok(_) => pretty(&json!({
                 "executed": true,
                 "perspective_id": p.perspective_id,
                 "expression_address": p.expression_address
             })),
-            Err(e) if e.code == 500 => {
-                error_json(format!("Error executing commands: {}", e.message))
-            }
-            Err(e) => perspective_error(&p.perspective_id, e),
+            Err(e) => e,
         }
-    }
-}
-
-/// The tool answers as its RPC method's guard does (#851).
-#[cfg(test)]
-mod guard_tests {
-    use super::*;
-    use crate::agent::capabilities::{
-        perspective_update_capability, PERSPECTIVE_CREATE_CAPABILITY,
-    };
-    use crate::mcp::tools::test_support::{app, handler_as, perspective, setup, status};
-
-    // The tool checked PERSPECTIVE_CREATE; the method checks the update capability on the
-    // perspective.
-    #[tokio::test]
-    async fn execute_commands_needs_the_update_capability() {
-        setup();
-        let uuid = perspective(None).await;
-        let run = |caps| {
-            let uuid = uuid.clone();
-            async move {
-                handler_as(app(caps))
-                    .execute_commands(Parameters(ExecuteCommandsParams {
-                        perspective_id: uuid,
-                        commands: r#"[{"action":"addLink","source":"this","predicate":"test://p","target":"test://t"}]"#.into(),
-                        expression_address: "test://subject".into(),
-                        parameters: None,
-                    }))
-                    .await
-            }
-        };
-        let refused = run(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]).await;
-        assert_eq!(status(&refused), Some(403), "{refused}");
-        let executed = run(vec![perspective_update_capability(vec![uuid.clone()])]).await;
-        assert!(executed.contains("\"executed\": true"), "{executed}");
-        crate::perspectives::remove_perspective(&uuid).await;
     }
 }

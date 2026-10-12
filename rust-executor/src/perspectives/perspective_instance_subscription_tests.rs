@@ -9,8 +9,8 @@
 //!
 //! The background `subscribed_queries_loop` is not running in these tests, so
 //! `check_subscribed_queries` is driven directly after the matching link is
-//! written. Pushes are observed on the global pubsub topic the WS layer
-//! forwards to clients.
+//! written. Pushes are observed as the typed `query-subscription-update` events
+//! the WS layer forwards to clients.
 
 use super::*;
 use crate::perspectives::interpretation_test_support::{setup_perspective_no_llm, TASK_SDNA};
@@ -18,19 +18,27 @@ use crate::pubsub::get_global_pubsub;
 use crate::types::PerspectiveQuerySubscriptionFilter;
 use tokio::sync::broadcast;
 
-/// Wait for a push for `subscription_id` on `rx`, ignoring pushes for other
-/// perspectives (the topic is global).
+/// Wait for a push for `subscription_id` on `rx`, ignoring other events and
+/// pushes for other perspectives (the channel is global).
 async fn next_push_for(
-    rx: &mut broadcast::Receiver<String>,
+    rx: &mut broadcast::Receiver<Arc<Event>>,
     perspective_uuid: &str,
     subscription_id: &str,
 ) -> PerspectiveQuerySubscriptionFilter {
     let deadline = Duration::from_secs(10);
     let wait = async {
         loop {
-            let msg = rx.recv().await.expect("pubsub receiver closed");
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                // Other tests' events share the channel; a lag skips some of theirs too.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("pubsub receiver closed: {e}"),
+            };
+            if event.topic != Topic::PerspectiveQuerySubscription {
+                continue;
+            }
             let filter: PerspectiveQuerySubscriptionFilter =
-                serde_json::from_str(&msg).expect("subscription push JSON");
+                serde_json::from_value(event.payload.clone()).expect("subscription push JSON");
             if filter.uuid == perspective_uuid && filter.subscription_id == subscription_id {
                 return filter;
             }
@@ -65,10 +73,7 @@ async fn model_subscription_shared_by_two_holders_survives_one_dispose() {
         .expect("second model subscribe");
     assert_eq!(id1, id2, "same params must share one subscription id");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     // First holder lets go: the entry must stay registered for the second one.
     assert!(perspective
@@ -138,10 +143,7 @@ async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
         .expect("second subscribe");
     assert_eq!(id1, id2, "same query must share one subscription id");
 
-    let mut rx = get_global_pubsub()
-        .await
-        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-        .await;
+    let mut rx = get_global_pubsub().await.subscribe_events();
 
     assert!(perspective
         .dispose_query_subscription(id1.clone())

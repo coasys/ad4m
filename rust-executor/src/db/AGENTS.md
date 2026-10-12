@@ -19,8 +19,9 @@ migration still live in `db.rs`.
 - `tasks.user_email` is the managed user who created the task. `NULL` is an operator task:
   admin credential, app token, the executor's own interpretation tasks, or any row older
   than the column.
-- User sessions reach only their own tasks (`Guard::Task` in `api/guards.rs`, and `ai.tasks`
-  lists the caller's own); operators and apps reach every task.
+- A session reaches only its agent's tasks (`Guard::Owns { owner: Task }` in
+  `api/guards.rs`; `ai.tasks` lists them): a user its own, a grant on the main agent the
+  operator tasks. The operator reaches every task. Another agent's task is 404.
 - Executor code that looks a task up by name reads operator tasks only
   (`get_tasks_owned_by(None)`). Otherwise a user can create a task under that name first and
   have it used for every user.

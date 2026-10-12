@@ -13,7 +13,6 @@ use super::{
     error_json, link_target, pretty, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD,
     MAX_QUERY_LIMIT,
 };
-use crate::mcp::tools::{decode, perspective_error};
 use crate::types::DecoratedLinkExpression;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -68,24 +67,22 @@ impl Ad4mMcpHandler {
             },
             "status": "shared",
         });
-        match self.call_method("perspective.addLink", params).await {
-            Ok(decorated) => {
-                let decorated: DecoratedLinkExpression = match decode(decorated) {
-                    Ok(decorated) => decorated,
-                    Err(e) => return e,
-                };
-                pretty(&json!({
-                    "success": true,
-                    "link": {
-                        "source": decorated.data.source,
-                        "predicate": decorated.data.predicate,
-                        "target": decorated.data.target,
-                        "timestamp": decorated.timestamp,
-                    },
-                }))
-            }
-            Err(e) if e.code == 500 => error_json(format!("Error adding child: {}", e.message)),
-            Err(e) => perspective_error(&p.perspective_id, e),
+        let added = self
+            .call::<DecoratedLinkExpression>("perspective.addLink", params, |e| {
+                error_json(format!("Error adding child: {}", e.message))
+            })
+            .await;
+        match added {
+            Ok(decorated) => pretty(&json!({
+                "success": true,
+                "link": {
+                    "source": decorated.data.source,
+                    "predicate": decorated.data.predicate,
+                    "target": decorated.data.target,
+                    "timestamp": decorated.timestamp,
+                },
+            })),
+            Err(e) => e,
         }
     }
 
@@ -104,17 +101,15 @@ impl Ad4mMcpHandler {
             "source": link_target(parent),
             "predicate": HAS_CHILD,
         });
-        let mut links: Vec<DecoratedLinkExpression> =
-            match self.call_method("perspective.queryLinks", params).await {
-                Ok(links) => match decode(links) {
-                    Ok(links) => links,
-                    Err(e) => return e,
-                },
-                Err(e) if e.code == 500 => {
-                    return error_json(format!("Error getting children: {}", e.message))
-                }
-                Err(e) => return perspective_error(&p.perspective_id, e),
-            };
+        let queried = self
+            .call::<Vec<DecoratedLinkExpression>>("perspective.queryLinks", params, |e| {
+                error_json(format!("Error getting children: {}", e.message))
+            })
+            .await;
+        let mut links = match queried {
+            Ok(links) => links,
+            Err(e) => return e,
+        };
         links.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         let total = links.len();
         let limit = p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT);
@@ -137,76 +132,5 @@ impl Ad4mMcpHandler {
             "total_count": total,
             "children": children,
         }))
-    }
-}
-
-/// The tools answer as their RPC methods' guards do (#851).
-#[cfg(test)]
-mod guard_tests {
-    use super::*;
-    use crate::agent::capabilities::{
-        perspective_query_capability, perspective_update_capability, ALL_CAPABILITY,
-        PERSPECTIVE_CREATE_CAPABILITY,
-    };
-    use crate::mcp::tools::test_support::{app, handler_as, perspective, setup, status, user};
-
-    // `add_child` checked PERSPECTIVE_CREATE and `get_children` no capability; the methods
-    // check the update and the query capability on the perspective.
-    #[tokio::test]
-    async fn the_tree_tools_need_the_perspective_capabilities() {
-        setup();
-        let uuid = perspective(None).await;
-        let add = |handler: Ad4mMcpHandler| {
-            let uuid = uuid.clone();
-            async move {
-                handler
-                    .add_child(Parameters(AddChildParams {
-                        perspective_id: uuid,
-                        parent: "ad4m://self".into(),
-                        child: "ad4m://obj/child".into(),
-                    }))
-                    .await
-            }
-        };
-        let list = |handler: Ad4mMcpHandler| {
-            let uuid = uuid.clone();
-            async move {
-                handler
-                    .get_children(Parameters(GetChildrenParams {
-                        perspective_id: uuid,
-                        parent: "ad4m://self".into(),
-                        limit: None,
-                    }))
-                    .await
-            }
-        };
-
-        let creator = add(handler_as(app(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]))).await;
-        assert_eq!(status(&creator), Some(403), "{creator}");
-        let reader = list(handler_as(app(vec![]))).await;
-        assert_eq!(status(&reader), Some(403), "{reader}");
-
-        let added = add(handler_as(app(vec![perspective_update_capability(vec![
-            uuid.clone(),
-        ])])))
-        .await;
-        assert!(added.contains("\"success\": true"), "{added}");
-        let listed = list(handler_as(app(vec![perspective_query_capability(vec![
-            uuid.clone(),
-        ])])))
-        .await;
-        let listed: serde_json::Value = serde_json::from_str(&listed).expect(&listed);
-        assert_eq!(listed["count"], 1, "{listed}");
-        assert_eq!(listed["children"][0]["id"], "ad4m://obj/child");
-
-        // A user who does not own the perspective finds nothing there.
-        let stranger = list(handler_as(user(
-            "tree.stranger@example.org",
-            "did:key:mcp-tree-stranger",
-            vec![ALL_CAPABILITY.clone()],
-        )))
-        .await;
-        assert_eq!(status(&stranger), Some(404), "{stranger}");
-        crate::perspectives::remove_perspective(&uuid).await;
     }
 }

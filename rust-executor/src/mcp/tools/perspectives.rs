@@ -5,7 +5,7 @@
 //! `.addSdna`) through the handler map, so the method's guard decides who may call it.
 
 use super::instances::{normalize_legacy_literal, other_literal_spelling};
-use super::{decode, method_error, perspective_error, Ad4mMcpHandler};
+use super::{labelled, method_error, Ad4mMcpHandler};
 use crate::types::{DecoratedLinkExpression, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -151,12 +151,9 @@ impl Ad4mMcpHandler {
     pub async fn list_perspectives(&self, _params: Parameters<ListPerspectivesParams>) -> String {
         // `perspective.all` lists the caller's own perspectives (every one to the operator).
         let handles: Vec<PerspectiveHandle> =
-            match self.call_method("perspective.all", json!({})).await {
-                Ok(handles) => match decode(handles) {
-                    Ok(handles) => handles,
-                    Err(e) => return e,
-                },
-                Err(e) => return method_error(e),
+            match self.call("perspective.all", json!({}), method_error).await {
+                Ok(handles) => handles,
+                Err(e) => return e,
             };
         let result: Vec<serde_json::Value> = handles
             .iter()
@@ -180,15 +177,15 @@ impl Ad4mMcpHandler {
         let p = &params.0;
 
         // The caller's user owns the new perspective; the operator's and an app's have no owner.
-        match self
-            .call_method("perspective.create", json!({ "name": p.name }))
-            .await
-        {
+        let created = self
+            .call::<PerspectiveHandle>(
+                "perspective.create",
+                json!({ "name": p.name }),
+                labelled("Error creating perspective"),
+            )
+            .await;
+        match created {
             Ok(handle) => {
-                let handle: PerspectiveHandle = match decode(handle) {
-                    Ok(handle) => handle,
-                    Err(e) => return e,
-                };
                 let result = json!({
                     "success": true,
                     "uuid": handle.uuid,
@@ -196,8 +193,7 @@ impl Ad4mMcpHandler {
                 });
                 serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
-            Err(e) if e.code == 500 => format!("Error creating perspective: {}", e.message),
-            Err(e) => method_error(e),
+            Err(e) => e,
         }
     }
 
@@ -218,12 +214,15 @@ impl Ad4mMcpHandler {
             "target": normalize_legacy_literal(&p.target),
         });
         let params = json!({ "uuid": p.perspective_id, "link": link, "status": "shared" });
-        match self.call_method("perspective.addLink", params).await {
+        let added = self
+            .call::<DecoratedLinkExpression>(
+                "perspective.addLink",
+                params,
+                labelled("Error adding link"),
+            )
+            .await;
+        match added {
             Ok(decorated) => {
-                let decorated: DecoratedLinkExpression = match decode(decorated) {
-                    Ok(decorated) => decorated,
-                    Err(e) => return e,
-                };
                 let result = json!({
                     "success": true,
                     "link": {
@@ -235,8 +234,7 @@ impl Ad4mMcpHandler {
                 });
                 serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
-            Err(e) if e.code == 500 => format!("Error adding link: {}", e.message),
-            Err(e) => perspective_error(&p.perspective_id, e),
+            Err(e) => e,
         }
     }
 
@@ -288,15 +286,15 @@ impl Ad4mMcpHandler {
                 "target": target,
             });
             let links: Vec<DecoratedLinkExpression> = match self
-                .call_method("perspective.queryLinks", params)
+                .call(
+                    "perspective.queryLinks",
+                    params,
+                    labelled("Error querying links"),
+                )
                 .await
             {
-                Ok(links) => match decode(links) {
-                    Ok(links) => links,
-                    Err(e) => return e,
-                },
-                Err(e) if e.code == 500 => return format!("Error querying links: {}", e.message),
-                Err(e) => return perspective_error(&p.perspective_id, e),
+                Ok(links) => links,
+                Err(e) => return e,
             };
 
             for l in &links {
@@ -342,7 +340,10 @@ impl Ad4mMcpHandler {
             "sdnaType": "subject_class",
             "shaclJson": p.shacl_json,
         });
-        match self.call_method("perspective.addSdna", params).await {
+        let added = self
+            .call::<serde_json::Value>("perspective.addSdna", params, labelled("Error adding SDNA"))
+            .await;
+        match added {
             Ok(_) => {
                 let result = json!({
                     "success": true,
@@ -351,48 +352,19 @@ impl Ad4mMcpHandler {
                 });
                 serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
-            Err(e) if e.code == 500 => format!("Error adding SDNA: {}", e.message),
-            Err(e) => perspective_error(&p.perspective_id, e),
+            Err(e) => e,
         }
     }
 }
 
-/// The tools answer as their RPC methods' guards do (#851).
+/// What the method matrix through MCP does not pin: a capability scoped to another
+/// perspective, and the operator's list (#851). The rows of every caller on every perspective
+/// are in `api::tests::method_matrix_mcp_tests`.
 #[cfg(test)]
 mod guard_tests {
     use super::*;
-    use crate::agent::capabilities::{
-        perspective_query_capability, perspective_update_capability, ALL_CAPABILITY,
-    };
-    use crate::agent::session::Principal;
-    use crate::mcp::tools::test_support::{app, handler_as, perspective, setup, status, user};
-
-    async fn query(handler: &Ad4mMcpHandler, uuid: &str) -> String {
-        handler
-            .query_links(Parameters(QueryLinksParams {
-                perspective_id: uuid.to_string(),
-                source: None,
-                predicate: None,
-                target: None,
-            }))
-            .await
-    }
-
-    // An app read any perspective it could reach without a query capability.
-    #[tokio::test]
-    async fn query_links_needs_the_query_capability() {
-        setup();
-        let uuid = perspective(None).await;
-        let without = handler_as(app(vec![]));
-        let refused = query(&without, &uuid).await;
-        assert_eq!(status(&refused), Some(403), "{refused}");
-        assert!(refused.contains("Capability is not matched"), "{refused}");
-
-        let with = handler_as(app(vec![perspective_query_capability(vec![uuid.clone()])]));
-        let answer = query(&with, &uuid).await;
-        assert_eq!(answer.trim(), "[]", "{answer}");
-        crate::perspectives::remove_perspective(&uuid).await;
-    }
+    use crate::agent::capabilities::{perspective_query_capability, perspective_update_capability};
+    use crate::mcp::tools::test_support::{app, handler_as, operator, perspective, setup, status};
 
     // Writes checked PERSPECTIVE_CREATE on every perspective; the method checks the update
     // capability on the one it names.
@@ -430,33 +402,12 @@ mod guard_tests {
         }
     }
 
-    // A perspective that is not the caller's reads as missing, never as forbidden.
-    #[tokio::test]
-    async fn another_users_perspective_reads_as_missing() {
-        setup();
-        let uuid = perspective(Some(vec!["did:key:mcp-owner".into()])).await;
-        let other = handler_as(user(
-            "other@example.org",
-            "did:key:mcp-other",
-            vec![ALL_CAPABILITY.clone()],
-        ));
-        let answer = query(&other, &uuid).await;
-        assert_eq!(status(&answer), Some(404), "{answer}");
-        assert!(
-            answer.contains(&format!("Perspective not found: {uuid}")),
-            "{answer}"
-        );
-        let missing = query(&other, "no-such-perspective").await;
-        assert_eq!(status(&missing), Some(404), "{missing}");
-        crate::perspectives::remove_perspective(&uuid).await;
-    }
-
     // The operator saw only the unowned and the main agent's perspectives, as an app does.
     #[tokio::test]
     async fn the_operator_lists_every_perspective() {
         setup();
         let users = perspective(Some(vec!["did:key:mcp-lister".into()])).await;
-        let listed = handler_as(Principal::Operator)
+        let listed = handler_as(operator())
             .list_perspectives(Parameters(ListPerspectivesParams {}))
             .await;
         assert!(listed.contains(&users), "{listed}");

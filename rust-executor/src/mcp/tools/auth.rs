@@ -7,7 +7,7 @@
 //! caller. `auth_status` has no RPC method: it reports the MCP session's [`Session`].
 
 use super::{call_method_as, Ad4mMcpHandler, RequestAuth};
-use crate::agent::capabilities::{apps_map, defs::ALL_CAPABILITY, AuthInfo, AuthInfoExtended};
+use crate::agent::capabilities::{defs::ALL_CAPABILITY, AuthInfo, AuthInfoExtended};
 use crate::agent::session::{AuthError, Principal, Session};
 use crate::api::ws_handler::WsRpcError;
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -62,6 +62,10 @@ pub struct RequestCapabilityParams {
     /// Optional application URL
     #[serde(default)]
     pub app_url: Option<String>,
+    /// Optional agent to act as on a multi-user executor: a user's email or an agent's DID.
+    /// Absent: the executor's main agent. That agent's owner approves the request.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Parameters for generating a JWT from a capability request
@@ -132,7 +136,7 @@ impl Ad4mMcpHandler {
 
     /// Request a capability token (local connect flow - step 1)
     #[tool(
-        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. On an executor started with --admin-credential, the request is only auto-permitted (code returned inline) when the caller's session holds the PERMIT capability: the admin credential, or a token with full rights. Any other caller, a multi-user user token included, gets only the request_id; the executor admin approves the request and provides the code out-of-band. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
+        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. Optional `agent` (a user's email or an agent's DID) asks for a token acting as that agent; absent, the main agent. On an executor started with --admin-credential, the request is only auto-permitted (code returned inline) when the caller may approve it: the admin credential, or a token that holds the PERMIT capability and acts as the requested agent (a user token for that user's own agent). Any other caller gets only the request_id; the agent's owner approves the request and provides the code out-of-band. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
     )]
     pub async fn request_capability(
         &self,
@@ -165,18 +169,19 @@ impl Ad4mMcpHandler {
     /// and resolves the caller; everything decidable lives here.
     ///
     /// The request itself is always created (`agent.requestCapability`, as a caller without
-    /// a token) — that publishes the capability-request exception the ADAM Launcher listens
-    /// for, which is the legitimate pairing flow. The auto-permit and the inline code are
-    /// `agent.permitCapability` as `permitter`, so its guard decides: the operator, or an app
-    /// whose token holds PERMIT; never a user or an anonymous caller, and never a caller
-    /// whose token does not work (`None`). The code is the mint secret (`generate_jwt`
-    /// exchanges it for a signed ALL_CAPABILITY JWT valid on every executor surface), and
-    /// returning it to any caller that could reach the MCP port made `--admin-credential`
-    /// decorative (issue #851, sub-problem 3).
+    /// a token, for the agent `p.agent` names: the main agent when absent) — that publishes
+    /// the capability-request exception the agent's owner listens for, which is the
+    /// legitimate pairing flow. The auto-permit and the inline code are
+    /// `agent.permitCapability` as `permitter`, so its guard (`Owns { Request }`, D12)
+    /// decides: the operator, or a session that holds PERMIT and acts as the requested agent
+    /// (a user for their own agent); never an anonymous caller, and never a caller whose
+    /// token does not work (`None`). The code is the mint secret (`generate_jwt` exchanges it
+    /// for a signed token on that agent), and returning it to any caller that could reach the
+    /// MCP port made `--admin-credential` decorative (issue #851, sub-problem 3).
     ///
     /// Scope: without an admin credential, a caller with no token on a loopback
     /// listener is the operator, so it still gets the inline code. On a multi-user
-    /// node that includes a user who drops their token or opens a new session
+    /// executor that includes a user who drops their token or opens a new session
     /// (#1059). Such a server binds loopback only (#1033); on a listener beyond
     /// loopback (an explicit `MCP_HOST`) that caller is anonymous and gets no code.
     pub(crate) async fn handle_capability_request(
@@ -194,13 +199,16 @@ impl Ad4mMcpHandler {
             capabilities: Some(vec![ALL_CAPABILITY.clone()]),
             user_email: None,
         };
-        let request = json!({ "authInfo": {
+        let mut request = json!({ "authInfo": {
             "appName": p.app_name,
             "appDesc": p.app_desc,
             "appDomain": app_domain,
             "appUrl": p.app_url,
             "capabilities": [&*ALL_CAPABILITY],
         }});
+        if let Some(agent) = &p.agent {
+            request["agent"] = json!(agent);
+        }
         let request_id = match self
             .call_without_token("agent.requestCapability", request)
             .await
@@ -220,10 +228,11 @@ impl Ad4mMcpHandler {
             json!({
                 "request_id": request_id,
                 "message": "Capability request created but NOT auto-permitted: this session may \
-                    not grant capabilities. The executor admin must approve the request (ADAM \
-                    Launcher), then call generate_jwt with this request_id and the code shown \
-                    to the admin. Only the admin credential, or an app token that holds the \
-                    PERMIT capability, auto-permits; a user token never does."
+                    not grant capabilities on the requested agent. Its owner (the executor admin \
+                    for the main agent, the user for theirs) must approve the request, then call \
+                    generate_jwt with this request_id and the code shown to them. Only the admin \
+                    credential, or a token that holds the PERMIT capability and acts as the \
+                    requested agent, auto-permits."
             })
             .to_string()
         };
@@ -236,7 +245,9 @@ impl Ad4mMcpHandler {
         };
         let permit = json!({ "auth": serde_json::to_string(&permit).unwrap_or_default() });
         match call_method_as(permitter, "agent.permitCapability", permit).await {
-            Err(e) if e.code == 403 => not_permitted(),
+            // The guard's refusal: no PERMIT (403), or the request is for an agent the
+            // caller does not act as (404, D6).
+            Err(e) if matches!(e.code, 401 | 403 | 404) => not_permitted(),
             Err(e) => json!({
                 "success": false,
                 "error": format!("Failed to permit capability: {}", e.message)
@@ -378,7 +389,7 @@ impl Ad4mMcpHandler {
     }
 
     /// Call the RPC method `method` as a caller without a token on this MCP listener: the
-    /// operator on a loopback listener of a node without an admin credential, anonymous
+    /// operator on a loopback listener of an executor without an admin credential, anonymous
     /// otherwise. The login and capability-request tools call this way, whatever session
     /// the MCP session holds: they obtain the session that replaces it, as an RPC client
     /// does on a connection without a token.
@@ -404,11 +415,9 @@ impl Ad4mMcpHandler {
     /// resolves, so `authenticated` is true exactly when a tool call would pass (#851 1).
     pub(crate) async fn auth_status_as(&self, request: RequestAuth) -> String {
         let caller = self.caller(request).await;
+        // The app is the grant's: a token carries no app name.
         let app_name = match &caller {
-            Ok(session) => match &session.principal {
-                Principal::App { token_id, .. } => apps_map::app_name_of(token_id),
-                _ => None,
-            },
+            Ok(session) => session.grant().map(|grant| grant.app_name().to_string()),
             Err(_) => None,
         };
         auth_status_json(
@@ -418,6 +427,11 @@ impl Ad4mMcpHandler {
         )
     }
 }
+
+/// What `auth_status` says of a token that decodes but opens no session because no active
+/// grant stands behind it.
+const NO_ACTIVE_GRANT: &str =
+    "no active grant: the token was revoked, its app removed, or it predates grants";
 
 /// Build the `auth_status` answer from what decides it: the caller's session (or why its
 /// token opens none), the app's name for an app token, and whether the executor's wallet
@@ -447,14 +461,16 @@ fn auth_status_json(
 
     match caller {
         // `authenticated` describes the session, which a lock does not end. `executor_locked`
-        // describes the node. Both are reported rather than folded together, because the
+        // describes the executor. Both are reported rather than folded together, because the
         // caller's next action differs: wait for the operator, versus obtain a token.
         Ok(session) if session.is_authenticated() => {
-            let principal = match session.principal {
+            // The wire keeps its two names for a grant: "app" on the main agent, "user" on
+            // a managed agent.
+            let principal = match &session.principal {
                 Principal::Operator => "operator",
-                Principal::App { .. } => "app",
-                Principal::User { .. } => "user",
-                Principal::Anonymous { .. } => unreachable!("an authenticated session"),
+                Principal::Agent(agent) if agent.is_main_agent() => "app",
+                Principal::Agent(_) => "user",
+                Principal::Anonymous => unreachable!("an authenticated session"),
             };
             json!({
                 "authenticated": true,
@@ -475,28 +491,36 @@ fn auth_status_json(
             "message": message(format!("Not authenticated. {}", super::AUTHENTICATE_HINT)),
         })
         .to_string(),
-        Err(e) => json!({
-            "authenticated": false,
-            "executor_locked": !unlocked,
-            "error": e.to_string(),
-            "message": if *e == AuthError::Locked {
-                json!(LOCKED_MESSAGE)
-            } else {
-                message(format!(
-                    "Token set but not accepted: {e}. {}",
-                    super::AUTHENTICATE_HINT
-                ))
-            },
-        })
-        .to_string(),
+        Err(e) => {
+            // A token that decodes but has no active grant (revoked, removed, or from before
+            // grants) says so, rather than the RPC refusal's "Unauthorized access".
+            let why = match e {
+                AuthError::Revoked => NO_ACTIVE_GRANT.to_string(),
+                e => e.to_string(),
+            };
+            json!({
+                "authenticated": false,
+                "executor_locked": !unlocked,
+                "error": why,
+                "message": if *e == AuthError::Locked {
+                    json!(LOCKED_MESSAGE)
+                } else {
+                    message(format!(
+                        "Token set but not accepted: {why}. {}",
+                        super::AUTHENTICATE_HINT
+                    ))
+                },
+            })
+            .to_string()
+        }
     }
 }
 
 #[cfg(test)]
 mod auth_status_tests {
     use super::*;
-    use crate::agent::capabilities::{ListenerReach, ALL_CAPABILITY};
-    use crate::agent::session::TokenId;
+    use crate::agent::capabilities::ALL_CAPABILITY;
+    use crate::agent::AgentContext;
     use serde_json::Value;
 
     fn parse(caller: Result<&Session, &AuthError>, unlocked: bool) -> Value {
@@ -504,21 +528,27 @@ mod auth_status_tests {
         serde_json::from_str(&json).expect("valid JSON")
     }
 
-    fn session(principal: Principal) -> Session {
-        Session::for_test(principal, ListenerReach::Network)
-    }
-
     fn anonymous() -> Session {
-        session(Principal::Anonymous { caps: vec![] })
+        Session::for_test(Principal::Anonymous)
     }
 
     fn user() -> Session {
-        session(Principal::User {
-            token_id: TokenId("t".into()),
-            email: "agent@example.org".into(),
-            did: "did:key:agent".into(),
-            caps: vec![ALL_CAPABILITY.clone()],
-        })
+        Session::for_test(Principal::Agent(AgentContext::for_user_email(
+            "agent@example.org".into(),
+        )))
+        .with_caps(vec![ALL_CAPABILITY.clone()])
+        .with_did("did:key:agent")
+    }
+
+    // The wire names a grant on the main agent "app" and one on a managed agent "user".
+    #[test]
+    fn a_grant_on_the_main_agent_reports_an_app() {
+        let app = Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_did("did:key:main");
+        let v = parse(Ok(&app), true);
+        assert_eq!(v["principal"], "app");
+        assert_eq!(v["user_email"], Value::Null);
+        assert_eq!(parse(Ok(&user()), true)["principal"], "user");
     }
 
     #[test]
@@ -555,7 +585,7 @@ mod auth_status_tests {
         for (e, why) in [
             (AuthError::Invalid("InvalidToken".into()), "InvalidToken"),
             (AuthError::Expired, "expired"),
-            (AuthError::Revoked, "Unauthorized access"),
+            (AuthError::Revoked, "no active grant"),
         ] {
             let v = parse(Err(&e), true);
             assert_eq!(v["authenticated"], false);
@@ -595,7 +625,7 @@ mod auth_status_session_tests {
     use super::*;
     use crate::agent::capabilities::{ListenerReach, ALL_CAPABILITY};
     use crate::mcp::server::McpContext;
-    use crate::test_utils::{ensure_db, setup_agent, setup_wallet};
+    use crate::test_utils::{ensure_test_db, setup_agent, setup_wallet};
     use serde_json::Value;
 
     const ADMIN: &str = "auth-status-admin";
@@ -627,11 +657,11 @@ mod auth_status_session_tests {
         assert_eq!(status(&handler, None).await["principal"], "operator");
     }
 
-    // #851 1: no token on the loopback listener of a node without a credential passes every
+    // #851 1: no token on the loopback listener of an executor without a credential passes every
     // tool as the operator, but auth_status answered "Not authenticated".
     #[tokio::test]
-    async fn no_token_on_a_local_node_without_a_credential_reports_the_operator() {
-        ensure_db();
+    async fn no_token_on_a_local_executor_without_a_credential_reports_the_operator() {
+        ensure_test_db();
         let v = status(&handler(ListenerReach::Loopback, None), None).await;
         assert_eq!(v["authenticated"], true, "{v}");
         assert_eq!(v["principal"], "operator");
@@ -641,25 +671,11 @@ mod auth_status_session_tests {
     async fn an_app_token_reports_the_app_and_its_capabilities() {
         setup_wallet();
         setup_agent();
-        crate::test_utils::use_test_apps_file();
-        let token = crate::agent::capabilities::token::generate_jwt(
-            "auth-status-app".to_string(),
-            3600,
-            crate::agent::capabilities::AuthInfo {
-                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let request_id = format!("auth-status-{}", uuid::Uuid::new_v4());
-        let app = crate::agent::capabilities::AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: crate::agent::capabilities::AuthInfo {
-                app_name: "auth-status-app".to_string(),
-                ..Default::default()
-            },
-        };
-        crate::test_utils::insert_app_with_token(request_id.clone(), app, &token);
+        let token = crate::test_utils::granted_token(crate::agent::capabilities::AuthInfo {
+            app_name: "auth-status-app".to_string(),
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+            ..Default::default()
+        });
 
         let handler = handler(ListenerReach::Network, Some(ADMIN));
         let v = status(&handler, Some(&token)).await;
@@ -669,12 +685,21 @@ mod auth_status_session_tests {
         assert_eq!(v["capabilities"].as_array().unwrap().len(), 1);
 
         // #851 1, the other direction: a revoked token decoded fine, so auth_status said
-        // `authenticated: true` while every tool refused it.
-        crate::agent::capabilities::apps_map::revoke_app(&request_id).unwrap();
+        // `authenticated: true` while every tool refused it. It also called a token without
+        // a grant "undecodable"; it names the missing grant.
+        let grants = crate::agent::grants::Grants::global();
+        grants.revoke(&grants.find(&token)).unwrap();
         let v = status(&handler, None).await;
         assert_eq!(v["authenticated"], false, "{v}");
-        assert!(v["error"].as_str().unwrap().contains("Unauthorized access"));
-        crate::agent::capabilities::apps_map::remove_app(&request_id).unwrap();
+        assert!(
+            v["error"].as_str().unwrap().contains("no active grant"),
+            "{v}"
+        );
+        assert!(
+            v["message"].as_str().unwrap().contains("no active grant"),
+            "{v}"
+        );
+        grants.remove(&grants.find(&token)).unwrap();
     }
 
     #[tokio::test]
@@ -705,8 +730,8 @@ mod auth_status_session_tests {
     }
 
     #[tokio::test]
-    async fn no_token_on_a_node_with_a_credential_is_anonymous() {
-        ensure_db();
+    async fn no_token_on_an_executor_with_a_credential_is_anonymous() {
+        ensure_test_db();
         let v = status(&handler(ListenerReach::Loopback, Some(ADMIN)), None).await;
         assert_eq!(v["authenticated"], false);
         assert_eq!(v["principal"], "anonymous");
@@ -733,6 +758,7 @@ mod capability_mint_tests {
             app_desc: "a caller that has not authenticated".to_string(),
             app_domain: None,
             app_url: None,
+            agent: None,
         }
     }
 
@@ -745,13 +771,10 @@ mod capability_mint_tests {
     /// `"code"` and "auto-permitted".
     #[tokio::test]
     async fn an_unauthenticated_caller_gets_no_mint_code() {
-        crate::test_utils::ensure_db();
+        crate::test_utils::ensure_test_db();
         let handler = handler_with_admin_credential();
-        let anonymous = Session::for_test(
-            Principal::Anonymous {
-                caps: crate::agent::capabilities::anonymous_capabilities_when(false),
-            },
-            ListenerReach::Network,
+        let anonymous = Session::for_test(Principal::Anonymous).with_caps(
+            crate::agent::capabilities::anonymous_capabilities_when(false),
         );
         let resp = handler
             .handle_capability_request(mint_params(), Some(Arc::new(anonymous)))
@@ -772,11 +795,11 @@ mod capability_mint_tests {
 
     #[tokio::test]
     async fn an_authenticated_caller_still_gets_a_permitted_code() {
-        use crate::agent::capabilities::pending::PendingApprovals;
+        use crate::agent::capabilities::pending::PendingRequests;
 
-        crate::test_utils::ensure_db();
+        crate::test_utils::ensure_test_db();
         let handler = handler_with_admin_credential();
-        let operator = Session::for_test(Principal::Operator, ListenerReach::Network);
+        let operator = Session::for_test(Principal::Operator);
         let resp = handler
             .handle_capability_request(mint_params(), Some(Arc::new(operator)))
             .await;
@@ -788,7 +811,7 @@ mod capability_mint_tests {
         // Not just an inline code: the permit must actually be registered,
         // i.e. generate_jwt with this pair would succeed.
         assert!(
-            PendingApprovals::global().has_code(request_id, code),
+            PendingRequests::global().has_code(request_id, code),
             "permit was not registered for the returned request_id/code"
         );
     }
@@ -801,7 +824,7 @@ mod capability_mint_tests {
     /// Runs the tool's real path, `request_capability_as`, with no header.
     #[tokio::test]
     async fn without_admin_credential_a_local_caller_is_still_auto_permitted() {
-        crate::test_utils::ensure_db();
+        crate::test_utils::ensure_test_db();
         let gets_code = |reach| async move {
             let handler = Ad4mMcpHandler::new(McpContext::new(None, reach, false));
             let resp = handler
@@ -820,76 +843,87 @@ mod capability_mint_tests {
         );
     }
 
-    /// The escalation of issue #851 sub-problem 3, through the capability layer: a
-    /// multi-user user token authenticates but holds no PERMIT capability, so it must
-    /// not auto-permit an ALL_CAPABILITY mint. A token that does hold PERMIT still may.
+    /// The escalation of issue #851 sub-problem 3, through the capability layer: a token
+    /// must not auto-permit a request it may not approve (D12). A token without PERMIT never
+    /// does; a token with it only for the agent it acts as. Users hold PERMIT on their own
+    /// agent (#1399), so a user token auto-permits requests for that user and no other.
     #[tokio::test]
-    async fn a_token_without_permit_may_not_auto_permit() {
+    async fn only_a_caller_that_may_approve_the_request_auto_permits_it() {
         use crate::agent::capabilities::{
-            get_user_default_capabilities, token::generate_jwt, types::AuthInfo, Capability,
-            ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
+            types::AuthInfo, Capability, AGENT_READ_CAPABILITY, ALL_CAPABILITY,
         };
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
 
         let jwt_with = |caps: Vec<Capability>| {
-            generate_jwt(
-                "test-app".to_string(),
-                DEFAULT_TOKEN_VALID_PERIOD,
-                AuthInfo {
-                    app_name: "test-app".to_string(),
-                    app_desc: String::new(),
-                    app_domain: None,
-                    app_url: None,
-                    app_icon_path: None,
-                    capabilities: Some(caps),
-                    user_email: None,
-                },
-            )
-            .expect("the wallet is unlocked in tests")
+            crate::test_utils::granted_token(AuthInfo {
+                app_name: "test-app".to_string(),
+                app_desc: String::new(),
+                app_domain: None,
+                app_url: None,
+                app_icon_path: None,
+                capabilities: Some(caps),
+                user_email: None,
+            })
         };
+        let alice = crate::test_utils::managed_user("mcp-alice");
+        let alice_token = crate::user_management::generate_user_jwt(&alice, "mcp").unwrap();
+        let bob = crate::test_utils::managed_user("mcp-bob");
 
         // Through the tool's own path: the header credential joins a fresh session, then
         // the permit check decides. Returns whether the reply carries a mint code.
-        let gets_code = |header: String| async move {
+        let gets_code = |header: String, agent: Option<String>| async move {
             let resp = handler_with_admin_credential()
                 .request_capability_as(
                     RequestAuth {
                         header: Some(header),
                         reach: None,
                     },
-                    mint_params(),
+                    RequestCapabilityParams {
+                        agent,
+                        ..mint_params()
+                    },
                 )
                 .await;
             let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
             v.get("code").is_some()
         };
 
-        // A user-capability token authenticates but cannot auto-permit.
+        // A token without PERMIT authenticates but cannot auto-permit.
         assert!(
-            !gets_code(jwt_with(get_user_default_capabilities())).await,
-            "a user token without PERMIT received a mint code"
+            !gets_code(jwt_with(vec![AGENT_READ_CAPABILITY.clone()]), None).await,
+            "a token without PERMIT received a mint code"
         );
-        // A token that holds PERMIT (here, ALL_CAPABILITY) still auto-permits.
-        assert!(gets_code(jwt_with(vec![ALL_CAPABILITY.clone()])).await);
-        // The admin credential auto-permits.
-        assert!(gets_code("test-admin-credential".to_string()).await);
+        // A user may approve for their own agent only.
+        assert!(
+            !gets_code(alice_token.clone(), None).await,
+            "a user token received a mint code for the main agent"
+        );
+        assert!(
+            !gets_code(alice_token.clone(), Some(bob.clone())).await,
+            "a user token received a mint code for another user"
+        );
+        assert!(gets_code(alice_token, Some(alice.clone())).await);
+        // A main-agent token that holds PERMIT (here, ALL_CAPABILITY) auto-permits for the
+        // main agent, never for a user's.
+        assert!(gets_code(jwt_with(vec![ALL_CAPABILITY.clone()]), None).await);
+        assert!(!gets_code(jwt_with(vec![ALL_CAPABILITY.clone()]), Some(alice.clone())).await);
+        // The admin credential auto-permits for any agent.
+        assert!(gets_code("test-admin-credential".to_string(), None).await);
+        assert!(gets_code("test-admin-credential".to_string(), Some(alice)).await);
     }
 
-    /// `agent.permitCapability` is `Guard::Node`: a user session never permits, whatever its
-    /// capabilities. The tool checked only PERMIT, so a user token holding it got the code.
+    /// `agent.permitCapability` is `Owns { Request }`: a user session permits only requests
+    /// for its own agent, whatever its capabilities. The tool checked only PERMIT, so a user
+    /// token holding it got the code for the main agent.
     #[tokio::test]
-    async fn a_user_session_holding_permit_gets_no_mint_code() {
-        crate::test_utils::ensure_db();
-        let user = Session::for_test(
-            Principal::User {
-                token_id: crate::agent::session::TokenId("mint-user".into()),
-                email: "mint.user@example.org".into(),
-                did: "did:key:mint-user".into(),
-                caps: vec![ALL_CAPABILITY.clone()],
-            },
-            ListenerReach::Network,
-        );
+    async fn a_user_session_holding_permit_gets_no_mint_code_for_the_main_agent() {
+        crate::test_utils::ensure_test_db();
+        let user = Session::for_test(Principal::Agent(
+            crate::agent::AgentContext::for_user_email("mint.user@example.org".into()),
+        ))
+        .with_caps(vec![ALL_CAPABILITY.clone()])
+        .with_did("did:key:mint-user");
         let resp = handler_with_admin_credential()
             .handle_capability_request(mint_params(), Some(Arc::new(user)))
             .await;
@@ -905,7 +939,7 @@ mod login_tests {
     use super::*;
     use crate::agent::capabilities::ListenerReach;
     use crate::mcp::server::McpContext;
-    use crate::test_utils::{ensure_db, setup_agent, setup_wallet, MultiUserMode};
+    use crate::test_utils::{ensure_test_db, setup_agent, setup_wallet, MultiUserMode};
 
     fn handler() -> Ad4mMcpHandler {
         Ad4mMcpHandler::new(McpContext::new(
@@ -923,7 +957,7 @@ mod login_tests {
     // still names the mode (`mcp-auth.test.ts` reads it).
     #[tokio::test]
     async fn logging_in_without_multi_user_mode_names_the_mode() {
-        ensure_db();
+        ensure_test_db();
         let answer = parse(
             &handler()
                 .login_email(Parameters(LoginEmailParams {

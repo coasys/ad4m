@@ -1,7 +1,7 @@
-//! A multi-user node for handler-level isolation tests.
+//! A multi-user executor for handler-level isolation tests.
 //!
 //! Requests go through the real handler map, guards included. User and app sessions open from
-//! tokens the node signs, the way the WS upgrade opens them (`AuthContext::open`). Users sign
+//! tokens the executor signs, the way the WS upgrade opens them (`RequestContext::open`). Users sign
 //! up through `user_management`, so they hold exactly the default user capabilities.
 
 use std::sync::Arc;
@@ -9,11 +9,8 @@ use std::sync::Arc;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::agent::capabilities::{
-    generate_jwt, AuthInfo, ListenerReach, ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
-};
+use crate::agent::capabilities::{AuthInfo, ListenerReach, ALL_CAPABILITY};
 use crate::agent::AgentService;
-use crate::api::auth::AuthContext;
 use crate::api::ws_handler::{build_handler_map, HandlerMap, WsRpcError};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::{register_perspective, unregister_perspective};
@@ -28,19 +25,19 @@ pub(crate) struct User {
     pub session: Session,
 }
 
-/// A node with multi-user mode on, until dropped.
-pub(crate) struct Node {
+/// An executor with multi-user mode on, until dropped.
+pub(crate) struct Executor {
     handlers: HandlerMap,
     _multi_user: MultiUserMode,
 }
 
-impl Node {
+impl Executor {
     pub(crate) async fn start() -> Self {
         let multi_user = MultiUserMode::on();
         setup_wallet();
         setup_agent();
         crate::prolog_service::init_prolog_service().await;
-        Node {
+        Executor {
             handlers: build_handler_map(),
             _multi_user: multi_user,
         }
@@ -68,12 +65,7 @@ impl Node {
             capabilities: Some(vec![ALL_CAPABILITY.clone()]),
             ..Default::default()
         };
-        let token = generate_jwt(
-            "isolation-test-app".to_string(),
-            DEFAULT_TOKEN_VALID_PERIOD,
-            auth,
-        )
-        .expect("main-agent app token");
+        let token = crate::test_utils::granted_token(auth);
         session_for(&token)
     }
 
@@ -99,9 +91,9 @@ impl Node {
 }
 
 fn session_for(token: &str) -> Session {
-    let auth = AuthContext::open(token, &None, false, ListenerReach::Network)
+    let ctx = RequestContext::open(token, &None, ListenerReach::Network)
         .unwrap_or_else(|e| panic!("the token opens a session: {e}"));
-    Arc::new(auth.to_request_context())
+    Arc::new(ctx)
 }
 
 /// A perspective in the global registry, removed again when dropped.

@@ -22,13 +22,15 @@ pub fn set_global_config(config: Ad4mConfig) {
     *global_config = Some(config);
 }
 
-/// The admin credential the executor runs with, if a global config exists. Never panics.
-pub fn configured_admin_credential() -> Option<Secret> {
+/// Whether the executor permits capability requests without the operator (development
+/// only). `false` without a global config. Never panics.
+pub fn auto_permit_cap_requests() -> bool {
     GLOBAL_AD4M_CONFIG
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .and_then(|config| config.admin_credential.clone())
+        .and_then(|config| config.auto_permit_cap_requests)
+        .unwrap_or(false)
 }
 
 /// Get a clone of the global Ad4mConfig.

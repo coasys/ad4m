@@ -3,9 +3,10 @@
 //! A token reaches an MCP session two ways. A login tool (`login_email`, `verify_email_code`,
 //! `generate_jwt`) sets one, and a client that authenticates by `Authorization` header sends
 //! one with every request. Either token opens a [`Session`] once, through [`Session::open`],
-//! so the admin credential is the operator and a JWT is an app or a user, exactly as on RPC.
-//! Every tool call checks the session again ([`Session::check`]): a token that is revoked,
-//! expires, logs out or falls behind its user's session cutoff stops working on the next call.
+//! so the admin credential is the operator and a JWT acts as its grant's agent, exactly as on
+//! RPC. Every tool call checks the session again ([`Session::check`]): a token whose grant is
+//! revoked or removed (logout, `revokeToken`, `removeApp`), or that expires, stops working on
+//! the next call.
 
 use crate::agent::capabilities::ListenerReach;
 use crate::agent::session::{AuthError, Session};
@@ -19,7 +20,7 @@ pub(crate) type Opened = Result<Arc<Session>, AuthError>;
 /// The session one MCP session's token opened, if a token arrived yet.
 ///
 /// Only a token is remembered. A caller without one resolves again on every call
-/// ([`Session::open`] with an empty token: the operator on a loopback listener of a node
+/// ([`Session::open`] with an empty token: the operator on a loopback listener of an executor
 /// without an admin credential, anonymous otherwise), so a header that arrives later still
 /// takes effect.
 #[derive(Clone, Default)]
@@ -32,9 +33,9 @@ impl Caller {
         Caller(Arc::new(RwLock::new(opened)))
     }
 
-    /// A caller that holds `opened` already: a session no token makes, such as the
-    /// in-process session of an interpretation pass without a caller token
-    /// ([`Session::in_process_user`]), or one that expires within a test.
+    /// A caller that holds `opened` already: a session no token of this MCP session makes,
+    /// such as an interpretation pass's caller or in-process owner session
+    /// ([`Session::in_process`]), or one that expires within a test.
     pub(crate) fn holding(opened: Opened) -> Self {
         Caller(Arc::new(RwLock::new(Some(opened))))
     }
@@ -96,10 +97,13 @@ impl Caller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::capabilities::{AuthInfo, ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY};
-    use crate::agent::revoked::RevokedSet;
-    use crate::agent::session::{Principal, TokenId};
-    use crate::test_utils::{ensure_db, setup_agent, setup_wallet};
+    use crate::agent::capabilities::{
+        AuthInfo, Capability, ALL_CAPABILITY, PERSPECTIVE_CREATE_CAPABILITY,
+    };
+    use crate::agent::grants::Grants;
+    use crate::agent::session::Principal;
+    use crate::agent::AgentContext;
+    use crate::test_utils::{ensure_test_db, setup_agent, setup_wallet};
 
     const ADMIN: &str = "mcp-caller-admin";
 
@@ -110,22 +114,18 @@ mod tests {
     fn app_token() -> String {
         setup_wallet();
         setup_agent();
-        crate::agent::capabilities::token::generate_jwt(
-            "an mcp app".to_string(),
-            3600,
-            AuthInfo {
-                capabilities: Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]),
-                ..AuthInfo::default()
-            },
-        )
-        .unwrap()
+        crate::test_utils::granted_token(AuthInfo {
+            app_name: "an mcp app".to_string(),
+            capabilities: Some(vec![PERSPECTIVE_CREATE_CAPABILITY.clone()]),
+            ..AuthInfo::default()
+        })
     }
 
-    fn token_id(session: &Session) -> TokenId {
-        match &session.principal {
-            Principal::App { token_id, .. } | Principal::User { token_id, .. } => token_id.clone(),
-            other => panic!("expected a token session, got {other:?}"),
-        }
+    /// A grant's session on the main agent whose token expired at second 1.
+    fn expired(caps: Vec<Capability>) -> Session {
+        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(caps)
+            .expiring_at(1)
     }
 
     #[tokio::test]
@@ -151,17 +151,22 @@ mod tests {
             .resolve(Some(ADMIN), &admin(), ListenerReach::Network)
             .await
             .unwrap();
-        assert!(matches!(session.principal, Principal::App { .. }));
+        assert_eq!(
+            session.principal,
+            Principal::Agent(AgentContext::main_agent())
+        );
     }
 
     #[tokio::test]
     async fn a_token_revoked_mid_session_is_refused_on_the_next_call() {
-        let caller = Caller::from_token(&app_token(), &admin(), ListenerReach::Network);
-        let session = caller
+        let token = app_token();
+        let caller = Caller::from_token(&token, &admin(), ListenerReach::Network);
+        assert!(caller
             .resolve(None, &admin(), ListenerReach::Network)
             .await
-            .unwrap();
-        RevokedSet::global().revoke(token_id(&session), u64::MAX);
+            .is_ok());
+        let grants = Grants::global();
+        grants.revoke(&grants.find(&token)).unwrap();
         let err = caller
             .resolve(None, &admin(), ListenerReach::Network)
             .await
@@ -179,11 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_token_that_expires_mid_session_is_refused_on_the_next_call() {
-        let principal = Principal::App {
-            token_id: TokenId("mcp-expiring".into()),
-            caps: vec![ALL_CAPABILITY.clone()],
-        };
-        let caller = Caller::holding(Ok(Arc::new(Session::for_test_expiring(principal, 1))));
+        let caller = Caller::holding(Ok(Arc::new(expired(vec![ALL_CAPABILITY.clone()]))));
         let err = caller
             .resolve(None, &admin(), ListenerReach::Network)
             .await
@@ -193,11 +194,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_fresh_header_token_replaces_a_dead_session() {
-        let principal = Principal::App {
-            token_id: TokenId("mcp-dead".into()),
-            caps: vec![],
-        };
-        let caller = Caller::holding(Ok(Arc::new(Session::for_test_expiring(principal, 1))));
+        let caller = Caller::holding(Ok(Arc::new(expired(vec![]))));
         let session = caller
             .resolve(Some(&app_token()), &admin(), ListenerReach::Network)
             .await
@@ -227,11 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_header_session_replaces_a_dead_remembered_one_on_store() {
-        let dead = Principal::App {
-            token_id: TokenId("mcp-dead-on-store".into()),
-            caps: vec![],
-        };
-        let caller = Caller::holding(Ok(Arc::new(Session::for_test_expiring(dead, 1))));
+        let caller = Caller::holding(Ok(Arc::new(expired(vec![]))));
         let header = Session::open(ADMIN, &admin(), ListenerReach::Network).unwrap();
         assert!(caller.remember(header).await.is_operator());
 
@@ -245,7 +238,7 @@ mod tests {
         // Decoding the header as a JWT reads the agent's key name from the config.
         setup_wallet();
         setup_agent();
-        ensure_db();
+        ensure_test_db();
         let caller = Caller::default();
         let err = caller
             .resolve(Some("wrong-credential"), &admin(), ListenerReach::Network)
@@ -261,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_token_follows_the_listener_reach() {
-        ensure_db();
+        ensure_test_db();
         let caller = Caller::default();
         let local = caller.resolve(None, &None, ListenerReach::Loopback).await;
         assert!(local.unwrap().is_operator());

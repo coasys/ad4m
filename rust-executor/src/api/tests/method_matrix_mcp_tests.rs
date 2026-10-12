@@ -8,19 +8,26 @@
 //! every one of them is. The tools that obtain a session (the login tools, `generate_jwt`)
 //! call as a caller without a token, so their rows expect that caller's answer, whoever holds
 //! the MCP session. A row compares the tool's status (401, 403 or 404,
-//! `mcp::tools::method_error`) with the status of the first method whose guard refuses, mapped
-//! as the tool maps it (`perspective_error` for a method on a perspective). A caller without an
-//! authenticated session expects 401 from every tool `call_tool` gates (not in `AUTH_TOOLS`),
-//! whatever the methods' guards say. A login tool refused by the guard names the multi-user
+//! `mcp::tools::method_error`) with the status of the first method whose guard refuses: missing
+//! or not the caller's is 404 from the guard itself (D6), so no tool remaps it. Each row also
+//! checks that the tool's first method answers the row's [`Expect`] from the RPC matrix, so the
+//! MCP sessions stand for the matrix's callers. A caller without an authenticated session
+//! expects 401 from every tool `call_tool` gates (not in `AUTH_TOOLS`), whatever the methods'
+//! guards say. A login tool refused by the guard names the multi-user
 //! mode, and `request_capability` withholds the code: those rows compare only the refusal.
 //!
 //! [`every_tool_is_classified`] fails for a new tool that is in neither list, so a tool that
 //! wraps an RPC method cannot skip the matrix.
 //!
 //! The tools with no RPC method that take a perspective (`NOT_WRAPPED`, and the dynamic
-//! per-class tools) run the same rows against the RPC rule for reading or changing a
-//! perspective, `Guard::perspective(perspective_query_capability | perspective_update_capability)`
+//! per-class tools) run the same rows, expecting the row's [`Expect`] of the RPC rule for
+//! reading or changing a perspective,
+//! `Guard::perspective(perspective_query_capability | perspective_update_capability)`
 //! ([`every_perspective_tool_without_a_method_follows_the_perspective_rule`]).
+//!
+//! [`main_agent_apps_reach_no_managed_agents_ai_task_through_mcp`]: no MCP tool names an AI
+//! task, so an MCP session reaches one only through the shared handler map; that path follows
+//! `Owns { Task }`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -31,20 +38,20 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
 use super::method_matrix_tests::{
-    perspective_rows, resource_rows, Caller, Target, World, OTHER_USER_DID, USER_DID, USER_EMAIL,
+    owns_rows, perspective_rows, resource_rows, Caller, Expect, Target, World, OTHER_USER_DID,
+    OTHER_USER_EMAIL, USER_DID, USER_EMAIL,
 };
 use crate::agent::capabilities::{
     anonymous_capabilities_when, perspective_query_capability, perspective_update_capability,
     Capability, ListenerReach,
 };
-use crate::agent::session::{Principal, Session, TokenId};
-use crate::api::guards::{Admission, Guard};
-use crate::api::ws_handler::{shared_handler_map, WsRpcError};
+use crate::agent::session::{Principal, Session};
+use crate::agent::AgentContext;
+use crate::api::guards::{Guard, Owner};
+use crate::api::ws_handler::shared_handler_map;
 use crate::mcp::tools::test_support::{handler_as, status, RuntimeService};
 use crate::mcp::tools::{auth, flows, instances, languages, neighbourhoods, perspectives};
-use crate::mcp::tools::{
-    perspective_error, profiles, request_context, subscriptions, Ad4mMcpHandler, AUTH_TOOLS,
-};
+use crate::mcp::tools::{profiles, request_context, subscriptions, Ad4mMcpHandler, AUTH_TOOLS};
 
 type Answer = Pin<Box<dyn Future<Output = String>>>;
 
@@ -65,7 +72,7 @@ struct Tool {
     methods: Vec<Method>,
     /// Runs the tool on a target perspective.
     run: Run,
-    /// `false` for a tool whose allowed path needs what a unit test node lacks (a language
+    /// `false` for a tool whose allowed path needs what a unit test executor lacks (a language
     /// download): only its refused rows run it; its allowed rows check its guard step.
     runs_when_allowed: bool,
     /// How a row reads the tool's answer.
@@ -505,7 +512,10 @@ fn tools() -> Vec<Tool> {
             )
         },
         // The request is created as a caller without a token; the inline code is
-        // `agent.permitCapability` as the caller, so only that method decides the row.
+        // `agent.permitCapability` as the caller, so only that method decides the row
+        // (`Owns { Request }`). The tool makes its own request for the agent the row's request
+        // names (the user's, or the main agent's); for a missing request it names an agent
+        // no executor has, so no request exists to approve.
         Tool {
             reads: Reads::Refusal(|answer| {
                 serde_json::from_str::<Value>(answer).map_or(true, |v| !v["code"].is_string())
@@ -513,9 +523,19 @@ fn tools() -> Vec<Tool> {
             ..tool(
                 "request_capability",
                 AsCaller,
-                vec![m("agent.permitCapability", |_| json!({ "auth": "{}" }))],
-                |h, _| {
+                vec![m("agent.permitCapability", |request| {
+                    let auth = json!({ "requestId": request, "auth": { "appName": "matrix", "appDesc": "d" } });
+                    json!({ "auth": auth.to_string() })
+                })],
+                |h, request| {
                     Box::pin(async move {
+                        let agent = if request.ends_with("-users-request") {
+                            Some(USER_EMAIL.to_string())
+                        } else if request.ends_with("-missing") {
+                            Some("did:key:matrix-no-such-agent".to_string())
+                        } else {
+                            None
+                        };
                         h.request_capability_as(
                             crate::mcp::tools::RequestAuth::default(),
                             auth::RequestCapabilityParams {
@@ -523,6 +543,7 @@ fn tools() -> Vec<Tool> {
                                 app_desc: "d".into(),
                                 app_domain: None,
                                 app_url: None,
+                                agent,
                             },
                         )
                         .await
@@ -631,75 +652,72 @@ const NOT_WRAPPED: &[&str] = &[
     "instance_update",
 ];
 
-/// The session of `caller`, holding `caps` where the row gives it capabilities.
+/// The session of `caller`, holding `caps` where the row gives it capabilities: the matrix's
+/// callers as MCP holds them.
 fn session(caller: Caller, caps: &[Capability]) -> Arc<Session> {
-    let user = |email: &str, did: &str| Principal::User {
-        token_id: TokenId(format!("matrix-{email}")),
-        email: email.into(),
-        did: did.into(),
-        caps: caps.to_vec(),
+    let user = |email: &str, did: &str| {
+        Session::for_test(Principal::Agent(AgentContext::for_user_email(email.into())))
+            .with_caps(caps.to_vec())
+            .with_did(did)
     };
-    let principal = match caller {
-        Caller::Operator => Principal::Operator,
-        Caller::AppWithout => Principal::App {
-            token_id: TokenId("matrix-app".into()),
-            caps: vec![],
-        },
-        Caller::AppWith => Principal::App {
-            token_id: TokenId("matrix-app".into()),
-            caps: caps.to_vec(),
-        },
+    let app = |caps: Vec<Capability>| {
+        Session::for_test(Principal::Agent(AgentContext::main_agent())).with_caps(caps)
+    };
+    Arc::new(match caller {
+        Caller::Operator => Session::for_test(Principal::Operator),
+        Caller::AppWithout => app(vec![]),
+        Caller::AppWith => app(caps.to_vec()),
         Caller::User => user(USER_EMAIL, USER_DID),
-        Caller::OtherUser => user("other@example.org", OTHER_USER_DID),
-        Caller::Anonymous => Principal::Anonymous {
-            caps: anonymous_capabilities_when(true),
-        },
-    };
-    Arc::new(Session::for_test(principal, ListenerReach::Network))
+        Caller::OtherUser => user(OTHER_USER_EMAIL, OTHER_USER_DID),
+        Caller::Anonymous => {
+            Session::for_test(Principal::Anonymous).with_caps(anonymous_capabilities_when(true))
+        }
+    })
 }
 
-/// The status `tool` must answer `session` with on perspective `target` (`None`: it allows).
+/// The status `tool` must answer `session` with on resource `target` (`None`: it allows).
 /// A caller without an authenticated session gets 401 from a tool that `call_tool` gates.
-/// Otherwise the first of the tool's methods whose guard refuses decides, mapped as the tool
-/// maps it: a method on a perspective answers as [`perspective_error`], any other as
-/// [`crate::mcp::tools::method_error`].
-async fn methods_refusal(
-    tool: &Tool,
-    guards: &HashMap<&str, Guard>,
-    session: Arc<Session>,
-    target: &str,
-) -> Option<u64> {
+/// Otherwise the status of the first of the tool's methods whose guard refuses decides: the
+/// tool answers it as [`crate::mcp::tools::method_error`], a perspective that is missing or
+/// not the caller's as 404 from the guard itself (D6).
+async fn methods_refusal(tool: &Tool, session: Arc<Session>, target: &str) -> Option<u64> {
     if !AUTH_TOOLS.contains(&tool.name) && !session.is_authenticated() {
         return Some(401);
     }
     let map = shared_handler_map();
     let ctx = request_context(session);
     for (method, params) in &tool.methods {
-        let refusal = match map.admit(method, &params(target), &ctx).await {
-            Ok(Admission::Granted) => continue,
-            Ok(Admission::Hidden) => WsRpcError::not_found(String::new()),
-            Err(e) => e,
-        };
-        return match guards[method] {
-            Guard::Perspective { .. } => status(&perspective_error(target, refusal)),
-            _ => Some(refusal.code.into()),
-        };
+        if let Err(refusal) = map.admit(method, &params(target), &ctx).await {
+            return Some(refusal.code.into());
+        }
     }
     None
 }
 
-/// The rows of `tool`: the perspective rows when its first method names a perspective, the
-/// resource rows of that method's guard otherwise.
-fn rows(guard: &Guard) -> Vec<(Caller, Option<Target>)> {
+/// The rows of a tool whose first method has `guard`: the `Owns` rows of its resource with
+/// that resource's id in the world, the resource rows of the guard otherwise. Each row keeps
+/// the matrix's expectation for that method.
+fn rows(guard: &Guard, world: &World) -> Vec<(Caller, Option<Target>, String, Expect)> {
     match guard {
-        Guard::Perspective { .. } => perspective_rows()
+        Guard::Owns { owner, .. } => owns_rows(*owner)
             .iter()
-            .map(|&(caller, target, _)| (caller, Some(target)))
+            .map(|&(caller, target, expect)| {
+                (caller, Some(target), world.id(*owner, target), expect)
+            })
             .collect(),
         _ => resource_rows(guard)
-            .iter()
-            .map(|&(caller, _)| (caller, None))
+            .into_iter()
+            .map(|(caller, expect)| (caller, None, String::new(), expect))
             .collect(),
+    }
+}
+
+/// The status a row's [`Expect`] names: `None` for a caller the guard admits.
+fn expected_status(expect: Expect) -> Option<u64> {
+    match expect {
+        Expect::Granted => None,
+        Expect::Forbidden => Some(403),
+        Expect::NotFound => Some(404),
     }
 }
 
@@ -723,31 +741,47 @@ async fn every_wrapping_tool_allows_and_refuses_as_its_methods_guards_do() {
     let mut created = Vec::new();
     let mut checked = 0;
     for tool in tools() {
-        let first = &guards[tool.methods[0].0];
+        let (first, first_params) = tool.methods[0];
         // "With the capability" holds every capability the tool's methods check.
         let caps: Vec<Capability> = tool
             .methods
             .iter()
             .filter_map(|(method, _)| guards[method].capability("*"))
             .collect();
-        for (caller, target) in rows(first) {
-            let uuid = target.map(|t| world.uuid(t)).unwrap_or_default();
+        for (caller, target, id, expect) in rows(&guards[first], &world) {
             let session = session(caller, &caps);
             let calls_as = match tool.calls {
                 Calls::AsCaller => session.clone(),
                 Calls::WithoutToken => without_token.clone(),
             };
-            let refusal = methods_refusal(&tool, &guards, calls_as, &uuid).await;
+            // The row's own answer for the first method, as the RPC matrix pins it: the MCP
+            // session stands for the same caller (MCP refuses a caller without a session
+            // before any guard).
+            if tool.calls == Calls::AsCaller && session.is_authenticated() {
+                let first_status = map
+                    .admit(first, &first_params(&id), &request_context(session.clone()))
+                    .await
+                    .err()
+                    .map(|e| u64::from(e.code));
+                if first_status != expected_status(expect) {
+                    failures.push(format!(
+                        "{} as {caller:?} on {target:?}: the matrix expects {expect:?} from \
+                         {first}, the guard answers {first_status:?}",
+                        tool.name,
+                    ));
+                }
+            }
+            let refusal = methods_refusal(&tool, calls_as, &id).await;
             let expected = refusal.is_none();
-            let handler = handler_as(session.principal.clone());
+            let handler = handler_as((*session).clone());
             let allowed = if expected && !tool.runs_when_allowed {
                 // The tool's own first step: the guard of its first method.
                 handler
-                    .admit_method(tool.methods[0].0, &(tool.methods[0].1)(&uuid))
+                    .admit_method(first, &first_params(&id))
                     .await
                     .is_ok()
             } else {
-                let answer = (tool.run)(handler, uuid.clone()).await;
+                let answer = (tool.run)(handler, id.clone()).await;
                 if let Ok(v) = serde_json::from_str::<Value>(&answer) {
                     if tool.name == "add_perspective" {
                         created.extend(v["uuid"].as_str().map(str::to_string));
@@ -794,8 +828,11 @@ async fn every_wrapping_tool_allows_and_refuses_as_its_methods_guards_do() {
     }
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // 12 perspective tools × 13 rows, 17 others × 5 rows: the walk reached them all.
-    assert!(checked >= 12 * 13 + 17 * 5, "only {checked} rows checked");
+    // 12 perspective tools × 15 rows, 17 others × 5 rows: the walk reached them all.
+    assert!(
+        checked >= 12 * perspective_rows().len() + 17 * 5,
+        "only {checked} rows checked"
+    );
 }
 
 /// What a tool that wraps no RPC method does to its perspective: the RPC rule it must follow.
@@ -1004,25 +1041,6 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
     ]
 }
 
-/// The refusal status `access`'s RPC rule gives `session` on perspective `uuid` (`None`: it
-/// allows), mapped as a tool maps it ([`perspective_error`]). A caller without an
-/// authenticated session gets 401: MCP refuses it before any rule.
-async fn rule_refusal(access: Access, session: Arc<Session>, uuid: &str) -> Option<u64> {
-    if !session.is_authenticated() {
-        return Some(401);
-    }
-    let params = json!({ "uuid": uuid });
-    match access
-        .guard()
-        .admit("matrix", &params, &request_context(session))
-        .await
-    {
-        Ok(Admission::Granted) => None,
-        Ok(Admission::Hidden) => unreachable!("Guard::perspective does not hide existence"),
-        Err(e) => status(&perspective_error(uuid, e)),
-    }
-}
-
 /// The tools with no RPC method that take a perspective (the dynamic per-class tools too) allow
 /// and refuse every matrix caller on every matrix perspective as the RPC rule for reading
 /// or changing a perspective does, with the same status.
@@ -1050,11 +1068,17 @@ async fn every_perspective_tool_without_a_method_follows_the_perspective_rule() 
             .guard()
             .capability("*")
             .expect("a perspective guard checks a capability")];
-        for &(caller, target, _) in perspective_rows() {
-            let uuid = world.uuid(target);
+        for &(caller, target, expect) in perspective_rows() {
+            let uuid = world.id(Owner::Perspective, target);
             let session = session(caller, &caps);
-            let expected = rule_refusal(tool.access, session.clone(), &uuid).await;
-            let answer = (tool.run)(handler_as(session.principal.clone()), uuid).await;
+            // The perspective rule is `Guard::perspective`, whose rows these are. A caller
+            // without an authenticated session gets 401: MCP refuses it before any rule.
+            let expected = if session.is_authenticated() {
+                expected_status(expect)
+            } else {
+                Some(401)
+            };
+            let answer = (tool.run)(handler_as((*session).clone()), uuid).await;
             let actual = status(&answer).filter(|s| matches!(s, 401 | 403 | 404));
             if actual != expected {
                 failures.push(format!(
@@ -1074,7 +1098,7 @@ async fn every_perspective_tool_without_a_method_follows_the_perspective_rule() 
 /// Every static tool is either in the matrix or has no RPC method.
 #[tokio::test]
 async fn every_tool_is_classified() {
-    let handler = handler_as(Principal::Operator);
+    let handler = handler_as(Session::for_test(Principal::Operator));
     let wrapped: Vec<&str> = tools().iter().map(|t| t.name).collect();
     let mut unclassified: Vec<String> = handler
         .exposed_tools()
@@ -1091,4 +1115,59 @@ async fn every_tool_is_classified() {
     for name in NOT_WRAPPED {
         assert!(!wrapped.contains(name), "{name} is in both lists");
     }
+}
+
+/// A main-agent app's MCP session reaches the main agent's AI tasks, never a managed agent's.
+/// No MCP tool names an AI task, so the session reaches one only through the shared handler
+/// map, where `Owns { Task }` answers 404 for another agent's task, missing or not (the leak
+/// the guards rework closed: an app's `*` reached every user's tasks).
+#[tokio::test]
+async fn main_agent_apps_reach_no_managed_agents_ai_task_through_mcp() {
+    let world = World::new().await;
+    let users_task = world.id(Owner::Task, Target::UsersOwn);
+    let main_task = world.id(Owner::Task, Target::MainAgents);
+    let app = handler_as(
+        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]),
+    );
+
+    for tool in app.exposed_tools().await {
+        let properties = tool.input_schema.get("properties").cloned();
+        let names_a_task = properties
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|p| p.keys().any(|k| k.to_lowercase().contains("task")));
+        assert!(!names_a_task, "{} names an AI task", tool.name);
+    }
+
+    let prompt = |task: &str| json!({ "taskId": task, "prompt": "p" });
+    let refused = app
+        .call_method("ai.prompt", prompt(&users_task))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 404, "{}", refused.message);
+    let removal = |task: &str| json!({ "id": task });
+    let refused = app
+        .admit_method("ai.removeTask", &removal(&users_task))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 404, "{}", refused.message);
+    // The main agent's own task passes the same guard.
+    assert!(app
+        .admit_method("ai.prompt", &prompt(&main_task))
+        .await
+        .is_ok());
+    assert!(app
+        .admit_method("ai.removeTask", &removal(&main_task))
+        .await
+        .is_ok());
+
+    let listed: Vec<crate::types::AITask> = app
+        .call("ai.tasks", json!({}), crate::mcp::tools::method_error)
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed.iter().map(|t| t.task_id.as_str()).collect();
+    assert!(!ids.contains(&users_task.as_str()), "{ids:?}");
+    assert!(ids.contains(&main_task.as_str()), "{ids:?}");
+    world.remove().await;
 }
