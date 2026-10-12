@@ -477,8 +477,10 @@ impl Ad4mDb {
     }
 
     /// Replaces `table.user_email` with `table.agent_did`, the DID of that user's agent from
-    /// `users`. A row whose email names no user with an agent was unreachable (no session
-    /// acts as it), so it is logged and dropped. One transaction: after a crash the table
+    /// `users`. A row whose email names no user with an agent keeps the email as its
+    /// `agent_did`: no session acts as an email, so it stays unreachable, but the operator's
+    /// audit view (`get_compute_log_all`) still lists it. The count is logged. One
+    /// transaction: after a crash the table
     /// has either its old or its new shape. Does nothing on a table without `user_email`.
     fn migrate_user_email_to_agent_did(conn: &Connection, table: &str) -> Ad4mDbResult<()> {
         let has_column = |column: &str| -> Ad4mDbResult<bool> {
@@ -505,11 +507,25 @@ impl Ad4mDb {
             ),
             [],
         )?;
-        let dropped = tx.execute(&format!("DELETE FROM {table} WHERE agent_did IS NULL"), [])?;
-        if dropped > 0 {
+        // `compute_log` is the operator's audit trail and a dropped row cannot come back.
+        // A row the `users` join cannot map keeps its email in `agent_did`: an email is
+        // not a DID, so no session reaches it, and the operator's view still shows it.
+        // A pending payment for no agent can never be credited: it leaves `pending`, so the
+        // payment poller does not retry it on every pass.
+        if table == "payment_requests" {
+            tx.execute(
+                "UPDATE payment_requests SET status = 'unmapped' WHERE agent_did IS NULL AND status = 'pending'",
+                [],
+            )?;
+        }
+        let kept = tx.execute(
+            &format!("UPDATE {table} SET agent_did = user_email WHERE agent_did IS NULL"),
+            [],
+        )?;
+        if kept > 0 {
             log::warn!(
-                "Dropped {} {} row(s) whose user has no agent: no session could reach them",
-                dropped,
+                "Kept {} {} row(s) whose user has no agent, named by their email: no session can reach them",
+                kept,
                 table
             );
         }
@@ -3184,7 +3200,7 @@ impl Ad4mDb {
     pub fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username FROM users WHERE did = ?1")?;
+            .prepare("SELECT username FROM users WHERE did = ?1 AND did != ''")?;
         match stmt.query_row([did], |row| row.get::<_, String>(0)) {
             Ok(username) => Ok(Some(username)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -4793,8 +4809,8 @@ mod tests {
     }
 
     /// D16: payment requests and the compute log name their agent by DID. Rows whose
-    /// email names no user with an agent were unreachable and go. A second start changes
-    /// nothing.
+    /// email names no user with an agent keep the email as `agent_did`: the operator's audit
+    /// view shows them, no managed session reaches them. A second start changes nothing.
     #[test]
     fn start_moves_billing_rows_from_the_users_email_to_the_agents_did() {
         let dir = tempfile::tempdir().unwrap();
@@ -4823,28 +4839,53 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(request.agent_did, "did:key:alice", "{start}");
-            assert!(db
-                .get_payment_request_by_hash("hash-gone")
-                .unwrap()
-                .is_none());
-            assert!(db
-                .get_payment_request_by_hash("hash-nodid")
-                .unwrap()
-                .is_none());
-            assert_eq!(
-                db.get_pending_payment_requests().unwrap().len(),
-                1,
-                "{start}"
-            );
+            // Rows of a deleted user or of one without an agent are kept, named by email.
+            // A kept payment can never be credited, so it leaves `pending`: the payment poller
+            // does not retry it on every pass.
+            for (hash, email) in [("hash-gone", "gone@test"), ("hash-nodid", "nodid@test")] {
+                let kept = db.get_payment_request_by_hash(hash).unwrap().unwrap();
+                assert_eq!(kept.agent_did, email, "{start}");
+                assert_eq!(kept.status, "unmapped", "{start}");
+            }
+            let pending = db.get_pending_payment_requests().unwrap();
+            assert_eq!(pending.len(), 1, "{start}: {pending:?}");
+            assert_eq!(pending[0].agent_did, "did:key:alice", "{start}");
 
             let log = db.get_compute_log_all(None, 10).unwrap();
-            assert_eq!(log.len(), 1, "{start}: {log:?}");
+            assert_eq!(log.len(), 2, "{start}: {log:?}");
+            assert!(
+                log.iter().any(|entry| entry.user_email == "gone@test"),
+                "{start}: the operator's audit view still shows the kept row: {log:?}"
+            );
             let alice = db.get_compute_log("did:key:alice", None, 10).unwrap();
             assert_eq!(alice.len(), 1, "{start}");
             assert_eq!(
                 alice[0].user_email, "alice@test",
                 "{start}: the log still names the account by email"
             );
+
+            // A managed session acts as a user's DID; none of them reaches a kept row.
+            let managed_dids: Vec<String> = db
+                .list_users()
+                .unwrap()
+                .into_iter()
+                .map(|user| user.did)
+                .filter(|did| !did.is_empty())
+                .collect();
+            assert_eq!(managed_dids, vec!["did:key:alice".to_string()], "{start}");
+            for did in &managed_dids {
+                let reached = db.get_compute_log(did, None, 10).unwrap();
+                assert!(
+                    reached.iter().all(|entry| entry.user_email != "gone@test"),
+                    "{start}: {did} reaches a kept row: {reached:?}"
+                );
+            }
+            for email in ["gone@test", "nodid@test"] {
+                assert!(
+                    db.get_username_by_did(email).unwrap().is_none(),
+                    "{start}: {email} must not resolve to a managed agent"
+                );
+            }
         }
     }
 

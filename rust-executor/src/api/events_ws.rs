@@ -1366,6 +1366,65 @@ mod audience_matrix_tests {
         }
     }
 
+    // A managed agent whose DID names no account must see no user's hosting info. The
+    // ghost holds every capability, so only the audience can keep the event from it. The
+    // operator acts as the main agent and gets it: that proves the event went out.
+    #[tokio::test]
+    async fn a_managed_agent_without_an_account_sees_no_users_hosting_info() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        database();
+        let real = format!("hosting-real-{}@example.org", uuid::Uuid::new_v4());
+        crate::test_utils::create_test_user(&real);
+        let ghost_did = "did:key:ghost";
+        assert!(crate::agent::AgentService::email_for_did(ghost_did).is_err());
+
+        let ghost = Session::for_test(Principal::Agent(AgentContext::managed(ghost_did.into())))
+            .with_caps(vec![ALL_CAPABILITY.clone()])
+            .with_did(ghost_did);
+        let mut ghost_stream = open(Arc::new(ghost)).await;
+        let mut operator_stream = open(Arc::new(Session::for_test(Principal::Operator))).await;
+
+        let info = crate::types::HostingUserInfo {
+            email: real.clone(),
+            remaining_credits: "5".into(),
+            hot_wallet_address: None,
+            free_access: false,
+        };
+        get_global_pubsub()
+            .await
+            .publish_event(Event::hosting_user_info(&info));
+
+        let hosting = Topic::HostingUserInfoChanged.as_str();
+        let seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = operator_stream.next().await.expect("the stream stays open");
+                if event.contains(hosting) && event.contains(&real) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("the operator receives the hosting event");
+        assert!(seen.contains(&real), "{seen}");
+
+        let leaked = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match ghost_stream.next().await {
+                    Some(event) if event.contains(hosting) => break Some(event),
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            leaked.is_err(),
+            "a session whose DID names no account received hosting info, or its stream \
+             ended: {leaked:?}"
+        );
+    }
+
     // The auto-processor's publishers: a pass's step signal reaches the pass owner where the
     // owner may read the perspective; a neighbourhood-state event reaches every reader. The
     // readers come from the registered handle at publish. The operator acts as the main
