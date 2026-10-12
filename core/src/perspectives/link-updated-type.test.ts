@@ -47,7 +47,7 @@ describe('link-updated handler type', () => {
     // link-added keeps its `{ link }` payload
     proxy.on('link-added', ({ link }: { link: DecoratedLinkExpression }) => {});
 
-    const event: PerspectiveLinkUpdatedWithOwner = { perspectiveUuid: 'test-uuid', owner: 'did:test:1', oldLink: link('old'), newLink: link('new') };
+    const event: PerspectiveLinkUpdatedWithOwner = { perspectiveUuid: 'test-uuid', oldLink: link('old'), newLink: link('new') };
     FakeWebSocket.last.onmessage?.({ data: JSON.stringify({ type: 'link-updated', ...event }) });
     expect(seen).toEqual(['old->new']);
     api.closeAll();

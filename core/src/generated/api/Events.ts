@@ -9,7 +9,6 @@ import type { AutoProcessorEvent } from "./AutoProcessorEvent";
 import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourhoodState";
 import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { HostingUserInfo } from "./HostingUserInfo";
-import type { MessageReceivedEvent } from "./MessageReceivedEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveLinkUpdatedWithOwner } from "./PerspectiveLinkUpdatedWithOwner";
@@ -34,7 +33,6 @@ export interface EventMap {
   "link-removed": PerspectiveLinkWithOwner;
   "link-updated": PerspectiveLinkUpdatedWithOwner;
   "signal": NeighbourhoodSignalFilter;
-  "message-received": MessageReceivedEvent;
   "notification-triggered": NotificationTriggeredEvent;
   "exception-occurred": ExceptionOccurredEvent;
   "transcription-text": TranscriptionTextFilter;

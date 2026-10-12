@@ -18,7 +18,7 @@ use crate::prolog_service::{
     engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
 };
 use crate::prolog_service::{PrologMode, PROLOG_MODE};
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use crate::pubsub::get_global_pubsub;
 use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, OnlineAgent,
@@ -1787,20 +1787,18 @@ impl PerspectiveInstance {
         // Only the recipients come from the handle; the lock is released before publishing.
         let owners = super::event_recipients(&*self.persisted.lock().await);
 
-        // One event per link and owner, each to that owner.
+        // One event per link, to all of the owners.
         let changes = [
             (Topic::LinkAdded, &decorated_diff.additions),
             (Topic::LinkRemoved, &decorated_diff.removals),
         ];
         for (topic, links) in changes {
             for link in links {
-                super::publish_to_each_owner(topic, owners.clone(), |owner| {
-                    PerspectiveLinkWithOwner {
-                        perspective_uuid: self.uuid.clone(),
-                        link: link.clone(),
-                        owner,
-                    }
-                });
+                let payload = PerspectiveLinkWithOwner {
+                    perspective_uuid: self.uuid.clone(),
+                    link: link.clone(),
+                };
+                super::publish_to_owners(topic, owners.clone(), payload);
             }
         }
     }
@@ -2137,15 +2135,14 @@ impl PerspectiveInstance {
             // `pubsub_publish_diff`, so it queues the definition sweep here.
             self.schedule_flow_pass_on_definition_change(&decorated_diff);
 
-            // One event per owner, each to that owner.
-            super::publish_to_each_owner(
+            // One event, to all of the owners.
+            super::publish_to_owners(
                 Topic::LinkUpdated,
                 super::event_recipients(&handle),
-                |owner| PerspectiveLinkUpdatedWithOwner {
+                PerspectiveLinkUpdatedWithOwner {
                     perspective_uuid: handle.uuid.clone(),
                     old_link: decorated_old_link.clone(),
                     new_link: decorated_new_link_expression.clone(),
-                    owner,
                 },
             );
 
@@ -4548,70 +4545,26 @@ impl PerspectiveInstance {
         remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
-        // Check if the recipient is a locally managed user
-        use crate::agent::AgentService;
-
         log::debug!(
             "🔔 SEND SIGNAL: Sending signal to remote agent {}",
             remote_agent_did
         );
 
-        let current_perspective_handle = self.persisted.lock().await.clone();
-
-        // Check if this perspective is part of a neighbourhood
-        if current_perspective_handle.shared_url.is_some() {
-            // Helper closure: publish a signal locally and return Ok(())
-            let publish_local = |handle: PerspectiveHandle,
-                                 mut signal: PerspectiveExpression,
-                                 recipient: String| async move {
-                signal.verify_signatures();
-                get_global_pubsub()
-                    .await
-                    .publish_event(super::signal_event(handle, signal, recipient));
-            };
-
-            // Check if any managed email user is the recipient
-            if let Ok(user_emails) = AgentService::list_user_emails() {
-                for user_email in user_emails {
-                    if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
-                        if user_did == remote_agent_did {
-                            if let Some(owners) = &current_perspective_handle.owners {
-                                if owners.contains(&remote_agent_did) {
-                                    log::debug!(
-                                        "Routing signal locally to managed user {} in neighbourhood {:?}",
-                                        user_email,
-                                        current_perspective_handle.shared_url
-                                    );
-                                    let handle = self.persisted.lock().await.clone();
-                                    publish_local(handle, payload, remote_agent_did).await;
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check if the main agent is the recipient.
-            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
-            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
-            if let Some(main_agent_did) = main_agent_did {
-                if main_agent_did == remote_agent_did {
-                    let is_owner = current_perspective_handle
-                        .owners
-                        .as_ref()
-                        .map_or(true, |o| o.is_empty() || o.contains(&remote_agent_did));
-                    if is_owner {
-                        log::debug!(
-                            "Routing signal locally to main agent in neighbourhood {:?}",
-                            current_perspective_handle.shared_url
-                        );
-                        let handle = self.persisted.lock().await.clone();
-                        publish_local(handle, payload, remote_agent_did).await;
-                        return Ok(());
-                    }
-                }
-            }
+        // A neighbourhood's owners are this executor's agents that joined it (or the main
+        // agent for an unowned perspective): a signal to one of them is delivered here.
+        let handle = self.persisted.lock().await.clone();
+        if handle.shared_url.is_some()
+            && super::event_recipients(&handle).contains(&remote_agent_did)
+        {
+            log::debug!(
+                "Routing signal locally to {} in neighbourhood {:?}",
+                remote_agent_did,
+                handle.shared_url
+            );
+            let mut signal = payload;
+            signal.verify_signatures();
+            super::publish_telepresence_signal(handle, signal, Some(remote_agent_did));
+            return Ok(());
         }
 
         log::debug!(
@@ -4648,54 +4601,24 @@ impl PerspectiveInstance {
             });
         }
 
-        // Route signals to all local agents (managed users + main agent) who are owners
+        // Route the broadcast to every local agent that owns the neighbourhood (its
+        // `event_recipients`), each copy naming that agent. The main agent does not get its
+        // own broadcast back: loopback handles that.
         if current_perspective_handle.shared_url.is_some() {
-            // Send to each local managed email user who is an explicit owner
-            if let Some(owners) = &current_perspective_handle.owners {
-                if let Ok(user_emails) = AgentService::list_user_emails() {
-                    for user_email in user_emails {
-                        if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
-                            if owners.contains(&user_did) {
-                                let handle = self.persisted.lock().await.clone();
-                                let mut signal = payload.clone();
-                                signal.verify_signatures();
-
-                                get_global_pubsub()
-                                    .await
-                                    .publish_event(super::signal_event(handle, signal, user_did));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Send to the main agent if it is an owner.
-            // The main agent is not in list_user_emails(), so it must be handled separately.
-            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
             let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
-            if let Some(main_agent_did) = main_agent_did {
-                let is_owner = current_perspective_handle
-                    .owners
-                    .as_ref()
-                    .map_or(true, |o| o.is_empty() || o.contains(&main_agent_did));
-                // Don't echo the broadcast back to the sender (loopback is handled separately).
-                let is_sender = payload.author == main_agent_did;
-                if is_owner && !is_sender {
-                    let handle = self.persisted.lock().await.clone();
-                    let mut signal = payload.clone();
-                    signal.verify_signatures();
-
-                    log::debug!(
-                        "Broadcasting signal locally to main agent in neighbourhood {:?}",
-                        current_perspective_handle.shared_url
-                    );
-
-                    get_global_pubsub().await.publish_event(super::signal_event(
-                        handle,
-                        signal,
-                        main_agent_did,
-                    ));
+            let mut signal = payload.clone();
+            signal.verify_signatures();
+            for recipient in super::event_recipients(&current_perspective_handle) {
+                let main_sent_it = main_agent_did.as_deref() == Some(recipient.as_str())
+                    && payload.author == recipient;
+                if main_sent_it {
+                    continue;
                 }
+                super::publish_telepresence_signal(
+                    current_perspective_handle.clone(),
+                    signal.clone(),
+                    Some(recipient),
+                );
             }
         }
 
@@ -5679,30 +5602,32 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    async fn send_subscription_update(
+    /// Publishes a live query update as `query-subscription-update` to the perspective's
+    /// owners ([`super::event_recipients`], read here, before the task), who also need the
+    /// capability to query it. Every socket of an owner gets it, whatever it watches; the
+    /// client routes it by `subscriptionId`. Delivery takes no lock. When live queries belong
+    /// to a connection (#1207), only the audience changes.
+    pub(crate) async fn send_subscription_update(
         &self,
         subscription_id: String,
         result: String,
         delay: Option<Duration>,
     ) {
         let uuid = self.uuid.clone();
+        let owners = super::event_recipients(&*self.persisted.lock().await);
         tokio::spawn(async move {
             if let Some(delay) = delay {
                 sleep(delay).await;
             }
-            let filter = PerspectiveQuerySubscriptionFilter {
+            let update = PerspectiveQuerySubscriptionFilter {
                 perspective_uuid: uuid.clone(),
                 uuid,
                 subscription_id,
                 result,
             };
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-                    &serde_json::to_string(&filter).unwrap(),
-                )
-                .await;
+            let topic = Topic::PerspectiveQuerySubscription;
+            let event = Event::new(topic, Audience::Dids(owners), update);
+            get_global_pubsub().await.publish_event(event);
         });
     }
 

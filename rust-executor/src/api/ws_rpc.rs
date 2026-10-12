@@ -751,10 +751,7 @@ mod socket_tests {
         let before = call(&mut rpc, "1", "agent.status").await;
         assert_ne!(before["error"]["code"], 401, "{before}");
         let mut sockets = vec![("rpc", rpc)];
-        for (name, path) in [
-            ("events", "/api/v1/ws/events"),
-            ("realtime", "/v1/realtime"),
-        ] {
+        for (name, path) in [("second rpc", "/api/v1/ws"), ("realtime", "/v1/realtime")] {
             let url = format!("ws://{addr}{path}?token={token}");
             sockets.push((name, tokio_tungstenite::connect_async(url).await.unwrap().0));
         }
@@ -805,11 +802,6 @@ mod socket_tests {
         .expect("the sockets register");
     }
 
-    async fn events_socket(addr: std::net::SocketAddr, token: &str) -> Client {
-        let url = format!("ws://{addr}/api/v1/ws/events?token={token}");
-        tokio_tungstenite::connect_async(url).await.unwrap().0
-    }
-
     // #1370: a user could not end their own session.
     #[tokio::test]
     async fn logout_answers_then_closes_that_tokens_sockets_only() {
@@ -819,14 +811,14 @@ mod socket_tests {
         let other = crate::user_management::generate_user_jwt(&email, "test").unwrap();
 
         let mut ws = connect(addr, &token).await;
-        let mut events = events_socket(addr, &token).await;
+        let mut second = connect(addr, &token).await;
         let mut other_ws = connect(addr, &other).await;
         registered(&token, 2).await;
         registered(&other, 1).await;
 
         let reply = call(&mut ws, "1", "user.logout").await;
         assert_eq!(reply["result"], true, "the caller gets the reply: {reply}");
-        for (name, socket) in [("rpc", &mut ws), ("events", &mut events)] {
+        for (name, socket) in [("rpc", &mut ws), ("second rpc", &mut second)] {
             let close = close_within(socket, Duration::from_secs(3)).await;
             assert_eq!(close.map(|c| c.0), Some(CLOSE_TOKEN_ENDED), "{name}");
         }
@@ -850,7 +842,7 @@ mod socket_tests {
 
         let mut sockets = vec![
             ("laptop rpc", connect(addr, &laptop).await),
-            ("laptop events", events_socket(addr, &laptop).await),
+            ("laptop second rpc", connect(addr, &laptop).await),
             ("phone rpc", connect(addr, &phone).await),
         ];
         let mut bystander_ws = connect(addr, &theirs).await;
@@ -1011,13 +1003,12 @@ mod socket_tests {
         }
     }
 
-    // The events socket used to answer a dead token with a refused upgrade (the HTTP
-    // extractor's error), and the realtime socket opened and then refused each request. A
-    // browser reads neither as "log in again".
+    // The realtime socket opened and then refused each request. A browser does not read that
+    // as "log in again".
     #[tokio::test]
-    async fn the_events_and_realtime_sockets_close_a_dead_token_with_1008() {
+    async fn the_realtime_socket_closes_a_dead_token_with_1008() {
         let addr = start_server().await;
-        for path in ["/api/v1/ws/events", "/v1/realtime"] {
+        for path in ["/v1/realtime"] {
             let url = format!("ws://{addr}{path}?token=not-a-jwt");
             let mut ws = tokio_tungstenite::connect_async(url)
                 .await

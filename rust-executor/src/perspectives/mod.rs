@@ -259,13 +259,12 @@ pub async fn add_perspective(
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 
-    publish_to_each_owner(
+    publish_to_owners(
         Topic::PerspectiveAdded,
         event_recipients(&handle),
-        |owner| PerspectiveWithOwner {
+        PerspectiveWithOwner {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
-            owner,
         },
     );
     Ok(())
@@ -284,18 +283,10 @@ pub(crate) fn event_recipients(handle: &PerspectiveHandle) -> Vec<String> {
     }
 }
 
-/// Publishes one `topic` event per DID in `owners`, each for that DID only, with the DID
-/// as the payload's `owner`.
-pub(crate) fn publish_to_each_owner<T: Serialize>(
-    topic: Topic,
-    owners: Vec<String>,
-    payload: impl Fn(String) -> T,
-) {
-    let pubsub = get_global_pubsub_sync();
-    for owner in owners {
-        let audience = Audience::Dids(vec![owner.clone()]);
-        pubsub.publish_event(Event::new(topic, audience, payload(owner)));
-    }
+/// Publishes one `topic` event with `payload` to the sessions of every DID in `owners` (a
+/// perspective's [`event_recipients`]): one event per audience, not one per owner.
+pub(crate) fn publish_to_owners(topic: Topic, owners: Vec<String>, payload: impl Serialize) {
+    get_global_pubsub_sync().publish_event(Event::new(topic, Audience::Dids(owners), payload));
 }
 
 pub fn all_perspectives() -> Vec<PerspectiveInstance> {
@@ -369,13 +360,12 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         }
     }
 
-    publish_to_each_owner(
+    publish_to_owners(
         Topic::PerspectiveUpdated,
         event_recipients(handle),
-        |owner| PerspectiveWithOwner {
+        PerspectiveWithOwner {
             perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
-            owner,
         },
     );
     Ok(())
@@ -437,13 +427,14 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         }
 
         let recipients = event_recipients(&*instance.persisted.lock().await);
-        publish_to_each_owner(Topic::PerspectiveRemoved, recipients, |owner| {
+        publish_to_owners(
+            Topic::PerspectiveRemoved,
+            recipients,
             PerspectiveRemovedWithOwner {
                 perspective_uuid: uuid.to_string(),
                 uuid: uuid.to_string(),
-                owner,
-            }
-        });
+            },
+        );
     }
 
     removed_instance

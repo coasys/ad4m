@@ -10,7 +10,8 @@ pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
-use crate::events::{Audience, Event, Topic};
+use crate::agent::AgentContext;
+use crate::events::Event;
 use crate::pubsub::get_global_pubsub;
 use crate::types::*;
 use crate::utils::constant_time_eq;
@@ -369,9 +370,12 @@ pub async fn request_capability(auth_info: AuthInfo) -> String {
         addon: Some(serde_json::to_string(&auth_extended).unwrap()),
     };
 
+    // The request is for the main agent until a request names its agent (#1399): the
+    // sessions that may approve apps for it get it.
+    let target = AgentContext::main_agent();
     get_global_pubsub()
         .await
-        .publish_event(Event::exception(&exception_info));
+        .publish_event(Event::approval_request(&exception_info, &target));
 
     request_id
 }
@@ -434,18 +438,18 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         cap_token.clone(),
     )?;
 
-    // The event reaches every session that can approve apps; the token goes only to the caller.
+    // The event reaches the sessions that may approve apps for the agent the app acts as (the
+    // main agent until a request names its agent, #1399); the token goes only to the caller.
     let apps_changed = Apps {
         auth: auth_for_publish,
         request_id: request_id.clone(),
         revoked: Some(false),
         token: String::new(),
     };
-    get_global_pubsub().await.publish_event(Event::new(
-        Topic::AppsChanged,
-        Audience::Approvers,
-        Some(apps_changed),
-    ));
+    let target = AgentContext::main_agent();
+    get_global_pubsub()
+        .await
+        .publish_event(Event::apps_changed(&apps_changed, &target));
 
     Ok(cap_token)
 }
@@ -693,6 +697,7 @@ mod tests {
 #[cfg(test)]
 mod app_token_tests {
     use super::*;
+    use crate::events::{Audience, Topic};
     use std::time::Duration;
 
     fn test_auth_info() -> AuthInfo {
@@ -821,7 +826,9 @@ mod app_token_tests {
             if event.topic != Topic::AppsChanged {
                 continue;
             }
-            assert_eq!(event.audience, Audience::Approvers);
+            let main = crate::agent::did();
+            assert_eq!(event.audience, Audience::Dids(vec![main]));
+            assert_eq!(event.capability, *AGENT_PERMIT_CAPABILITY);
             if let Ok(Some(app)) = serde_json::from_value::<Option<Apps>>(event.payload.clone()) {
                 if app.request_id == request_id {
                     break app;

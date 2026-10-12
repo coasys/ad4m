@@ -42,7 +42,7 @@ impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub with: Resource,
@@ -58,7 +58,7 @@ impl From<crate::types::CapabilityInput> for Capability {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,

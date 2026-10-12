@@ -7,8 +7,8 @@
 //!   * **tests** can `subscribe()` and `await` a specific step instead of
 //!     polling the graph or sleeping — the whole pass is observable without
 //!     manually driving interpretation, and
-//!   * **the WS-RPC layer** can forward the topic to clients as a
-//!     WS subscription for near-free, so a Flux-style UI can show
+//!   * **the WS-RPC layer** forwards the topic to the pass owner's sockets
+//!     ([`pass_audience`]), so a Flux-style UI can show
 //!     "collecting → running LLM → done" and await the next batch.
 //!
 //! Emission is fire-and-forget: a pass never fails or blocks because nobody is
@@ -205,8 +205,9 @@ impl AutoProcessorEvent {
     }
     /// Attach live-debug LLM I/O — only set from a pass whose
     /// `AutoProcessorConfig.emit_debug_events` is `true`. Payload sizes are
-    /// large (10s of KB); the wire-level DID filter (Nico's 2026-08-19 call)
-    /// keeps this from leaking to observers who did not run the pass.
+    /// large (10s of KB); the event's audience, the pass owner only
+    /// ([`pass_audience`], Nico's 2026-08-19 call), keeps this from leaking to
+    /// observers who did not run the pass.
     pub fn with_llm_io(mut self, input: String, output: String) -> Self {
         self.llm_input = Some(input);
         self.llm_output = Some(output);
@@ -246,56 +247,39 @@ impl AutoProcessorEvent {
     }
 }
 
-/// Who may read a perspective, read from its handle when an event about it is published.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Readers {
-    /// These DIDs may read the perspective: its owners, or the main agent for an unowned
-    /// perspective (`perspectives::event_recipients`, the audience of every perspective topic).
-    Owners(Vec<String>),
-    /// No perspective with this UUID is registered.
-    Unknown,
-}
-
-/// Who may read perspective `uuid` now. Waits for the handle; no emitter holds it while it
-/// emits.
-pub(crate) async fn readers(uuid: &str) -> Readers {
+/// The DIDs that may read perspective `uuid` now: its owners, or the main agent for an
+/// unowned perspective (`perspectives::event_recipients`, the audience of every perspective
+/// topic). Empty when no perspective with this UUID is registered. Waits for the handle; no
+/// emitter holds it while it emits.
+pub(crate) async fn readers(uuid: &str) -> Vec<String> {
     let Some(instance) = crate::perspectives::get_perspective(uuid) else {
-        return Readers::Unknown;
+        return vec![];
     };
     let handle = instance.persisted.lock().await;
-    Readers::Owners(crate::perspectives::event_recipients(&handle))
+    crate::perspectives::event_recipients(&handle)
 }
 
-/// Who receives a pass's step signal: the operator always; the pass owner (`agent_did`)
-/// when it may read the perspective. The rule `matches_auto_processor_pass_owner` applied
-/// per socket: a hosting agent never sees a managed user's pass, and an event without an
-/// owner reaches only the operator.
-pub(crate) fn pass_audience(readers: Readers, agent_did: Option<&str>) -> Audience {
-    let may_read = |did: &str| match &readers {
-        Readers::Owners(owners) => owners.iter().any(|o| o == did),
-        Readers::Unknown => false,
-    };
-    match agent_did {
-        Some(did) if may_read(did) => Audience::OperatorAndDids(vec![did.to_string()]),
-        _ => Audience::Operator,
-    }
+/// Who receives a pass's step signal: the pass owner (`agent_did`), when it may read the
+/// perspective; else nobody. The rule `matches_auto_processor_pass_owner` applied per
+/// socket: a hosting agent never sees a managed user's pass (debug events carry its LLM
+/// prompts). The operator acts as the main agent, so it gets the main agent's passes only.
+pub(crate) fn pass_audience(readers: &[String], agent_did: Option<&str>) -> Audience {
+    let owner = agent_did.filter(|did| readers.iter().any(|r| r == did));
+    Audience::Dids(owner.map(str::to_string).into_iter().collect())
 }
 
-/// Who receives a neighbourhood-state event: the operator always, and every reader of the
-/// perspective, whoever claimed the batch. An unowned perspective's reader is the main
-/// agent, as for every other perspective topic.
-pub(crate) fn neighbourhood_state_audience(readers: Readers) -> Audience {
-    match readers {
-        Readers::Owners(owners) => Audience::OperatorAndDids(owners),
-        Readers::Unknown => Audience::Operator,
-    }
+/// Who receives a neighbourhood-state event: every reader of the perspective, whoever
+/// claimed the batch. An unowned perspective's reader is the main agent, as for every other
+/// perspective topic.
+pub(crate) fn neighbourhood_state_audience(readers: Vec<String>) -> Audience {
+    Audience::Dids(readers)
 }
 
 /// Publish an event on the auto-processor topic, to its audience ([`pass_audience`]).
 /// Fire-and-forget: never errors, never blocks a pass on the absence of listeners.
 pub async fn emit(event: AutoProcessorEvent) {
     let audience = pass_audience(
-        readers(&event.perspective_uuid).await,
+        &readers(&event.perspective_uuid).await,
         event.agent_did.as_deref(),
     );
     get_global_pubsub().await.publish_event(Event::new(
@@ -473,49 +457,37 @@ pub struct InterpretationEmitContext {
 
 #[cfg(test)]
 mod audience_tests {
-    //! The per-socket rules the auto-processor topics had before they named their audience,
-    //! as the audience the publisher now names. Who receives each audience is pinned by
-    //! `events_ws::audience_matrix_tests`.
+    //! The audience the publisher names for the auto-processor topics (the per-socket rules
+    //! they had before, without the operator's view of every agent's passes). Who receives
+    //! each audience is pinned by `events_ws::audience_matrix_tests`.
     use super::*;
 
-    fn owners(dids: &[&str]) -> Readers {
-        Readers::Owners(dids.iter().map(|d| d.to_string()).collect())
-    }
-
-    fn operator_and(did: &str) -> Audience {
-        Audience::OperatorAndDids(vec![did.to_string()])
+    fn owners(dids: &[&str]) -> Vec<String> {
+        dids.iter().map(|d| d.to_string()).collect()
     }
 
     #[test]
-    fn a_pass_reaches_its_owner_where_the_owner_may_read_and_always_the_operator() {
+    fn a_pass_reaches_its_owner_where_the_owner_may_read_and_nobody_else() {
         let alice = Some("did:key:alice");
         assert_eq!(
-            pass_audience(owners(&["did:key:alice"]), alice),
-            operator_and("did:key:alice")
+            pass_audience(&owners(&["did:key:alice", "did:key:bob"]), alice),
+            Audience::Dids(owners(&["did:key:alice"]))
         );
         // A pass owner who does not own the perspective, an unknown perspective, or an
-        // event without an owner: the operator only.
-        assert_eq!(
-            pass_audience(owners(&["did:key:bob"]), alice),
-            Audience::Operator
-        );
-        assert_eq!(pass_audience(Readers::Unknown, alice), Audience::Operator);
-        assert_eq!(
-            pass_audience(owners(&["did:key:alice"]), None),
-            Audience::Operator
-        );
+        // event without an owner: nobody (the operator only, before).
+        let nobody = Audience::Dids(vec![]);
+        assert_eq!(pass_audience(&owners(&["did:key:bob"]), alice), nobody);
+        assert_eq!(pass_audience(&[], alice), nobody);
+        assert_eq!(pass_audience(&owners(&["did:key:alice"]), None), nobody);
     }
 
     #[test]
-    fn neighbourhood_state_reaches_every_reader_and_always_the_operator() {
+    fn neighbourhood_state_reaches_every_reader() {
         assert_eq!(
             neighbourhood_state_audience(owners(&["did:key:alice", "did:key:bob"])),
-            Audience::OperatorAndDids(vec!["did:key:alice".into(), "did:key:bob".into()])
+            Audience::Dids(owners(&["did:key:alice", "did:key:bob"]))
         );
-        assert_eq!(
-            neighbourhood_state_audience(Readers::Unknown),
-            Audience::Operator
-        );
+        assert_eq!(neighbourhood_state_audience(vec![]), Audience::Dids(vec![]));
     }
 
     // An unowned perspective's reader is the main agent, as for every perspective topic:
@@ -528,7 +500,7 @@ mod audience_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let main = crate::agent::did();
-        assert_eq!(readers("no-such-perspective").await, Readers::Unknown);
+        assert_eq!(readers("no-such-perspective").await, Vec::<String>::new());
         for (owners_list, expected) in [
             (
                 Some(vec!["did:key:alice".to_string()]),

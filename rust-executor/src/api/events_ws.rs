@@ -1,126 +1,77 @@
-//! WebSocket event endpoint: GET /api/v1/ws/events
+//! Event delivery on the RPC socket (`GET /api/v1/ws`).
 //!
-//! Single WebSocket endpoint serving ALL event types.
-//! Each message is a JSON object `{ "type": "<event-type>", ...payload }`.
+//! Each event message is a JSON object `{ "type": "<event-type>", ...payload }` (no `id`).
 //! [`event_specs`] types every payload (exported to the SDK as `Events.ts`);
 //! each perspective-scoped payload carries a flat `perspectiveUuid`.
-//! Events are filtered per-user in multi-user mode, then to what the socket
-//! asked for with `events.watch` (nothing until it does).
 //!
 //! Typed [`Event`](crate::events::Event)s from `PubSub::publish_event` reach a
-//! socket when `Session::may_receive` (the audience and the topic's capability,
-//! `Topic::capability`) and `event_interest::wants` hold, as [`wire_message`].
-//! One string topic remains: live query updates, which need the capability to
-//! query the perspective and wait for its owners (`matches_perspective_owner`)
-//! until live queries belong to a connection (#1207).
+//! socket when `Session::may_receive` (the audience and the event's capability) and
+//! `event_interest::wants` (what the socket asked for with `events.watch`; nothing until it
+//! does, live query updates aside) hold, as [`wire_message`]. Nothing here takes a lock or
+//! parses a payload.
 //!
 //! ## Event types
 //!
-//! "Owners" is `perspectives::event_recipients`: the owners, or the main agent
-//! for an unowned perspective.
+//! "Owners" is `perspectives::event_recipients`: the owners, or the main agent for an
+//! unowned perspective. Each event goes out once, to every DID of its audience; only a
+//! signal goes out once per recipient, each copy naming its `recipient`.
 //!
-//! | Type                          | Payload key   | Filtering              | Description                          |
+//! | Type                          | Payload key   | Audience               | Description                          |
 //! |-------------------------------|---------------|------------------------|--------------------------------------|
-//! | `agent-status-changed`        | `agent`       | typed: the agent's DID | Agent status changed                 |
-//! | `agent-updated`               | `agent`       | typed: the agent's DID | Agent profile updated                |
-//! | `apps-changed`                | (inline)      | typed: approvers       | Installed apps changed (no token)    |
-//! | `hosting-user-info-changed`   | (inline)      | typed: the user + main agent | Hosting user info changed      |
-//! | `perspective-added`           | (inline)      | typed: `owner` only    | New perspective created              |
-//! | `perspective-removed`         | (inline)      | typed: `owner` only    | Perspective deleted                  |
-//! | `perspective-updated`         | (inline)      | typed: `owner` only    | Perspective metadata updated         |
-//! | `sync-state-change`           | (inline)      | typed: owners          | Neighbourhood sync state changed     |
-//! | `link-added`                  | (inline)      | typed: `owner` only    | Link added to perspective            |
-//! | `link-removed`                | (inline)      | typed: `owner` only    | Link removed from perspective        |
-//! | `link-updated`                | (inline)      | typed: `owner` only    | Link updated in perspective          |
-//! | `signal`                      | (inline)      | typed: `recipient`, else each owner | Neighbourhood signal received |
-//! | `message-received`            | `message`     | typed: the agent it is for (no publisher yet) | Runtime message received |
-//! | `notification-triggered`      | `notification` + `perspectiveUuid` | typed: notification owner DID | Notification triggered |
-//! | `exception-occurred`          | `exception`   | typed: per type, see `Audience::for_exception` | Exception occurred |
-//! | `transcription-text`          | (inline)      | typed: the stream owner's DID | AI transcription text         |
-//! | `model-loading-status`        | (inline)      | typed: everyone        | AI model loading status              |
-//! | `query-subscription-update`   | (inline)      | string: perspective owner | Live query subscription update    |
-//! | `auto-processor-event`        | (inline)      | typed: operator + pass owner | Auto-processor pass step signal |
-//! | `auto-processor-neighbourhood-state` | (inline) | typed: operator + readers | Coarse-grained neighbourhood view of "someone is auto-processing" |
+//! | `agent-status-changed`        | `agent`       | the agent's DID        | Agent status changed                 |
+//! | `agent-updated`               | `agent`       | the agent's DID        | Agent profile updated                |
+//! | `apps-changed`                | (inline)      | the approved agent's DID, AGENT_PERMIT | Installed apps changed (no token) |
+//! | `hosting-user-info-changed`   | (inline)      | the user + main agent  | Hosting user info changed            |
+//! | `perspective-added`           | (inline)      | owners                 | New perspective created              |
+//! | `perspective-removed`         | (inline)      | owners                 | Perspective deleted                  |
+//! | `perspective-updated`         | (inline)      | owners                 | Perspective metadata updated         |
+//! | `sync-state-change`           | (inline)      | owners                 | Neighbourhood sync state changed     |
+//! | `link-added`                  | (inline)      | owners                 | Link added to perspective            |
+//! | `link-removed`                | (inline)      | owners                 | Link removed from perspective        |
+//! | `link-updated`                | (inline)      | owners                 | Link updated in perspective          |
+//! | `signal`                      | (inline)      | `recipient`, else a copy per owner | Neighbourhood signal received |
+//! | `notification-triggered`      | `notification` + `perspectiveUuid` | the notification owner's DID | Notification triggered |
+//! | `exception-occurred`          | `exception`   | approval requests: the agent asked, AGENT_PERMIT; else everyone | Exception occurred |
+//! | `transcription-text`          | (inline)      | the stream owner's DID | AI transcription text                |
+//! | `model-loading-status`        | (inline)      | everyone               | AI model loading status              |
+//! | `query-subscription-update`   | (inline)      | owners (passes `events.watch`) | Live query subscription update |
+//! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
+//! | `auto-processor-neighbourhood-state` | (inline) | owners                | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
-//! ## Client → Server messages
-//!
-//! | Type     | Description                          |
-//! |----------|--------------------------------------|
-//! | `ping`   | Server responds with `{"type":"pong"}`|
-//! | `events.watch` / `events.unwatch` | Choose the events this socket gets (none until the first watch); see `event_interest.rs`. Same on `/api/v1/ws` |
-//!
-//! Other messages are silently ignored (future extensibility).
+//! Every session also needs the event's capability (`Event::capability`).
 
-use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
-    },
-    response::Response,
-};
 use futures::stream::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
 use super::event_interest::{self, SharedInterest};
-use crate::agent::capabilities::*;
 use crate::agent::session::Session;
-use crate::agent::session_registry::SessionRegistry;
 use crate::events::{Event, Topic};
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use crate::pubsub::get_global_pubsub;
 
-use super::auth::AppState;
-use super::errors::ApiError;
-use crate::types::RequestContext;
 use crate::types::{
     AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
-    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveExpression,
-    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
-    PerspectiveRemovedWithOwner, PerspectiveStateFilter, PerspectiveWithOwner,
-    TranscriptionTextFilter,
+    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveLinkUpdatedWithOwner,
+    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveRemovedWithOwner,
+    PerspectiveStateFilter, PerspectiveWithOwner, TranscriptionTextFilter,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// The name of every event this socket emits. `Topic::as_str` and
-/// [`event_specs`] both use these, so an event cannot go out untyped.
-pub mod events {
-    pub const AGENT_STATUS_CHANGED: &str = "agent-status-changed";
-    pub const AGENT_UPDATED: &str = "agent-updated";
-    pub const APPS_CHANGED_EVENT: &str = "apps-changed";
-    pub const HOSTING_USER_INFO_CHANGED: &str = "hosting-user-info-changed";
-    pub const PERSPECTIVE_ADDED: &str = "perspective-added";
-    pub const PERSPECTIVE_REMOVED: &str = "perspective-removed";
-    pub const PERSPECTIVE_UPDATED: &str = "perspective-updated";
-    pub const SYNC_STATE_CHANGE: &str = "sync-state-change";
-    pub const LINK_ADDED: &str = "link-added";
-    pub const LINK_REMOVED: &str = "link-removed";
-    pub const LINK_UPDATED: &str = "link-updated";
-    pub const SIGNAL: &str = "signal";
-    pub const MESSAGE_RECEIVED: &str = "message-received";
-    pub const NOTIFICATION_TRIGGERED: &str = "notification-triggered";
-    pub const EXCEPTION_OCCURRED: &str = "exception-occurred";
-    pub const TRANSCRIPTION_TEXT: &str = "transcription-text";
-    pub const MODEL_LOADING_STATUS: &str = "model-loading-status";
-    pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
-    pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
-    pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
-}
-
-/// One emitted event: its name, the TypeScript type of its payload (the
+/// One emitted event: its topic, the TypeScript type of its payload (the
 /// wire message without `type`) and whether it is about one perspective
 /// (carries `perspectiveUuid`, so `events.watch` can narrow it).
 pub struct EventSpec {
-    pub name: &'static str,
+    pub topic: Topic,
     pub payload: super::ws_handler::TsType,
     pub scoped: bool,
 }
 
 impl EventSpec {
-    fn of<T: ts_rs::TS + 'static>(name: &'static str, scoped: bool) -> Self {
+    fn of<T: ts_rs::TS + 'static>(topic: Topic, scoped: bool) -> Self {
         Self {
-            name,
+            topic,
             payload: super::ws_handler::TsType::of::<T>(),
             scoped,
         }
@@ -139,172 +90,74 @@ pub struct AgentUpdatedEvent {
     pub agent: Agent,
 }
 
-/// `message-received`: `{ message }`.
-#[derive(Debug, Serialize, Deserialize, TS)]
-pub struct MessageReceivedEvent {
-    pub message: PerspectiveExpression,
-}
-
 /// `exception-occurred`: `{ exception }`.
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct ExceptionOccurredEvent {
     pub exception: ExceptionInfo,
 }
 
-/// Every event the socket emits, with its payload type.
+/// Every event the executor emits, with its payload type, in the order of `Topic::ALL`.
 pub fn event_specs() -> Vec<EventSpec> {
     use crate::perspectives::auto_processor::events::{
         AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     };
-    use events::*;
+    use Topic::*;
     vec![
-        EventSpec::of::<AgentStatusChangedEvent>(AGENT_STATUS_CHANGED, false),
-        EventSpec::of::<AgentUpdatedEvent>(AGENT_UPDATED, false),
-        EventSpec::of::<Apps>(APPS_CHANGED_EVENT, false),
-        EventSpec::of::<HostingUserInfo>(HOSTING_USER_INFO_CHANGED, false),
-        EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_ADDED, true),
-        EventSpec::of::<PerspectiveRemovedWithOwner>(PERSPECTIVE_REMOVED, true),
-        EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_UPDATED, true),
-        EventSpec::of::<PerspectiveStateFilter>(SYNC_STATE_CHANGE, true),
-        EventSpec::of::<PerspectiveLinkWithOwner>(LINK_ADDED, true),
-        EventSpec::of::<PerspectiveLinkWithOwner>(LINK_REMOVED, true),
-        EventSpec::of::<PerspectiveLinkUpdatedWithOwner>(LINK_UPDATED, true),
-        EventSpec::of::<NeighbourhoodSignalFilter>(SIGNAL, true),
-        EventSpec::of::<MessageReceivedEvent>(MESSAGE_RECEIVED, false),
-        EventSpec::of::<NotificationTriggeredEvent>(NOTIFICATION_TRIGGERED, true),
-        EventSpec::of::<ExceptionOccurredEvent>(EXCEPTION_OCCURRED, false),
-        EventSpec::of::<TranscriptionTextFilter>(TRANSCRIPTION_TEXT, false),
-        EventSpec::of::<AIModelLoadingStatus>(MODEL_LOADING_STATUS, false),
-        EventSpec::of::<PerspectiveQuerySubscriptionFilter>(QUERY_SUBSCRIPTION_UPDATE, true),
-        EventSpec::of::<AutoProcessorEvent>(AUTO_PROCESSOR_EVENT, true),
-        EventSpec::of::<AutoProcessorNeighbourhoodState>(AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, true),
+        EventSpec::of::<AgentStatusChangedEvent>(AgentStatusChanged, false),
+        EventSpec::of::<AgentUpdatedEvent>(AgentUpdated, false),
+        EventSpec::of::<Apps>(AppsChanged, false),
+        EventSpec::of::<HostingUserInfo>(HostingUserInfoChanged, false),
+        EventSpec::of::<PerspectiveWithOwner>(PerspectiveAdded, true),
+        EventSpec::of::<PerspectiveRemovedWithOwner>(PerspectiveRemoved, true),
+        EventSpec::of::<PerspectiveWithOwner>(PerspectiveUpdated, true),
+        EventSpec::of::<PerspectiveStateFilter>(PerspectiveSyncStateChange, true),
+        EventSpec::of::<PerspectiveLinkWithOwner>(LinkAdded, true),
+        EventSpec::of::<PerspectiveLinkWithOwner>(LinkRemoved, true),
+        EventSpec::of::<PerspectiveLinkUpdatedWithOwner>(LinkUpdated, true),
+        EventSpec::of::<NeighbourhoodSignalFilter>(NeighbourhoodSignal, true),
+        EventSpec::of::<NotificationTriggeredEvent>(RuntimeNotificationTriggered, true),
+        EventSpec::of::<ExceptionOccurredEvent>(ExceptionOccurred, false),
+        EventSpec::of::<TranscriptionTextFilter>(AiTranscriptionText, false),
+        EventSpec::of::<AIModelLoadingStatus>(AiModelLoadingStatus, false),
+        EventSpec::of::<PerspectiveQuerySubscriptionFilter>(PerspectiveQuerySubscription, true),
+        EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
+        EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
     ]
 }
 
-/// GET /ws/events — WebSocket endpoint for all real-time events.
-///
-/// Authentication is via `token` query parameter or `Authorization` header.
-/// All event types are multiplexed over a single WebSocket connection.
-///
-/// A token that opens no session gets the upgrade, then a close with 1008 at once: a browser
-/// cannot read the HTTP status of a refused upgrade.
-pub async fn events_ws(
-    ws: WebSocketUpgrade,
-    State(_state): State<AppState>,
-    context: Result<RequestContext, ApiError>,
-) -> Result<Response, ApiError> {
-    let context = match context {
-        Ok(context) => context,
-        Err(ApiError::Unauthorized(reason)) => {
-            return Ok(ws.on_upgrade(move |socket| {
-                super::ws_rpc::close_refused(socket, super::ws_rpc::CLOSE_TOKEN_ENDED, reason)
-            }))
-        }
-        Err(ApiError::Unavailable(reason)) => {
-            return Ok(ws.on_upgrade(move |socket| {
-                super::ws_rpc::close_refused(socket, super::ws_rpc::CLOSE_TRY_AGAIN_LATER, reason)
-            }))
-        }
-        Err(e) => return Err(e),
-    };
-    context
-        .require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| ApiError::Forbidden(e))?;
-
-    let session = context.session.clone();
-
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, session)))
-}
-
-/// Build the merged event stream for the agent a session acts as.
-///
-/// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per agent and to `interest` (what the socket asked for with `events.watch`).
-/// The stream ends at the first event after `session.check()` fails.
+/// The event stream of a session's socket: the JSON message of each event the session may
+/// receive and `interest` (what the socket asked for with `events.watch`) wants. The
+/// session's DID is read per event, so a socket opened before the main agent had a DID gets
+/// its events once it has one. The stream ends at the first event after `session.check()`
+/// fails: expiry and revocation stop events as they stop requests.
 pub(crate) async fn build_event_stream(
     session: Arc<Session>,
     interest: SharedInterest,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
-    // The session's own agent, taken from the session: a token that stops decoding cannot
-    // turn it into the main agent. Resolved once at subscription time, for the live-query
-    // filter; `None` (a client that connected before `agent.generate()`) lets every update
-    // through, as single-user mode.
-    let resolved_did = session.acts_as_did().map(str::to_string);
-    build_event_stream_for(session, interest, resolved_did).await
-}
-
-/// [`build_event_stream`] with the session DID already resolved (tests
-/// inject one directly).
-pub(crate) async fn build_event_stream_for(
-    session: Arc<Session>,
-    interest: SharedInterest,
-    resolved_did: Option<String>,
-) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::future::ready;
 
-    let pubsub = get_global_pubsub().await;
-    let query_updates = query_updates(
-        pubsub
-            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await,
-        resolved_did,
-        session.clone(),
-    );
-    // The session decides who, the socket's interest what.
-    let typed = {
-        let session = session.clone();
-        BroadcastStream::new(pubsub.subscribe_events())
+    let events = get_global_pubsub().await.subscribe_events();
+    let check = session.clone();
+    // The session decides who, the socket's interest what. An event the session may receive
+    // checks the token even when the socket does not want it.
+    Box::pin(
+        BroadcastStream::new(events)
             .filter_map(received)
             .filter_map(move |event| {
                 ready(session.may_receive(&event).then(|| {
                     event_interest::wants(&interest, &event).then(|| wire_message(&event))
                 }))
             })
-    };
-
-    // Events end with the token: expiry and revokeToken() stop them as they stop requests.
-    Box::pin(
-        futures::stream::select(query_updates, typed)
-            .take_while(move |_| ready(session.check().is_ok()))
+            .take_while(move |_| ready(check.check().is_ok()))
             .filter_map(ready),
     )
 }
 
-/// The live query updates of the perspectives `did` owns (all of them for `None`) that
-/// `session` may query, as the stream builder's items: `Some(message)`, or `None` for an
-/// update that is not JSON. They pass `events.watch` untouched.
-fn query_updates(
-    updates: tokio::sync::broadcast::Receiver<String>,
-    did: Option<String>,
-    session: Arc<Session>,
-) -> impl futures::stream::Stream<Item = Option<String>> + Send {
-    BroadcastStream::new(updates)
-        .filter_map(received)
-        .filter_map(move |msg| {
-            let did = did.clone();
-            let session = session.clone();
-            async move {
-                let topic = Topic::PerspectiveQuerySubscription;
-                let readable =
-                    session.may(&topic.capability(event_perspective_uuid(&msg).as_deref()));
-                (readable && matches_perspective_owner(&msg, did.as_deref()).await).then(|| {
-                    serde_json::from_str(&msg)
-                        .ok()
-                        .map(|payload| wire(topic, &payload))
-                })
-            }
-        })
-}
-
 /// The socket message for `event`, built without parsing the payload again.
 pub(crate) fn wire_message(event: &Event) -> String {
-    wire(event.topic, &event.payload)
-}
-
-/// The socket message for a `topic` event with `payload`.
-fn wire(topic: Topic, payload: &serde_json::Value) -> String {
-    let event_type = topic.as_str();
-    if let Some(key) = payload_key(topic) {
+    let event_type = event.topic.as_str();
+    let payload = &event.payload;
+    if let Some(key) = payload_key(event.topic) {
         return wrap_event_nested(event_type, key, &payload.to_string());
     }
     match payload {
@@ -320,7 +173,6 @@ fn wire(topic: Topic, payload: &serde_json::Value) -> String {
 fn payload_key(topic: Topic) -> Option<&'static str> {
     match topic {
         Topic::AgentStatusChanged | Topic::AgentUpdated => Some("agent"),
-        Topic::RuntimeMessageReceived => Some("message"),
         Topic::ExceptionOccurred => Some("exception"),
         // No `_` arm: a new topic does not compile until someone picks its shape.
         Topic::AppsChanged
@@ -342,75 +194,6 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
     }
 }
 
-async fn handle_events_ws(mut socket: WebSocket, session: Arc<Session>) {
-    log::info!("Events WebSocket connected");
-
-    // Fires when the token is revoked: the socket closes at once, not at the next event.
-    let revoked = tokio_util::sync::CancellationToken::new();
-    let _registered = SessionRegistry::global().register(&session, revoked.clone());
-
-    let interest = SharedInterest::default();
-    let mut event_stream = build_event_stream(session, interest.clone()).await;
-
-    loop {
-        tokio::select! {
-            _ = revoked.cancelled() => {
-                super::ws_rpc::close_token_ended(&mut socket).await;
-                break;
-            }
-            // Forward events from PubSub to WebSocket
-            event = event_stream.next() => {
-                match event {
-                    Some(data) => {
-                        if socket.send(Message::Text(data.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    // The stream ends when the token stops working.
-                    None => {
-                        super::ws_rpc::close_token_ended(&mut socket).await;
-                        break;
-                    }
-                }
-            }
-            // Handle incoming WebSocket messages
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Some(reply) = client_message_reply(&text, &interest) {
-                            let _ = socket.send(Message::Text(reply.into())).await;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        log::info!("Events WebSocket closed");
-                        break;
-                    }
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = socket.send(Message::Pong(data)).await;
-                    }
-                    _ => {} // Ignore binary, pong, etc.
-                }
-            }
-        }
-    }
-}
-
-/// The reply to a client message on the events socket: `pong` for `ping`,
-/// the `events.watch` / `events.unwatch` reply, or `None` (ignored).
-fn client_message_reply(text: &str, interest: &SharedInterest) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
-    let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    if msg_type == "ping" {
-        return Some(r#"{"type":"pong"}"#.to_string());
-    }
-    event_interest::handle_control(
-        msg_type,
-        parsed.get("id").unwrap_or(&serde_json::Value::Null),
-        parsed.get("params").unwrap_or(&serde_json::json!({})),
-        interest,
-    )
-}
-
 // ── Event helper functions ──────────────────────────────────────────────────
 
 /// The message a socket's receiver got, or `None` when it lagged.
@@ -419,9 +202,9 @@ fn received<T>(r: Result<T, BroadcastStreamRecvError>) -> futures::future::Ready
         Ok(msg) => Some(msg),
         Err(BroadcastStreamRecvError::Lagged(n)) => {
             // The socket's receiver fell more than the channel's capacity behind (a slow
-            // client, or an ownership filter waiting on a perspective lock), so these events
-            // are gone for this socket. Say so: the client cannot know it missed them.
-            log::warn!("events_ws: a socket's event stream lagged and dropped {n} event(s)");
+            // client), so these events are gone for this socket. Say so: the client cannot
+            // know it missed them.
+            log::warn!("events: a socket's event stream lagged and dropped {n} event(s)");
             None
         }
     })
@@ -452,204 +235,10 @@ fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &str) -> Str
     )
 }
 
-/// Multi-user: only live query updates about a perspective the session owns. An
-/// update without `perspectiveUuid`, or one that does not parse, reaches nobody:
-/// the publisher sets the field.
-async fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
-    let Some(did) = current_did else {
-        return true;
-    };
-    match event_perspective_uuid(msg) {
-        Some(uuid) => perspective_is_owned_by(&uuid, did).await,
-        None => false,
-    }
-}
-
-/// The event's `perspectiveUuid`, if `msg` is a JSON object holding one.
-fn event_perspective_uuid(msg: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(msg)
-        .ok()?
-        .get("perspectiveUuid")?
-        .as_str()
-        .map(str::to_string)
-}
-
-/// Whether `did` owns (or nobody owns) perspective `uuid`. Fails closed for an
-/// unknown perspective. Waits for the handle: a `try_lock` here dropped every
-/// event published while a write held it, so live queries missed updates.
-async fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
-    let Some(instance) = crate::perspectives::get_perspective(uuid) else {
-        return false;
-    };
-    let did = did.to_string();
-    // Spawned so the runtime polls the lock, not the socket's event stream. The
-    // tokio Mutex hands the permit to the first waiter, which keeps it until it
-    // is polled; a stream parked behind a slow socket send would hold the
-    // handle, and stall every writer of the perspective.
-    tokio::spawn(async move {
-        let handle = instance.persisted.lock().await;
-        handle.is_unowned() || handle.is_owned_by(&did)
-    })
-    .await
-    .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod perspective_is_owned_by_tests {
-    //! `perspective_is_owned_by` fails closed for a perspective that is not
-    //! registered (CodeRabbit #903), and waits for a perspective whose handle
-    //! a write holds instead of failing: a failed `try_lock` here used to drop
-    //! live-query updates published during writes.
-    use super::{matches_perspective_owner, perspective_is_owned_by, query_updates};
-    use crate::agent::capabilities::perspective_query_capability;
-    use crate::agent::session::{Principal, Session};
-    use crate::agent::AgentContext;
-    use crate::perspectives::perspective_instance::PerspectiveInstance;
-    use crate::perspectives::{register_perspective, unregister_perspective};
-    use crate::types::PerspectiveHandle;
-    use futures::StreamExt;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    fn operator() -> Arc<Session> {
-        Arc::new(Session::for_test(Principal::Operator))
-    }
-
-    // #1284: a live query update reaches a socket only if its session may query the
-    // perspective, as `perspective.subscribeQuery` requires. An app acts as the main agent,
-    // so the owner check alone let an app read the updates of every perspective.
-    #[tokio::test]
-    async fn a_live_query_update_needs_the_capability_to_query_its_perspective() {
-        let app = Arc::new(
-            Session::for_test(Principal::Agent(AgentContext::main_agent()))
-                .with_caps(vec![perspective_query_capability(vec!["readable".into()])])
-                .with_token_id("live-query-app"),
-        );
-        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        let mut stream = Box::pin(query_updates(rx, None, app));
-        for uuid in ["other", "readable"] {
-            let update = serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" });
-            tx.send(update.to_string()).unwrap();
-        }
-        let sent = stream.next().await.unwrap().expect("the readable update");
-        let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
-        assert_eq!(sent["perspectiveUuid"], "readable");
-    }
-
-    #[tokio::test]
-    async fn missing_perspective_returns_false_for_any_did() {
-        for did in ["did:key:alice", "", "did:key:admin"] {
-            assert!(!perspective_is_owned_by("not-a-registered-perspective", did).await);
-        }
-    }
-
-    #[tokio::test]
-    async fn waits_for_a_handle_a_write_holds() {
-        let handle = PerspectiveHandle::new_with_owner("owned".into(), "did:key:alice".into());
-        let uuid = handle.uuid.clone();
-        let instance = PerspectiveInstance::new(handle, None);
-        let persisted = instance.persisted.clone();
-        register_perspective(uuid.clone(), instance);
-
-        let write = persisted.lock().await;
-        let update =
-            serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" }).to_string();
-        let check =
-            tokio::spawn(
-                async move { matches_perspective_owner(&update, Some("did:key:alice")).await },
-            );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            !check.is_finished(),
-            "the check waits for the write, it does not fail"
-        );
-        drop(write);
-        assert!(
-            check.await.unwrap(),
-            "the owner receives the update once the write ends"
-        );
-
-        assert!(!perspective_is_owned_by(&uuid, "did:key:bob").await);
-        unregister_perspective(&uuid);
-    }
-
-    #[tokio::test]
-    async fn a_parked_check_does_not_keep_the_handle_after_the_write() {
-        let handle = PerspectiveHandle::new_with_owner("p".into(), "did:key:alice".into());
-        let uuid = handle.uuid.clone();
-        let instance = PerspectiveInstance::new(handle, None);
-        let persisted = instance.persisted.clone();
-        register_perspective(uuid.clone(), instance);
-        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        let mut stream = Box::pin(query_updates(rx, Some("did:key:bob".into()), operator()));
-        let write = persisted.lock().await;
-        let update = serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" });
-        tx.send(update.to_string()).unwrap();
-        assert!(futures::poll!(stream.next()).is_pending());
-        drop(write);
-        // The socket loop is busy in `socket.send` and does not poll the stream.
-        let next_writer = tokio::time::timeout(Duration::from_millis(300), persisted.lock()).await;
-        let parked = next_writer.is_err();
-        drop(next_writer);
-        unregister_perspective(&uuid);
-        assert!(
-            !parked,
-            "a parked ownership check holds the handle after the write released it"
-        );
-    }
-
-    // An update goes out as its fields beside `type`; one that is not JSON still reaches the
-    // stream, which ends there if the token stopped working, but sends nothing.
-    #[tokio::test]
-    async fn a_live_query_update_goes_out_as_its_fields_beside_its_type() {
-        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
-        let mut stream = Box::pin(query_updates(rx, None, operator()));
-        let update = r#"{"perspectiveUuid":"p","uuid":"p","subscriptionId":"s","result":"[]"}"#;
-        tx.send(update.into()).unwrap();
-        tx.send("not json".into()).unwrap();
-        let sent = stream.next().await.unwrap().expect("a JSON update is sent");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&sent).unwrap(),
-            serde_json::json!({
-                "type": "query-subscription-update",
-                "perspectiveUuid": "p",
-                "uuid": "p",
-                "subscriptionId": "s",
-                "result": "[]",
-            })
-        );
-        assert_eq!(stream.next().await, Some(None));
-    }
-}
-
-#[cfg(test)]
-mod events_socket_message_tests {
-    use crate::api::event_interest::SharedInterest;
-    use serde_json::json;
-
-    #[test]
-    fn events_socket_watch_round_trip_carries_the_request_id() {
-        let interest: SharedInterest = Default::default();
-        let reply = |text: &str| -> serde_json::Value {
-            serde_json::from_str(&super::client_message_reply(text, &interest).unwrap()).unwrap()
-        };
-        assert_eq!(
-            reply(r#"{"id":"w1","type":"events.watch","params":{"agent-updated":null}}"#),
-            json!({ "id": "w1", "result": true })
-        );
-        assert_eq!(
-            reply(r#"{"id":"u1","type":"events.unwatch"}"#),
-            json!({ "id": "u1", "result": true })
-        );
-        assert_eq!(reply(r#"{"type":"ping"}"#), json!({ "type": "pong" }));
-        assert!(super::client_message_reply(r#"{"type":"other"}"#, &interest).is_none());
-        assert!(super::client_message_reply("not json", &interest).is_none());
-    }
-}
-
 #[cfg(test)]
 mod app_approval_event_tests {
     use super::*;
+    use crate::agent::capabilities::*;
     use crate::agent::session::Principal;
     use crate::agent::AgentContext;
     use crate::events::Audience;
@@ -693,10 +282,12 @@ mod app_approval_event_tests {
     // An app token used to reach every connected socket through `apps-changed`, including
     // sockets that never authenticated. The real publishers of an app approval: the
     // capability request (`exception-occurred`) and the approval (`apps-changed`) reach the
-    // sessions that may approve apps (`AGENT_PERMIT`, the rule of `can_approve_apps`), and no
-    // other session.
+    // sessions of the agent the app asks for (the main agent here) that hold `AGENT_PERMIT`,
+    // and no other session: not one of the main agent without it, nor another agent's that
+    // holds it. An app that may approve but not subscribe to exceptions still gets the
+    // request (it went to every approver before, through the exception subscription only).
     #[tokio::test]
-    async fn app_approval_events_reach_only_sessions_that_can_approve_apps() {
+    async fn app_approval_events_reach_exactly_the_main_agents_sessions_holding_agent_permit() {
         use crate::agent::capabilities::{
             generate_capability_token, permit_capability, request_capability, AuthInfo,
             AuthInfoExtended,
@@ -705,16 +296,27 @@ mod app_approval_event_tests {
         crate::test_utils::setup_agent();
         crate::test_utils::use_test_apps_file();
         let operator = Arc::new(Session::for_test(Principal::Operator));
-        let user = Session::for_test(Principal::Agent(AgentContext::for_user_email(
-            "approval.user@example.org".into(),
-        )))
-        .with_caps(crate::agent::capabilities::get_user_default_capabilities())
-        .with_did("did:key:approval-user")
-        .with_token_id("approval-user");
-        // A socket that never authenticated gets no stream and is no approver.
+        let user = |name: &str, caps: Vec<Capability>| {
+            Session::for_test(Principal::Agent(AgentContext::for_user_email(format!(
+                "approval.{name}@example.org"
+            ))))
+            .with_caps(caps)
+            .with_did(&format!("did:key:approval-{name}"))
+            .with_token_id(&format!("approval-{name}"))
+        };
+        let mut user_caps = get_user_default_capabilities();
+        let user_session = user("user", user_caps.clone());
+        user_caps.push(AGENT_PERMIT_CAPABILITY.clone());
+        let permitting_user = user("permitting-user", user_caps);
+        // A socket that never authenticated gets no stream and acts as no agent.
         let anonymous = Session::for_test(Principal::Anonymous);
         assert!(!anonymous.is_authenticated());
-        assert!(!anonymous.in_audience(&Audience::Approvers));
+        assert_eq!(anonymous.acts_as_did(), None);
+        let permit_only = vec![
+            AGENT_PERMIT_CAPABILITY.clone(),
+            AGENT_READ_CAPABILITY.clone(),
+        ];
+        assert!(!app("x", permit_only.clone()).may(&RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY));
         let sessions = [
             ("operator", operator, true),
             (
@@ -722,12 +324,14 @@ mod app_approval_event_tests {
                 app("permit", vec![ALL_CAPABILITY.clone()]),
                 true,
             ),
+            ("permit-only app", app("permit-only", permit_only), true),
             (
                 "reader app",
                 app("reader", vec![AGENT_READ_CAPABILITY.clone()]),
                 false,
             ),
-            ("user", Arc::new(user), false),
+            ("user", Arc::new(user_session), false),
+            ("permitting user", Arc::new(permitting_user), false),
         ];
         let mut streams = Vec::new();
         for (name, session, approver) in sessions {
@@ -760,9 +364,12 @@ mod app_approval_event_tests {
             serde_json::json!({ "fence": request_id }),
         ));
 
-        let approval: BTreeSet<String> = [events::EXCEPTION_OCCURRED, events::APPS_CHANGED_EVENT]
-            .map(String::from)
-            .into();
+        let approval: BTreeSet<String> = [
+            Topic::ExceptionOccurred.as_str(),
+            Topic::AppsChanged.as_str(),
+        ]
+        .map(String::from)
+        .into();
         for (name, approver, stream) in &mut streams {
             let expected = if *approver {
                 approval.clone()
@@ -836,10 +443,9 @@ mod typed_wire_tests {
     /// clients' wire format.
     fn string_path(topic: Topic, raw_json: &str) -> String {
         let nested = [
-            (events::AGENT_STATUS_CHANGED, "agent"),
-            (events::AGENT_UPDATED, "agent"),
-            (events::MESSAGE_RECEIVED, "message"),
-            (events::EXCEPTION_OCCURRED, "exception"),
+            ("agent-status-changed", "agent"),
+            ("agent-updated", "agent"),
+            ("exception-occurred", "exception"),
         ];
         let name = topic.as_str();
         if let Some((_, key)) = nested.iter().find(|(n, _)| *n == name) {
@@ -880,14 +486,42 @@ mod typed_wire_tests {
             }
         }
     }
+
+    // A live query update was the last string topic: its message was the update's fields
+    // beside `type`. The typed event sends the same message.
+    #[test]
+    fn a_live_query_update_goes_out_as_its_fields_beside_its_type() {
+        let update = crate::types::PerspectiveQuerySubscriptionFilter {
+            perspective_uuid: "p".into(),
+            uuid: "p".into(),
+            subscription_id: "s".into(),
+            result: "[]".into(),
+        };
+        let event = Event::new(
+            Topic::PerspectiveQuerySubscription,
+            Audience::Dids(vec![]),
+            &update,
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&wire_message(&event)).unwrap(),
+            json!({
+                "type": "query-subscription-update",
+                "perspectiveUuid": "p",
+                "uuid": "p",
+                "subscriptionId": "s",
+                "result": "[]",
+            })
+        );
+    }
 }
 
 #[cfg(test)]
 mod audience_matrix_tests {
     //! Plan 20 §8.2: for each (topic, audience) case, which sessions' event streams deliver
     //! the event. Each case goes through `Session::may_receive` and through a real stream
-    //! from `build_event_stream_for`. A new topic or audience adds its cases here.
+    //! from `build_event_stream`. A new topic or audience adds its cases here.
     use super::*;
+    use crate::agent::capabilities::*;
     use crate::agent::session::Principal;
     use crate::agent::AgentContext;
     use crate::events::Audience;
@@ -947,13 +581,18 @@ mod audience_matrix_tests {
 
     type Stream = Pin<Box<dyn futures::stream::Stream<Item = String> + Send>>;
 
-    /// A matrix case: its name, topic, audience, the perspective it is about and the sessions
-    /// that receive it.
-    type Case<'a> = (String, Topic, Audience, Option<&'a str>, Vec<&'a str>);
+    /// A matrix case: its name, the event as its publisher builds it (its payload is replaced
+    /// by the case's tag) and the sessions that receive it.
+    type Case<'a> = (String, Event, Vec<&'a str>);
+
+    /// An event of `topic` for `audience`, about no perspective.
+    fn event(topic: Topic, audience: Audience) -> Event {
+        Event::new(topic, audience, serde_json::Value::Null)
+    }
 
     /// A stream that watches every event, as a socket that asked for all of them.
     async fn open(session: Arc<Session>) -> Stream {
-        build_event_stream_for(session, event_interest::watching_all(), None).await
+        build_event_stream(session, event_interest::watching_all()).await
     }
 
     /// The streams of `sessions`, by name. An anonymous session gets no stream on a real
@@ -1018,13 +657,13 @@ mod audience_matrix_tests {
         let readers = ["operator", "app", "permit app", "user A", "user B"];
         // The operator and apps act as the main agent; these hold the topics' capabilities.
         let main_agent = ["operator", "app", "permit app"];
+        // The main agent's sessions that hold AGENT_PERMIT.
         let approvers = ["operator", "permit app"];
-        let mut cases: Vec<(String, Topic, Audience, Vec<&str>)> = vec![
+        let mut cases: Vec<Case> = vec![
             // The AI app holds AI_READ; the P reader and anonymous callers do not.
             (
                 "everyone".into(),
-                Topic::AiModelLoadingStatus,
-                Audience::Everyone,
+                event(Topic::AiModelLoadingStatus, Audience::Everyone),
                 vec![
                     "operator",
                     "app",
@@ -1034,47 +673,42 @@ mod audience_matrix_tests {
                     "AI app",
                 ],
             ),
-            // A message names the agent it is for; the AI app may not read messages.
+            // An app approval for the main agent: its sessions that may approve apps.
             (
-                "message-to-main".into(),
-                Topic::RuntimeMessageReceived,
-                Audience::Dids(vec![main.clone()]),
-                main_agent.to_vec(),
-            ),
-            (
-                "operator".into(),
-                Topic::AppsChanged,
-                Audience::Operator,
-                vec!["operator"],
-            ),
-            (
-                "approvers".into(),
-                Topic::AppsChanged,
-                Audience::Approvers,
+                "apps-changed-of-main".into(),
+                Event::apps_changed(&Default::default(), &AgentContext::main_agent()),
                 approvers.to_vec(),
+            ),
+            // One for user A: A's sessions holding AGENT_PERMIT, which a user token lacks yet.
+            (
+                "apps-changed-of-a".into(),
+                event(Topic::AppsChanged, Audience::Dids(vec![A.into()])),
+                vec![],
             ),
             (
                 "user-a".into(),
-                Topic::LinkAdded,
-                Audience::Dids(vec![A.into()]),
+                event(Topic::LinkAdded, Audience::Dids(vec![A.into()])),
                 vec!["user A"],
             ),
             (
                 "users-a-b".into(),
-                Topic::NeighbourhoodSignal,
-                Audience::Dids(vec![A.into(), B.into()]),
+                event(
+                    Topic::NeighbourhoodSignal,
+                    Audience::Dids(vec![A.into(), B.into()]),
+                ),
                 vec!["user A", "user B"],
             ),
             (
                 "main-agent".into(),
-                Topic::PerspectiveUpdated,
-                Audience::Dids(vec![main.clone()]),
+                event(
+                    Topic::PerspectiveUpdated,
+                    Audience::Dids(vec![main.clone()]),
+                ),
                 main_agent.to_vec(),
             ),
             (
                 "no-did".into(),
-                Topic::AgentUpdated,
-                Audience::Dids(vec![]),
+                event(Topic::AgentUpdated, Audience::Dids(vec![])),
                 vec![],
             ),
         ];
@@ -1087,7 +721,8 @@ mod audience_matrix_tests {
                 ("main-agent", Some(main.as_str()), main_agent.to_vec()),
                 ("no-agent-yet", None, readers.to_vec()),
             ] {
-                cases.push((format!("{topic}-{name}"), topic, Audience::agent(did), to));
+                let e = event(topic, Audience::agent(did));
+                cases.push((format!("{topic}-{name}"), e, to));
             }
         }
         // A triggered notification goes to its owner (`matches_notification_owner` before),
@@ -1097,8 +732,8 @@ mod audience_matrix_tests {
             ("main", &main, main_agent.to_vec()),
         ] {
             let audience = Audience::Dids(vec![owner.to_string()]);
-            let topic = Topic::RuntimeNotificationTriggered;
-            cases.push((format!("notification-of-{name}"), topic, audience, to));
+            let e = event(Topic::RuntimeNotificationTriggered, audience);
+            cases.push((format!("notification-of-{name}"), e, to));
         }
         // A signal goes to the recipient it names. One without a recipient goes to each
         // owner (`telepresence_signals_reach_their_recipients`), never to every session.
@@ -1111,75 +746,65 @@ mod audience_matrix_tests {
                 Default::default(),
                 recipient,
             );
-            let topic = Topic::NeighbourhoodSignal;
-            cases.push((format!("signal-{name}"), topic, signal.audience, to));
+            let e = event(Topic::NeighbourhoodSignal, signal.audience);
+            cases.push((format!("signal-{name}"), e, to));
         }
         // Transcription text goes to the stream's owner (`matches_transcription_user` before).
         // The AI app acts as the main agent and may transcribe.
         let mut main_and_ai = main_agent.to_vec();
         main_and_ai.push("AI app");
         for (name, did, to) in [("a", A, vec!["user A"]), ("main", &main, main_and_ai)] {
-            let audience = Audience::agent(Some(did));
-            cases.push((
-                format!("transcription-of-{name}"),
-                Topic::AiTranscriptionText,
-                audience,
-                to,
-            ));
+            let e = event(Topic::AiTranscriptionText, Audience::agent(Some(did)));
+            cases.push((format!("transcription-of-{name}"), e, to));
         }
-        // The auto-processor topics: the operator always, and the pass owner or the
-        // perspective's readers (`matches_auto_processor_*` before; their `is_admin` case is
-        // the operator).
+        // The auto-processor topics: a pass to its owner when the owner reads the perspective,
+        // a neighbourhood state to the perspective's readers. The operator acts as the main
+        // agent: it no longer sees another agent's pass (`OperatorAndDids` before), whose
+        // debug events carry that agent's LLM prompts.
         {
             use crate::perspectives::auto_processor::events::{
-                neighbourhood_state_audience, pass_audience, Readers,
+                neighbourhood_state_audience, pass_audience,
             };
-            let owners =
-                |dids: &[&str]| Readers::Owners(dids.iter().map(|d| d.to_string()).collect());
+            let owners = |dids: &[&str]| dids.iter().map(|d| d.to_string()).collect::<Vec<_>>();
             let pass = Topic::AutoProcessorEvent;
             let state = Topic::AutoProcessorNeighbourhoodState;
             for (name, topic, audience, to) in [
                 (
                     "pass-of-a",
                     pass,
-                    pass_audience(owners(&[A]), Some(A)),
-                    vec!["operator", "user A"],
+                    pass_audience(&owners(&[A]), Some(A)),
+                    vec!["user A"],
                 ),
                 (
                     "pass-of-a-on-b",
                     pass,
-                    pass_audience(owners(&[B]), Some(A)),
-                    vec!["operator"],
+                    pass_audience(&owners(&[B]), Some(A)),
+                    vec![],
                 ),
                 (
                     "pass-of-main",
                     pass,
-                    pass_audience(owners(&[&main]), Some(&main)),
+                    pass_audience(&owners(&[&main]), Some(&main)),
                     main_agent.to_vec(),
                 ),
                 (
                     "pass-of-a-unowned",
                     pass,
-                    pass_audience(owners(&[&main]), Some(A)),
-                    vec!["operator"],
+                    pass_audience(&owners(&[&main]), Some(A)),
+                    vec![],
                 ),
-                (
-                    "pass-unknown",
-                    pass,
-                    pass_audience(Readers::Unknown, Some(A)),
-                    vec!["operator"],
-                ),
+                ("pass-unknown", pass, pass_audience(&[], Some(A)), vec![]),
                 (
                     "pass-no-owner",
                     pass,
-                    pass_audience(owners(&[&main]), None),
-                    vec!["operator"],
+                    pass_audience(&owners(&[&main]), None),
+                    vec![],
                 ),
                 (
                     "state-of-a-b",
                     state,
                     neighbourhood_state_audience(owners(&[A, B])),
-                    vec!["operator", "user A", "user B"],
+                    vec!["user A", "user B"],
                 ),
                 // An unowned perspective's reader is the main agent (it reached every
                 // authenticated session, users included, before one helper chose them).
@@ -1192,16 +817,16 @@ mod audience_matrix_tests {
                 (
                     "state-unknown",
                     state,
-                    neighbourhood_state_audience(Readers::Unknown),
-                    vec!["operator"],
+                    neighbourhood_state_audience(vec![]),
+                    vec![],
                 ),
             ] {
-                cases.push((name.to_string(), topic, audience, to));
+                cases.push((name.to_string(), event(topic, audience), to));
             }
         }
-        // Exceptions go per type (`exception_visible` before): approval requests to the
-        // sessions that may approve apps, the others to every session that may subscribe to
-        // exceptions.
+        // Exceptions go per type (`exception_visible` before): approval requests to the main
+        // agent's sessions that may approve apps (whatever their exception subscription), the
+        // others to every session that may subscribe to exceptions.
         {
             use crate::types::{ExceptionInfo, ExceptionType::*};
             for kind in [
@@ -1220,22 +845,18 @@ mod audience_matrix_tests {
                     r#type: kind,
                     ..Default::default()
                 };
-                let audience = Event::exception(&info).audience;
-                cases.push((name, Topic::ExceptionOccurred, audience, to));
+                cases.push((name, Event::exception(&info), to));
             }
         }
         // Perspective topics name the perspective's owners, or the main agent for an
         // unowned perspective: the rule the string filters applied before (`owner` equal to
-        // the session's DID, which is the main agent's for the operator and apps).
+        // the session's DID, which is the main agent's for the operator and apps). Each goes
+        // out once, to all of them.
         let handle = |owners: Option<Vec<&str>>| crate::types::PerspectiveHandle {
             owners: owners.map(|o| o.into_iter().map(String::from).collect()),
             ..Default::default()
         };
-        // Sync-state goes out once, to all owners. The other perspective and link topics go
-        // out once per owner, each to that owner (`publish_to_each_owner`).
         let recipients = crate::perspectives::event_recipients;
-        let owned_by_a = handle(Some(vec![A]));
-        let owned_by_a_b = handle(Some(vec![A, B]));
         for topic in [
             Topic::PerspectiveAdded,
             Topic::PerspectiveRemoved,
@@ -1244,29 +865,20 @@ mod audience_matrix_tests {
             Topic::LinkAdded,
             Topic::LinkRemoved,
             Topic::LinkUpdated,
+            Topic::PerspectiveQuerySubscription,
         ] {
-            let mut perspectives = vec![
-                ("owned-by-a", owned_by_a.clone(), vec!["user A"]),
+            for (name, perspective, to) in [
+                ("owned-by-a", handle(Some(vec![A])), vec!["user A"]),
+                (
+                    "owned-by-a-b",
+                    handle(Some(vec![A, B])),
+                    vec!["user A", "user B"],
+                ),
                 ("unowned", handle(None), main_agent.to_vec()),
                 ("no-owners", handle(Some(vec![])), main_agent.to_vec()),
-            ];
-            if topic == Topic::PerspectiveSyncStateChange {
-                perspectives.push((
-                    "owned-by-a-b",
-                    owned_by_a_b.clone(),
-                    vec!["user A", "user B"],
-                ));
-            }
-            for (name, perspective, to) in perspectives {
-                let audience = Audience::Dids(recipients(&perspective));
-                cases.push((format!("{topic}-{name}"), topic, audience, to));
-            }
-            if topic != Topic::PerspectiveSyncStateChange {
-                // A's and B's copies of one event on a perspective they share.
-                for (owner, to, copy) in [(A, "user A", "a"), (B, "user B", "b")] {
-                    let audience = Audience::Dids(vec![owner.into()]);
-                    cases.push((format!("{topic}-{copy}-of-a-b"), topic, audience, vec![to]));
-                }
+            ] {
+                let e = event(topic, Audience::Dids(recipients(&perspective)));
+                cases.push((format!("{topic}-{name}"), e, to));
             }
         }
         // #1284: an app acts as the main agent, so the audience alone gave it every event of
@@ -1274,10 +886,6 @@ mod audience_matrix_tests {
         // capability that reads it on that perspective: the P reader gets the main agent's
         // events on P only, the AI app none. The rows above carry no perspective, so they
         // need the capability on every perspective (`*`), which the P reader lacks.
-        let mut cases: Vec<Case> = cases
-            .into_iter()
-            .map(|(case, topic, audience, to)| (case, topic, audience, None, to))
-            .collect();
         let mut main_and_p_reader = main_agent.to_vec();
         main_and_p_reader.push("P reader");
         let to_main = || Audience::Dids(vec![main.clone()]);
@@ -1298,16 +906,15 @@ mod audience_matrix_tests {
                 ("main-on-q", to_main(), Q, main_agent.to_vec()),
                 ("a-on-p", Audience::Dids(vec![A.into()]), P, vec!["user A"]),
             ] {
-                cases.push((format!("{topic}-{name}"), topic, audience, Some(on), to));
+                let e = event(topic, audience).for_perspective(on);
+                cases.push((format!("{topic}-{name}"), e, to));
             }
         }
         // A signal needs the neighbourhood capability: the P reader may query P, not read
         // its neighbourhood.
         cases.push((
             "signal-main-on-p".into(),
-            Topic::NeighbourhoodSignal,
-            to_main(),
-            Some(P),
+            event(Topic::NeighbourhoodSignal, to_main()).for_perspective(P),
             main_agent.to_vec(),
         ));
 
@@ -1316,11 +923,11 @@ mod audience_matrix_tests {
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
         let pubsub = get_global_pubsub().await;
-        for (case, topic, audience, perspective, to) in &cases {
-            let mut event = Event::new(*topic, audience.clone(), json_case(&tag(case)));
-            if let Some(perspective) = perspective {
-                event = event.for_perspective(*perspective);
-            }
+        for (case, event, to) in &cases {
+            let event = Event {
+                payload: json_case(&tag(case)),
+                ..event.clone()
+            };
             for (name, session) in &sessions {
                 let expected = to.contains(name);
                 assert_eq!(session.may_receive(&event), expected, "{case} → {name}");
@@ -1345,14 +952,14 @@ mod audience_matrix_tests {
         serde_json::json!({ "case": tag })
     }
 
-    /// `(type, perspectiveUuid, owner)` of each message `stream` delivers for a perspective of
-    /// this run, sorted, until the `fence` perspective's message. `owner` is empty when the
-    /// message has none.
+    /// `(type, perspectiveUuid)` of each message `stream` delivers for a perspective of this
+    /// run, sorted, until the `fence` perspective's message. No message names an `owner`: an
+    /// event goes out once to all of its recipients (D9).
     async fn perspective_events(
         stream: &mut Stream,
         run: &str,
         fence: &str,
-    ) -> Vec<(String, String, String)> {
+    ) -> Vec<(String, String)> {
         let mut got = Vec::new();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -1365,8 +972,8 @@ mod audience_matrix_tests {
                 if uuid == fence {
                     return;
                 }
-                let text = |key: &str| v[key].as_str().unwrap_or_default().to_string();
-                got.push((text("type"), uuid.to_string(), text("owner")));
+                assert!(v.get("owner").is_none(), "a message names its owner: {msg}");
+                got.push((v["type"].as_str().unwrap().to_string(), uuid.to_string()));
             }
         })
         .await
@@ -1375,11 +982,11 @@ mod audience_matrix_tests {
         got
     }
 
-    /// The sorted `(type, perspectiveUuid, owner)` triples of `types` for one perspective.
-    fn expect(types: &[&str], uuid: &str, owner: &str) -> Vec<(String, String, String)> {
-        let mut list: Vec<_> = types
+    /// The sorted `(type, perspectiveUuid)` pairs of `topics` for one perspective.
+    fn expect(topics: &[Topic], uuid: &str) -> Vec<(String, String)> {
+        let mut list: Vec<_> = topics
             .iter()
-            .map(|t| (t.to_string(), uuid.to_string(), owner.to_string()))
+            .map(|t| (t.as_str().to_string(), uuid.to_string()))
             .collect();
         list.sort();
         list
@@ -1439,34 +1046,31 @@ mod audience_matrix_tests {
         let fence = format!("{run}-fence");
         publish_fence(serde_json::json!({ "perspectiveUuid": fence })).await;
 
-        // Sync-state carries no `owner`; the others name the receiving owner.
-        let lifecycle = |uuid: &str, owner: &str| {
-            let owned = [
-                events::PERSPECTIVE_ADDED,
-                events::PERSPECTIVE_UPDATED,
-                events::PERSPECTIVE_UPDATED,
-                events::PERSPECTIVE_REMOVED,
+        let lifecycle = |uuid: &str| {
+            use Topic::*;
+            let topics = [
+                PerspectiveAdded,
+                PerspectiveUpdated,
+                PerspectiveUpdated,
+                PerspectiveSyncStateChange,
+                PerspectiveRemoved,
             ];
-            let mut list = expect(&owned, uuid, owner);
-            list.extend(expect(&[events::SYNC_STATE_CHANGE], uuid, ""));
-            list.sort();
-            list
+            expect(&topics, uuid)
         };
-        let main = crate::agent::did();
         for (name, stream) in &mut streams {
             let got = perspective_events(stream, &run, &fence).await;
             let expected = match *name {
-                "user A" => lifecycle(&owned.uuid, A),
-                "operator" | "app" | "permit app" => lifecycle(&unowned.uuid, &main),
+                "user A" => lifecycle(&owned.uuid),
+                "operator" | "app" | "permit app" => lifecycle(&unowned.uuid),
                 _ => vec![],
             };
             assert_eq!(got, expected, "{name}");
         }
     }
 
-    // Link events go out once per owner, each to that owner with the owner's DID in `owner`.
-    // Each owner's stream gets its own copy of each change exactly once, never a co-owner's
-    // copy; nobody else gets any.
+    // D9: a link change is one event to all of the perspective's owners, not one per owner
+    // naming that owner in `owner`. Each owner's stream gets each change exactly once, with
+    // no `owner` field; nobody else gets any.
     #[tokio::test]
     async fn each_link_event_reaches_each_owner_exactly_once() {
         use crate::agent::AgentContext;
@@ -1478,6 +1082,7 @@ mod audience_matrix_tests {
         crate::prolog_service::init_prolog_service().await;
         let sessions = sessions();
         let mut streams = open_all(&sessions).await;
+        let mut published = get_global_pubsub().await.subscribe_events();
 
         let run = uuid::Uuid::new_v4().to_string();
         let perspective = |name: &str, owners: Option<Vec<String>>| {
@@ -1512,20 +1117,27 @@ mod audience_matrix_tests {
         let fence = format!("{run}-fence");
         publish_fence(serde_json::json!({ "perspectiveUuid": fence })).await;
 
-        let changes = [
-            events::LINK_ADDED,
-            events::LINK_UPDATED,
-            events::LINK_REMOVED,
-        ];
+        let changes = [Topic::LinkAdded, Topic::LinkUpdated, Topic::LinkRemoved];
         let shared_uuid = format!("{run}-owned-by-a-b");
         let unowned_uuid = format!("{run}-unowned");
-        let main_did = crate::agent::did();
+        // One event per change on the shared perspective, to both owners.
+        let mut shared_events = Vec::new();
+        while let Ok(event) = published.try_recv() {
+            if event.perspective.as_deref() == Some(shared_uuid.as_str()) {
+                shared_events.push((event.topic, event.audience.clone()));
+            }
+        }
+        let both = Audience::Dids(vec![A.into(), B.into()]);
+        assert_eq!(
+            shared_events,
+            changes.map(|t| (t, both.clone())).to_vec(),
+            "one event per change"
+        );
         for (name, stream) in &mut streams {
             let got = perspective_events(stream, &run, &fence).await;
             let expected = match *name {
-                "user A" => expect(&changes, &shared_uuid, A),
-                "user B" => expect(&changes, &shared_uuid, B),
-                "operator" | "app" | "permit app" => expect(&changes, &unowned_uuid, &main_did),
+                "user A" | "user B" => expect(&changes, &shared_uuid),
+                "operator" | "app" | "permit app" => expect(&changes, &unowned_uuid),
                 _ => vec![],
             };
             assert_eq!(got, expected, "{name}");
@@ -1595,7 +1207,11 @@ mod audience_matrix_tests {
 
         // `(type, perspectiveUuid, recipient)` triples.
         let signal = |p: &crate::types::PerspectiveHandle, to: &str| {
-            (events::SIGNAL.to_string(), p.uuid.clone(), to.to_string())
+            (
+                Topic::NeighbourhoodSignal.to_string(),
+                p.uuid.clone(),
+                to.to_string(),
+            )
         };
         for (name, stream) in &mut streams {
             let mut got = Vec::new();
@@ -1639,6 +1255,81 @@ mod audience_matrix_tests {
         }
     }
 
+    // `send_signal` and `send_broadcast` deliver to this executor's own agents in a
+    // neighbourhood through `event_recipients`: a signal to an owner is published here (once,
+    // naming it), a signal to anyone else goes to the link language; a broadcast reaches every
+    // owner but the main agent when the main agent sent it. Without a link language the
+    // remote part fails after the local delivery.
+    #[tokio::test]
+    async fn signals_to_this_executors_agents_are_delivered_here() {
+        use crate::perspectives::perspective_instance::PerspectiveInstance;
+        use crate::types::{PerspectiveExpression, PerspectiveHandle};
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = crate::agent::did();
+        let run = uuid::Uuid::new_v4().to_string();
+        let neighbourhood = |name: &str, owners: Vec<String>| {
+            PerspectiveInstance::new(
+                PerspectiveHandle {
+                    uuid: format!("{run}-{name}"),
+                    shared_url: Some(format!("neighbourhood://{run}-{name}")),
+                    owners: Some(owners),
+                    ..Default::default()
+                },
+                None,
+            )
+        };
+        let shared = neighbourhood("a-b", vec![A.into(), B.into()]);
+        let with_main = neighbourhood("a-main", vec![A.into(), main.clone()]);
+        let mut published = get_global_pubsub().await.subscribe_events();
+        let mut signals = || {
+            let mut got = Vec::new();
+            while let Ok(event) = published.try_recv() {
+                let ours = event
+                    .perspective
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with(&run));
+                if event.topic == Topic::NeighbourhoodSignal && ours {
+                    let recipient = event.payload["recipient"].as_str().unwrap().to_string();
+                    got.push((event.audience.clone(), recipient));
+                }
+            }
+            got.sort_by(|x: &(Audience, String), y| x.1.cmp(&y.1));
+            got
+        };
+        let to = |did: &str| (Audience::Dids(vec![did.to_string()]), did.to_string());
+
+        shared
+            .send_signal(B.into(), PerspectiveExpression::default())
+            .await
+            .expect("an owner's signal is delivered here");
+        assert_eq!(signals(), vec![to(B)]);
+        assert!(shared
+            .send_signal("did:key:remote".into(), PerspectiveExpression::default())
+            .await
+            .is_err());
+        assert_eq!(
+            signals(),
+            vec![],
+            "a remote agent's signal goes to the link language"
+        );
+
+        let from_main = PerspectiveExpression {
+            author: main.clone(),
+            ..Default::default()
+        };
+        let _ = with_main.send_broadcast(from_main, false).await;
+        assert_eq!(signals(), vec![to(A)], "the main agent sent it");
+        let from_a = PerspectiveExpression {
+            author: A.into(),
+            ..Default::default()
+        };
+        let _ = with_main.send_broadcast(from_a, false).await;
+        let mut expected = vec![to(A), to(&main)];
+        expected.sort_by(|x, y| x.1.cmp(&y.1));
+        assert_eq!(signals(), expected);
+    }
+
     // A user's hosting info goes to that user and to the sessions that act as the main agent:
     // `matches_hosting_user` let every session without a user email through, and a user's
     // session only for its own email. Other users get nothing.
@@ -1674,11 +1365,13 @@ mod audience_matrix_tests {
         }
     }
 
-    // The auto-processor's publishers: a pass's step signal reaches the operator and the pass
-    // owner where the owner may read the perspective; a neighbourhood-state event reaches the
-    // operator and every reader. The readers come from the registered handle at publish.
+    // The auto-processor's publishers: a pass's step signal reaches the pass owner where the
+    // owner may read the perspective; a neighbourhood-state event reaches every reader. The
+    // readers come from the registered handle at publish. The operator acts as the main
+    // agent: it gets the main agent's passes, not a managed agent's (it got every pass
+    // before, LLM prompts in debug events included).
     #[tokio::test]
-    async fn auto_processor_events_reach_the_operator_and_the_readers() {
+    async fn auto_processor_events_reach_the_pass_owner_and_the_readers() {
         use crate::perspectives::auto_processor::events::{
             emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
             AutoProcessorStep, NeighbourhoodPhase,
@@ -1754,18 +1447,7 @@ mod audience_matrix_tests {
             .await
             .unwrap_or_else(|_| panic!("{name}: the fence never arrived; got {got:?}"));
             let expected: &[&str] = match *name {
-                "operator" => &[
-                    "pass-of-a",
-                    "pass-of-b",
-                    "pass-of-main",
-                    "pass-of-a-on-unowned",
-                    "pass-unknown",
-                    "pass-no-owner",
-                    "state-of-a-b",
-                    "state-unowned",
-                    "state-unknown",
-                ],
-                "app" | "permit app" => &["pass-of-main", "state-unowned"],
+                "operator" | "app" | "permit app" => &["pass-of-main", "state-unowned"],
                 // Users may not read an unowned perspective, so they get none of its events.
                 "user A" => &["pass-of-a", "state-of-a-b"],
                 "user B" => &["state-of-a-b"],
@@ -1787,7 +1469,7 @@ mod audience_matrix_tests {
             &serde_json::json!({ "link-added": ["wanted"] }),
             &interest,
         );
-        let mut stream: Stream = build_event_stream_for(session, interest, None).await;
+        let mut stream: Stream = build_event_stream(session, interest).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
@@ -1837,11 +1519,84 @@ mod audience_matrix_tests {
             .expect("the stream must answer, not hang");
         assert!(next.is_none(), "an expired session got {next:?}");
     }
+
+    // A live query update is a typed event to the perspective's owners (`event_recipients`,
+    // read when it is published) that may query it. Only they get it, and delivering it takes
+    // no lock: an owner gets it while a write holds the perspective's handle. Each socket
+    // used to wait for the handle to check ownership (`perspective_is_owned_by`), and to let
+    // every update of an unowned perspective through to every session, users included.
+    #[tokio::test]
+    async fn a_live_query_update_reaches_the_owners_that_may_query_it_without_a_lock() {
+        use crate::perspectives::perspective_instance::PerspectiveInstance;
+        use crate::perspectives::{register_perspective, unregister_perspective};
+        use crate::types::PerspectiveHandle;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let sessions = sessions();
+        let mut streams = open_all(&sessions).await;
+
+        let run = uuid::Uuid::new_v4().to_string();
+        let tag = |case: &str| format!("{run}:{case}");
+        let mut perspectives = Vec::new();
+        for (name, owners) in [("owned-by-a", Some(vec![A.to_string()])), ("unowned", None)] {
+            let handle = PerspectiveHandle {
+                uuid: format!("{run}-{name}"),
+                owners,
+                ..Default::default()
+            };
+            let instance = PerspectiveInstance::new(handle.clone(), None);
+            register_perspective(handle.uuid, instance.clone());
+            perspectives.push((name, instance));
+        }
+        let mut published = get_global_pubsub().await.subscribe_events();
+        let mut writes = Vec::new();
+        for (name, instance) in &perspectives {
+            instance
+                .send_subscription_update(tag(name), "[]".into(), None)
+                .await;
+            // A write holds the handle from here until every stream has its updates.
+            writes.push(instance.persisted.lock().await);
+        }
+        // The updates go out from a task; the fence goes after them.
+        let mut updates = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while updates < perspectives.len() {
+                let event = published.recv().await.unwrap();
+                let ours = event
+                    .perspective
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with(&run));
+                if event.topic == Topic::PerspectiveQuerySubscription && ours {
+                    updates += 1;
+                }
+            }
+        })
+        .await
+        .expect("the updates go out while a write holds the handle");
+        let fence = tag("fence");
+        publish_fence(json_case(&fence)).await;
+
+        for (name, stream) in &mut streams {
+            let got = delivered(stream, &run, &fence).await;
+            let expected: BTreeSet<String> = match *name {
+                "user A" => [tag("owned-by-a")].into(),
+                // The AI app and the P reader may not query these perspectives.
+                "operator" | "app" | "permit app" => [tag("unowned")].into(),
+                _ => BTreeSet::new(),
+            };
+            assert_eq!(got, expected, "{name}");
+        }
+        drop(writes);
+        for (_, instance) in &perspectives {
+            unregister_perspective(&instance.uuid);
+        }
+    }
 }
 
 #[cfg(test)]
 mod token_expiry_tests {
     use super::*;
+    use crate::agent::capabilities::*;
     use crate::agent::session::Principal;
     use crate::agent::AgentContext;
     use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
@@ -1894,15 +1649,15 @@ mod token_expiry_tests {
 
 #[cfg(test)]
 mod event_spec_tests {
-    use super::{event_specs, events};
-    use crate::events::Topic;
+    use super::event_specs;
+    use crate::events::{Audience, Event, Topic};
     use crate::types::*;
     use std::collections::BTreeSet;
 
     #[test]
     fn every_emitted_event_has_exactly_one_spec() {
-        let specs: Vec<&str> = event_specs().iter().map(|s| s.name).collect();
-        let unique: BTreeSet<&str> = specs.iter().copied().collect();
+        let specs: Vec<Topic> = event_specs().iter().map(|s| s.topic).collect();
+        let unique: BTreeSet<&str> = specs.iter().map(|t| t.as_str()).collect();
         assert_eq!(unique.len(), specs.len(), "duplicate spec: {specs:?}");
         let topics = Topic::ALL.map(Topic::as_str);
         assert_eq!(unique, topics.into_iter().collect::<BTreeSet<_>>());
@@ -1910,10 +1665,56 @@ mod event_spec_tests {
 
     #[test]
     fn nested_payloads_keep_their_wire_key() {
-        let wire = super::wrap_event_nested(events::AGENT_UPDATED, "agent", r#"{"did":"d"}"#);
+        let wire =
+            super::wrap_event_nested(Topic::AgentUpdated.as_str(), "agent", r#"{"did":"d"}"#);
         let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(v["agent"]["did"], "d");
         let _: super::AgentUpdatedEvent = serde_json::from_value(v).unwrap();
+    }
+
+    // `events.watch` narrows by `Event::perspective`, which comes from the payload's
+    // `perspectiveUuid`. A payload of a topic that is about no perspective carries none, so a
+    // watch that lists perspectives never takes it (`EventSpec::scoped` is false).
+    #[test]
+    fn unscoped_payloads_name_no_perspective() {
+        let payloads = [
+            (
+                Topic::AgentStatusChanged,
+                serde_json::to_value(AgentStatus::default()),
+            ),
+            (Topic::AgentUpdated, serde_json::to_value(Agent::default())),
+            (Topic::AppsChanged, serde_json::to_value(Apps::default())),
+            (
+                Topic::HostingUserInfoChanged,
+                serde_json::to_value(HostingUserInfo::default()),
+            ),
+            (
+                Topic::ExceptionOccurred,
+                serde_json::to_value(ExceptionInfo::default()),
+            ),
+            (
+                Topic::AiTranscriptionText,
+                serde_json::to_value(TranscriptionTextFilter::default()),
+            ),
+            (
+                Topic::AiModelLoadingStatus,
+                serde_json::to_value(AIModelLoadingStatus::default()),
+            ),
+        ];
+        let unscoped: BTreeSet<&str> = event_specs()
+            .iter()
+            .filter(|s| !s.scoped)
+            .map(|s| s.topic.as_str())
+            .collect();
+        assert_eq!(
+            unscoped,
+            payloads.iter().map(|(t, _)| t.as_str()).collect(),
+            "every unscoped topic has a payload here"
+        );
+        for (topic, payload) in payloads {
+            let event = Event::new(topic, Audience::Everyone, payload.unwrap());
+            assert_eq!(event.perspective, None, "{topic}");
+        }
     }
 
     /// Serializes a scoped payload's publish struct and checks the flat
@@ -1939,12 +1740,10 @@ mod event_spec_tests {
             uuid_of(PerspectiveWithOwner {
                 perspective_uuid: p(),
                 perspective: handle.clone(),
-                owner: "o".into(),
             }),
             uuid_of(PerspectiveRemovedWithOwner {
                 perspective_uuid: p(),
                 uuid: p(),
-                owner: "o".into(),
             }),
             uuid_of(PerspectiveStateFilter {
                 perspective_uuid: p(),
@@ -1992,31 +1791,5 @@ mod event_spec_tests {
             )),
         ];
         assert!(scoped.iter().all(|u| u == "p"));
-    }
-}
-
-#[cfg(test)]
-mod perspective_owner_filter_tests {
-    use super::matches_perspective_owner;
-
-    #[tokio::test]
-    async fn filters_by_the_flat_perspective_uuid() {
-        let unknown = r#"{"perspectiveUuid":"no-such-perspective","notification":{}}"#;
-        assert!(
-            !matches_perspective_owner(unknown, Some("did:x")).await,
-            "an unverifiable owner fails closed"
-        );
-        assert!(
-            matches_perspective_owner(unknown, None).await,
-            "single-user"
-        );
-        assert!(
-            !matches_perspective_owner(r#"{"notification":{}}"#, Some("did:x")).await,
-            "an event without perspectiveUuid fails closed"
-        );
-        assert!(
-            !matches_perspective_owner("not json", Some("did:x")).await,
-            "an event that does not parse fails closed"
-        );
     }
 }

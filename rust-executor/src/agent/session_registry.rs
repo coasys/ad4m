@@ -1,7 +1,7 @@
 //! Open connections by token id, so a revocation closes them at once.
 //!
-//! Each socket that serves an app or a user session (the RPC socket, the events socket and
-//! the realtime socket) registers while it is open. [`super::revoked::revoke`] ends every
+//! Each socket that serves an app or a user session (the RPC socket and the realtime
+//! socket) registers while it is open. [`super::revoked::revoke`] ends every
 //! connection of the revoked id: the connection's own close path then closes it with 1008,
 //! as it does when a check fails. Without the registry an open socket closed only on its
 //! next request or event.

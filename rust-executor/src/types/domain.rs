@@ -873,23 +873,21 @@ pub struct NeighbourhoodSignalFilter {
     pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
-// Wrapper for link events with owner filtering (for multi-user isolation)
+/// `link-added` / `link-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveLinkWithOwner {
     pub perspective_uuid: String,
     pub link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
-// Wrapper for link updated events with owner filtering (for multi-user isolation)
+/// `link-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveLinkUpdatedWithOwner {
     pub perspective_uuid: String,
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
-    pub owner: String, // DID of the owner
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -1043,22 +1041,20 @@ where
     }
 }
 
-// Wrapper type for perspective subscriptions that includes owner for filtering
+/// `perspective-added` / `perspective-updated`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveWithOwner {
     pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
-    pub owner: String,
 }
 
-// Wrapper type for perspective removed subscriptions that includes owner for filtering
+/// `perspective-removed`: one event to all of the perspective's owners.
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveRemovedWithOwner {
     pub perspective_uuid: String,
     pub uuid: String,
-    pub owner: String,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]

@@ -568,8 +568,7 @@ mod tests {
         json!({
             "type": "link-added",
             "perspectiveUuid": uuid,
-            "link": { "author": "did:key:z6Mkxyz", "timestamp": "t", "data": { "source": "s", "predicate": "p", "target": "tgt" } },
-            "owner": "did:key:z6Mkxyz"
+            "link": { "author": "did:key:z6Mkxyz", "timestamp": "t", "data": { "source": "s", "predicate": "p", "target": "tgt" } }
         })
     }
 

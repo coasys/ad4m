@@ -22,8 +22,8 @@ use std::sync::OnceLock;
 
 use super::capabilities::{
     anonymous_capabilities, capability_matches, decode_jwt, is_admin_credential_token_on,
-    require_capability, Capability, ListenerReach, AGENT_AUTH_CAPABILITY, AGENT_PERMIT_CAPABILITY,
-    ALL_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
+    require_capability, Capability, ListenerReach, AGENT_AUTH_CAPABILITY, ALL_CAPABILITY,
+    TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::revoked::{RevokedSet, SessionCutoffs};
 use super::{did_for_context, AgentContext, AgentService};
@@ -299,28 +299,20 @@ impl Session {
     }
 
     /// Whether this session's event stream delivers `event`: the session is in the event's
-    /// audience and holds the capability that reads the topic's data (#1284). A grant on the
-    /// main agent acts as the main agent, so the audience alone let it read every
-    /// perspective the main agent owns. The stream itself ends once [`Session::check`] fails.
+    /// audience (everyone, or it acts as one of the DIDs) and holds the event's capability
+    /// (#1284): the one that reads the topic's data, or AGENT_PERMIT for an approval request.
+    /// A grant on the main agent acts as the main agent, so the audience alone let it read
+    /// every perspective the main agent owns. The operator acts as the main agent too: it gets
+    /// the main agent's events, not every agent's. The stream itself ends once
+    /// [`Session::check`] fails.
     pub(crate) fn may_receive(&self, event: &Event) -> bool {
-        self.in_audience(&event.audience)
-            && self.may(&event.topic.capability(event.perspective.as_deref()))
-    }
-
-    /// Whether this session is one of `audience`, whatever its capabilities.
-    pub(crate) fn in_audience(&self, audience: &Audience) -> bool {
-        match audience {
+        let in_audience = match &event.audience {
             Audience::Everyone => true,
-            Audience::Operator => self.is_operator(),
-            Audience::Approvers => self.may(&AGENT_PERMIT_CAPABILITY),
-            Audience::Dids(dids) => self.acts_as_one_of(dids),
-            Audience::OperatorAndDids(dids) => self.is_operator() || self.acts_as_one_of(dids),
-        }
-    }
-
-    fn acts_as_one_of(&self, dids: &[String]) -> bool {
-        self.acts_as_did()
-            .is_some_and(|did| dids.iter().any(|d| d == did))
+            Audience::Dids(dids) => self
+                .acts_as_did()
+                .is_some_and(|did| dids.iter().any(|d| d == did)),
+        };
+        in_audience && self.may(&event.capability)
     }
 }
 
