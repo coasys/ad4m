@@ -60,6 +60,7 @@ const connect = JSON.parse(fs.readFileSync('connect/package.json', 'utf8'))
 console.log("Connect version: " + connect.version + " -> " + VERSION)
 connect.version = VERSION
 connect.devDependencies["@coasys/ad4m"] = "workspace:" + VERSION
+connect.peerDependencies["@coasys/ad4m"] = "workspace:" + VERSION
 fs.writeFileSync('connect/package.json', JSON.stringify(connect, null, 2) + '\n')
 
 const core = JSON.parse(fs.readFileSync('core/package.json', 'utf8'))
