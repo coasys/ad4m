@@ -44,9 +44,9 @@ describe("Multi-User Simple integration tests", () => {
     before(async () => {
         [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
         registerPorts([apiPort, hcAdminPort, hcAppPort]);
-        if (!fs.existsSync(appDataPath)) {
-            fs.mkdirSync(appDataPath, { recursive: true });
-        }
+        // rmSync with force also clears a dangling symlink, which existsSync reports as missing.
+        fs.rmSync(appDataPath, { recursive: true, force: true });
+        fs.mkdirSync(appDataPath, { recursive: true });
 
         // Start local Holochain services
         let localServices = await runHcLocalServices();
