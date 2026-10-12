@@ -1609,6 +1609,65 @@ mod capability_request_tests {
         assert!(!app.session.may(&ALL_CAPABILITY));
     }
 
+    // An approver grants no more than it holds itself. An app that a user approved with
+    // AGENT_PERMIT may approve requests on the user's agent, but only within its own grant:
+    // it cannot mint itself (or another app) a grant with all of the user's capabilities.
+    // The same holds on the main agent for an app that holds AGENT_PERMIT without `*`.
+    #[tokio::test]
+    async fn an_approver_grants_no_more_than_it_holds() {
+        setup();
+        let (alice_email, alice) = user("attenuate-alice");
+        let narrow = [AGENT_READ_CAPABILITY.clone(), AGENT_PERMIT_CAPABILITY.clone()];
+        let first = request(Some(&alice_email), &narrow).await;
+        let code = permit(alice, &first, &narrow).await.unwrap();
+        let app = open(&redeem(&first, &code).await.unwrap());
+
+        let second = request(Some(&alice_email), &[ALL_CAPABILITY.clone()]).await;
+        let code = permit(app, &second, &[ALL_CAPABILITY.clone()])
+            .await
+            .expect("an app with AGENT_PERMIT on alice's agent approves her requests");
+        let child = open(&redeem(&second, &code).await.unwrap());
+        assert!(
+            !child.session.may(&PERSPECTIVE_CREATE_CAPABILITY),
+            "an app holding READ and PERMIT minted a grant with every user capability"
+        );
+        assert!(child.session.may(&AGENT_READ_CAPABILITY));
+
+        let for_main = request(None, &[ALL_CAPABILITY.clone()]).await;
+        let code = permit(
+            main_agent_app(vec![AGENT_PERMIT_CAPABILITY.clone()]),
+            &for_main,
+            &[ALL_CAPABILITY.clone()],
+        )
+        .await
+        .unwrap();
+        let child = open(&redeem(&for_main, &code).await.unwrap());
+        assert!(
+            !child.session.may(&AGENT_LOCK_CAPABILITY),
+            "an app holding only PERMIT minted a `*` grant on the main agent"
+        );
+    }
+
+    // `user.revokeAllSessions` ends every login and app of the user. An app the user
+    // approved acts as the user's agent, but with only what it was granted: one without
+    // AGENT_UPDATE (which `agent.revokeToken` and `agent.removeApp` need) cannot end them.
+    #[tokio::test]
+    async fn a_read_only_app_cannot_end_its_users_sessions() {
+        setup();
+        let (alice_email, alice) = user("ras-alice");
+        let read = [AGENT_READ_CAPABILITY.clone()];
+        let id = request(Some(&alice_email), &read).await;
+        let code = permit(alice.clone(), &id, &read).await.unwrap();
+        let app = open(&redeem(&id, &code).await.unwrap());
+        let refused = call("user.revokeAllSessions", json!({}), app.clone()).await;
+        assert!(matches!(refused, Err((403, _))), "{refused:?}");
+        assert!(
+            alice.session.check().is_ok(),
+            "a read-only app revoked alice's login"
+        );
+        assert!(app.session.check().is_ok());
+    }
+
     #[tokio::test]
     async fn a_request_for_an_unknown_did_is_refused() {
         setup();
