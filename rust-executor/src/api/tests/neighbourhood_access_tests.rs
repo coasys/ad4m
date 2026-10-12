@@ -1,6 +1,6 @@
 //! `neighbourhood.*` methods on a multi-user executor.
 //!
-//! The perspective that holds a neighbourhood decides who may use it (`Guard::Perspective`),
+//! The perspective that holds a neighbourhood decides who may use it (`Guard::Owns`),
 //! by the rule the `perspective.*` methods apply. Knowing another user's perspective uuid must
 //! not let a user publish it (which would add them to its owners), inject signals into it, or
 //! read who is online in it.
@@ -58,7 +58,7 @@ async fn a_user_cannot_signal_or_broadcast_through_another_users_neighbourhood()
         executor
             .call("neighbourhood.sendSignal", signal.clone(), &bob.session)
             .await,
-        403,
+        404,
         "bob signalling alice through her neighbourhood",
     );
     let broadcast = json!({ "uuid": hers.uuid, "payload": empty_perspective() });
@@ -70,7 +70,7 @@ async fn a_user_cannot_signal_or_broadcast_through_another_users_neighbourhood()
                 &bob.session,
             )
             .await,
-        403,
+        404,
         "bob broadcasting into alice's neighbourhood",
     );
     assert_eq!(
@@ -123,7 +123,7 @@ async fn a_user_cannot_set_status_or_read_presence_in_another_users_neighbourhoo
     ] {
         expect_code(
             executor.call(op, params, &bob.session).await,
-            403,
+            404,
             &format!("bob calling {op} on alice's neighbourhood"),
         );
     }
@@ -184,7 +184,7 @@ async fn a_user_cannot_publish_another_users_perspective_and_become_its_owner() 
         executor
             .call("neighbourhood.publish", publish.clone(), &bob.session)
             .await,
-        403,
+        404,
         "bob publishing alice's perspective",
     );
     assert_eq!(hers.owners().await, Some(vec![alice.did.clone()]));
@@ -217,7 +217,7 @@ async fn a_user_cannot_list_members_of_the_main_agents_unowned_neighbourhood() {
         executor
             .call("neighbourhood.otherAgents", uuid.clone(), &bob.session)
             .await,
-        403,
+        404,
         "bob listing members of the main agent's neighbourhood",
     );
     let err = expect_code(
@@ -287,7 +287,7 @@ async fn operators_and_apps_keep_their_perspective_access() {
                 &app,
             )
             .await,
-        403,
+        404,
         "a main-agent app probing a user's neighbourhood",
     );
 }

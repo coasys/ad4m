@@ -81,9 +81,11 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   handler runs. A handler calls `ctx.require(&X_CAPABILITY)` only for a check its guard does not
   make; `Session::may` answers the same question as a `bool`. MCP tools check via
   `Ad4mMcpHandler::get_*_perspective`.
-- **Per-user objects**: a user session reaches only its own. Perspectives are owned by DID
-  (`owners`), AI tasks by email (`tasks.user_email`). A WS method that names one declares
-  `Guard::Perspective` or `Guard::Task` (`api/AGENTS.md`). The capability check alone does not
+- **Per-agent objects**: a session reaches only its agent's; the operator reaches all.
+  Perspectives are owned by DID (`owners`; none = the main agent), AI tasks by email
+  (`tasks.user_email`; none = the main agent), grants and capability requests by their agent.
+  A WS method that names one declares `Guard::Owns` (`api/AGENTS.md`); missing and not yours
+  are both 404. The capability check alone does not
   separate users: user tokens hold wildcard perspective, neighbourhood and AI capabilities.
 - **Capability requests** (#1399, executor side): `agent.requestCapability(authInfo, agent?)`
   names a target agent (a managed user's email; absent = the main agent) and records a

@@ -3,8 +3,9 @@
 //! one without.
 //!
 //! The walk reads the guards from the handler map, so a method that gets a guard is covered
-//! without a new test. The rows are per guard kind ([`resource_rows`], [`perspective_rows`],
-//! [`task_rows`]).
+//! without a new test. The rows are per guard kind ([`resource_rows`]) and, for
+//! `Guard::Owns`, per kind of resource ([`perspective_rows`], [`agent_resource_rows`] for AI
+//! tasks, grants and capability requests).
 //! A method whose params need more than the perspective's uuid adds an entry to
 //! [`EXTRA_PARAMS`]; without it the walk reports the method's 400. The walk calls
 //! [`HandlerMap::admit`], the dispatcher's steps before the handler, so no handler runs.
@@ -16,29 +17,33 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use ts_rs::TS;
 
+use crate::agent::capabilities::pending::PendingRequests;
 use crate::agent::capabilities::{
-    anonymous_capabilities_when, perspective_query_capability, Capability, AGENT_AUTH_CAPABILITY,
-    AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY, AI_PROMPT_CAPABILITY,
+    anonymous_capabilities_when, capability_matches, perspective_query_capability, AuthInfo,
+    Capability, AGENT_AUTH_CAPABILITY, AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY,
+    AI_PROMPT_CAPABILITY,
 };
-use crate::agent::AgentService;
-use crate::api::guards::{uuid_param, Admission, Guard};
+use crate::agent::grants::{Grants, LiveGrant};
+use crate::agent::{AgentContext, AgentService};
+use crate::api::guards::{uuid_param, Guard, Owner};
 use crate::api::perspectives_ws::PerspectiveUuidParams;
 use crate::api::ws_handler::{build_handler_map, HandlerMap, NoParams, WsRpcError};
 use crate::types::{PerspectiveHandle, RequestContext};
 
 const USER_EMAIL: &str = "user@example.org";
 const USER_DID: &str = "did:key:matrix-user";
+const OTHER_USER_EMAIL: &str = "other@example.org";
 const OTHER_USER_DID: &str = "did:key:matrix-other-user";
 
 /// Who calls.
 #[derive(Clone, Copy, Debug)]
 enum Caller {
     Operator,
-    /// An app token without the guard's capability.
+    /// An app token on the main agent without the guard's capability.
     AppWithout,
-    /// An app token with the guard's capability.
+    /// An app token on the main agent with the guard's capability.
     AppWith,
-    /// A user session with the guard's capability.
+    /// A user session (a grant on the user's managed agent) with the guard's capability.
     User,
     /// A second user with the guard's capability.
     OtherUser,
@@ -46,98 +51,82 @@ enum Caller {
     Anonymous,
 }
 
-/// The perspective a call names.
+/// The resource a call names.
 #[derive(Clone, Copy, Debug)]
 enum Target {
-    /// Owned by [`Caller::User`].
+    /// Owned by [`Caller::User`]'s agent.
     UsersOwn,
     /// Owned by the executor's main agent.
     MainAgents,
+    /// A perspective without owners (the main agent's).
     Unowned,
-    /// No such perspective.
+    /// No such resource.
     Missing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Expect {
     Granted,
+    /// 403: the capability, or the rule of `Operator` and `Executor`.
     Forbidden,
-    /// 403 from the owner rule: `null` for a method that hides existence.
-    NotOwner,
-    /// 404: `null` for a method that hides existence.
+    /// 404: missing or not the caller's (D6).
     NotFound,
 }
 
-/// Guards that name no resource: who passes each. A guard that names one has its own rows
-/// ([`perspective_rows`], [`task_rows`]).
-fn resource_rows(guard: &Guard) -> &'static [(Caller, Expect)] {
+/// Whether a caller without a token holds `cap` (multi-user mode on: the widest set).
+fn anonymous_holds(cap: &Capability) -> bool {
+    capability_matches(&anonymous_capabilities_when(true), cap)
+}
+
+/// Guards that name no resource: who passes each. `Guard::Owns` has its own rows
+/// ([`owns_rows`]).
+fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
     use Caller::*;
     use Expect::*;
     match guard {
-        Guard::Open => &[
+        Guard::Open => vec![
             (Operator, Granted),
             (AppWithout, Granted),
             (AppWith, Granted),
             (User, Granted),
             (Anonymous, Granted),
         ],
-        Guard::Operator => &[
+        Guard::Operator => vec![
             (Operator, Granted),
             (AppWithout, Forbidden),
             (AppWith, Forbidden),
             (User, Forbidden),
             (Anonymous, Forbidden),
         ],
-        Guard::Anonymous(_) => &[
+        // The capability alone: a caller without a token passes exactly when the anonymous
+        // set covers it.
+        Guard::Cap(cap) => vec![
             (Operator, Granted),
             (AppWithout, Forbidden),
             (AppWith, Granted),
             (User, Granted),
-            (Anonymous, Granted),
+            (OtherUser, Granted),
+            (
+                Anonymous,
+                if anonymous_holds(cap) {
+                    Granted
+                } else {
+                    Forbidden
+                },
+            ),
         ],
-        Guard::Executor(_) => &[
+        Guard::Executor(_) => vec![
             (Operator, Granted),
             (AppWithout, Forbidden),
             (AppWith, Granted),
             (User, Forbidden),
             (Anonymous, Forbidden),
         ],
-        Guard::SelfAgent(_) => &[
-            (Operator, Granted),
-            (AppWithout, Forbidden),
-            (AppWith, Granted),
-            (User, Granted),
-            (Anonymous, Forbidden),
-        ],
-        Guard::Perspective { .. } | Guard::Task { .. } => &[],
+        Guard::Owns { .. } => vec![],
     }
 }
 
-/// `Guard::Task`: who reaches which AI task. For tasks, [`Target::UsersOwn`] is a task of
-/// [`Caller::User`] and [`Target::MainAgents`] an operator task (no user). A user's refusal
-/// is 404, so it cannot learn which task ids exist; the operator and apps reach every task,
-/// and the handler answers for a missing one.
-fn task_rows() -> &'static [(Caller, Target, Expect)] {
-    use Caller::*;
-    use Expect::*;
-    use Target::*;
-    &[
-        (Operator, UsersOwn, Granted),
-        (Operator, MainAgents, Granted),
-        (Operator, Missing, Granted),
-        (AppWithout, UsersOwn, Forbidden),
-        (AppWith, UsersOwn, Granted),
-        (AppWith, MainAgents, Granted),
-        (AppWith, Missing, Granted),
-        (User, UsersOwn, Granted),
-        (User, MainAgents, NotFound),
-        (User, Missing, NotFound),
-        (OtherUser, UsersOwn, NotFound),
-        (Anonymous, UsersOwn, Forbidden),
-    ]
-}
-
-/// `Guard::Perspective`: who reaches which perspective.
+/// `Guard::Owns` on a perspective: who reaches which.
 fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
     use Caller::*;
     use Expect::*;
@@ -150,13 +139,48 @@ fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
         (AppWithout, Unowned, Forbidden),
         (AppWith, Unowned, Granted),
         (AppWith, MainAgents, Granted),
-        (AppWith, UsersOwn, NotOwner),
+        (AppWith, UsersOwn, NotFound),
+        (AppWith, Missing, NotFound),
         (User, UsersOwn, Granted),
-        (User, Unowned, NotOwner),
-        (User, MainAgents, NotOwner),
-        (OtherUser, UsersOwn, NotOwner),
+        (User, Unowned, NotFound),
+        (User, MainAgents, NotFound),
+        (User, Missing, NotFound),
+        (OtherUser, UsersOwn, NotFound),
         (Anonymous, Unowned, Forbidden),
     ]
+}
+
+/// `Guard::Owns` on an AI task, a grant or a capability request: [`Target::UsersOwn`] is
+/// [`Caller::User`]'s agent's, [`Target::MainAgents`] the main agent's (a task without a
+/// user, a grant or request on the main agent). The operator reaches all; every other session
+/// its agent's; the rest is 404, missing or not.
+fn agent_resource_rows() -> &'static [(Caller, Target, Expect)] {
+    use Caller::*;
+    use Expect::*;
+    use Target::*;
+    &[
+        (Operator, UsersOwn, Granted),
+        (Operator, MainAgents, Granted),
+        (Operator, Missing, NotFound),
+        (AppWithout, MainAgents, Forbidden),
+        (AppWith, MainAgents, Granted),
+        (AppWith, UsersOwn, NotFound),
+        (AppWith, Missing, NotFound),
+        (User, UsersOwn, Granted),
+        (User, MainAgents, NotFound),
+        (User, Missing, NotFound),
+        (OtherUser, UsersOwn, NotFound),
+        (OtherUser, MainAgents, NotFound),
+        (Anonymous, UsersOwn, Forbidden),
+    ]
+}
+
+/// The rows of `Guard::Owns` on `owner`.
+fn owns_rows(owner: Owner) -> &'static [(Caller, Target, Expect)] {
+    match owner {
+        Owner::Perspective => perspective_rows(),
+        Owner::Task | Owner::Grant | Owner::Request => agent_resource_rows(),
+    }
 }
 
 /// A method and the params it needs beyond the perspective's uuid.
@@ -167,7 +191,7 @@ type ExtraParams = (&'static str, fn() -> Value);
 const TARGET: &str = "@target";
 
 const EXTRA_PARAMS: &[ExtraParams] = &[
-    ("test.perspective.hidden", || json!({ "note": "fixture" })),
+    ("test.perspective.or_null", || json!({ "note": "fixture" })),
     ("test.task", || json!({ "taskId": TARGET })),
     // Guard::Executor. `admit` runs no handler, so no path, key or proof here is used.
     ("agent.generate", || json!({ "passphrase": "p" })),
@@ -176,8 +200,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "agent.unlock",
         || json!({ "passphrase": "p", "holochain": false }),
     ),
-    ("agent.removeApp", || json!({ "id": "request-id" })),
-    ("agent.revokeToken", || json!({ "token": "request-id" })),
+    ("agent.removeApp", || json!({ "id": TARGET })),
+    ("agent.revokeToken", || json!({ "token": TARGET })),
     ("agent.addTrustedAgents", || json!({ "agents": [] })),
     ("agent.byDid", || json!({ "did": "did:key:z6Mk" })),
     (
@@ -189,7 +213,11 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "agent.requestCapability",
         || json!({ "authInfo": { "appName": "a", "appDesc": "d", "appDomain": "example.org" } }),
     ),
-    ("agent.permitCapability", || json!({ "auth": "{}" })),
+    // The request id sits in a JSON string: [`params`] replaces `TARGET` inside strings too.
+    ("agent.permitCapability", || {
+        let auth = json!({ "requestId": TARGET, "auth": { "appName": "a", "appDesc": "d" } });
+        json!({ "auth": auth.to_string() })
+    }),
     (
         "agent.generateJwt",
         || json!({ "requestId": "request-id", "rand": "123" }),
@@ -384,7 +412,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "email": "new@example.org", "amount": 1.0 }),
     ),
     ("perspective.create", || json!({ "name": "n" })),
-    // Guard::Perspective: the params beside `uuid`.
+    // Guard::Owns on a perspective: the params beside `uuid`.
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
     ("perspective.subscribeQuery", || json!({ "query": "true." })),
@@ -556,12 +584,13 @@ fn entanglement_proof() -> Value {
     })
 }
 
-/// The params of `method` naming `target` (a perspective or a task): as the `uuid` param of a
-/// perspective method, and wherever its [`EXTRA_PARAMS`] put [`TARGET`].
+/// The params of `method` naming `target` (the id of a perspective, task, grant or request):
+/// as the `uuid` param of a perspective method, and wherever its [`EXTRA_PARAMS`] put
+/// [`TARGET`], inside a string too.
 fn params(method: &str, target: Option<&str>, uuid_param: bool) -> Value {
     fn replace(value: &mut Value, target: &str) {
         match value {
-            Value::String(s) if s == TARGET => *s = target.to_string(),
+            Value::String(s) if s.contains(TARGET) => *s = s.replace(TARGET, target),
             Value::Array(items) => items.iter_mut().for_each(|v| replace(v, target)),
             Value::Object(fields) => fields.values_mut().for_each(|v| replace(v, target)),
             _ => {}
@@ -590,7 +619,7 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
         Caller::AppWith => RequestContext::app_for_test(caps()),
         Caller::User => RequestContext::user_for_test(USER_EMAIL, USER_DID, caps()),
         Caller::OtherUser => {
-            RequestContext::user_for_test("other@example.org", OTHER_USER_DID, caps())
+            RequestContext::user_for_test(OTHER_USER_EMAIL, OTHER_USER_DID, caps())
         }
         // The most a caller without a token holds: multi-user mode on adds signing up,
         // logging in and verifying an email.
@@ -601,17 +630,18 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
     }
 }
 
-fn outcome(result: Result<Admission, WsRpcError>) -> Result<Admission, u16> {
-    result.map_err(|e| e.code)
-}
-
-/// The perspectives and AI tasks the rows name; [`World::remove`] removes them.
+/// The perspectives, AI tasks, grants and capability requests the rows name;
+/// [`World::remove`] removes them.
 struct World {
     users_own: String,
     main_agents: String,
     unowned: String,
     users_task: String,
     operators_task: String,
+    users_grant: String,
+    main_agents_grant: String,
+    users_request: String,
+    main_agents_request: String,
 }
 
 impl World {
@@ -640,12 +670,34 @@ impl World {
             })
             .expect("a task")
         };
+        let grant = |name: &str, agent: AgentContext| {
+            let id = format!("{run}-{name}-grant");
+            Grants::global()
+                .insert(LiveGrant::for_test(&id, agent, u64::MAX))
+                .expect("a grant");
+            id
+        };
+        let request = |name: &str, agent: AgentContext| {
+            let id = format!("{run}-{name}-request");
+            PendingRequests::global().request(
+                id.clone(),
+                AuthInfo::default(),
+                agent,
+                crate::agent::grants::now(),
+            );
+            id
+        };
+        let user = || AgentContext::for_user_email(USER_EMAIL.to_string());
         let world = World {
             users_own: format!("{run}-users-own"),
             main_agents: format!("{run}-main-agents"),
             unowned: format!("{run}-unowned"),
             users_task: task(Some(USER_EMAIL)),
             operators_task: task(None),
+            users_grant: grant("users", user()),
+            main_agents_grant: grant("main", AgentContext::main_agent()),
+            users_request: request("users", user()),
+            main_agents_request: request("main", AgentContext::main_agent()),
         };
         for (uuid, owners) in [
             (&world.users_own, Some(vec![USER_DID.to_string()])),
@@ -664,22 +716,20 @@ impl World {
         world
     }
 
-    fn uuid(&self, target: Target) -> String {
+    /// The id of the `owner` resource a row names.
+    fn id(&self, owner: Owner, target: Target) -> String {
+        let missing = || format!("{}-missing", uuid::Uuid::new_v4());
+        let (users, main_agents) = match owner {
+            Owner::Perspective => (&self.users_own, &self.main_agents),
+            Owner::Task => (&self.users_task, &self.operators_task),
+            Owner::Grant => (&self.users_grant, &self.main_agents_grant),
+            Owner::Request => (&self.users_request, &self.main_agents_request),
+        };
         match target {
-            Target::UsersOwn => self.users_own.clone(),
-            Target::MainAgents => self.main_agents.clone(),
-            Target::Unowned => self.unowned.clone(),
-            Target::Missing => format!("{}-missing", uuid::Uuid::new_v4()),
-        }
-    }
-
-    /// The task a task row names: the user's own, or an operator task for
-    /// [`Target::MainAgents`].
-    fn task(&self, target: Target) -> String {
-        match target {
-            Target::UsersOwn => self.users_task.clone(),
-            Target::MainAgents => self.operators_task.clone(),
-            Target::Unowned | Target::Missing => format!("{}-missing", uuid::Uuid::new_v4()),
+            Target::UsersOwn => users.clone(),
+            Target::MainAgents => main_agents.clone(),
+            Target::Unowned if owner == Owner::Perspective => self.unowned.clone(),
+            Target::Unowned | Target::Missing => missing(),
         }
     }
 
@@ -690,7 +740,16 @@ impl World {
         for task in [self.users_task, self.operators_task] {
             crate::db::Ad4mDb::with_global_instance(|db| db.remove_task(task)).unwrap();
         }
+        // A test may have removed one already.
+        for grant in [&self.users_grant, &self.main_agents_grant] {
+            let _ = Grants::global().remove(&Grants::global().find(grant));
+        }
     }
+}
+
+/// The 403/404 of a refusal.
+fn outcome(result: Result<(), WsRpcError>) -> Result<(), u16> {
+    result.map_err(|e| e.code)
 }
 
 /// Every row of every method in `map` whose answer differs from the row's (and every method
@@ -703,42 +762,28 @@ async fn walk(map: &HandlerMap, world: &World) -> (Vec<String>, usize) {
             failures.push(format!("{method} has no guard"));
             continue;
         };
-        let hides = matches!(
-            guard,
-            Guard::Perspective {
-                hides_existence: true,
-                ..
-            }
-        );
         let mut cases: Vec<(Caller, Option<String>, Expect)> = resource_rows(guard)
-            .iter()
-            .map(|&(caller, expect)| (caller, None, expect))
+            .into_iter()
+            .map(|(caller, expect)| (caller, None, expect))
             .collect();
-        let names_perspective = matches!(guard, Guard::Perspective { .. });
-        if names_perspective {
+        let owner = match guard {
+            Guard::Owns { owner, .. } => Some(*owner),
+            _ => None,
+        };
+        if let Some(owner) = owner {
             cases.extend(
-                perspective_rows()
-                    .iter()
-                    .map(|&(caller, target, expect)| (caller, Some(world.uuid(target)), expect)),
-            );
-        }
-        if matches!(guard, Guard::Task { .. }) {
-            cases.extend(
-                task_rows()
-                    .iter()
-                    .map(|&(caller, target, expect)| (caller, Some(world.task(target)), expect)),
+                owns_rows(owner).iter().map(|&(caller, target, expect)| {
+                    (caller, Some(world.id(owner, target)), expect)
+                }),
             );
         }
         for (caller, target, expect) in cases {
             let ctx = context(caller, guard.capability("*"));
-            let params = params(method, target.as_deref(), names_perspective);
+            let params = params(method, target.as_deref(), owner == Some(Owner::Perspective));
             let got = outcome(map.admit(method, &params, &ctx).await);
             let want = match expect {
-                Expect::Granted => Ok(Admission::Granted),
+                Expect::Granted => Ok(()),
                 Expect::Forbidden => Err(403),
-                Expect::NotOwner if hides => Ok(Admission::Hidden),
-                Expect::NotOwner => Err(403),
-                Expect::NotFound if hides => Ok(Admission::Hidden),
                 Expect::NotFound => Err(404),
             };
             checked += 1;
@@ -781,29 +826,27 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
         }
     };
     map.method::<NoParams, bool>("test.anonymous", handler())
-        .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
     map.method::<NoParams, bool>("test.executor", handler())
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
-    map.method::<NoParams, bool>("test.self", handler())
+    map.method::<NoParams, bool>("test.cap", handler())
         .read()
-        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<PerspectiveUuidParams, bool>("test.perspective", handler())
-        .guard(Guard::Perspective {
-            capability: perspective_query_capability,
-            uuid: uuid_param,
-            hides_existence: false,
-        });
-    map.method::<UuidAndNote, Option<bool>>("test.perspective.hidden", handler())
+        .guard(Guard::perspective(perspective_query_capability));
+    map.method::<UuidAndNote, Option<bool>>("test.perspective.or_null", handler())
         .read()
-        .guard(Guard::Perspective {
-            capability: perspective_query_capability,
-            uuid: uuid_param,
-            hides_existence: true,
+        .or_null()
+        .guard(Guard::Owns {
+            cap: perspective_query_capability,
+            id: uuid_param,
+            owner: Owner::Perspective,
         });
     map.method::<TaskIdParams, bool>("test.task", handler())
-        .guard(Guard::Task {
-            capability: AI_PROMPT_CAPABILITY.clone(),
-            task_id: |params| params.get("taskId")?.as_str().map(str::to_string),
+        .guard(Guard::Owns {
+            cap: |_| AI_PROMPT_CAPABILITY.clone(),
+            id: |params| params.get("taskId")?.as_str().map(str::to_string),
+            owner: Owner::Task,
         });
     map.method::<NoParams, bool>("test.open", handler())
         .guard(Guard::Open);
@@ -820,11 +863,37 @@ async fn every_method_admits_exactly_the_callers_its_guard_names() {
     let (failures, checked) = walk(&map, &world).await;
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // 5 resource guards × 5 rows, 2 perspective guards × 13 rows, 1 task guard × 12 rows:
-    // the walk reached them all.
-    assert!(
-        checked >= 5 * 5 + 2 * 13 + 12,
-        "only {checked} rows checked"
+    // The test methods alone: Open, Operator and Executor × 5 rows, 2 Cap guards × 6 rows, 2
+    // perspective guards and 1 task guard: the walk reached them all.
+    let least = 3 * 5 + 2 * 6 + 2 * perspective_rows().len() + agent_resource_rows().len();
+    assert!(checked >= least, "only {checked} rows checked");
+}
+
+/// `Guard::Cap` checks the capability alone, so a caller without a token reaches exactly the
+/// methods whose capability is in the anonymous set (and the `Open` ones): asking for a
+/// capability, redeeming it, signing up, logging in, verifying an email.
+#[test]
+fn anonymous_callers_reach_only_the_anonymous_capabilitys_methods() {
+    let map = build_handler_map();
+    let anonymous: Vec<&str> = map
+        .guards()
+        .into_iter()
+        .filter_map(|(name, guard)| match guard {
+            Some(Guard::Cap(cap) | Guard::Executor(cap)) if anonymous_holds(cap) => Some(name),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        anonymous,
+        vec![
+            "agent.generateJwt",
+            "agent.requestCapability",
+            "user.create",
+            "user.login",
+            "user.multiUserEnabled",
+            "user.requestVerification",
+            "user.verifyEmail",
+        ]
     );
 }
 
@@ -902,7 +971,7 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
         call("test.perspective", json!({}), Caller::AppWithout, &query).await,
         Err(400)
     );
-    // Then the capability, then the owner rule; the handler never runs.
+    // Then the capability, then the rule; the handler never runs.
     assert_eq!(
         call(
             "test.executor",
@@ -926,7 +995,7 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     let others = json!({ "uuid": world.users_own });
     assert_eq!(
         call("test.perspective", others, Caller::OtherUser, &query).await,
-        Err(403)
+        Err(404)
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -934,12 +1003,15 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
         "no refused call ran its handler"
     );
 
-    // A method that hides existence answers null without running its handler, for another
-    // user's perspective and for a missing one alike. The capability still refuses with 403.
-    for uuid in [world.users_own.clone(), world.uuid(Target::Missing)] {
+    // A method flagged or_null answers null without running its handler, for another user's
+    // perspective and for a missing one alike. The capability still refuses with 403.
+    for uuid in [
+        world.users_own.clone(),
+        world.id(Owner::Perspective, Target::Missing),
+    ] {
         assert_eq!(
             call(
-                "test.perspective.hidden",
+                "test.perspective.or_null",
                 note(&uuid),
                 Caller::OtherUser,
                 &query
@@ -950,7 +1022,7 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     }
     assert_eq!(
         call(
-            "test.perspective.hidden",
+            "test.perspective.or_null",
             note(&world.users_own),
             Caller::AppWithout,
             &query
@@ -961,13 +1033,13 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
-        "a hidden answer ran no handler"
+        "a null answer ran no handler"
     );
 
     // Admitted: the handler runs and its result goes back.
     assert_eq!(
         call(
-            "test.perspective.hidden",
+            "test.perspective.or_null",
             note(&world.users_own),
             Caller::User,
             &query
@@ -986,6 +1058,149 @@ async fn dispatch_runs_the_guard_after_the_params_and_before_the_handler() {
         Ok(json!(true))
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    world.remove().await;
+}
+
+/// D6: only `perspective.get` and `perspective.snapshot` answer `null` for a perspective that
+/// is missing or not the caller's; every other method that names one answers 404.
+#[tokio::test]
+async fn perspective_get_answers_null_and_query_links_404_for_another_users_perspective() {
+    let world = World::new().await;
+    let map = build_handler_map();
+    assert_eq!(
+        map.or_null_methods(),
+        vec!["perspective.get", "perspective.snapshot"]
+    );
+    let query = perspective_query_capability(vec!["*".into()]);
+    let other = Arc::new(context(Caller::OtherUser, Some(query)));
+    let theirs = world.users_own.clone();
+    for method in ["perspective.get", "perspective.snapshot"] {
+        assert_eq!(
+            map.dispatch(method, json!({ "uuid": theirs }), other.clone())
+                .await
+                .map_err(|e| e.code),
+            Ok(Value::Null),
+            "{method}"
+        );
+    }
+    let err = map
+        .dispatch(
+            "perspective.queryLinks",
+            params("perspective.queryLinks", Some(&theirs), true),
+            other.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.code, err.message),
+        (404, format!("Perspective {theirs} not found")),
+        "not the caller's answers as a missing one does"
+    );
+    world.remove().await;
+}
+
+/// D12, D14: a user approves and revokes the requests and grants of their own agent; another
+/// user's and the main agent's are 404 to them. The operator approves and revokes any.
+#[tokio::test]
+async fn a_user_approves_and_revokes_only_their_own_agents_requests_and_grants() {
+    let world = World::new().await;
+    let map = build_handler_map();
+    let user_caps = crate::agent::capabilities::get_user_default_capabilities();
+    let alice = Arc::new(RequestContext::user_for_test(
+        USER_EMAIL,
+        USER_DID,
+        user_caps.clone(),
+    ));
+    let bob = Arc::new(RequestContext::user_for_test(
+        OTHER_USER_EMAIL,
+        OTHER_USER_DID,
+        user_caps,
+    ));
+    let operator = Arc::new(RequestContext::operator_for_test());
+    let bobs_grant = format!("{}-bob-grant", uuid::Uuid::new_v4());
+    Grants::global()
+        .insert(LiveGrant::for_test(
+            &bobs_grant,
+            AgentContext::for_user_email(OTHER_USER_EMAIL.to_string()),
+            u64::MAX,
+        ))
+        .unwrap();
+    let permit = |request: &str| params("agent.permitCapability", Some(request), false);
+    let code = |answer: Result<Value, WsRpcError>| answer.map(|_| ()).map_err(|e| e.code);
+
+    // Alice: her own request and grant; Bob's and the main agent's read as missing.
+    for (method, params) in [
+        ("agent.permitCapability", permit(&world.main_agents_request)),
+        (
+            "agent.revokeToken",
+            json!({ "token": world.main_agents_grant }),
+        ),
+        ("agent.removeApp", json!({ "id": world.main_agents_grant })),
+        ("agent.revokeToken", json!({ "token": bobs_grant })),
+        ("agent.removeApp", json!({ "id": bobs_grant })),
+    ] {
+        assert_eq!(
+            code(map.dispatch(method, params.clone(), alice.clone()).await),
+            Err(404),
+            "alice: {method} {params}"
+        );
+    }
+    assert!(Grants::global()
+        .get(&crate::agent::session::TokenId(bobs_grant.clone()))
+        .is_some());
+    assert_eq!(
+        code(
+            map.dispatch(
+                "agent.permitCapability",
+                permit(&world.users_request),
+                alice.clone()
+            )
+            .await
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        code(
+            map.dispatch(
+                "agent.revokeToken",
+                json!({ "token": world.users_grant }),
+                alice.clone()
+            )
+            .await
+        ),
+        Ok(())
+    );
+    // Bob cannot approve Alice's request either.
+    assert_eq!(
+        code(
+            map.dispatch(
+                "agent.permitCapability",
+                permit(&world.users_request),
+                bob.clone()
+            )
+            .await
+        ),
+        Err(404)
+    );
+
+    // The operator approves and revokes for any agent.
+    for (method, params) in [
+        ("agent.permitCapability", permit(&world.main_agents_request)),
+        ("agent.revokeToken", json!({ "token": bobs_grant })),
+        ("agent.removeApp", json!({ "id": world.main_agents_grant })),
+    ] {
+        assert_eq!(
+            code(map.dispatch(method, params.clone(), operator.clone()).await),
+            Ok(()),
+            "operator: {method} {params}"
+        );
+    }
+    assert!(Grants::global()
+        .get(&crate::agent::session::TokenId(bobs_grant.clone()))
+        .is_none());
+    Grants::global()
+        .remove(&Grants::global().find(&bobs_grant))
+        .unwrap();
     world.remove().await;
 }
 
@@ -1112,5 +1327,5 @@ fn a_method_takes_one_guard() {
 fn a_method_the_socket_handles_itself_takes_no_guard() {
     HandlerMap::new()
         .inline::<NoParams, bool>("test.inline")
-        .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
 }

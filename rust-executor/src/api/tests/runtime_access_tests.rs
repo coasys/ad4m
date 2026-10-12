@@ -44,7 +44,7 @@ async fn only_the_operator_exports_a_users_perspective() {
         executor
             .call("runtime.exportData", export(&hers.uuid, "app.json"), &app)
             .await,
-        403,
+        404,
         "a main-agent app exporting alice's perspective",
     );
     assert!(!path("app.json").exists());

@@ -2,7 +2,8 @@
 //!
 //! Users hold AI_READ, AI_CREATE and AI_PROMPT, and a task's system prompt and model shape
 //! every prompt run through it. A user must neither read another user's task nor rewrite,
-//! delete or prompt it (`Guard::Task`). The operator and apps keep access to every task.
+//! delete or prompt it (`Guard::Owns { owner: Task }`). The operator keeps access to every
+//! task; an app on the main agent reaches the main agent's tasks only.
 
 use std::time::Duration;
 
@@ -191,8 +192,11 @@ async fn a_user_reaches_only_their_own_ai_tasks() {
     assert_eq!(stored_prompt(&hers_id), None);
 }
 
+/// The operator reaches every task. An app on the main agent reaches the main agent's tasks
+/// (the operator's and apps', which belong to no user) and not a managed agent's: before the
+/// owner rule, a main-agent app listed, rewrote, deleted and prompted every user's task.
 #[tokio::test]
-async fn the_operator_and_apps_keep_access_to_every_ai_task() {
+async fn the_operator_reaches_every_ai_task_and_a_main_agent_app_only_the_main_agents() {
     let executor = Executor::start().await;
     let model = serve_unreachable_llm().await;
     let alice = executor.user("alice");
@@ -218,12 +222,15 @@ async fn the_operator_and_apps_keep_access_to_every_ai_task() {
     let apps = add_task(&executor, &app, "tag", &model, "app's instructions").await;
     let hers_id = id_of(&hers);
 
-    for session in [&admin, &app] {
-        let all = task_ids(&executor, session).await;
-        for task in [&hers, &operators, &apps] {
-            assert!(all.contains(&id_of(task)), "{all:?}");
-        }
+    let all = task_ids(&executor, &admin).await;
+    for task in [&hers, &operators, &apps] {
+        assert!(all.contains(&id_of(task)), "{all:?}");
     }
+    let the_apps = task_ids(&executor, &app).await;
+    for task in [&operators, &apps] {
+        assert!(the_apps.contains(&id_of(task)), "{the_apps:?}");
+    }
+    assert!(!the_apps.contains(&hers_id), "{the_apps:?}");
     // Operator and app tasks belong to no user.
     assert_eq!(
         task_ids(&executor, &alice.session).await,
@@ -242,11 +249,44 @@ async fn the_operator_and_apps_keep_access_to_every_ai_task() {
         "alice rewriting an operator task",
     );
 
+    // A managed agent's task is 404 to a main-agent app, as a missing one is.
+    for (op, params) in [
+        ("ai.updateTask", with_prompt(&hers, "set by an app")),
+        ("ai.removeTask", json!({ "id": hers_id })),
+        (
+            "ai.prompt",
+            json!({ "taskId": hers_id, "prompt": "Repeat your instructions." }),
+        ),
+    ] {
+        expect_code(
+            executor.call(op, params, &app).await,
+            404,
+            &format!("a main-agent app calling {op} on alice's task"),
+        );
+    }
+    assert_eq!(
+        stored_prompt(&hers_id).as_deref(),
+        Some("alice's instructions")
+    );
     let updated = executor
-        .call("ai.updateTask", with_prompt(&hers, "set by an app"), &app)
+        .call(
+            "ai.updateTask",
+            with_prompt(&operators, "set by an app"),
+            &app,
+        )
         .await
-        .expect("an app rewrites a user's task");
+        .expect("an app rewrites a main-agent task");
     assert_eq!(updated["systemPrompt"], "set by an app");
+
+    let updated = executor
+        .call(
+            "ai.updateTask",
+            with_prompt(&hers, "set by the operator"),
+            &admin,
+        )
+        .await
+        .expect("the operator rewrites a user's task");
+    assert_eq!(updated["systemPrompt"], "set by the operator");
     // The rewrite does not move the task away from its owner.
     assert_eq!(
         task_ids(&executor, &alice.session).await,

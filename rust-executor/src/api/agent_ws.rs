@@ -8,7 +8,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::agent::grants::{GrantError, Grants, LiveGrant};
+use crate::agent::grants::{GrantError, Grants};
 use crate::agent::{
     did_document_for_context, AgentContext, AgentService, AgentSignature as InternalAgentSignature,
 };
@@ -22,7 +22,7 @@ use crate::pubsub::get_global_pubsub;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::Guard;
+use super::guards::{Guard, Owner};
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -122,17 +122,6 @@ fn apps_of(ctx: &RequestContext) -> Result<Value, WsRpcError> {
         .map(|grant| grant.as_app())
         .collect();
     Ok(serde_json::to_value(apps)?)
-}
-
-/// The grants that `token_or_request_id` names and the caller may manage: those on the agent
-/// it acts as, or any for the operator (D14). Another agent's grant reads as missing.
-fn manageable_grants(ctx: &RequestContext, token_or_request_id: &str) -> Vec<Arc<LiveGrant>> {
-    let own = ctx.acts_as();
-    Grants::global()
-        .find(token_or_request_id)
-        .into_iter()
-        .filter(|grant| ctx.is_operator() || grant.agent == own)
-        .collect()
 }
 
 /// agent.byDid — get agent by DID
@@ -509,19 +498,13 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 /// agent.removeApp — deletes an app's grant: its token stops working at once (a missing grant
-/// refuses as a revoked one does, #396) and leaves the app list.
+/// refuses as a revoked one does, #396) and leaves the app list. The guard (`Owns { Grant }`)
+/// checked that the caller's agent owns it, or that the caller is the operator.
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let request_id = params.require_str("id")?;
-    match Grants::global().remove(&manageable_grants(&ctx, &request_id)) {
-        Ok(()) => {}
-        Err(GrantError::NotFound) => {
-            return Err(WsRpcError::internal(format!(
-                "App with request_key '{}' not found.",
-                request_id
-            )))
-        }
-        Err(e @ GrantError::Store(_)) => return Err(WsRpcError::internal(e.to_string())),
-    }
+    Grants::global()
+        .remove(&Grants::global().find(&request_id))
+        .map_err(grant_error)?;
     apps_of(&ctx)
 }
 
@@ -585,31 +568,32 @@ async fn request_capability(params: Value, _ctx: Arc<RequestContext>) -> Result<
 
 /// agent.permitCapability — the owner of the agent a request names approves it, with the
 /// capabilities in `auth` (which may be fewer than the app asked for), and gets the code
-/// the app redeems. The owner is the operator, or a session acting as that agent with
-/// AGENT_PERMIT ([`may_approve`], D12); a request for another agent reads as missing.
-// PR 5 moves the owner check into the method's guard.
+/// the app redeems. The guard (`Owns { Request }`, D12) checked that the caller is the
+/// operator or acts as that agent with AGENT_PERMIT; a request for another agent is 404.
 async fn permit_capability_handler(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let body: PermitCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
-    let missing = || {
-        WsRpcError::not_found(
-            "No pending request has this id; it may have expired. The app must request access \
-             again",
-        )
-    };
-    let target = request_target(&auth.request_id).ok_or_else(missing)?;
-    if !may_approve(&ctx.session, &target) {
-        return Err(missing());
-    }
     let random_number_challenge =
-        crate::agent::capabilities::permit_capability(auth).map_err(|_| missing())?;
+        crate::agent::capabilities::permit_capability(auth).map_err(|_| {
+            WsRpcError::not_found(
+                "No pending request has this id; it may have expired. The app must request \
+                 access again",
+            )
+        })?;
     Ok(Value::String(random_number_challenge))
+}
+
+/// The request `agent.permitCapability` approves: `requestId` in its `auth` param, a JSON
+/// string. None (400) when `auth` does not parse.
+fn permitted_request_id(params: &Value) -> Option<String> {
+    let auth: AuthInfoExtended = serde_json::from_str(params.get("auth")?.as_str()?).ok()?;
+    Some(auth.request_id)
 }
 
 /// agent.generateJwt — generate JWT
@@ -623,19 +607,26 @@ async fn generate_jwt(params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
     Ok(Value::String(cap_token.expose_once()))
 }
 
-/// agent.revokeToken — revokes a grant: its token stops working and its sockets close.
+/// agent.revokeToken — revokes a grant: its token stops working and its sockets close. The
+/// guard (`Owns { Grant }`) checked that the caller's agent owns it, or that the caller is the
+/// operator: a value that names no grant the caller may manage is 404, not a silent success
+/// (#1060).
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
-    // for an app's grant and a login's. A value that names no grant the caller may manage
-    // answers 404 instead of a silent success (#1060).
+    // for an app's grant and a login's.
     let token = params.require_str("token")?;
     Grants::global()
-        .revoke(&manageable_grants(&ctx, &token))
-        .map_err(|e| match e {
-            GrantError::NotFound => WsRpcError::not_found(e.to_string()),
-            GrantError::Store(_) => WsRpcError::internal(e.to_string()),
-        })?;
+        .revoke(&Grants::global().find(&token))
+        .map_err(grant_error)?;
     apps_of(&ctx)
+}
+
+/// A grant that went away between the guard and the handler is 404, as a missing one is.
+fn grant_error(e: GrantError) -> WsRpcError {
+    match e {
+        GrantError::NotFound => WsRpcError::not_found(e.to_string()),
+        GrantError::Store(_) => WsRpcError::internal(e.to_string()),
+    }
 }
 
 // ── Status ──
@@ -850,53 +841,64 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The caller's own agent: a user's, else the main agent.
     map.method::<NoParams, Agent>("agent.get", get_agent)
         .read()
-        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // The grants on the caller's own agent (without tokens).
     map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
         .read()
-        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
         .read()
-        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile)
-        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long()
         .guard(Guard::Executor(AGENT_CREATE_CAPABILITY.clone()));
     // Always fails (not implemented); the result type is the SDK's `AgentStatus`. Users get
     // the 501 too.
     map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent)
-        .guard(Guard::SelfAgent(AGENT_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_CREATE_CAPABILITY.clone()));
     map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
         .long()
         .guard(Guard::Executor(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message)
-        .guard(Guard::SelfAgent(AGENT_SIGN_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_SIGN_CAPABILITY.clone()));
     // A grant belongs to its agent's owner: a user removes the grants on their own agent, the
-    // operator any (`manageable_grants`; another agent's grant reads as missing).
+    // operator any (D14); another agent's grant is 404.
     map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
-        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Owns {
+            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            id: |params| params.get("id")?.as_str().map(str::to_string),
+            owner: Owner::Grant,
+        });
     // An app without a token asks for one.
     map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability)
-        .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
-    // The owner of the request's target agent approves it: the operator, or a session acting
-    // as that agent with AGENT_PERMIT (`may_approve` in the handler; another agent's request
-    // reads as missing).
+        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
+    // The owner of the request's target agent approves it (D12): the operator, or a session
+    // acting as that agent with AGENT_PERMIT. Another agent's request is 404.
     map.method::<PermitCapabilityRequest, String>(
         "agent.permitCapability",
         permit_capability_handler,
     )
-    .guard(Guard::SelfAgent(AGENT_PERMIT_CAPABILITY.clone()));
+    .guard(Guard::Owns {
+        cap: |_| AGENT_PERMIT_CAPABILITY.clone(),
+        id: permitted_request_id,
+        owner: Owner::Request,
+    });
     map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt)
-        .guard(Guard::Anonymous(AGENT_AUTH_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
     // As agent.removeApp: the grants on the caller's own agent, or any for the operator.
     map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
-        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Owns {
+            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            id: |params| params.get("token")?.as_str().map(str::to_string),
+            owner: Owner::Grant,
+        });
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
         .read()
-        .guard(Guard::SelfAgent(AGENT_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // Every caller may ask, with or without capabilities.
     map.method::<NoParams, bool>("agent.isLocked", is_locked)
         .read()
@@ -904,9 +906,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The executor's trust list, which users read too.
     map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
         .read()
-        .guard(Guard::SelfAgent(
-            RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY.clone(),
-        ));
+        .guard(Guard::Cap(RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY.clone()));
     // The executor's trust list decides whose languages this executor installs and runs.
     map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents)
         .guard(Guard::Executor(
@@ -1206,7 +1206,8 @@ mod revoke_token_tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err.0, 500, "{}", err.1);
+        // 404 as for revokeToken (the handler answered 500 before the guard checked the grant).
+        assert_eq!(err.0, 404, "{}", err.1);
         assert!(err.1.contains("not found"), "{}", err.1);
     }
 

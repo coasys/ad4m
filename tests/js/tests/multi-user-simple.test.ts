@@ -475,7 +475,9 @@ describe("Multi-User Simple integration tests", () => {
                 expect.fail("User 2 should not be able to add links to User 1's perspective");
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                expect(errorMessage).to.include("Access denied");
+                // Not yours answers as missing does (404), so a user cannot learn which
+                // perspectives exist.
+                expect(errorMessage).to.include(`Perspective ${perspective1.uuid} not found`);
                 console.log("✅ Cross-user perspective access properly denied");
             }
         });

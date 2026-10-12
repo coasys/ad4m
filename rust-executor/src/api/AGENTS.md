@@ -54,87 +54,265 @@ A method declares who may call it where it registers:
 ```rust
 map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>("perspective.get", handler)
     .read()
-    .guard(Guard::perspective_or_null(perspective_query_capability));
+    .or_null()
+    .guard(Guard::perspective(perspective_query_capability));
 map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
     .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
+map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
+    .guard(Guard::Owns { cap: |_| AI_CREATE_CAPABILITY.clone(), id: removed_task_id, owner: Owner::Task });
 ```
 
-`Guard::perspective(cap)` and `Guard::perspective_or_null(cap)` build `Guard::Perspective` on
-the `uuid` param (`hides_existence` false and true).
+`Guard::perspective(cap)` builds `Guard::Owns { owner: Perspective }` on the `uuid` param.
 
 `HandlerMap::dispatch` runs, in order: find the method (404) → params deserialize into `P`
-(400) → the guard's capability (403) → the guard's rule (403, or `null` without running the
-handler when `hides_existence` is set and the perspective is missing or not the caller's) → the
+(400) → the guard's capability (403) → the guard's rule (403, or 404 for a resource) → the
 handler. `HandlerMap::admit` runs the steps before the handler alone.
 
 | Guard | Rule after the capability |
 |---|---|
 | `Open` | no capability and no rule: every caller, anonymous included, reaches the handler, which decides |
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
-| `Anonymous(cap)` | none; `cap` must be one anonymous callers hold |
-| `Executor(cap)` | no session on a managed agent: 403 naming the method, whatever the user's capabilities; the operator, grants on the main agent and anonymous callers pass |
-| `SelfAgent(cap)` | an authenticated session; the handler acts on `ctx.acts_as()` |
-| `Perspective { .. }` | `get_perspective_with_access`: the operator reaches all; a user its own; a grant on the main agent the unowned and the main agent's; 404 when missing |
-| `Task { .. }` | an authenticated session; a user reaches only its own AI tasks (`tasks.user_email`), and gets 404 for any other id, its own missing or not; the operator and grants on the main agent reach every task |
+| `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
+| `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
+| `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
+
+`Owns` per `Owner` (who owns the resource; the operator reaches all):
+
+- `Perspective`: its `owners` DIDs; none = the main agent (`get_perspective_with_access`).
+  A grant on the main agent reaches the main agent's and the unowned perspectives.
+- `Task`: `tasks.user_email`; none = the main agent. A grant on the main agent reaches the main
+  agent's tasks only, not a managed agent's.
+- `Grant`: the agent of the grant a token or request id names (`Grants::find`), for
+  `agent.revokeToken` and `agent.removeApp` (D14). `agent.getApps` is `Cap`: it lists only the
+  grants of `ctx.acts_as()` (the main agent's for the operator and main-agent apps).
+- `Request`: the target agent of a pending capability request (`PendingRequests`), for
+  `agent.permitCapability` (D12): a user approves requests for their own agent, the operator
+  any.
+
+**Missing and not yours are one answer: 404** (D6), on every perspective, task, grant and
+request, so a caller cannot learn which ids exist. A method flagged `.or_null()` answers `null`
+in place of 404 (the guard's or a handler's, e.g. a perspective removed between the guard and
+the handler) without running the handler: only `perspective.get` and `perspective.snapshot`,
+whose SDK results are optional. A perspective handler fetches with `guarded_perspective`.
 
 Capabilities stay: every guard but `Open` and `Operator` checks one first, and the rule adds
 whose data the call may touch. A method takes exactly one guard. A second panics where it
 registers. A method without one makes `build_handler_map` panic, naming it
 (`HandlerMap::require_guards`): the API thread builds the map before it serves, so the executor
 binary exits at start. Dispatch also refuses (500) a method without a guard in a map built
-without that check. A guard runs before the handler's own checks, so adding one changes nothing for callers the
-handler already refuses with the same code. A handler check that is not part of the guard
-(compute credits, param validation beyond the contract type) now runs after the access check:
-a call that fails both gets the access answer.
+without that check. A guard runs before the handler's own checks. A handler check that is not
+part of the guard (compute credits, param validation beyond the contract type) runs after the
+access check: a call that fails both gets the access answer.
 
-Which guard each method has:
+Notes on some methods:
 
-- `Open`: the methods that check no capability: `agent.isLocked`, `runtime.info`,
-  `runtime.tlsDomain`, `runtime.freeHostingEnabled`, `user.logout` and
-  `user.revokeAllSessions` (their handlers check the session's principal).
-- `Operator`: `runtime.openLink`, `runtime.restartHolochain`, `runtime.setHostRates`,
-  `runtime.setUnytMembraneProof`, `runtime.importData` (it writes rows as they are in the
-  file, granted notifications and password hashes included), `runtime.grantNotification`,
-  `user.setMultiUserEnabled`, `user.freeAccess`, and the stubs `user.credits` and
-  `runtime.unyt*` (501 to the operator) until each gets a handler and its real guard.
-- `Executor`: the executor-wide methods that refuse user sessions (agent keys, trust list and
-  entanglement writes, AI models, hosting wallet, language
-  publish/remove/settings, `runtime.exportData`, friends and outbox, link-language template writes,
-  `runtime.addHcAgentInfos`, `runtime.setFreeHostingEnabled`, `runtime.quit`, `user.list`,
-  `user.wallet`, `user.emailTest`). `runtime.exportData` of one perspective
-  checks `get_perspective_with_access` in its handler (a `db` export names none), so an app
-  exports only the unowned and the main agent's perspectives.
-- `Anonymous`: `agent.requestCapability`, `agent.generateJwt`, `user.create`, `user.login`,
-  `user.verifyEmail`, `user.requestVerification`, `user.multiUserEnabled`.
-- `SelfAgent`: the methods any authenticated caller with the capability may call, users
-  included. Most act as the caller (profile, sign, notifications, embeddings, expressions,
-  `neighbourhood.join`, `ai.addTask`, which records the caller's user as the task's owner,
-  `perspective.create`, which the caller's user owns, `hosting.setHotWallet`, which also
-  refuses a session without a user). `perspective.all` lists the caller's own perspectives
-  (every one to the operator). `agent.getApps`, `agent.revokeToken` and `agent.removeApp` act
-  on the grants of the caller's own agent (any grant for the operator; `manageable_grants`), and
-  `agent.permitCapability` approves only a request whose target agent the caller owns
-  (`may_approve`): their handlers check the owner, and another agent's grant or request reads
-  as missing.
-  `ai.tasks` lists a user's own tasks, and every task to the operator and apps.
-  Some read executor-wide data that users read today:
-  `agent.getTrustedAgents`, `ai.models`, `language.*` reads, link-language templates,
+- `Open` handlers check the session's principal (`user.logout`, `user.revokeAllSessions`).
+- `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
+  and password hashes included. The stubs `user.credits` and `runtime.unyt*` answer 501 to the
+  operator until each gets a handler and its real guard.
+- `runtime.exportData` (`Executor`) of one perspective checks `get_perspective_with_access` in
+  its handler (a `db` export names none), so an app exports only the main agent's perspectives.
+- `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
+  `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
   users there, a behaviour change.
-- `Perspective`: every `perspective.*` method that names one perspective, and every
-  `neighbourhood.*` method that names one (`publish` by `perspectiveUuid`, the others by
-  `uuid`), on the neighbourhood capability: the perspective that holds a neighbourhood decides
-  who may use it.
-- `Task`: `ai.updateTask` (`task.taskId`, the row it rewrites), `ai.removeTask` (`id`) and
-  `ai.prompt` (`taskId`).
+- `perspective.all` lists the caller's agent's perspectives, `ai.tasks` its tasks (every one to
+  the operator); `ai.addTask` and `perspective.create` record the caller's agent as owner.
+- `neighbourhood.*` methods that name a perspective (`publish` by `perspectiveUuid`, the others
+  by `uuid`) use `Owns { Perspective }` on the neighbourhood capability: the perspective that
+  holds a neighbourhood decides who may use it.
+
+Which guard each method has, generated from the handler map
+(`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
+fails when it is stale; `pnpm run generate:api-types` in `core/` rewrites it with the SDK
+contracts:
+
+<!-- guard-table:start (generated from the handler map) -->
+
+169 methods: Cap 54, Executor 33, Open 6, Operator 15, Owns 61.
+
+| Method | Guard |
+|---|---|
+| `agent.addEntanglementProofs` | `Executor(agent:UPDATE)` |
+| `agent.addTrustedAgents` | `Executor(runtime.trusted_agents:CREATE)` |
+| `agent.byDid` | `Cap(agent:READ)` |
+| `agent.deleteEntanglementProofs` | `Executor(agent:UPDATE)` |
+| `agent.deleteTrustedAgents` | `Executor(runtime.trusted_agents:DELETE)` |
+| `agent.entanglementProofPreflight` | `Executor(agent:READ)` |
+| `agent.generate` | `Executor(agent:CREATE)` |
+| `agent.generateJwt` | `Cap(agent:AUTHENTICATE)` |
+| `agent.get` | `Cap(agent:READ)` |
+| `agent.getApps` | `Cap(agent:READ)` |
+| `agent.getEntanglementProofs` | `Executor(agent:READ)` |
+| `agent.getTrustedAgents` | `Cap(runtime.trusted_agents:READ)` |
+| `agent.import` | `Cap(agent:CREATE)` |
+| `agent.isLocked` | `Open` |
+| `agent.lock` | `Executor(agent:UPDATE)` |
+| `agent.permitCapability` | `Owns(Request, agent:PERMIT)` |
+| `agent.removeApp` | `Owns(Grant, agent:UPDATE)` |
+| `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
+| `agent.revokeToken` | `Owns(Grant, agent:UPDATE)` |
+| `agent.sign` | `Cap(agent:SIGN)` |
+| `agent.status` | `Cap(agent:READ)` |
+| `agent.unlock` | `Executor(agent:SIGN)` |
+| `agent.updateProfile` | `Cap(agent:UPDATE)` |
+| `ai.addModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.addTask` | `Cap(artificial intelligence:CREATE)` |
+| `ai.discoverModels` | `Executor(artificial intelligence:CREATE)` |
+| `ai.embed` | `Cap(artificial intelligence:PROMPT)` |
+| `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
+| `ai.modelLoadingStatus` | `Cap(artificial intelligence:READ)` |
+| `ai.models` | `Cap(artificial intelligence:READ)` |
+| `ai.prompt` | `Owns(Task, artificial intelligence:PROMPT)` |
+| `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.removeTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.tasks` | `Cap(artificial intelligence:READ)` |
+| `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |
+| `ai.transcriptionOpen` | `Cap(artificial intelligence:TRANSCRIBE)` |
+| `ai.updateModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.updateTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `expression.create` | `Cap(expression:CREATE)` |
+| `expression.get` | `Cap(expression:READ)` |
+| `expression.getMany` | `Cap(expression:READ)` |
+| `expression.getRaw` | `Cap(expression:READ)` |
+| `expression.interact` | `Cap(expression:UPDATE)` |
+| `expression.interactions` | `Cap(expression:READ)` |
+| `hosting.info` | `Cap(runtime.hosting:READ)` |
+| `hosting.requestPayment` | `Cap(agent:UPDATE)` |
+| `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
+| `hosting.wallet` | `Executor(runtime.hosting:READ)` |
+| `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `language.all` | `Cap(language:READ)` |
+| `language.applyTemplate` | `Cap(language:CREATE)` |
+| `language.get` | `Cap(language:READ)` |
+| `language.meta` | `Cap(language:READ)` |
+| `language.publish` | `Executor(language:CREATE)` |
+| `language.remove` | `Executor(language:DELETE)` |
+| `language.source` | `Cap(language:READ)` |
+| `language.writeSettings` | `Executor(language:UPDATE)` |
+| `neighbourhood.hasTelepresence` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.join` | `Cap(neighbourhood:READ)` |
+| `neighbourhood.onlineAgents` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.otherAgents` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.publish` | `Owns(Perspective, neighbourhood:CREATE)` |
+| `neighbourhood.sendBroadcast` | `Owns(Perspective, neighbourhood:UPDATE)` |
+| `neighbourhood.sendSignal` | `Owns(Perspective, neighbourhood:UPDATE)` |
+| `neighbourhood.setOnlineStatus` | `Owns(Perspective, neighbourhood:UPDATE)` |
+| `perspective.acceptFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.acceptInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addLink` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addLinkExpression` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addLinks` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.addSdna` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.all` | `Cap(perspective:READ)` |
+| `perspective.commitBatch` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.create` | `Cap(perspective:CREATE)` |
+| `perspective.createBatch` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.createSubject` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.disposeQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.disposeSparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.evaluateGetters` | `Owns(Perspective, perspective:READ)` |
+| `perspective.executeCommands` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.flowValidOutputs` | `Owns(Perspective, perspective:READ)` |
+| `perspective.get` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
+| `perspective.getAllShacl` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getShacl` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getShaclNames` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getShaclTargetClass` | `Owns(Perspective, perspective:READ)` |
+| `perspective.getSubjectData` | `Owns(Perspective, perspective:READ)` |
+| `perspective.interpretationOverlays` | `Owns(Perspective, perspective:READ)` |
+| `perspective.keepAliveQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.keepAliveSparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.linkMutations` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.mintFlowReceipt` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.modelQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.modelSubscribe` | `Owns(Perspective, perspective:READ)` |
+| `perspective.proposeFlowTransition` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.publishSnapshot` | `Owns(Perspective, perspective:READ)` |
+| `perspective.queryLinks` | `Owns(Perspective, perspective:READ)` |
+| `perspective.queryProlog` | `Owns(Perspective, perspective:READ)` |
+| `perspective.querySparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.rejectFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.rejectInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.remove` | `Owns(Perspective, perspective:DELETE)` |
+| `perspective.removeAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.removeLink` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.removeLinks` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.runInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.runInterpretationWithHarness` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.snapshot` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
+| `perspective.subjectClassesOf` | `Owns(Perspective, perspective:READ)` |
+| `perspective.subscribeQuery` | `Owns(Perspective, perspective:READ)` |
+| `perspective.subscribeSparql` | `Owns(Perspective, perspective:READ)` |
+| `perspective.update` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.updateLink` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.verifyFlowReceipt` | `Owns(Perspective, perspective:READ)` |
+| `runtime.addFriends` | `Executor(runtime.friends:CREATE)` |
+| `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
+| `runtime.addLinkLanguageTemplates` | `Executor(runtime.known_link_languages:CREATE)` |
+| `runtime.computeLog` | `Cap(agent:READ)` |
+| `runtime.createNotification` | `Cap(agent:UPDATE)` |
+| `runtime.deleteNotification` | `Cap(agent:UPDATE)` |
+| `runtime.exportData` | `Executor(agent:UPDATE)` |
+| `runtime.freeHostingEnabled` | `Open` |
+| `runtime.friendStatus` | `Cap(runtime.friend_status:READ)` |
+| `runtime.friends` | `Executor(runtime.friends:READ)` |
+| `runtime.grantNotification` | `Operator` |
+| `runtime.hcAgentInfos` | `Cap(runtime.hc_agent_info:READ)` |
+| `runtime.hostRates` | `Cap(runtime.hosting:READ)` |
+| `runtime.importData` | `Operator` |
+| `runtime.inbox` | `Cap(runtime.messages:READ)` |
+| `runtime.info` | `Open` |
+| `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
+| `runtime.notifications` | `Cap(agent:UPDATE)` |
+| `runtime.openLink` | `Operator` |
+| `runtime.outbox` | `Executor(runtime.messages:READ)` |
+| `runtime.quit` | `Executor(runtime:QUIT)` |
+| `runtime.removeFriends` | `Executor(runtime.friends:DELETE)` |
+| `runtime.removeLinkLanguageTemplates` | `Executor(runtime.known_link_languages:DELETE)` |
+| `runtime.restartHolochain` | `Operator` |
+| `runtime.sendFriendMessage` | `Executor(runtime.messages:CREATE)` |
+| `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
+| `runtime.setHostRates` | `Operator` |
+| `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
+| `runtime.setUnytMembraneProof` | `Operator` |
+| `runtime.tlsDomain` | `Open` |
+| `runtime.unytAgentKey` | `Operator` |
+| `runtime.unytHotAgentPubkey` | `Operator` |
+| `runtime.unytReinstallDna` | `Operator` |
+| `runtime.unytSendHot` | `Operator` |
+| `runtime.unytVersionInfo` | `Cap(runtime.hosting:READ)` |
+| `runtime.unytWalletBalance` | `Operator` |
+| `runtime.unytWalletHistory` | `Operator` |
+| `runtime.updateNotification` | `Cap(agent:UPDATE)` |
+| `runtime.verifySignature` | `Cap(agent:READ)` |
+| `user.create` | `Cap(runtime.user_management:CREATE)` |
+| `user.credits` | `Operator` |
+| `user.emailTest` | `Executor(*:*)` |
+| `user.freeAccess` | `Operator` |
+| `user.list` | `Executor(runtime.user_management:READ)` |
+| `user.login` | `Cap(runtime.user_management:LOGIN)` |
+| `user.logout` | `Open` |
+| `user.multiUserEnabled` | `Cap(runtime.user_management[enabled]:READ)` |
+| `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
+| `user.revokeAllSessions` | `Open` |
+| `user.setMultiUserEnabled` | `Operator` |
+| `user.verifyEmail` | `Cap(runtime.user_management:VERIFY)` |
+| `user.wallet` | `Executor(runtime.user_management:READ)` |
+
+<!-- guard-table:end -->
 
 `tests/method_matrix_tests.rs` walks every method in `build_handler_map()` (one without a
 guard fails it; `every_registered_method_has_a_guard` says so on its own) and calls
-`admit` as each kind of caller (operator, app with and without the capability, user, another
-user, anonymous) on its own, others', unowned, the main agent's and missing perspectives, and
-on the user's own, an operator's and a missing AI task. A new guard is covered without a new
-test; a method whose params need more than `uuid` adds an entry to `EXTRA_PARAMS`, with
-`TARGET` where it names the row's perspective or task in another param.
+`admit` as each kind of caller (operator, app on the main agent with and without the
+capability, user, another user, anonymous). `Cap` rows admit an anonymous caller exactly when
+the anonymous set covers the capability. `Owns` rows name the user's own, the main agent's,
+an unowned (perspectives) and a missing resource of the guard's `Owner`. A new guard is
+covered without a new test; a method whose params need more than `uuid` adds an entry to
+`EXTRA_PARAMS`, with `TARGET` where it names the row's resource in another param.
 
 ## Protocol
 
@@ -222,11 +400,10 @@ test; a method whose params need more than `uuid` adds an entry to `EXTRA_PARAMS
      managed agent, restarted at approval. Its approval request goes to the target agent
      (`Event::approval_request`). Every request waits for that owner: the declared app name
      and domain are the caller's claim and approve nothing.
-  2. `agent.permitCapability { auth }`: the handler checks `may_approve` (the operator, or a
-     session acting as the request's agent with AGENT_PERMIT); anyone else reads the request
-     as missing (404). The approver may grant fewer capabilities than asked; the target is
-     fixed by the request. It returns a six-digit code, stored as a `Secret`. PR 5 moves this
-     owner check into the method's guard.
+  2. `agent.permitCapability { auth }`: its guard, `Owns { owner: Request }`, admits the
+     operator or a session acting as the request's agent with AGENT_PERMIT; anyone else gets
+     404, as for a missing request. The approver may grant fewer capabilities than asked; the
+     target is fixed by the request. It returns a six-digit code, stored as a `Secret`.
   3. `agent.generateJwt { requestId, rand }` (anyone): `PendingRequests::redeem` checks the code
      and mints the grant on the request's agent in one locked step, with the approved
      capabilities capped at that agent's own (`grant_caps_for`: a managed agent holds its user's

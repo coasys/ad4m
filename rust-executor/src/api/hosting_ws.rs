@@ -112,7 +112,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The executor's rates and version, and the caller's own record for a user session.
     map.method::<NoParams, HostingInfoResult>("hosting.info", get_hosting_info)
         .read()
-        .guard(Guard::SelfAgent(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(RUNTIME_HOSTING_READ_CAPABILITY.clone()));
     // The executor's own ledger: reading it can also create the executor's ledger key.
     map.method::<NoParams, HostingWalletResult>("hosting.wallet", get_hosting_wallet)
         .read()
@@ -126,11 +126,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "hosting.requestPayment",
         request_payment,
     )
-    .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+    .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     // Sets the caller's own wallet address. The handler refuses a session without a user
     // (403): the operator and apps have no hosting record.
     map.method::<SetHotWalletAddressRequest, bool>("hosting.setHotWallet", set_hot_wallet)
-        .guard(Guard::SelfAgent(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
 }
 
 // ── Contracts ───────────────────────────────────────────────────────────────

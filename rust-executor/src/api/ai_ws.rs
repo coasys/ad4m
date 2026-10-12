@@ -15,7 +15,7 @@ use crate::types::{
 };
 use base64::Engine;
 
-use super::guards::Guard;
+use super::guards::{Guard, Owner};
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -272,12 +272,16 @@ fn updated_task_id(params: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// A user session lists its own tasks; the operator and apps list every task.
+/// The operator lists every task; any other session the tasks of the agent it acts as (a
+/// grant on the main agent the main agent's, which belong to no user), as the task guard
+/// (`Owns { Task }`) lets it reach them.
 async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let tasks = match ctx.user_email() {
-        Some(email) => Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(Some(email)))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?,
-        None => AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?,
+    let tasks = if ctx.is_operator() {
+        AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?
+    } else {
+        let agent = ctx.acts_as();
+        Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(agent.user_email.as_deref()))
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
     };
     Ok(serde_json::to_value(tasks)?)
 }
@@ -428,7 +432,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The executor's models (without keys), which users read too.
     map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
         .read()
-        .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     // The provider's own model ids.
     map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
         .read()
@@ -449,55 +453,59 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         get_default_model,
     )
     .read()
-    .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
+    .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
         "ai.modelLoadingStatus",
         get_model_loading_status,
     )
     .read()
-    .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
-    // Tasks belong to the user who created them (`tasks.user_email`); the operator and apps
-    // reach every task. The list and the new task follow the caller's user.
+    .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
+    // Tasks belong to the agent whose session created them (`tasks.user_email`, none for the
+    // main agent); the operator reaches every task, any other session its agent's. The list
+    // and the new task follow the caller's agent.
     map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
         .read()
-        .guard(Guard::SelfAgent(AI_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task)
-        .guard(Guard::SelfAgent(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task)
-        .guard(Guard::Task {
-            capability: AI_CREATE_CAPABILITY.clone(),
-            task_id: updated_task_id,
+        .guard(Guard::Owns {
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
+            id: updated_task_id,
+            owner: Owner::Task,
         });
     map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
-        .guard(Guard::Task {
-            capability: AI_CREATE_CAPABILITY.clone(),
-            task_id: removed_task_id,
+        .guard(Guard::Owns {
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
+            id: removed_task_id,
+            owner: Owner::Task,
         });
     // Prompts, embeddings and transcription bill the caller's user; the handlers check its
     // compute credits after the guard.
     // The completion text.
     map.method::<PromptRequest, String>("ai.prompt", ai_prompt)
         .long()
-        .guard(Guard::Task {
-            capability: AI_PROMPT_CAPABILITY.clone(),
-            task_id: prompt_task_id,
+        .guard(Guard::Owns {
+            cap: |_| AI_PROMPT_CAPABILITY.clone(),
+            id: prompt_task_id,
+            owner: Owner::Task,
         });
     // The embedding vector as JSON, zlib-deflated, base64-encoded.
     map.method::<EmbedRequest, String>("ai.embed", ai_embed)
         .long()
-        .guard(Guard::SelfAgent(AI_PROMPT_CAPABILITY.clone()));
+        .guard(Guard::Cap(AI_PROMPT_CAPABILITY.clone()));
     // The new stream's id.
     map.method::<AiTranscriptionOpenParams, String>(
         "ai.transcriptionOpen",
         open_transcription_stream,
     )
-    .guard(Guard::SelfAgent(AI_TRANSCRIBE_CAPABILITY.clone()));
+    .guard(Guard::Cap(AI_TRANSCRIBE_CAPABILITY.clone()));
     // Always the string `"true"`.
     map.method::<AiTranscriptionCloseParams, String>(
         "ai.transcriptionClose",
         close_transcription_stream,
     )
-    .guard(Guard::SelfAgent(AI_TRANSCRIBE_CAPABILITY.clone()));
+    .guard(Guard::Cap(AI_TRANSCRIBE_CAPABILITY.clone()));
 }
 
 // ── HTTP-only: binary transcription feed ────────────────────────────────────

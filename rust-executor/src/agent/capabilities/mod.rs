@@ -11,7 +11,6 @@ pub use token::*;
 pub use types::*;
 
 use crate::agent::grants::now;
-use crate::agent::session::Session;
 use crate::agent::AgentContext;
 use crate::events::Event;
 use crate::pubsub::get_global_pubsub;
@@ -401,16 +400,11 @@ pub fn request_target(request_id: &str) -> Option<AgentContext> {
     PendingRequests::global().target(request_id, now())
 }
 
-/// Whether `session` may approve a capability request for `target` (D12): the operator, or a
-/// session that acts as `target` and holds AGENT_PERMIT (a user on their own agent; on the
-/// main agent, an app the operator gave AGENT_PERMIT). Nobody approves for another agent.
-pub fn may_approve(session: &Session, target: &AgentContext) -> bool {
-    session.is_operator() || (session.acts_as() == *target && session.may(&AGENT_PERMIT_CAPABILITY))
-}
-
 /// Approves a pending request with `auth_info_extended.auth`, which may grant less than the
 /// app asked for, and returns the code the app redeems: for the approver only. The request's
-/// agent stays the one it named. The caller has checked [`may_approve`].
+/// agent stays the one it named. The caller has checked that the approver owns that agent
+/// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`; MCP's
+/// `caller_can_permit`).
 pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
     let code = gen_random_digits();
     PendingRequests::global().approve(

@@ -1,7 +1,7 @@
-//! A multi-user user session acts for its user only. The calls below act on the executor
-//! itself (its main key, wallet, host files, database or executor-wide settings), and the
-//! default user capabilities cover the capabilities they check, so before these guards a
-//! user token reached all of them.
+//! A user session acts for its user's agent only: it signs, publishes and sets its profile as
+//! that agent, not the main agent. That user sessions cannot call the calls that act on the
+//! executor itself (`Guard::Executor`) is a row of the method matrix
+//! (`method_matrix_tests.rs`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,114 +74,6 @@ impl Drop for TestUser {
             let _ = std::fs::remove_dir_all(user_dir);
         }
     }
-}
-
-#[tokio::test]
-async fn user_sessions_cannot_call_executor_operations() {
-    let dir = tempfile::tempdir().unwrap();
-    let export_path = dir.path().join("dump.json");
-    // Every call carries params its contract accepts, so the dispatcher's params check
-    // passes and the guard is what refuses.
-    let model = json!({ "name": "m", "type": "LLM" });
-    let proof = json!({
-        "deviceKey": "k",
-        "deviceKeySignedByDid": "s",
-        "deviceKeyType": "t",
-        "did": "did:key:z6Mk",
-        "didSignedByDeviceKey": "s",
-        "didSigningKeyId": "i",
-    });
-    let calls = [
-        ("agent.generate", json!({ "passphrase": "p" })),
-        ("agent.lock", json!({ "passphrase": "p" })),
-        (
-            "agent.unlock",
-            json!({ "passphrase": "p", "holochain": false }),
-        ),
-        (
-            "runtime.exportData",
-            json!({ "type": "db", "filePath": export_path.to_str().unwrap() }),
-        ),
-        (
-            "ai.discoverModels",
-            json!({ "baseUrl": "https://api.example.org/v1" }),
-        ),
-        ("ai.addModel", json!({ "model": model })),
-        ("ai.updateModel", json!({ "id": "m1", "model": model })),
-        ("ai.removeModel", json!({ "id": "m1" })),
-        (
-            "ai.setDefaultModel",
-            json!({ "id": "m1", "modelType": "LLM" }),
-        ),
-        ("agent.addEntanglementProofs", json!({ "proofs": [proof] })),
-        (
-            "agent.deleteEntanglementProofs",
-            json!({ "proofs": [proof] }),
-        ),
-        (
-            "agent.entanglementProofPreflight",
-            json!({ "deviceKey": "k", "deviceKeyType": "t" }),
-        ),
-        ("agent.getEntanglementProofs", json!({})),
-        (
-            "agent.addTrustedAgents",
-            json!({ "agents": ["did:key:z6Mk"] }),
-        ),
-        (
-            "agent.deleteTrustedAgents",
-            json!({ "agents": ["did:key:z6Mk"] }),
-        ),
-        (
-            "language.publish",
-            json!({
-                "languagePath": dir.path().join("bundle.js").to_str().unwrap(),
-                "languageMeta": { "name": "n", "description": "d" },
-            }),
-        ),
-        ("language.remove", json!({ "address": "QmLang" })),
-        (
-            "language.writeSettings",
-            json!({ "address": "QmLang", "settings": {} }),
-        ),
-        ("runtime.addHcAgentInfos", json!({ "agentInfos": [] })),
-        (
-            "runtime.addLinkLanguageTemplates",
-            json!({ "addresses": [] }),
-        ),
-        (
-            "runtime.removeLinkLanguageTemplates",
-            json!({ "addresses": [] }),
-        ),
-        ("runtime.friends", json!({})),
-        ("runtime.addFriends", json!({ "dids": [] })),
-        ("runtime.removeFriends", json!({ "dids": [] })),
-        (
-            "runtime.sendFriendMessage",
-            json!({ "did": "did:key:z6Mk", "message": { "links": [] } }),
-        ),
-        ("runtime.outbox", json!({})),
-        ("hosting.wallet", json!({})),
-        ("hosting.walletHistory", json!({})),
-    ];
-    let mut not_refused = Vec::new();
-    for (op, params) in calls {
-        // Spawned, so a handler that panics is reported with the rest instead of ending
-        // the loop.
-        let result = tokio::spawn(call(op, params, user_session("guard.user@example.org"))).await;
-        match result {
-            Ok(Err((403, message))) if message.contains(op) => {}
-            other => not_refused.push(format!("{op}: {other:?}")),
-        }
-    }
-    assert!(
-        not_refused.is_empty(),
-        "these calls must refuse a user session:\n{}",
-        not_refused.join("\n")
-    );
-    assert!(
-        !export_path.exists(),
-        "a refused export must not write the file"
-    );
 }
 
 #[tokio::test]

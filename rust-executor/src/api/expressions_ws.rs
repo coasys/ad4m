@@ -186,7 +186,7 @@ async fn interact_expression(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    let read = || Guard::SelfAgent(EXPRESSION_READ_CAPABILITY.clone());
+    let read = || Guard::Cap(EXPRESSION_READ_CAPABILITY.clone());
     map.method::<ExpressionUrlRequest, Option<ExpressionRendered>>(
         "expression.get",
         get_expression,
@@ -204,7 +204,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(read());
     // The caller signs the new expression as itself (`ctx.acts_as()`).
     map.method::<CreateExpressionRequest, String>("expression.create", create_expression)
-        .guard(Guard::SelfAgent(EXPRESSION_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(EXPRESSION_CREATE_CAPABILITY.clone()));
     map.method::<ExpressionUrlRequest, Vec<InteractionMeta>>(
         "expression.interactions",
         get_interactions,
@@ -213,5 +213,5 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(read());
     // The interaction's result, JSON-encoded (`"null"` when it returns nothing).
     map.method::<ExpressionInteractRequest, String>("expression.interact", interact_expression)
-        .guard(Guard::SelfAgent(EXPRESSION_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(EXPRESSION_UPDATE_CAPABILITY.clone()));
 }

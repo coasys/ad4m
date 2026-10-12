@@ -354,17 +354,15 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Signing up, logging in and verifying an email: callers without a token hold these
     // capabilities while multi-user mode is on.
     map.method::<CreateUserRequest, UserCreationResult>("user.create", create_user)
-        .guard(Guard::Anonymous(
+        .guard(Guard::Cap(
             RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
         ));
     // The session JWT.
     map.method::<UsersLoginParams, String>("user.login", login_user)
-        .guard(Guard::Anonymous(
-            RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
-        ));
+        .guard(Guard::Cap(RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone()));
     // The session JWT.
     map.method::<UsersVerifyEmailParams, String>("user.verifyEmail", verify_email)
-        .guard(Guard::Anonymous(
+        .guard(Guard::Cap(
             RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
         ));
     // Open: a user acts on their own sessions whatever their capabilities. Only the operator
@@ -383,7 +381,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         ));
     map.method::<NoParams, bool>("user.multiUserEnabled", get_multi_user_enabled)
         .read()
-        .guard(Guard::Anonymous(
+        .guard(Guard::Cap(
             RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
         ));
     map.method::<SetMultiUserRequest, bool>("user.setMultiUserEnabled", set_multi_user_enabled)
@@ -408,7 +406,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "user.requestVerification",
         request_verification,
     )
-    .guard(Guard::Anonymous(
+    .guard(Guard::Cap(
         RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
     ));
 }

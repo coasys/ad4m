@@ -11,7 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use super::guards::{Admission, Guard};
+use super::guards::Guard;
 use crate::types::RequestContext;
 
 // ── Error type ──────────────────────────────────────────────────────────────
@@ -251,6 +251,8 @@ struct Entry {
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     result: Check,
     guard: Option<Guard>,
+    /// [`MethodFlags::or_null`]: answer `null` where the method would answer 404.
+    or_null: bool,
 }
 
 /// Returned by [`HandlerMap::method`] to mark a method `read` or `long` and to set its
@@ -269,6 +271,20 @@ impl MethodFlags<'_> {
     pub fn long(self) -> Self {
         self.spec.long = true;
         self
+    }
+    /// The method answers `null` where it would answer 404: a resource that is missing or not
+    /// the caller's (the guard's answer, D6), or one that went away before the handler read
+    /// it. For reads whose SDK result is optional (`perspective.get`, `perspective.snapshot`).
+    pub fn or_null(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no or_null"));
+        entry.or_null = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
     }
     /// Who may call the method. The dispatcher runs the guard after the params deserialize
     /// and before the handler.
@@ -339,6 +355,7 @@ impl HandlerMap {
             params: check::<P>,
             result: check::<R>,
             guard: None,
+            or_null: false,
         });
         MethodFlags {
             spec: push_spec::<P, R>(&mut self.specs, name),
@@ -372,6 +389,18 @@ impl HandlerMap {
         guards
     }
 
+    /// The methods flagged [`MethodFlags::or_null`], sorted by name.
+    pub fn or_null_methods(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .handlers
+            .iter()
+            .filter(|(_, entry)| entry.or_null)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Every method contract, sorted by name.
     pub fn specs(&self) -> Vec<&MethodSpec> {
         let mut specs: Vec<&MethodSpec> = self.specs.iter().collect();
@@ -380,8 +409,8 @@ impl HandlerMap {
     }
 
     /// Dispatch an RPC message: find the method (404), check the params against its
-    /// contract (400), run its guard (403, or `null` where the method hides existence), then
-    /// run the handler.
+    /// contract (400), run its guard (403, or 404 for a resource that is missing or not the
+    /// caller's), then run the handler. A method flagged `.or_null()` answers `null` for 404.
     pub async fn dispatch(
         &self,
         msg_type: &str,
@@ -389,10 +418,14 @@ impl HandlerMap {
         ctx: Arc<RequestContext>,
     ) -> Result<Value, WsRpcError> {
         let entry = self.entry(msg_type)?;
-        if Self::admit_entry(entry, msg_type, &params, &ctx).await? == Admission::Hidden {
-            return Ok(Value::Null);
-        }
-        let result = (entry.handler)(params, ctx).await?;
+        let answer = match Self::admit_entry(entry, msg_type, &params, &ctx).await {
+            Ok(()) => (entry.handler)(params, ctx).await,
+            Err(e) => Err(e),
+        };
+        let result = match answer {
+            Err(e) if e.code == 404 && entry.or_null => return Ok(Value::Null),
+            answer => answer?,
+        };
         #[cfg(debug_assertions)]
         if let Err(e) = (entry.result)(&result) {
             log::error!("{} returned a result outside its contract: {}", msg_type, e);
@@ -401,13 +434,14 @@ impl HandlerMap {
     }
 
     /// The dispatcher's steps before the handler, without running it: whether `ctx` may call
-    /// `msg_type` with `params`.
+    /// `msg_type` with `params`. The guard's answer as it is: a 404 stays a 404 for a method
+    /// flagged `.or_null()`, which `dispatch` turns into `null`.
     pub async fn admit(
         &self,
         msg_type: &str,
         params: &Value,
         ctx: &RequestContext,
-    ) -> Result<Admission, WsRpcError> {
+    ) -> Result<(), WsRpcError> {
         Self::admit_entry(self.entry(msg_type)?, msg_type, params, ctx).await
     }
 
@@ -422,7 +456,7 @@ impl HandlerMap {
         msg_type: &str,
         params: &Value,
         ctx: &RequestContext,
-    ) -> Result<Admission, WsRpcError> {
+    ) -> Result<(), WsRpcError> {
         (entry.params)(params).map_err(|e| {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;

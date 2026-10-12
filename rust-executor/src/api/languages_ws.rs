@@ -295,16 +295,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The executor's installed languages, which users read too.
     map.method::<LanguageListParams, Vec<LanguageHandle>>("language.all", list_languages)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, LanguageHandle>("language.get", get_language)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, LanguageMeta>("language.meta", get_language_meta)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     map.method::<LanguageAddressParams, String>("language.source", get_language_source)
         .read()
-        .guard(Guard::SelfAgent(LANGUAGE_READ_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_READ_CAPABILITY.clone()));
     // Reads `languagePath` from any path on the host and publishes the file signed by the
     // executor's main agent.
     map.method::<PublishLanguageRequest, LanguageMeta>("language.publish", publish_language)
@@ -312,7 +312,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Executor(LANGUAGE_CREATE_CAPABILITY.clone()));
     map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
         .long()
-        .guard(Guard::SelfAgent(LANGUAGE_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Cap(LANGUAGE_CREATE_CAPABILITY.clone()));
     // Installed languages and their settings are shared by every user of the executor.
     map.method::<LanguageAddressParams, bool>("language.remove", remove_language)
         .guard(Guard::Executor(LANGUAGE_DELETE_CAPABILITY.clone()));
