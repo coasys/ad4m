@@ -440,7 +440,11 @@ async fn live_proposal_role(
     terminal: bool,
     committed: Option<&str>,
 ) -> anyhow::Result<LiveProposalRole> {
+    // Shared graphs only, as the fold counts it: a Local vote of ours is not
+    // `AlreadyVoted`, and a Local proposal is not one to join.
     let links = perspective
+        .clone()
+        .for_shared_reads()
         .get_links(&LinkQuery {
             source: Some(proposal_uri.to_string()),
             ..Default::default()

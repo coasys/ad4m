@@ -48,6 +48,48 @@ async fn a_local_vote_does_not_settle_the_voters_own_edge() {
     assert_eq!(f.cached_state().await, "scoped");
 }
 
+/// The acting calls count votes as the fold does. With Alice's Local vote on
+/// Bob's proposal, neither her accept nor her propose on the same edge may
+/// take it for the vote she has already cast: each writes her Shared vote,
+/// and that vote settles the edge.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_vote_does_not_stand_in_for_the_voters_shared_one() {
+    async fn bobs_proposal_with_alices_local_vote() -> (Fixture, String) {
+        let mut f = seed_satisfied_fixture(None).await;
+        set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+        let seal = seal_for(&f, "scoped").await;
+        let bob = TestSigner::generate();
+        let proposal =
+            sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+        let alice = acting_did(&f);
+        f.link(&proposal, ACCEPTED_BY_PREDICATE, &alice, LinkStatus::Local)
+            .await;
+        (f, proposal)
+    }
+
+    let (mut f, proposal) = bobs_proposal_with_alices_local_vote().await;
+    let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect("Alice accepts");
+    assert_eq!(fired.len(), 1, "accept: {fired:?}");
+
+    let (mut f, proposal) = bobs_proposal_with_alices_local_vote().await;
+    let instance = f.instance_uri.clone();
+    let outcome =
+        propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+            .await
+            .expect("Alice proposes");
+    assert_eq!(
+        (
+            outcome.proposal_uri,
+            outcome.recorded_vote,
+            outcome.outcomes.len()
+        ),
+        (proposal, true, 1),
+        "propose: (joined, vote written, edges fired)"
+    );
+}
+
 /// A role you grant yourself in your own Local graph is not a role anyone
 /// else can see, so a vote it enables counts for nothing. Same single vote,
 /// same rule: with the grant Local the edge holds; with it Shared it settles.

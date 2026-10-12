@@ -62,7 +62,10 @@ pub async fn accept_flow_proposal(
     proposal_uri: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<FireOutcome>> {
-    let links = proposal_links(perspective, proposal_uri).await?;
+    // Shared graphs only, as the fold reads it (`FlowInstance::read_set`): a
+    // proposal or vote in a Local graph counts for nothing there, so it must
+    // neither be one we can vote on nor stand in for the vote we write.
+    let links = proposal_links(&perspective.clone().for_shared_reads(), proposal_uri).await?;
     let Some(instance_uri) = links.iter().find_map(|l| {
         (l.data.predicate.as_deref() == Some(FLOW_INSTANCE_PREDICATE))
             .then(|| l.data.target.clone())
