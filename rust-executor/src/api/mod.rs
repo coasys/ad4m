@@ -98,8 +98,6 @@ pub fn api_router(state: AppState) -> Router {
         Router::new()
             // ── WebSocket RPC (primary client transport) ──
             .route("/ws", get(ws_rpc::ws_rpc))
-            // ── WebSocket Events (event stream) ──
-            .route("/ws/events", get(events_ws::events_ws))
             // ── HTTP-only: binary transcription feed (can't go through WS JSON) ──
             .route(
                 "/ai/transcription/feed",
@@ -140,7 +138,7 @@ pub fn listener_router(
             "API on {addr} is reachable from the network and no --admin-credential is set. \
              Callers there without a token can only request a capability, check whether \
              multi-user mode is on and sign up and log in when it is; they are not the operator. Set an admin credential to \
-             administer this node remotely."
+             administer this executor remotely."
         );
     }
     Ok(api_router(state).layer(Extension(reach)))
@@ -208,12 +206,8 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     let port = config
         .port
         .ok_or_else(|| deno_core::anyhow::anyhow!("API port not configured"))?;
-    let admin_credential = config.admin_credential.clone();
-    let auto_permit = config.auto_permit_cap_requests.unwrap_or(false);
-
     let state = AppState {
-        admin_credential,
-        auto_permit_cap_requests: auto_permit,
+        admin_credential: config.admin_credential.clone(),
     };
 
     // A bad certificate or key is not fatal: the API keeps serving on 127.0.0.1,

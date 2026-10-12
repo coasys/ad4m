@@ -44,7 +44,7 @@ fn check_compute_credits_ws(user_email: Option<&str>) -> Result<(), WsRpcError> 
 // ── Models ──
 
 async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let _service = AIService::global_instance()
@@ -65,14 +65,14 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// filling in the form and wants the list to pick from, before there is
 /// anything to list. Answers the provider's own model ids.
 ///
-/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this node's,
+/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this executor's,
 /// but it makes an outbound request to an arbitrary URL with an
 /// arbitrary key, which is the same authority adding a model carries and more
 /// than reading the models already configured.
 ///
 /// That includes the failure body. `list_models` puts the upstream response
 /// verbatim into its error, so a caller can point `baseUrl` at a host this
-/// node can reach and read what it answers. Deliberate, on two grounds: a
+/// executor can reach and read what it answers. Deliberate, on two grounds: a
 /// holder of AI_CREATE can already name an arbitrary URL and send it
 /// credentials, so this widens reach and not authority; and the body is the
 /// reason the endpoint is worth having, because a status alone does not
@@ -81,9 +81,9 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// user sessions: the reach is a cleaner read primitive than `addModel` plus a
 /// prompt, needing no model and no completion.
 async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node sends a request to a URL the caller chooses.
+    // The executor sends a request to a URL the caller chooses.
     refuse_user_session(&ctx, "ai.discoverModels")?;
 
     let base_url = params.require_str("baseUrl")?;
@@ -147,7 +147,7 @@ pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRp
 }
 
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     // Node-wide settings: every user's prompts go to the models and keys set here.
     refuse_user_session(&ctx, "ai.addModel")?;
@@ -170,7 +170,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "ai.updateModel")?;
 
@@ -196,7 +196,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "ai.removeModel")?;
 
@@ -215,7 +215,7 @@ async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "ai.setDefaultModel")?;
 
@@ -242,7 +242,7 @@ async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let model_type_str = params.require_str("modelType")?;
@@ -267,7 +267,7 @@ async fn get_model_loading_status(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let model = params
@@ -285,7 +285,7 @@ async fn get_model_loading_status(
 // ── Tasks ──
 
 async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_READ_CAPABILITY)
+    ctx.require(&AI_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let tasks = AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -293,7 +293,7 @@ async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let task: AITaskInput =
@@ -313,7 +313,7 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 }
 
 async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let task: AITask = serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
@@ -332,7 +332,7 @@ async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+    ctx.require(&AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
@@ -352,7 +352,7 @@ async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 // ── Prompt & Embed ──
 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
+    ctx.require(&AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_email())?;
 
@@ -376,7 +376,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
+    ctx.require(&AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_email())?;
 
@@ -410,7 +410,7 @@ async fn open_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    ctx.require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_email())?;
 
@@ -433,7 +433,7 @@ async fn close_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    ctx.require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: AiTranscriptionCloseParams = serde_json::from_value(params)
@@ -500,7 +500,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 // This endpoint receives raw PCM Float32 LE bytes via HTTP POST.
 // It cannot go through WS JSON, so it stays as a regular Axum handler.
 
-use super::auth::{AppState, AuthContext};
+use super::auth::AppState;
 use super::errors::ApiError;
 use axum::extract::State;
 use axum::response::Json;
@@ -511,12 +511,12 @@ use axum::response::Json;
 /// Stream IDs are passed via `X-Stream-Ids` header (comma-separated).
 pub async fn feed_transcription_stream(
     State(_state): State<AppState>,
-    auth: AuthContext,
+    context: RequestContext,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
+    context
+        .require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
     check_compute_credits_ws(context.user_email()).map_err(|e| ApiError::Forbidden(e.message))?;
 

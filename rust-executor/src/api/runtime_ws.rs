@@ -46,7 +46,7 @@ async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<V
 }
 
 async fn quit_runtime(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
+    ctx.require(&RUNTIME_QUIT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     tokio::spawn(async {
@@ -58,7 +58,7 @@ async fn quit_runtime(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn set_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
+    ctx.require(&RUNTIME_MY_STATUS_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let _ = params;
@@ -121,9 +121,9 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // Reads or writes any path on the host and the whole node database.
+    // Reads or writes any path on the host and the whole executor database.
     refuse_user_session(&ctx, "runtime.exportData")?;
 
     let body: ExportRequest = serde_json::from_value(params)
@@ -173,9 +173,9 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // Reads or writes any path on the host and the whole node database.
+    // Reads or writes any path on the host and the whole executor database.
     refuse_user_session(&ctx, "runtime.importData")?;
 
     // An import writes rows as they are in the file: notifications with their `granted` flag
@@ -237,7 +237,7 @@ async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<V
 }
 
 async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: VerifySignatureRequest = serde_json::from_value(params)
@@ -253,11 +253,11 @@ async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 // ── Friends & Messages ──
-// The friend list and the outbox belong to the node's main agent; a user session has
+// The friend list and the outbox belong to the main agent; a user session has
 // neither of its own here, so it may not read or change them.
 
 async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_READ_CAPABILITY)
+    ctx.require(&RUNTIME_FRIENDS_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "runtime.friends")?;
 
@@ -268,7 +268,7 @@ async fn list_friends(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
+    ctx.require(&RUNTIME_FRIEND_STATUS_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let _ = params.require_str("did")?;
@@ -276,7 +276,7 @@ async fn get_friend_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_CREATE_CAPABILITY)
+    ctx.require(&RUNTIME_FRIENDS_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "runtime.addFriends")?;
 
@@ -291,7 +291,7 @@ async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_FRIENDS_DELETE_CAPABILITY)
+    ctx.require(&RUNTIME_FRIENDS_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "runtime.removeFriends")?;
 
@@ -309,7 +309,7 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 /// user could read every other user's messages through `runtime.outbox`. The params are still
 /// checked against the contract.
 async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
+    ctx.require(&RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     // The main agent's friends and outbox: a user session has neither of its own here.
     refuse_user_session(&ctx, "runtime.sendFriendMessage")?;
@@ -321,13 +321,13 @@ async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
+    ctx.require(&RUNTIME_MESSAGES_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     Ok(serde_json::json!([]))
 }
 
 async fn get_outbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_READ_CAPABILITY)
+    ctx.require(&RUNTIME_MESSAGES_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "runtime.outbox")?;
 
@@ -365,11 +365,8 @@ async fn check_notification_perspectives(
     ctx: &RequestContext,
 ) -> Result<(), WsRpcError> {
     for uuid in perspective_ids {
-        check_capability(
-            &ctx.capabilities,
-            &perspective_query_capability(vec![uuid.clone()]),
-        )
-        .map_err(|e| WsRpcError::forbidden(e))?;
+        ctx.require(&perspective_query_capability(vec![uuid.clone()]))
+            .map_err(|e| WsRpcError::forbidden(e))?;
 
         let perspective = match get_perspective_or_404(uuid).await {
             Ok(perspective) => perspective,
@@ -400,7 +397,7 @@ fn notification_for_caller(id: &str, dids: &Dids) -> Result<Notification, WsRpcE
 }
 
 async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let dids = notification_dids(&ctx)?;
@@ -415,7 +412,7 @@ async fn list_notifications(_params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: NotificationInput = serde_json::from_value(params)
@@ -443,7 +440,7 @@ async fn create_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
@@ -477,7 +474,7 @@ async fn update_notification(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     // Only the operator approves notifications: the launcher holds the admin credential. An
@@ -505,7 +502,7 @@ async fn grant_notification(params: Value, ctx: Arc<RequestContext>) -> Result<V
 }
 
 async fn delete_notification(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let id = params.require_str("id")?;
@@ -522,11 +519,8 @@ async fn get_link_language_templates(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
         Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
@@ -538,12 +532,9 @@ async fn add_link_language_templates(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node's list of link-language templates, offered to every user.
+    ctx.require(&RUNTIME_KNOWN_LINK_LANGUAGES_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+    // The executor's list of link-language templates, offered to every user.
     refuse_user_session(&ctx, "runtime.addLinkLanguageTemplates")?;
 
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
@@ -560,11 +551,8 @@ async fn remove_link_language_templates(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_KNOWN_LINK_LANGUAGES_DELETE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "runtime.removeLinkLanguageTemplates")?;
 
     let body: LinkLanguageTemplatesRequest = serde_json::from_value(params)
@@ -580,7 +568,7 @@ async fn remove_link_language_templates(
 // ── Holochain ──
 
 async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let config = crate::config::get_global_config();
@@ -599,9 +587,9 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
+    ctx.require(&RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // Injects peer records into the node's Holochain conductor.
+    // Injects peer records into the executor's Holochain conductor.
     refuse_user_session(&ctx, "runtime.addHcAgentInfos")?;
 
     let config = crate::config::get_global_config();
@@ -626,7 +614,7 @@ async fn get_network_metrics(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let config = crate::config::get_global_config();
@@ -657,7 +645,7 @@ async fn set_free_hosting_enabled(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
+    ctx.require(&RUNTIME_QUIT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let enabled = params
@@ -676,7 +664,7 @@ async fn get_tls_domain(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
 }
 
 async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+    ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let email = compute_log_email(params.opt_str("userEmail"), &ctx)?;
@@ -744,7 +732,7 @@ fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpc
 }
 
 async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
 
     let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())
@@ -795,7 +783,7 @@ async fn set_unyt_membrane_proof(
 }
 
 async fn unyt_version_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let (installed, bundled) = crate::unyt_service::version_info();
     Ok(serde_json::to_value(UnytVersionInfo {

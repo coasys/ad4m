@@ -46,7 +46,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
-    'agent.requestCapability': 'request-id-123',
+    'agent.requestCapability': (p: Record<string, unknown>) =>
+        'agent' in p ? `request-for-${p.agent}` : 'request-id-123',
     'agent.permitCapability': 'permitted-token',
     'agent.generateJwt': 'jwt-token-abc',
     'agent.getApps': [{ requestId: 'app1', auth: {}, token: 'tok', revoked: false }],
@@ -377,12 +378,11 @@ function wireHandle(uuid: string): PerspectiveHandle {
     return { uuid, name: 'test-perspective', neighbourhood: null, sharedUrl: null, state: 'SYNCED', owners: null };
 }
 
-const OWNER = 'did:test:123';
-const linkAdded = (perspectiveUuid: string, source: string) => event('link-added', { perspectiveUuid, owner: OWNER, link: wireLink(source) });
-const linkRemoved = (perspectiveUuid: string, source: string) => event('link-removed', { perspectiveUuid, owner: OWNER, link: wireLink(source) });
+const linkAdded = (perspectiveUuid: string, source: string) => event('link-added', { perspectiveUuid, link: wireLink(source) });
+const linkRemoved = (perspectiveUuid: string, source: string) => event('link-removed', { perspectiveUuid, link: wireLink(source) });
 const linkUpdated = (perspectiveUuid: string, oldSource: string, newSource: string) =>
-    event('link-updated', { perspectiveUuid, owner: OWNER, oldLink: wireLink(oldSource), newLink: wireLink(newSource) });
-const perspectiveAdded = (uuid: string) => event('perspective-added', { perspectiveUuid: uuid, owner: OWNER, perspective: wireHandle(uuid) });
+    event('link-updated', { perspectiveUuid, oldLink: wireLink(oldSource), newLink: wireLink(newSource) });
+const perspectiveAdded = (uuid: string) => event('perspective-added', { perspectiveUuid: uuid, perspective: wireHandle(uuid) });
 
 // ===================== TEST SETUP =====================
 
@@ -498,6 +498,13 @@ describe('AgentClient', () => {
     test('requestCapability() returns request ID', async () => {
         const id = await ad4m.agent.requestCapability({ appName: 'test', appDesc: 'test', appDomain: 'test', appUrl: 'test', capabilities: [] } as any);
         expect(id).toBe('request-id-123');
+    });
+
+    // #1399: the request names the agent the app asks to act as; without one, no `agent`
+    // param goes out (the executor's main agent).
+    test('requestCapability() passes the requested agent', async () => {
+        const id = await ad4m.agent.requestCapability({ appName: 'test', appDesc: 'test', appDomain: 'test', appUrl: 'test', capabilities: [] } as any, 'alice@example.org');
+        expect(id).toBe('request-for-alice@example.org');
     });
 
     test('permitCapability() returns token', async () => {
@@ -1419,7 +1426,7 @@ describe('Ad4mClient', () => {
             agentUpdated: jest.fn(), agentStatus: jest.fn(), apps: jest.fn(),
             hosting: jest.fn(),
             added: jest.fn(), updated: jest.fn(), removed: jest.fn(),
-            message: jest.fn(), exception: jest.fn(), notification: jest.fn(),
+            exception: jest.fn(), notification: jest.fn(),
         };
         freshClient.on('agent-updated', ({ agent }) => handlers.agentUpdated(agent));
         freshClient.on('agent-status-changed', ({ agent }) => handlers.agentStatus(agent));
@@ -1428,7 +1435,6 @@ describe('Ad4mClient', () => {
         freshClient.on('perspective-added', ({ perspective }) => handlers.added(perspective));
         freshClient.on('perspective-updated', ({ perspective }) => handlers.updated(perspective));
         freshClient.on('perspective-removed', ({ perspectiveUuid }) => handlers.removed(perspectiveUuid));
-        freshClient.on('message-received', ({ message }) => handlers.message(message));
         freshClient.on('exception-occurred', ({ exception }) => handlers.exception(exception));
         freshClient.on('notification-triggered', ({ notification }) => handlers.notification(notification));
         await freshClient.agent.me(); // wait for the socket to open
@@ -1450,12 +1456,8 @@ describe('Ad4mClient', () => {
         }));
         ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
         ws.emit(perspectiveAdded('uuid-a'));
-        ws.emit(event('perspective-updated', { perspectiveUuid: 'uuid-a', owner: OWNER, perspective: wireHandle('uuid-a') }));
-        ws.emit(event('perspective-removed', { perspectiveUuid: 'uuid-a', uuid: 'uuid-a', owner: OWNER }));
-        ws.emit(event('message-received', { message: {
-            author: 'did:test:1', timestamp: '2024-01-01T00:00:00.000Z', data: { links: [] },
-            proof: { key: 'k', signature: 's', valid: true, invalid: false },
-        } }));
+        ws.emit(event('perspective-updated', { perspectiveUuid: 'uuid-a', perspective: wireHandle('uuid-a') }));
+        ws.emit(event('perspective-removed', { perspectiveUuid: 'uuid-a', uuid: 'uuid-a' }));
         ws.emit(event('exception-occurred', { exception }));
         ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification }));
 

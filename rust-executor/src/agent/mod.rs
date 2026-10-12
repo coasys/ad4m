@@ -11,9 +11,8 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
-pub mod revoked;
+pub mod grants;
 pub mod session;
-pub mod session_registry;
 pub mod signatures;
 
 /// Validate that a user email is safe to use as a filesystem path segment.
@@ -30,14 +29,20 @@ fn validate_user_email_for_path(email: &str) -> Result<(), AnyError> {
     Ok(())
 }
 
-/// Context for determining which agent to use for operations
+/// One of the executor's agents: the main agent (agent #0, owned by the operator), or the
+/// managed agent of a user.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentContext {
-    pub user_email: Option<String>, // The user's email for wallet key lookup
-    pub is_main_agent: bool,
+    /// The managed agent's user, which names its wallet key. `None`: the main agent.
+    pub user_email: Option<String>,
 }
 
 impl AgentContext {
+    /// Whether this is the main agent.
+    pub fn is_main_agent(&self) -> bool {
+        self.user_email.is_none()
+    }
+
     /// The agent a token acts as.
     ///
     /// The empty token, the admin credential and operator tokens act as the main agent. A user
@@ -53,32 +58,19 @@ impl AgentContext {
             return Ok(Self::main_agent());
         }
         let claims = capabilities::decode_jwt(auth_token)?;
-        capabilities::check_not_revoked(&claims).map_err(|e| anyhow!(e))?;
-        Ok(Self::for_session(claims.sub))
+        let grant = capabilities::granted(&claims).map_err(|e| anyhow!(e))?;
+        Ok(grant.agent.clone())
     }
 
-    /// The agent a session acts as: the user it resolved at authentication, or the main agent
-    /// for an operator session. Takes no token, so nothing gets re-decoded.
-    pub fn for_session(user_email: Option<String>) -> Self {
-        match user_email {
-            Some(user_email) => Self::for_user_email(user_email),
-            None => Self::main_agent(),
-        }
-    }
-
-    /// Create AgentContext for main agent
+    /// The main agent.
     pub fn main_agent() -> Self {
-        Self {
-            user_email: None,
-            is_main_agent: true,
-        }
+        Self { user_email: None }
     }
 
-    /// Create AgentContext for specific user
+    /// The managed agent of `user_email`.
     pub fn for_user_email(user_email: String) -> Self {
         Self {
             user_email: Some(user_email),
-            is_main_agent: false,
         }
     }
 
@@ -226,7 +218,7 @@ fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(
 }
 
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
-    if context.is_main_agent {
+    if context.is_main_agent() {
         let backend = wallet_backend();
         let key_name = context.wallet_key_name();
         backend
@@ -247,7 +239,7 @@ pub fn signing_key_id_for_context(context: &AgentContext) -> Result<String, AnyE
 }
 
 pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
-    if context.is_main_agent {
+    if context.is_main_agent() {
         // For main agent, get from AgentService
         let did_result = AgentService::with_global_instance(|a| {
             a.did
@@ -864,7 +856,7 @@ impl AgentService {
     /// The legacy key only saw the first 24 bytes of the space-padded passphrase, so
     /// `pw` and `pw ` (or two passphrases that differ after byte 24) open the same legacy
     /// file. The rewrite binds the file to whichever of them was typed. Until an unlock
-    /// opens the rewritten file directly, a failed unlock on a locked node falls back to
+    /// opens the rewritten file directly, a failed unlock on a locked executor falls back to
     /// this copy (`unlock_from_legacy_backup`).
     fn legacy_backup_file(&self) -> String {
         format!("{}.legacy", self.file)
@@ -918,8 +910,8 @@ impl AgentService {
 
     pub fn unlock(&mut self, password: String) -> Result<(), AnyError> {
         let backend = wallet_backend();
-        // An unlocked node never falls back: the backup's keys would replace keys in memory
-        // that the node may not have saved yet.
+        // An unlocked executor never falls back: the backup's keys would replace keys in
+        // memory that the executor may not have saved yet.
         let was_unlocked = backend.is_unlocked();
         let mut result = backend.unlock(&password);
         let backup_exists = std::path::Path::new(&self.legacy_backup_file()).exists();
@@ -942,7 +934,7 @@ impl AgentService {
             result = Ok(());
         }
         if result.is_ok() {
-            // Best effort: a node on a read-only or full disk still unlocks, and its keystore
+            // Best effort: an executor on a read-only or full disk still unlocks, and its keystore
             // stays in the legacy format until a later save succeeds. No rewrite without a
             // backup of the legacy file, see `legacy_backup_file`.
             if self.legacy_keystore {
@@ -1041,7 +1033,7 @@ impl AgentService {
     /// the cleaned `store`, so nothing leaks over the API.
     ///
     /// Done at load rather than at the next save(): save() runs on lock and profile
-    /// changes, so a node that is only ever unlocked would keep its private keys on disk
+    /// changes, so an executor that is only ever unlocked would keep its private keys on disk
     /// in plaintext indefinitely. The file is re-serialised from `AgentStore`, as save()
     /// does: the keystore string and its fingerprint are kept byte for byte, but a
     /// top-level key that `AgentStore` does not model is dropped.
@@ -1068,7 +1060,7 @@ impl AgentService {
         let mut dump: AgentStore = serde_json::from_str(&file).unwrap();
         Self::strip_private_keys_from_stored_document(&self.file, &mut dump);
 
-        // A node that ran #1163 before this fix may have copied its leaking agent file to
+        // An executor that ran #1163 before this fix may have copied its leaking agent file to
         // the legacy backup. Only the backup's keystore is ever read back
         // (`unlock_from_legacy_backup`), so its document is cleaned the same way.
         let backup = self.legacy_backup_file();
@@ -1305,13 +1297,13 @@ mod tests {
     #[test]
     fn test_agent_context_creation() {
         let main_context = AgentContext::main_agent();
-        assert!(main_context.is_main_agent);
+        assert!(main_context.is_main_agent());
         assert_eq!(main_context.user_email, None);
         assert_eq!(main_context.wallet_key_name(), "main");
 
         let user_email = "test@example.com".to_string();
         let user_context = AgentContext::for_user_email(user_email.clone());
-        assert!(!user_context.is_main_agent);
+        assert!(!user_context.is_main_agent());
         assert_eq!(user_context.user_email, Some(user_email.clone()));
         assert_eq!(user_context.wallet_key_name(), user_email);
     }
@@ -1544,11 +1536,11 @@ mod tests {
         let bob_context = AgentContext::for_user_email(bob_email.to_string());
 
         assert!(
-            !alice_context.is_main_agent,
+            !alice_context.is_main_agent(),
             "Alice context should not be main agent"
         );
         assert!(
-            !bob_context.is_main_agent,
+            !bob_context.is_main_agent(),
             "Bob context should not be main agent"
         );
         assert_eq!(alice_context.user_email, Some(alice_email.to_string()));
@@ -2027,7 +2019,7 @@ mod tests {
         setup_agent();
     }
 
-    /// `agent.generate` on a migrated node replaces the main key under the same name. The
+    /// `agent.generate` on a migrated executor replaces the main key under the same name. The
     /// fingerprint covers public keys, so the fallback does not bring the old identity back.
     #[test]
     fn the_legacy_fallback_never_restores_a_replaced_key() {
@@ -2059,7 +2051,7 @@ mod tests {
         let main_key = wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN);
         AgentService::with_global_instance(|svc| svc.save(VARIANT.to_string()));
 
-        restart_and_unlock(OWNER).expect("the real passphrase still opens the node");
+        restart_and_unlock(OWNER).expect("the real passphrase still opens the executor");
         assert_eq!(
             wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN),
             main_key
@@ -2068,7 +2060,7 @@ mod tests {
         setup_agent();
     }
 
-    /// `agent.lock` saves under the passphrase that unlocked the node but re-encrypts memory
+    /// `agent.lock` saves under the passphrase that unlocked the executor but re-encrypts memory
     /// under the one it gets, so the next unlock opens memory, not the file. The backup goes
     /// only once the agent file opens with that passphrase too.
     #[test]
@@ -2088,8 +2080,8 @@ mod tests {
         setup_agent();
     }
 
-    /// On an unlocked node, a failed unlock never falls back: the backup's keys would replace
-    /// a key in memory that the node has not saved yet.
+    /// On an unlocked executor, a failed unlock never falls back: the backup's keys would
+    /// replace a key in memory that the executor has not saved yet.
     #[test]
     fn an_unlocked_node_never_falls_back_to_the_legacy_backup() {
         ensure_setup();
@@ -2210,7 +2202,7 @@ mod tests {
         reopened.expect("the migrated file unlocks");
     }
 
-    /// A node that ran #1163 before #1229 copied its leaking agent file to the legacy
+    /// An executor that ran #1163 before #1229 copied its leaking agent file to the legacy
     /// backup. `load()` cleans the backup too, keeping its keystore verbatim.
     #[test]
     fn load_strips_private_keys_from_an_existing_legacy_backup() {
@@ -2238,13 +2230,13 @@ mod tests {
             json!(legacy_keystore),
             "the strip must keep the backup's keystore verbatim"
         );
-        unlocked.expect("the node still unlocks");
+        unlocked.expect("the executor still unlocks");
     }
 }
 
 #[cfg(test)]
 mod agent_context_tests {
-    use super::{capabilities, AgentContext};
+    use super::{AgentContext, AgentService};
     use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
 
     fn setup() {
@@ -2252,7 +2244,13 @@ mod agent_context_tests {
         setup_agent();
     }
 
-    // A token that no longer decoded used to act as the node's main agent.
+    /// A login of `email`, whose agent gets a key first: a login's grant names its DID.
+    fn login(email: &str) -> String {
+        AgentService::ensure_user_key_exists(email).unwrap();
+        crate::user_management::generate_user_jwt(email, "test").unwrap()
+    }
+
+    // A token that no longer decoded used to act as the main agent.
     #[test]
     fn an_expired_user_token_acts_as_nobody() {
         setup();
@@ -2272,9 +2270,9 @@ mod agent_context_tests {
     fn a_user_token_acts_as_its_user() {
         setup();
         let _multi_user = MultiUserMode::on();
-        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
+        let token = login("alice@example.org");
         let context = AgentContext::from_auth_token(token, false).unwrap();
-        assert!(!context.is_main_agent);
+        assert!(!context.is_main_agent());
         assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
     }
 
@@ -2283,46 +2281,40 @@ mod agent_context_tests {
         setup();
         let _multi_user = MultiUserMode::on();
         let admin = AgentContext::from_auth_token("the-admin-credential".to_string(), true);
-        assert!(admin.unwrap().is_main_agent);
+        assert!(admin.unwrap().is_main_agent());
         let empty = AgentContext::from_auth_token(String::new(), false);
-        assert!(empty.unwrap().is_main_agent);
+        assert!(empty.unwrap().is_main_agent());
     }
 
-    // A user token used to act as the node's main agent once multi-user mode read as off
+    // A user token used to act as the main agent once multi-user mode read as off
     // (switched off, or a failed read of the setting).
     #[test]
     fn a_user_token_acts_as_its_user_when_multi_user_mode_is_off() {
         setup();
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
-        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
+        let token = login("alice@example.org");
         let context = AgentContext::from_auth_token(token, false).unwrap();
-        assert!(!context.is_main_agent);
+        assert!(!context.is_main_agent());
         assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
     }
 
     #[test]
     fn a_revoked_token_acts_as_nobody() {
         setup();
-        crate::test_utils::use_test_apps_file();
-        let token =
-            crate::user_management::generate_user_jwt("revoked@example.org", "test").unwrap();
-        let request_key = format!("key-{}", uuid::Uuid::new_v4());
-        let app = capabilities::AuthInfoExtended {
-            request_id: request_key.clone(),
-            auth: capabilities::AuthInfo::default(),
-        };
-        crate::test_utils::insert_app_with_token(request_key.clone(), app, &token);
-        capabilities::apps_map::revoke_app(&request_key).unwrap();
+        let token = login("revoked@example.org");
+        assert!(AgentContext::from_auth_token(token.clone(), false).is_ok());
+        let grants = super::grants::Grants::global();
+        grants.revoke(&grants.find(&token)).unwrap();
         assert!(AgentContext::from_auth_token(token, false).is_err());
-        capabilities::apps_map::remove_app(&request_key).unwrap();
     }
 
-    // Handlers and event streams take the user their session resolved at authentication.
     #[test]
-    fn a_session_acts_as_the_user_it_resolved() {
-        let user = AgentContext::for_session(Some("alice@example.org".to_string()));
-        assert!(!user.is_main_agent);
-        assert_eq!(user.user_email.as_deref(), Some("alice@example.org"));
-        assert!(AgentContext::for_session(None).is_main_agent);
+    fn only_the_agent_without_a_user_is_the_main_agent() {
+        let managed = AgentContext::for_user_email("alice@example.org".to_string());
+        assert!(!managed.is_main_agent());
+        assert_eq!(managed.wallet_key_name(), "alice@example.org");
+        let main = AgentContext::main_agent();
+        assert!(main.is_main_agent());
+        assert_eq!(main.wallet_key_name(), crate::wallet::KEY_NAME_MAIN);
     }
 }

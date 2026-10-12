@@ -42,12 +42,12 @@ use super::types::{
 };
 use crate::ai_service::providers::{ChatReply, ChatTurn, ChatUsage, ToolSpec};
 use crate::ai_service::AIService;
-use crate::api::auth::AuthContext;
 use crate::billing::check_compute_credits;
+use crate::types::RequestContext;
 
 /// Answer a tool-carrying chat request through the model's native tool calling.
 pub async fn chat_with_native_tools(
-    auth: AuthContext,
+    auth: RequestContext,
     requested_model: String,
     model_id: String,
     messages: &[ChatMessage],

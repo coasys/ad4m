@@ -59,6 +59,12 @@ pub struct PublicPerspectiveInput {
 #[ts(export)]
 pub struct RequestCapabilityRequest {
     pub auth_info: AuthInfoInput,
+    // The agent the app asks to act as (#1399): a managed user's email or an agent's DID.
+    // Absent: the executor's main agent. (A plain comment: ts-rs copies doc comments into
+    // the generated type with trailing whitespace.)
+    #[serde(default)]
+    #[ts(optional)]
+    pub agent: Option<String>,
 }
 
 #[derive(Deserialize, TS)]

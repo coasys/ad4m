@@ -204,9 +204,11 @@ impl RuntimeService {
                 addon: Some(serde_json::to_string(&notification.view()).unwrap()),
             };
 
+            // The main agent's sessions that may approve apps answer it.
+            let target = crate::agent::AgentContext::main_agent();
             get_global_pubsub()
                 .await
-                .publish_event(Event::exception(&exception_info));
+                .publish_event(Event::approval_request(&exception_info, &target));
         }
 
         Ok(notification_id)

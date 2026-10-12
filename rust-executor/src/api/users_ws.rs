@@ -16,11 +16,8 @@ async fn get_multi_user_enabled(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let enabled = Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled())
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -44,7 +41,7 @@ async fn set_multi_user_enabled(
 }
 
 async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
+    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     if !crate::user_management::is_multi_user_enabled() {
@@ -58,7 +55,7 @@ async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn get_user_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
+    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let email = params.require_str("email")?;
@@ -99,11 +96,8 @@ async fn set_user_free_access(
 async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     use crate::user_management as um;
 
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: CreateUserRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -170,7 +164,7 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
+    ctx.require(&RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersLoginParams = serde_json::from_value(params)
@@ -185,11 +179,8 @@ async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersVerifyEmailParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -205,7 +196,8 @@ async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &ALL_CAPABILITY).map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&ALL_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersEmailTestParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -260,11 +252,8 @@ async fn request_verification(
 ) -> Result<Value, WsRpcError> {
     use crate::user_management as um;
 
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersRequestVerificationParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -335,20 +324,22 @@ async fn request_verification(
     }
 }
 
-/// user.logout — revokes the caller's own user token. Its open sockets close.
+/// user.logout — revokes the caller's own grant: its token stops working and its open
+/// sockets close. The user's other logins keep working.
 async fn logout(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let (token_id, expires_at) = ctx.session.user_token().ok_or_else(|| {
+    let grant = ctx.session.user_grant().ok_or_else(|| {
         WsRpcError::bad_request("user.logout ends a user session; this session is not one")
     })?;
-    crate::agent::revoked::revoke(token_id.clone(), expires_at).map_err(WsRpcError::internal)?;
+    crate::agent::grants::Grants::global()
+        .revoke(std::slice::from_ref(grant))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(true))
 }
 
-/// user.revokeAllSessions — revokes every token of a user issued up to now. A user revokes
-/// their own (the current one too); the operator revokes any user's, named by `email`.
+/// user.revokeAllSessions — revokes every grant on a user's agent: logins and apps. A user
+/// revokes their own (the current one too); the operator revokes any user's, named by
+/// `email`. Logins after it work.
 async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    use crate::agent::revoked::{revoke_all_sessions, RevokeAllError};
-
     let body: UsersRevokeAllSessionsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let named = body.email.map(|email| email.trim().to_lowercase());
@@ -372,10 +363,13 @@ async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<
             ))
         }
     };
-    revoke_all_sessions(&email).map_err(|e| match e {
-        RevokeAllError::NoSuchUser => WsRpcError::not_found(e.to_string()),
-        RevokeAllError::Store(_) => WsRpcError::internal(e.to_string()),
-    })?;
+    let exists = crate::db::Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
+    if !exists {
+        return Err(WsRpcError::not_found("No user has this email"));
+    }
+    crate::agent::grants::Grants::global()
+        .revoke_agent(&crate::agent::AgentContext::for_user_email(email))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(true))
 }
 
@@ -530,13 +524,13 @@ pub enum UsersEmailTestResult {
 #[cfg(test)]
 mod session_revocation_tests {
     //! #1370: user tokens could not be revoked: no logout, no "log out everywhere".
-    use crate::agent::capabilities::{check_not_revoked, decode_jwt, ListenerReach};
-    use crate::agent::revoked::SessionCutoffs;
+    use crate::agent::capabilities::{capabilities_from_token, AuthInfo, ListenerReach};
+    use crate::agent::grants::Grants;
     use crate::agent::session::{AuthError, Session};
-    use crate::api::auth::AuthContext;
+    use crate::agent::AgentContext;
     use crate::api::ws_handler::build_handler_map;
     use crate::db::Ad4mDb;
-    use crate::test_utils::{managed_user, setup_agent, setup_wallet, use_test_apps_file};
+    use crate::test_utils::{granted_token, managed_user, setup_agent, setup_wallet};
     use crate::types::RequestContext;
     use crate::user_management::generate_user_jwt;
     use serde_json::{json, Value};
@@ -547,7 +541,6 @@ mod session_revocation_tests {
     fn setup() {
         setup_wallet();
         setup_agent();
-        use_test_apps_file();
     }
 
     fn open(token: &str) -> Result<Session, AuthError> {
@@ -556,9 +549,9 @@ mod session_revocation_tests {
 
     /// The context of a socket that presents `token`.
     fn ctx(token: &str) -> Arc<RequestContext> {
-        let auth = AuthContext::open(token, &Some(ADMIN.into()), false, ListenerReach::Network)
+        let ctx = RequestContext::open(token, &Some(ADMIN.into()), ListenerReach::Network)
             .unwrap_or_else(|e| panic!("the token opens a session: {e}"));
-        Arc::new(auth.to_request_context())
+        Arc::new(ctx)
     }
 
     async fn call(
@@ -572,6 +565,32 @@ mod session_revocation_tests {
             .map_err(|e| (e.code, e.message))
     }
 
+    fn app_token(name: &str) -> String {
+        granted_token(AuthInfo {
+            app_name: name.to_string(),
+            capabilities: Some(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]),
+            ..Default::default()
+        })
+    }
+
+    // D3: a login is an auto-approved grant on the user's agent, named after the app that
+    // logged in.
+    #[tokio::test]
+    async fn a_login_is_a_grant_on_the_users_agent() {
+        setup();
+        let email = managed_user("login-grant");
+        let token = generate_user_jwt(&email, "Flux").unwrap();
+        let session = open(&token).unwrap();
+        let grant = session.grant().expect("a login has a grant");
+        assert_eq!(grant.agent, AgentContext::for_user_email(email.clone()));
+        assert_eq!(grant.app_name(), "Flux");
+        assert_eq!(grant.request_id, grant.id.0, "a login answers no request");
+        assert_eq!(
+            grant.did,
+            crate::agent::AgentService::get_user_did_by_email(&email).unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn logout_revokes_the_callers_token_only() {
         setup();
@@ -581,10 +600,12 @@ mod session_revocation_tests {
             generate_user_jwt(&email, "test").unwrap(),
         );
         let (laptop_session, phone_session) = (open(&laptop).unwrap(), open(&phone).unwrap());
+        let laptop_socket = laptop_session.ended();
 
         let reply = call("user.logout", json!({}), ctx(&laptop)).await.unwrap();
         assert_eq!(reply, json!(true));
         assert_eq!(laptop_session.check(), Err(AuthError::Revoked));
+        assert!(laptop_socket.is_cancelled(), "the laptop's sockets close");
         assert_eq!(open(&laptop).unwrap_err(), AuthError::Revoked);
         assert!(
             phone_session.check().is_ok(),
@@ -596,17 +617,13 @@ mod session_revocation_tests {
     #[tokio::test]
     async fn logout_is_a_bad_request_for_a_session_without_a_user_token() {
         setup();
-        let app = crate::agent::capabilities::generate_jwt(
-            "logout app".to_string(),
-            3600,
-            Default::default(),
-        )
-        .unwrap();
+        let app = app_token("logout app");
         for caller in [ctx(ADMIN), ctx(&app)] {
             let (code, message) = call("user.logout", json!({}), caller).await.unwrap_err();
             assert_eq!(code, 400, "{message}");
             assert!(message.contains("user session"), "{message}");
         }
+        assert!(open(&app).is_ok(), "the app's grant stays");
     }
 
     #[tokio::test]
@@ -633,38 +650,32 @@ mod session_revocation_tests {
             );
             assert_eq!(open(token).unwrap_err(), AuthError::Revoked);
             // MCP resolves tokens without a session; it refuses them as well.
-            assert!(check_not_revoked(&decode_jwt(token.clone()).unwrap()).is_err());
+            assert!(capabilities_from_token(token.clone(), &None).is_err());
         }
 
-        // Issued within the same second as the cutoff, yet after it.
+        // A login right after works: no cutoff, no same-second workaround.
         let later = generate_user_jwt(&email, "test").unwrap();
         assert!(open(&later).unwrap().check().is_ok());
-        assert!(check_not_revoked(&decode_jwt(later).unwrap()).is_ok());
+        assert!(capabilities_from_token(later, &None).is_ok());
         assert!(open(&others).is_ok(), "another user's token works");
     }
 
-    // Two revoke-alls within one second, with a login between them: the second must still
-    // end that login, whose iat is the first cutoff + 1.
+    // Two revoke-alls with a login between them: the second ends that login.
     #[tokio::test]
-    async fn a_second_revoke_all_in_the_same_second_ends_a_login_made_between_them() {
+    async fn a_second_revoke_all_ends_a_login_made_after_the_first() {
         setup();
         let email = managed_user("revoke-all-twice");
+        let agent = AgentContext::for_user_email(email.clone());
         let first = generate_user_jwt(&email, "test").unwrap();
-        crate::agent::revoked::revoke_all_sessions(&email).unwrap();
+        Grants::global().revoke_agent(&agent).unwrap();
         let between = generate_user_jwt(&email, "test").unwrap();
-        assert!(
-            open(&between).is_ok(),
-            "a login after the first cutoff works"
-        );
+        assert!(open(&between).is_ok(), "a login after the first works");
 
-        crate::agent::revoked::revoke_all_sessions(&email).unwrap();
+        Grants::global().revoke_agent(&agent).unwrap();
         assert_eq!(open(&between).unwrap_err(), AuthError::Revoked);
         assert_eq!(open(&first).unwrap_err(), AuthError::Revoked);
         let after = generate_user_jwt(&email, "test").unwrap();
-        assert!(
-            open(&after).is_ok(),
-            "a login after the second cutoff works"
-        );
+        assert!(open(&after).is_ok(), "a login after the second works");
     }
 
     #[tokio::test]
@@ -708,16 +719,9 @@ mod session_revocation_tests {
     #[tokio::test]
     async fn revoke_all_refuses_callers_and_targets_it_cannot_serve() {
         setup();
-        let app = crate::agent::capabilities::generate_jwt(
-            "revoke-all app".to_string(),
-            3600,
-            crate::agent::capabilities::AuthInfo {
-                capabilities: Some(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let app = app_token("revoke-all app");
         let email = managed_user("revoke-all-app-target");
+        let target = generate_user_jwt(&email, "test").unwrap();
         let cases = [
             (ctx(&app), json!({ "email": email }), 403),
             (ctx(ADMIN), json!({}), 400),
@@ -729,15 +733,16 @@ mod session_revocation_tests {
                 .unwrap_err();
             assert_eq!(code, expected, "{params}: {message}");
         }
-        assert_eq!(SessionCutoffs::global().get("nobody@example.org"), None);
+        assert!(open(&target).is_ok(), "the refused calls revoked nothing");
     }
 
-    // A restart reads the cutoff back from the users table.
+    // A restart reads the revoked grants back from the database.
     #[tokio::test]
-    async fn the_cutoff_is_in_the_database() {
+    async fn revoked_logins_stay_revoked_after_a_reload() {
         setup();
         let email = managed_user("revoke-all-db");
         let token = generate_user_jwt(&email, "test").unwrap();
+        let id = open(&token).unwrap().grant().unwrap().id.clone();
         call(
             "user.revokeAllSessions",
             json!({ "email": email }),
@@ -746,42 +751,12 @@ mod session_revocation_tests {
         .await
         .unwrap();
 
-        let reloaded = Ad4mDb::with_global_instance(SessionCutoffs::load).unwrap();
-        let issued_at = decode_jwt(token).unwrap().issued_at();
-        assert!(reloaded.refuses(&email, issued_at));
-        assert_eq!(reloaded.get(&email), SessionCutoffs::global().get(&email));
-    }
-
-    #[test]
-    fn a_reopened_database_file_keeps_the_cutoff() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cutoffs.sqlite");
-        let path = path.to_str().unwrap();
-        let db = Ad4mDb::new(path).unwrap();
-        db.add_user_prehashed("kept@example.org", "did:key:kept", "unused")
-            .unwrap();
-        assert!(db
-            .set_user_sessions_valid_after("kept@example.org", 1_000)
-            .unwrap());
-        assert!(
-            !db.set_user_sessions_valid_after("nobody@example.org", 1_000)
-                .unwrap(),
-            "no row for an unknown user"
-        );
-        drop(db);
-
-        let cutoffs = SessionCutoffs::load(&Ad4mDb::new(path).unwrap()).unwrap();
-        assert_eq!(cutoffs.get("kept@example.org"), Some(1_000));
-        assert!(cutoffs.refuses("kept@example.org", 1_000));
-        assert!(!cutoffs.refuses("kept@example.org", 1_001));
-    }
-
-    #[test]
-    fn a_cutoff_never_moves_back() {
-        let cutoffs = SessionCutoffs::default();
-        cutoffs.set("a@example.org", 2_000);
-        cutoffs.set("a@example.org", 1_000);
-        assert_eq!(cutoffs.get("a@example.org"), Some(2_000));
+        let reloaded = Grants::default();
+        Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        assert!(reloaded.get(&id).is_none());
+        let listed = reloaded.list(&AgentContext::for_user_email(email));
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_ended());
     }
 
     // `agent.revokeToken` answered 404 for a user's JWT: only app tokens could be revoked.
@@ -798,5 +773,23 @@ mod session_revocation_tests {
             .unwrap();
         assert_eq!(open(&revoked).unwrap_err(), AuthError::Revoked);
         assert!(open(&kept).is_ok());
+    }
+
+    // D4: a user token issued before grants has no grant and is refused once; the user logs
+    // in again.
+    #[tokio::test]
+    async fn a_user_token_from_before_grants_is_refused_and_a_new_login_works() {
+        setup();
+        let email = managed_user("pre-grants");
+        let (old, _) = crate::agent::capabilities::token::sign_token(
+            "test".to_string(),
+            3600,
+            Some(email.clone()),
+        )
+        .unwrap();
+        let err = open(&old).unwrap_err();
+        assert_eq!(err, AuthError::Revoked);
+        assert_eq!(err.close_code(), 1008);
+        assert!(open(&generate_user_jwt(&email, "test").unwrap()).is_ok());
     }
 }

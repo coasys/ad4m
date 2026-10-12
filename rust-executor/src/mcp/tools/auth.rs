@@ -5,8 +5,10 @@
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::{
     defs::ALL_CAPABILITY, generate_capability_token, permit_capability,
-    request_capability as cap_request_capability, token::decode_jwt, AuthInfo, AuthInfoExtended,
+    request_capability as cap_request_capability, requested_agent, token::decode_jwt, AuthInfo,
+    AuthInfoExtended,
 };
+use crate::agent::AgentContext;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,6 +40,10 @@ pub struct RequestCapabilityParams {
     /// Optional application URL
     #[serde(default)]
     pub app_url: Option<String>,
+    /// Optional agent to act as on a multi-user executor: a user's email or an agent's DID.
+    /// Absent: the executor's main agent. That agent's owner approves the request.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Parameters for generating a JWT from a capability request
@@ -104,7 +110,7 @@ impl Ad4mMcpHandler {
 
     /// Request a capability token (local connect flow - step 1)
     #[tool(
-        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. On an executor started with --admin-credential, the request is only auto-permitted (code returned inline) when the caller's session holds the PERMIT capability: the admin credential, or a token with full rights. Any other caller, a multi-user user token included, gets only the request_id; the executor admin approves the request and provides the code out-of-band. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
+        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. Optional `agent` (a user's email or an agent's DID) asks for a token acting as that agent; absent, the main agent. On an executor started with --admin-credential, the request is only auto-permitted (code returned inline) when the caller may approve it: the admin credential, or a token that holds the PERMIT capability and acts as the requested agent (a user token for that user's own agent). Any other caller gets only the request_id; the agent's owner approves the request and provides the code out-of-band. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
     )]
     pub async fn request_capability(
         &self,
@@ -129,8 +135,12 @@ impl Ad4mMcpHandler {
         params: RequestCapabilityParams,
     ) -> String {
         self.adopt_credential(header_token).await;
-        let caller_can_permit = self.caller_can_permit().await;
-        self.handle_capability_request(params, caller_can_permit)
+        let target = match requested_agent(params.agent.as_deref()) {
+            Ok(target) => target,
+            Err(e) => return json!({"success": false, "error": e}).to_string(),
+        };
+        let caller_can_permit = self.caller_can_permit(&target).await;
+        self.handle_capability_request(params, target, caller_can_permit)
             .await
     }
 
@@ -157,6 +167,7 @@ impl Ad4mMcpHandler {
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
+        target: AgentContext,
         caller_can_permit: bool,
     ) -> String {
         let auth_info = AuthInfo {
@@ -169,16 +180,17 @@ impl Ad4mMcpHandler {
             user_email: None,
         };
 
-        let request_id = cap_request_capability(auth_info.clone()).await;
+        let request_id = cap_request_capability(auth_info.clone(), target).await;
 
         if !caller_can_permit {
             return json!({
                 "request_id": request_id,
                 "message": "Capability request created but NOT auto-permitted: this session may \
-                    not grant capabilities. The executor admin must approve the request (ADAM \
-                    Launcher), then call generate_jwt with this request_id and the code shown \
-                    to the admin. Only the admin credential, or a token that holds the PERMIT \
-                    capability, auto-permits; a user token never does."
+                    not grant capabilities on the requested agent. Its owner (the executor admin \
+                    for the main agent, the user for theirs) must approve the request, then call \
+                    generate_jwt with this request_id and the code shown to them. Only the admin \
+                    credential, or a token that holds the PERMIT capability and acts as the \
+                    requested agent, auto-permits."
             })
             .to_string();
         }
@@ -311,11 +323,16 @@ impl Ad4mMcpHandler {
     pub async fn auth_status(&self, _params: Parameters<AuthStatusParams>) -> String {
         let token = self.context.auth_token.read().await;
         let session = match token.as_deref() {
-            Some(t) if !t.is_empty() => match decode_jwt(t.to_string()) {
-                Ok(claims) => SessionToken::Valid {
-                    app_name: claims.capabilities.app_name,
-                    user_email: claims.capabilities.user_email,
-                    has_capabilities: claims.capabilities.capabilities.is_some(),
+            // The app and capabilities are the grant's: a token carries neither. A token
+            // without an active grant works no more than one that does not decode.
+            Some(t) if !t.is_empty() => match decode_jwt(t.to_string())
+                .map_err(|e| e.to_string())
+                .and_then(|claims| crate::agent::capabilities::granted(&claims))
+            {
+                Ok(grant) => SessionToken::Valid {
+                    app_name: grant.app_name().to_string(),
+                    user_email: grant.agent.user_email.clone(),
+                    has_capabilities: grant.auth.capabilities.is_some(),
                 },
                 Err(_) => SessionToken::Undecodable,
             },
@@ -489,6 +506,7 @@ mod capability_mint_tests {
             app_desc: "a caller that has not authenticated".to_string(),
             app_domain: None,
             app_url: None,
+            agent: None,
         }
     }
 
@@ -503,7 +521,7 @@ mod capability_mint_tests {
     async fn an_unauthenticated_caller_gets_no_mint_code() {
         let handler = handler_with_admin_credential();
         let resp = handler
-            .handle_capability_request(mint_params(), false)
+            .handle_capability_request(mint_params(), AgentContext::main_agent(), false)
             .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         assert!(
@@ -521,10 +539,12 @@ mod capability_mint_tests {
 
     #[tokio::test]
     async fn an_authenticated_caller_still_gets_a_permitted_code() {
-        use crate::agent::capabilities::pending::PendingApprovals;
+        use crate::agent::capabilities::pending::PendingRequests;
 
         let handler = handler_with_admin_credential();
-        let resp = handler.handle_capability_request(mint_params(), true).await;
+        let resp = handler
+            .handle_capability_request(mint_params(), AgentContext::main_agent(), true)
+            .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         let request_id = v["request_id"].as_str().expect("request_id present");
         let code = v["code"]
@@ -533,7 +553,7 @@ mod capability_mint_tests {
         // Not just an inline code: the permit must actually be registered,
         // i.e. generate_jwt with this pair would succeed.
         assert!(
-            PendingApprovals::global().has_code(request_id, code),
+            PendingRequests::global().has_code(request_id, code),
             "permit was not registered for the returned request_id/code"
         );
     }
@@ -563,53 +583,70 @@ mod capability_mint_tests {
         );
     }
 
-    /// The escalation of issue #851 sub-problem 3, through the capability layer: a
-    /// multi-user user token authenticates but holds no PERMIT capability, so it must
-    /// not auto-permit an ALL_CAPABILITY mint. A token that does hold PERMIT still may.
+    /// The escalation of issue #851 sub-problem 3, through the capability layer: a token
+    /// must not auto-permit a request it may not approve (D12). A token without PERMIT never
+    /// does; a token with it only for the agent it acts as. Users hold PERMIT on their own
+    /// agent (#1399), so a user token auto-permits requests for that user and no other.
     #[tokio::test]
-    async fn a_token_without_permit_may_not_auto_permit() {
+    async fn only_a_caller_that_may_approve_the_request_auto_permits_it() {
         use crate::agent::capabilities::{
-            get_user_default_capabilities, token::generate_jwt, types::AuthInfo, Capability,
-            ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
+            types::AuthInfo, Capability, AGENT_READ_CAPABILITY, ALL_CAPABILITY,
         };
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
 
         let jwt_with = |caps: Vec<Capability>| {
-            generate_jwt(
-                "test-app".to_string(),
-                DEFAULT_TOKEN_VALID_PERIOD,
-                AuthInfo {
-                    app_name: "test-app".to_string(),
-                    app_desc: String::new(),
-                    app_domain: None,
-                    app_url: None,
-                    app_icon_path: None,
-                    capabilities: Some(caps),
-                    user_email: None,
-                },
-            )
-            .expect("the wallet is unlocked in tests")
+            crate::test_utils::granted_token(AuthInfo {
+                app_name: "test-app".to_string(),
+                app_desc: String::new(),
+                app_domain: None,
+                app_url: None,
+                app_icon_path: None,
+                capabilities: Some(caps),
+                user_email: None,
+            })
         };
+        let alice = crate::test_utils::managed_user("mcp-alice");
+        let alice_token = crate::user_management::generate_user_jwt(&alice, "mcp").unwrap();
+        let bob = crate::test_utils::managed_user("mcp-bob");
 
         // Through the tool's own path: the header credential joins a fresh session, then
         // the permit check decides. Returns whether the reply carries a mint code.
-        let gets_code = |header: String| async move {
+        let gets_code = |header: String, agent: Option<String>| async move {
             let resp = handler_with_admin_credential()
-                .request_capability_with_header(Some(header), mint_params())
+                .request_capability_with_header(
+                    Some(header),
+                    RequestCapabilityParams {
+                        agent,
+                        ..mint_params()
+                    },
+                )
                 .await;
             let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
             v.get("code").is_some()
         };
 
-        // A user-capability token authenticates but cannot auto-permit.
+        // A token without PERMIT authenticates but cannot auto-permit.
         assert!(
-            !gets_code(jwt_with(get_user_default_capabilities())).await,
-            "a user token without PERMIT received a mint code"
+            !gets_code(jwt_with(vec![AGENT_READ_CAPABILITY.clone()]), None).await,
+            "a token without PERMIT received a mint code"
         );
-        // A token that holds PERMIT (here, ALL_CAPABILITY) still auto-permits.
-        assert!(gets_code(jwt_with(vec![ALL_CAPABILITY.clone()])).await);
-        // The admin credential auto-permits.
-        assert!(gets_code("test-admin-credential".to_string()).await);
+        // A user may approve for their own agent only.
+        assert!(
+            !gets_code(alice_token.clone(), None).await,
+            "a user token received a mint code for the main agent"
+        );
+        assert!(
+            !gets_code(alice_token.clone(), Some(bob.clone())).await,
+            "a user token received a mint code for another user"
+        );
+        assert!(gets_code(alice_token, Some(alice.clone())).await);
+        // A main-agent token that holds PERMIT (here, ALL_CAPABILITY) auto-permits for the
+        // main agent, never for a user's.
+        assert!(gets_code(jwt_with(vec![ALL_CAPABILITY.clone()]), None).await);
+        assert!(!gets_code(jwt_with(vec![ALL_CAPABILITY.clone()]), Some(alice.clone())).await);
+        // The admin credential auto-permits for any agent.
+        assert!(gets_code("test-admin-credential".to_string(), None).await);
+        assert!(gets_code("test-admin-credential".to_string(), Some(alice)).await);
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! The cache and the marks are `Local` (see [`pass`](super::pass)), so
 //! nothing a peer writes can update them on this replica — only this
-//! replica's own pass can. `Local` is also per agent on a multi-user node,
+//! replica's own pass can. `Local` is also per agent on a multi-user executor,
 //! so one sync burst sweeps once per agent that keeps bookkeeping here; see
 //! [`flow_pass_agents`]. Before this module that pass ran after this
 //! replica's own vote ([`accept`](super::accept)) or mint only; a replica
@@ -321,7 +321,7 @@ impl PerspectiveInstance {
     }
 
     /// The agents [`flow_pass_agents`] names, with this perspective's owner
-    /// DIDs read from its handle and resolved against the node's agents.
+    /// DIDs read from its handle and resolved against the executor's agents.
     ///
     /// Two reads, both cheap and neither touching the wallet mutex: the
     /// handle's `owners`, and — only when an owner is not the main agent —
@@ -337,7 +337,7 @@ impl PerspectiveInstance {
     /// "recording … rolled back (re-runs next pass)" warning — loud, and
     /// harmless because the derivation is a pure fold that repeats. The
     /// alternative, `WalletBackend::key_exists`, falls back to a blocking
-    /// HTTP call on `SharedWallet` — the very backend a multi-user node
+    /// HTTP call on `SharedWallet` — the very backend a multi-user executor
     /// runs — so pre-checking would trade a rare loud failure for a wallet
     /// round-trip per user per pass. Note also that nothing here calls
     /// `ensure_user_key`: a missing key must never be answered by minting a
@@ -371,7 +371,7 @@ impl PerspectiveInstance {
 
         let contexts = flow_pass_agents(&owners, main_did.as_deref(), &managed_users);
         log::debug!(
-            "sync-triggered flow pass on {}: {} of {} owner(s) are agents on this node",
+            "sync-triggered flow pass on {}: {} of {} owner(s) are agents on this executor",
             self.uuid,
             contexts.len(),
             owners.len()
@@ -383,11 +383,11 @@ impl PerspectiveInstance {
 /// Every agent whose `Local` bookkeeping a flow pass on this perspective
 /// must advance: **this perspective's owners, and nobody else.**
 ///
-/// `owners` is the handle's owner DID list, `main_agent_did` this node's own
-/// DID, and `managed_users` the `(did, email)` of the node's managed users.
-/// An owner DID is the main agent's, or a managed user's, or neither — and
-/// *neither* is skipped: it names an agent this node does not act for, whose
-/// bookkeeping is kept on its own node.
+/// `owners` is the handle's owner DID list, `main_agent_did` this executor's
+/// main agent's DID, and `managed_users` the `(did, email)` of the executor's
+/// managed users. An owner DID is the main agent's, or a managed user's, or
+/// neither — and *neither* is skipped: it names an agent this executor does
+/// not act for, whose bookkeeping is kept on its own executor.
 ///
 /// **Why more than one.** The derived-state cache and the fired marks are
 /// `Local` links, and managed users get their own local link space (the
@@ -397,7 +397,7 @@ impl PerspectiveInstance {
 /// happened long ago as new — the `first_pass_here` catch-up in
 /// [`pass`](super::pass) suppresses the flood only once.
 ///
-/// **Why the main agent is not unconditional.** A hosted node holds
+/// **Why the main agent is not unconditional.** A hosted executor holds
 /// perspectives it is not an owner of: a neighbourhood one managed user
 /// joined is that user's, and the main agent cannot even read it
 /// (`check_main_agent_access` is `is_owned_by` once a perspective has
@@ -410,7 +410,7 @@ impl PerspectiveInstance {
 /// so a plain local perspective has none — and `check_main_agent_access`
 /// grants the main agent an unowned perspective for exactly that reason.
 /// Empty `owners` therefore means `[main_agent]`, which is also every
-/// single-user node's normal case.
+/// single-user executor's normal case.
 ///
 /// **Why all owners and not only the online ones.** Unlike the
 /// auto-processor — where an offline user simply misses an LLM pass another
@@ -450,16 +450,13 @@ pub fn flow_pass_agents(
                 .map(|(_, email)| email.clone())
             {
                 Some(email) => AgentContext::for_user_email(email),
-                // An owner this node does not act for: a peer that joined the
+                // An owner this executor does not act for: a peer that joined the
                 // neighbourhood from its own executor, or a user that has since
                 // been removed. Its bookkeeping is not ours to advance.
                 None => continue,
             }
         };
-        if !contexts
-            .iter()
-            .any(|c| c.user_email == context.user_email && c.is_main_agent == context.is_main_agent)
-        {
+        if !contexts.contains(&context) {
             contexts.push(context);
         }
     }
@@ -700,7 +697,7 @@ mod tests {
         // in the DB must not fan a pass out over a perspective nobody claims.
         let contexts = flow_pass_agents(&[], Some(MAIN), &users());
         assert_eq!(emails(&contexts), vec![None]);
-        assert!(contexts[0].is_main_agent);
+        assert!(contexts[0].is_main_agent());
     }
 
     #[test]
@@ -713,11 +710,11 @@ mod tests {
             "one context per owner, in the handle's order"
         );
         assert!(
-            contexts[1].is_main_agent,
+            contexts[1].is_main_agent(),
             "the main agent's own DID resolves to the main-agent context"
         );
         assert!(
-            !contexts[0].is_main_agent && !contexts[2].is_main_agent,
+            !contexts[0].is_main_agent() && !contexts[2].is_main_agent(),
             "a managed user's pass must sign as that user, not as the host"
         );
     }
@@ -734,7 +731,7 @@ mod tests {
     #[test]
     fn an_owner_this_node_does_not_act_for_is_skipped() {
         // A peer that joined from its own executor, or a removed user: its
-        // bookkeeping lives on its own node. Skipped, never silently swept as
+        // bookkeeping lives on its own executor. Skipped, never silently swept as
         // the main agent — that would sign one agent's cache with another's key.
         let owners = vec!["did:key:zRemotePeer".to_string(), MAIN.to_string()];
         assert_eq!(

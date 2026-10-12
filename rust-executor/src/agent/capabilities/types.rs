@@ -42,7 +42,7 @@ impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub with: Resource,
@@ -58,7 +58,7 @@ impl From<crate::types::CapabilityInput> for Capability {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
@@ -82,15 +82,19 @@ pub struct Claims {
     exp: u64,
     iat: u64,
     nonce: String,
-    pub capabilities: AuthInfo,
+    // Tokens issued before grants also carry `capabilities` (the app's `AuthInfo`). Serde
+    // skips the unknown field, so they still decode; their grant (migrated from the old app
+    // registry) holds the capabilities now, and nothing reads them from a token.
 }
 
 impl Claims {
+    /// Claims for a token that the main agent's key `issuer` signs, naming the managed agent
+    /// `sub` (`None`: the main agent).
     pub fn new(
         issuer: String,
         audience: String,
         expiration_time: u64,
-        capabilities: AuthInfo,
+        sub: Option<String>,
     ) -> Self {
         let now = SystemTime::now();
         let unix_timestamp = now
@@ -102,13 +106,17 @@ impl Claims {
 
         Claims {
             iss: issuer,
-            sub: capabilities.user_email.clone(), // Set sub to user email
+            sub,
             aud: audience,
             exp: unix_timestamp + expiration_time,
             iat: unix_timestamp,
             nonce,
-            capabilities,
         }
+    }
+
+    /// The DID of the key that signed the token.
+    pub fn issuer(&self) -> &str {
+        &self.iss
     }
 
     /// The token's id: a fresh v4 UUID per token.
@@ -124,15 +132,5 @@ impl Claims {
     /// Unix time (seconds) at which the token was issued.
     pub fn issued_at(&self) -> u64 {
         self.iat
-    }
-
-    /// Moves the issue time to `earliest` when it is earlier, and the expiry with it, so the
-    /// token keeps its validity period.
-    pub(crate) fn issued_no_earlier_than(mut self, earliest: u64) -> Self {
-        if self.iat < earliest {
-            self.exp += earliest - self.iat;
-            self.iat = earliest;
-        }
-        self
     }
 }

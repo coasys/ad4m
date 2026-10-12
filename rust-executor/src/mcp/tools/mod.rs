@@ -519,26 +519,38 @@ impl Ad4mMcpHandler {
         capabilities_from_token(token.unwrap_or_default(), &self.context.admin_credential)
     }
 
-    /// Whether the current caller may auto-permit a capability request.
+    /// Whether the current caller may auto-permit a capability request for `target`: the
+    /// rule of `agent.permitCapability` ([`crate::agent::capabilities::may_approve`], D12).
     ///
-    /// Authentication alone is not enough: a multi-user user token authenticates
-    /// (it decodes to a valid session), but it holds no PERMIT capability, so it may
-    /// only *create* a request for the admin to approve out of band. Auto-permit hands
-    /// back the inline code, which `generate_jwt` turns into an ALL_CAPABILITY token; a
-    /// caller without PERMIT must never receive it (issue #851, sub-problem 3). The
-    /// admin credential decodes to ALL_CAPABILITY, which contains PERMIT, so the admin
-    /// still auto-permits. `request_capability_with_header` adopts a valid header
-    /// credential into the session before this runs, so reading the session token covers
-    /// header-only clients too.
+    /// Authentication alone is not enough. The operator (the admin credential) may; any other
+    /// token only if it holds PERMIT and acts as `target`: a user token permits requests for
+    /// that user's own agent and creates any other for its owner to approve out of band.
+    /// Auto-permit hands back the inline code, which `generate_jwt` turns into a token on
+    /// `target`; a caller that may not approve must never receive it (issue #851,
+    /// sub-problem 3). `request_capability_with_header` adopts a valid header credential into
+    /// the session before this runs, so reading the session token covers header-only clients
+    /// too.
     ///
     /// The check holds only on an executor with an admin credential. Without one, the empty
-    /// token holds ALL_CAPABILITY, so every caller passes, on a multi-user node also a user
+    /// token is the operator, so every caller passes, on a multi-user executor also a user
     /// who drops their token (#1059).
-    pub(crate) async fn caller_can_permit(&self) -> bool {
-        match self.get_capabilities().await {
+    pub(crate) async fn caller_can_permit(&self, target: &AgentContext) -> bool {
+        let token = self.get_auth_token().await.unwrap_or_default();
+        if crate::agent::capabilities::is_admin_credential_token(
+            &token,
+            &self.context.admin_credential,
+        ) {
+            return true;
+        }
+        let holds_permit = match self.get_capabilities().await {
             Ok(caps) => check_capability(&Ok(caps), &AGENT_PERMIT_CAPABILITY).is_ok(),
             Err(_) => false,
-        }
+        };
+        holds_permit
+            && !token.is_empty()
+            && self
+                .agent_context_for(&token)
+                .is_ok_and(|agent| agent == *target)
     }
 
     /// Store an auth token in the session and return a success JSON response
@@ -840,7 +852,7 @@ mod agent_context_tests {
         })
     }
 
-    // MCP tools used to act as the node's main agent once a session token stopped decoding.
+    // MCP tools used to act as the main agent once a session token stopped decoding.
     #[tokio::test]
     async fn an_expired_session_token_acts_as_nobody() {
         setup_wallet();
@@ -857,10 +869,10 @@ mod agent_context_tests {
         setup_agent();
         let _multi_user = MultiUserMode::on();
         let context = handler("test-admin").get_agent_context().await.unwrap();
-        assert!(context.is_main_agent);
+        assert!(context.is_main_agent());
     }
 
-    // Profile tools answered with the node's DID once a session token stopped decoding.
+    // Profile tools answered with the main agent's DID once a session token stopped decoding.
     #[tokio::test]
     async fn a_profile_tool_with_an_expired_token_does_not_answer_as_the_node() {
         setup_wallet();
@@ -881,6 +893,8 @@ mod agent_context_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
+        // A login's grant names the user's DID, so the user has a key.
+        crate::agent::AgentService::ensure_user_key_exists("mcp.user@example.org").unwrap();
         let token =
             crate::user_management::generate_user_jwt("mcp.user@example.org", "test").unwrap();
         let context = handler(&token).get_agent_context().await.unwrap();
