@@ -1704,6 +1704,10 @@ export class PerspectiveProxy {
      *
      * await perspective.addFlow('Delivery', deliveryFlow);
      * ```
+     *
+     * Rejects, storing nothing, when a `consensusRule` carries a key the
+     * executor does not know or a key written twice (#1144): the error names
+     * the state and the key.
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
         const flowNameLiteral = Literal.from(name).toUrl();
