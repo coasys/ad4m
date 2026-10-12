@@ -350,7 +350,7 @@ const meta = await ad4m.languages.publish(
     { name: "note-store", description: "A simple note store" },
 );
 
-// Install on another node (or the same one later)
+// Install on another executor (or the same one later)
 await ad4m.languages.install(meta.address);
 
 // Use: all Expression operations go through the universal address format
@@ -364,7 +364,7 @@ claims, install it, and speak the protocol.
 
 ## The core Languages
 
-Every AD4M node boots with a small set of **core Languages**. These are
+Every AD4M executor boots with a small set of **core Languages**. These are
 the ones the rest of the system actually relies on — without them, an
 agent cannot participate in a Neighbourhood at all:
 

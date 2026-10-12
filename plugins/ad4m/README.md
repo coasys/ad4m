@@ -90,7 +90,7 @@ a stale file can hand you a previous run's account.
 |---------------|----------------|
 | Multi-user password | Export `AD4M_PASSWORD` before running setup (recommended; also lets the plugin re-authenticate when the JWT expires). `config.password` works but is plaintext at rest. |
 | Capability approval code (external mode) | Run the executor with `--auto-permit-cap-requests`; the code is logged to stdout. |
-| Email verification code (multi-user node with SMTP verification) | **No headless route.** A human reads the code from the inbox. Nodes without SMTP verification return the JWT from `login_email` and never reach this prompt. |
+| Email verification code (multi-user executor with SMTP verification) | **No headless route.** A human reads the code from the inbox. Executors without SMTP verification return the JWT from `login_email` and never reach this prompt. |
 
 Without a TTY and without `AD4M_PASSWORD`, setup fails with an explicit message rather
 than hanging.
@@ -190,10 +190,10 @@ All fields are optional. In managed mode, credentials are auto-generated during 
 | `wakeToken` | auto from `hooks.token` | Override for the hooks authentication token |
 | `debounceMs` | `2000` | Debounce interval for wake events (ms) |
 | `allowInsecureHttp` | `false` | Client-side guard. Every MCP call carries a credential, so the plugin refuses a non-loopback plaintext `http://` `mcpEndpoint` unless this is set. `https://`, `http://localhost…` and SSH-tunnelled endpoints need it off. Use it only for a trusted LAN path; otherwise put TLS in front of the executor. |
-| `multiUser` | `false` | External mode: provision the agent's own user account on a multi-user node (`signup` + `login_email`) instead of requesting a capability against the node's base agent. |
+| `multiUser` | `false` | External mode: provision the agent's own user account on a multi-user executor (`signup` + `login_email`) instead of requesting a capability against the executor's main agent. |
 | `email` | — | Multi-user: the agent's account identifier. Persisted by setup for re-authentication. |
 | `password` | — | Multi-user password. Resolution order: `AD4M_PASSWORD` env var → interactive prompt during setup → this field. **Prefer the env var** — this field is plaintext at rest, and setup persists only the resulting `token` and `email`. |
-| `runHolochain` | `true` | Managed mode: set `false` to start the executor with `--run-holochain false` — no P2P or bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync. |
+| `runHolochain` | `true` | Managed mode: set `false` to start the executor with `--run-holochain false` — no P2P or bootstrap egress, for isolated or offline executors that do not need neighbourhood sync. |
 | `rustLog` | — | `RUST_LOG` value for the executor process (e.g. `holochain=debug`). Managed mode only. |
 | `executorLogTarget` | `file` | Where executor logs go: `file` (`~/.ad4m/ad4m.log`), `openclaw`, or `both`. |
 
@@ -286,21 +286,21 @@ Setup names this case rather than blaming the token:
 
 ```
 [ad4m-setup] Could not complete auth: the executor is LOCKED, not misconfigured.
-[ad4m-setup] A JWT will not help here — a locked node rejects it too. Have the
+[ad4m-setup] A JWT will not help here — a locked executor rejects it too. Have the
 executor's operator call unlockAgent, then run `openclaw ad4m-setup` again.
 ```
 
-**Pasting a JWT is not the remedy** — a locked node rejects a valid token exactly as it
+**Pasting a JWT is not the remedy** — a locked executor rejects a valid token exactly as it
 rejects the handshake. Unlock the executor first (`unlockAgent`, or the launcher's
 passphrase prompt), then re-run setup. The config snippet printed below the warning says
 the same thing in the field you would otherwise fill:
 `"token": "<unlock the executor first, then re-run ad4m-setup>"`.
 
 If `auth_status` cannot be reached either, setup says the lock state is **unknown** rather
-than implying the node is fine — check it before pasting anything.
+than implying the executor is fine — check it before pasting anything.
 
 `ad4m_auth_status` answers the same question at any time: `executor_locked: true`
-alongside `authenticated: true` means your credential is fine and the node is not ready.
+alongside `authenticated: true` means your credential is fine and the executor is not ready.
 
 ## Plugin structure
 
@@ -341,11 +341,11 @@ plugins/ad4m/
   `0600`) like a JWT already did, instead of being printed as one copy-paste line.
 - **Setup warns instead of falling back silently.** An `--endpoint` that does not answer
   used to drop to managed mode without a word, downloading an executor and returning a
-  localhost config for a remote node you named.
+  localhost config for a remote executor you named.
 - **Setup names a locked executor as the cause when auth fails.** It used to answer every
   failed handshake with "obtain a JWT token manually" — the one remedy that cannot work
-  against a locked node, which rejects a pasted token too. Setup now asks `auth_status`
-  before it advises, and points at `unlockAgent` when the node is locked.
+  against a locked executor, which rejects a pasted token too. Setup now asks `auth_status`
+  before it advises, and points at `unlockAgent` when the executor is locked.
 
 ### 0.0.2
 

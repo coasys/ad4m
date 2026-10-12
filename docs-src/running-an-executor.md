@@ -1,4 +1,4 @@
-# Running an AD4M Executor — Node Operator Guide
+# Running an AD4M Executor — Operator Guide
 
 > **Audience.** This file is for the person who stands up and maintains the executor process — downloading, initializing, running, unlocking, and verifying. If you were handed a running executor's address and just need to authenticate against it, see `references/setup.md` instead.
 
@@ -85,7 +85,7 @@ ad4m-executor run \
 | `--hc-admin-port` | 2000 | Holochain admin port |
 | `--hc-app-port` | 1337 | Holochain app interface port |
 
-For a long-running node, put these settings in a config file instead
+For a long-running executor, put these settings in a config file instead
 (`ad4m-executor run --config <file>`), with the admin credential in a file
 named by `AD4M_ADMIN_CREDENTIAL_FILE`. The keys, the `AD4M_<FLAG>` variables
 and their precedence are in `pages/developer-guides/executor-config.mdx`
@@ -94,7 +94,7 @@ would start with.
 
 To run the executor as a `systemd` service without the launcher (a unit
 with the secrets loaded through `LoadCredential=`, updates with a copy of
-the data directory, health checks, rollback, moving a node off the
+the data directory, health checks, rollback, moving an executor off the
 launcher), follow `headless-executor.md`.
 
 **For AI agents**: Always run in a screen session with logging:
@@ -138,20 +138,20 @@ itself at every start (see "Unlocking at startup" in
 `--holochain true` starts the Holochain conductor during unlock. Same caveat
 as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
 
-**Skipping this step is expected to break every other auth path — by design, not by bug.** An executor is only usable once its main operator has unlocked it. The wallet keeps signing keys in memory only; immediately after a restart, before `unlock` runs, the executor holds just the encrypted cipher — it can check that a password/credential is *structurally* valid but cannot actually sign anything, so it fails at key lookup instead. **What's actually wrong here is the error message, not the lockout itself:** a third party trying to authenticate against a not-yet-unlocked node should fail immediately with a clear "this executor hasn't been unlocked yet" message, not a confusing one that reads like a bad credential:
+**Skipping this step is expected to break every other auth path — by design, not by bug.** An executor is only usable once its main operator has unlocked it. The wallet keeps signing keys in memory only; immediately after a restart, before `unlock` runs, the executor holds just the encrypted cipher — it can check that a password/credential is *structurally* valid but cannot actually sign anything, so it fails at key lookup instead. **What's actually wrong here is the error message, not the lockout itself:** a third party trying to authenticate against a not-yet-unlocked executor should fail immediately with a clear "this executor hasn't been unlocked yet" message, not a confusing one that reads like a bad credential:
 
-- `login_email` (multi-user) → `User key not found on executor` — reads like a wrong password. It's actually "nobody has unlocked this node yet."
+- `login_email` (multi-user) → `User key not found on executor` — reads like a wrong password. It's actually "nobody has unlocked this executor yet."
 - `request_capability` → `generate_jwt` (capability flow) → `main key not found` — the capability bootstrap is equally blocked until unlock.
 
-If you're the executor's operator and don't have CLI access handy, the same unlock is available over the WebSocket RPC API (`references/setup.md` → "WebSocket RPC API (Fallback)"): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the node first.
+If you're the executor's operator and don't have CLI access handy, the same unlock is available over the WebSocket RPC API (`references/setup.md` → "WebSocket RPC API (Fallback)"): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the executor first.
 
-**Test-only mode, not a security bug: the empty token is the operator on loopback only.** `run` refuses to start without an admin credential unless it is passed `--insecure-no-admin-credential` (or `AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true`). On a node started that way, with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access, including `agent.unlock`, on an API listener bound to a loopback address (the default, `--localhost true`). This is the single-user local mode for tests and development. On a listener bound to any other address (`--localhost false`, or the HTTPS listener when TLS is configured) a caller with no token is anonymous: it can request a capability (`agent.requestCapability`), check whether multi-user mode is on, and sign up and log in when it is. It cannot read, unlock or administer anything. To administer a node over the network, set an admin credential.
+**Test-only mode, not a security bug: the empty token is the operator on loopback only.** `run` refuses to start without an admin credential unless it is passed `--insecure-no-admin-credential` (or `AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true`). On an executor started that way, with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access, including `agent.unlock`, on an API listener bound to a loopback address (the default, `--localhost true`). This is the single-user local mode for tests and development. On a listener bound to any other address (`--localhost false`, or the HTTPS listener when TLS is configured) a caller with no token is anonymous: it can request a capability (`agent.requestCapability`), check whether multi-user mode is on, and sign up and log in when it is. It cannot read, unlock or administer anything. To administer an executor over the network, set an admin credential.
 
-**A proxy or tunnel in front of a loopback listener needs an admin credential.** A reverse proxy or tunnel on the same host (nginx, Caddy, Traefik, cloudflared, `tailscale serve`, `ssh -R`) connects to the executor from `127.0.0.1`, so its remote clients arrive on the loopback listener. A request that carries a `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header is treated as a network caller, which covers most HTTP proxy configurations. A proxy that sets none of these headers (a raw TCP or stream forward, `ssh -R`, an nginx `proxy_pass` without `proxy_set_header`) is still treated as the operator, and so is every client behind it. Set an admin credential on any node you put a proxy or tunnel in front of.
+**A proxy or tunnel in front of a loopback listener needs an admin credential.** A reverse proxy or tunnel on the same host (nginx, Caddy, Traefik, cloudflared, `tailscale serve`, `ssh -R`) connects to the executor from `127.0.0.1`, so its remote clients arrive on the loopback listener. A request that carries a `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header is treated as a network caller, which covers most HTTP proxy configurations. A proxy that sets none of these headers (a raw TCP or stream forward, `ssh -R`, an nginx `proxy_pass` without `proxy_set_header`) is still treated as the operator, and so is every client behind it. Set an admin credential on any executor you put a proxy or tunnel in front of.
 
-**No admin credential is a testing/development mode, not a deployment target.** The launcher always sets an admin credential; a node with none configured only happens when `ad4m-executor` is started by hand with `--insecure-no-admin-credential` and without `AD4M_ADMIN_CREDENTIAL` or `--admin-credential`. Production deployments must set one. **Never pass the flag except on loopback/local test setups.**
+**No admin credential is a testing/development mode, not a deployment target.** The launcher always sets an admin credential; an executor with none configured only happens when `ad4m-executor` is started by hand with `--insecure-no-admin-credential` and without `AD4M_ADMIN_CREDENTIAL` or `--admin-credential`. Production deployments must set one. **Never pass the flag except on loopback/local test setups.**
 
-**A web page open in a browser on the same machine can reach a loopback executor too.** The HTTP API accepts requests from any origin (no CORS restriction), and the WebSocket API doesn't check the `Origin` header either. On a node with no admin credential, that means any page open in a local browser — not just terminal tools — gets the same operator access a local CLI would. Chrome asks the user for Local Network Access permission before a public site can reach loopback (for HTTP since Chrome 142, for WebSocket since Chrome 147), but one click grants it, and other browsers may not ask at all. Don't run without a credential on a machine where you also browse untrusted sites with a node holding real data.
+**A web page open in a browser on the same machine can reach a loopback executor too.** The HTTP API accepts requests from any origin (no CORS restriction), and the WebSocket API doesn't check the `Origin` header either. On an executor with no admin credential, that means any page open in a local browser — not just terminal tools — gets the same operator access a local CLI would. Chrome asks the user for Local Network Access permission before a public site can reach loopback (for HTTP since Chrome 142, for WebSocket since Chrome 147), but one click grants it, and other browsers may not ask at all. Don't run without a credential on a machine where you also browse untrusted sites with an executor holding real data.
 
 Before [#1059](https://github.com/coasys/ad4m/issues/1059) the empty token had full access on every listener.
 

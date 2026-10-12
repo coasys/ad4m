@@ -34,9 +34,9 @@ export interface PluginConfig {
   rustLog?: string;
   /** Where to send executor logs: "file" (default) = ~/.ad4m/ad4m.log only, "openclaw" = openclaw logs only, "both" = both. */
   executorLogTarget?: "file" | "openclaw" | "both";
-  /** Run Holochain in managed mode (default true). Set false to start the executor with `--run-holochain false` — no P2P/bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync. */
+  /** Run Holochain in managed mode (default true). Set false to start the executor with `--run-holochain false` — no P2P/bootstrap egress, for isolated or offline executors that do not need neighbourhood sync. */
   runHolochain?: boolean;
-  /** External mode: on a multi-user node, provision the assistant's own user identity (signup + login) instead of requesting a capability against the node's base agent. */
+  /** External mode: on a multi-user executor, provision the assistant's own user identity (signup + login) instead of requesting a capability against the executor's main agent. */
   multiUser?: boolean;
   /** Multi-user: the assistant's user email/identifier. Persisted by setup for re-authentication. */
   email?: string;
