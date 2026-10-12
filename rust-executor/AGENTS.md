@@ -63,10 +63,19 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   the main agent (agent #0, `user_email: None`, `is_main_agent()`), or a user's managed agent.
   `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
   credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
-  (a grant: a token without `sub` acts as the main agent, with `sub` as that user's agent), or
-  `Principal::Anonymous`. Capabilities, token id, expiry and the agent's DID are `Session` fields.
-  Read identity with `acts_as()` / `acts_as_did()` / `user()` / `is_operator()`; never decode the
-  token again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+  (a grant on the main agent or on a user's agent), or `Principal::Anonymous`. Capabilities, the
+  grant and the agent's DID are `Session` fields. Read identity with `acts_as()` /
+  `acts_as_did()` / `user()` / `is_operator()`; never decode the token again. Any
+  signing/DID/billing path takes the `AgentContext` explicitly.
+- **Grants** (`agent/grants.rs`, table `grants` in `db/grants.rs`) are the one allowlist of
+  tokens: a token (id = its `nonce`) opens a session only while its grant exists, is active and
+  has not expired, and the session's capabilities are the grant's (tokens carry `iss, aud, iat,
+  exp, nonce, sub` only). Both mint paths go through `grants::mint`: the app capability flow (a
+  grant on the main agent) and a user login (an auto-approved grant on that user's agent). The
+  admin credential is no token. Revoking or removing a grant cancels its `ended` token, which
+  every socket of the session watches through `Session::ended()`. Start-up moves the old app
+  registry (`apps_data.json`, renamed `.migrated`) into grant rows and drops expired rows. Tests
+  mint with `test_utils::granted_token(auth)`; a token signed without a grant is refused.
 - **Capabilities**: every WS handler checks `ctx.require(&X_CAPABILITY)` itself
   (`agent/capabilities/defs.rs`); `Session::may` answers the same question as a `bool`. MCP tools
   check via `Ad4mMcpHandler::get_*_perspective`.

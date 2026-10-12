@@ -882,6 +882,8 @@ mod agent_context_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
+        // A login's grant names the user's DID, so the user has a key.
+        crate::agent::AgentService::ensure_user_key_exists("mcp.user@example.org").unwrap();
         let token =
             crate::user_management::generate_user_jwt("mcp.user@example.org", "test").unwrap();
         let context = handler(&token).get_agent_context().await.unwrap();

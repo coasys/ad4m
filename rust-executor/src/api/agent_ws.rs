@@ -8,6 +8,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
+use crate::agent::grants::{GrantError, Grants, LiveGrant};
 use crate::agent::{
     did_document_for_context, AgentContext, AgentService, AgentSignature as InternalAgentSignature,
 };
@@ -109,12 +110,34 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     Ok(serde_json::to_value(agent)?)
 }
 
-/// agent.apps — list registered apps
+/// agent.apps — the grants of the agent the caller acts as: a user lists the apps (and
+/// logins) on their own agent, the operator and main-agent apps those on the main agent.
 async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     ctx.require(&AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(serde_json::to_value(apps_map::client_view())?)
+    apps_of(&ctx)
+}
+
+/// The app list of the agent the caller acts as, as clients see it: no tokens.
+fn apps_of(ctx: &RequestContext) -> Result<Value, WsRpcError> {
+    let apps: Vec<crate::types::Apps> = Grants::global()
+        .list(&ctx.acts_as())
+        .iter()
+        .map(|grant| grant.as_app())
+        .collect();
+    Ok(serde_json::to_value(apps)?)
+}
+
+/// The grants that `token_or_request_id` names and the caller may manage: those on the agent
+/// it acts as, or any for the operator (D14). Another agent's grant reads as missing.
+fn manageable_grants(ctx: &RequestContext, token_or_request_id: &str) -> Vec<Arc<LiveGrant>> {
+    let own = ctx.acts_as();
+    Grants::global()
+        .find(token_or_request_id)
+        .into_iter()
+        .filter(|grant| ctx.is_operator() || grant.agent == own)
+        .collect()
 }
 
 /// agent.byDid — get agent by DID
@@ -540,26 +563,24 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(out)?)
 }
 
-/// agent.removeApp — remove app
+/// agent.removeApp — deletes an app's grant: its token stops working at once (a missing grant
+/// refuses as a revoked one does, #396) and leaves the app list.
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_app_management_by_users(&ctx)?;
 
     let request_id = params.require_str("id")?;
-    apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::client_view())?)
-}
-
-/// Approved apps belong to the executor's operator. The default user capabilities include
-/// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
-fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
-    if ctx.user_email().is_some() {
-        return Err(WsRpcError::forbidden(
-            "Apps belong to the node's operator; a user session may not remove or revoke them",
-        ));
+    match Grants::global().remove(&manageable_grants(&ctx, &request_id)) {
+        Ok(()) => {}
+        Err(GrantError::NotFound) => {
+            return Err(WsRpcError::internal(format!(
+                "App with request_key '{}' not found.",
+                request_id
+            )))
+        }
+        Err(e @ GrantError::Store(_)) => return Err(WsRpcError::internal(e.to_string())),
     }
-    Ok(())
+    apps_of(&ctx)
 }
 
 // ── Auth ──
@@ -649,35 +670,22 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(Value::String(cap_token))
 }
 
-/// agent.revokeToken — revoke token
+/// agent.revokeToken — revokes a grant: its token stops working and its sockets close.
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_app_management_by_users(&ctx)?;
 
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
-    // and so does a user's JWT. A value that names no app and is no user token answers 404
-    // instead of a silent success (#1060).
+    // for an app's grant and a login's. A value that names no grant the caller may manage
+    // answers 404 instead of a silent success (#1060).
     let token = params.require_str("token")?;
-    match apps_map::revoke_app(&token) {
-        Ok(()) => {}
-        Err(apps_map::RevokeError::NotFound) => revoke_user_token(&token)?,
-        Err(e @ apps_map::RevokeError::Store(_)) => {
-            return Err(WsRpcError::internal(e.to_string()))
-        }
-    }
-    Ok(serde_json::to_value(apps_map::client_view())?)
-}
-
-/// Revokes `token` by its id when it is a valid user token this node issued.
-fn revoke_user_token(token: &str) -> Result<(), WsRpcError> {
-    let not_found = || WsRpcError::not_found(apps_map::RevokeError::NotFound.to_string());
-    let claims = decode_jwt(token.to_string()).map_err(|_| not_found())?;
-    if claims.sub.is_none() {
-        return Err(not_found());
-    }
-    let id = crate::agent::session::TokenId(claims.nonce().to_string());
-    crate::agent::revoked::revoke(id, claims.expires_at()).map_err(WsRpcError::internal)
+    Grants::global()
+        .revoke(&manageable_grants(&ctx, &token))
+        .map_err(|e| match e {
+            GrantError::NotFound => WsRpcError::not_found(e.to_string()),
+            GrantError::Store(_) => WsRpcError::internal(e.to_string()),
+        })?;
+    apps_of(&ctx)
 }
 
 // ── Status ──
@@ -1115,38 +1123,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod app_management_tests {
-    use crate::agent::capabilities::get_user_default_capabilities;
-    use crate::api::ws_handler::build_handler_map;
-    use crate::types::RequestContext;
-    use serde_json::json;
-    use std::sync::Arc;
-
-    // The default user capabilities include AGENT_UPDATE, which these calls check, so a user
-    // session could remove or revoke the operator's apps.
-    #[tokio::test]
-    async fn user_sessions_cannot_remove_or_revoke_apps() {
-        let user = Arc::new(RequestContext::user_for_test(
-            "apps.user@example.org",
-            "did:key:apps-user",
-            get_user_default_capabilities(),
-        ));
-        for (op, params) in [
-            ("agent.removeApp", json!({ "id": "some-request-id" })),
-            ("agent.revokeToken", json!({ "token": "some-request-id" })),
-        ] {
-            let err = build_handler_map()
-                .dispatch(op, params, user.clone())
-                .await
-                .expect_err(op);
-            assert_eq!(err.code, 403, "{op}: {}", err.message);
-        }
-    }
-}
-
-#[cfg(test)]
 mod revoke_token_tests {
     use crate::agent::capabilities::*;
+    use crate::agent::grants::Grants;
+    use crate::agent::session::TokenId;
     use crate::api::ws_handler::build_handler_map;
     use crate::types::RequestContext;
     use serde_json::json;
@@ -1160,67 +1140,109 @@ mod revoke_token_tests {
     fn approved_app() -> (String, String) {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
-        let request_id = format!("revoke-test-{}", uuid::Uuid::new_v4());
-        let token = generate_jwt("revoke test".to_string(), 3600, AuthInfo::default()).unwrap();
-        let app = AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth: AuthInfo::default(),
-        };
-        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        let token = crate::test_utils::granted_token(AuthInfo {
+            app_name: "revoke test".to_string(),
+            ..AuthInfo::default()
+        });
+        let request_id = Grants::global().find(&token)[0].request_id.clone();
         (request_id, token)
     }
 
-    async fn revoke(value: &str) -> Result<serde_json::Value, (u16, String)> {
+    async fn call_as(
+        op: &str,
+        params: serde_json::Value,
+        ctx: Arc<RequestContext>,
+    ) -> Result<serde_json::Value, (u16, String)> {
         build_handler_map()
-            .dispatch("agent.revokeToken", json!({ "token": value }), operator())
+            .dispatch(op, params, ctx)
             .await
             .map_err(|e| (e.code, e.message))
     }
 
-    fn is_revoked(token: &str) -> bool {
-        let (id, _) = read_stored_token_id(token).expect("a token this node issued");
-        crate::agent::revoked::RevokedSet::global().contains(&id)
+    async fn revoke(value: &str) -> Result<serde_json::Value, (u16, String)> {
+        call_as("agent.revokeToken", json!({ "token": value }), operator()).await
+    }
+
+    fn id_of(token: &str) -> TokenId {
+        TokenId(read_stored_claims(token).unwrap().nonce().to_string())
+    }
+
+    fn is_refused(token: &str) -> bool {
+        Grants::global().get(&id_of(token)).is_none()
+    }
+
+    fn request_ids(reply: &serde_json::Value) -> Vec<String> {
+        reply
+            .as_array()
+            .expect("the reply lists the apps")
+            .iter()
+            .map(|app| app["requestId"].as_str().unwrap().to_string())
+            .collect()
     }
 
     // #1060: revoking by the JWT, as the field name says, reported success and revoked
     // nothing.
     #[tokio::test]
     async fn revoking_by_the_jwt_revokes_the_app() {
-        let (request_id, token) = approved_app();
-        assert!(!is_revoked(&token));
+        let (_, token) = approved_app();
+        assert!(!is_refused(&token));
         revoke(&token).await.expect("the JWT names the app");
-        assert!(is_revoked(&token));
-        apps_map::remove_app(&request_id).unwrap();
+        assert!(is_refused(&token));
     }
 
     #[tokio::test]
     async fn revoking_by_the_request_id_still_works() {
         let (request_id, token) = approved_app();
-        revoke(&request_id)
+        let reply = revoke(&request_id)
             .await
             .expect("the SDK sends the request id");
-        assert!(is_revoked(&token));
-        apps_map::remove_app(&request_id).unwrap();
+        assert!(is_refused(&token));
+        let app = reply
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|app| app["requestId"] == request_id.as_str())
+            .expect("a revoked app stays listed")
+            .clone();
+        assert_eq!(app["revoked"], true);
     }
 
-    // #396: `removeApp` deleted the record that held the revocation.
+    // #396: `removeApp` deleted the record that held the revocation. A removed app has no
+    // grant, and a token without one is refused, revoked first or not.
     #[tokio::test]
-    async fn removing_a_revoked_app_keeps_its_token_revoked() {
-        let (request_id, token) = approved_app();
-        revoke(&request_id).await.unwrap();
-        build_handler_map()
-            .dispatch("agent.removeApp", json!({ "id": request_id }), operator())
-            .await
-            .unwrap();
-        assert!(apps_map::get_app(&request_id).unwrap().is_none());
-        assert!(is_revoked(&token));
+    async fn a_removed_apps_token_stays_refused() {
+        for revoke_first in [true, false] {
+            let (request_id, token) = approved_app();
+            if revoke_first {
+                revoke(&request_id).await.unwrap();
+            }
+            let reply = call_as("agent.removeApp", json!({ "id": request_id }), operator())
+                .await
+                .unwrap();
+            assert!(!request_ids(&reply).contains(&request_id));
+            assert!(is_refused(&token));
+            assert!(crate::agent::session::Session::open(
+                &token,
+                &Some("admin".into()),
+                ListenerReach::Network
+            )
+            .is_err());
+        }
     }
 
     #[tokio::test]
     async fn a_value_that_names_no_app_is_an_error() {
         let err = revoke("names-no-app").await.unwrap_err();
         assert_eq!(err.0, 404, "{}", err.1);
+        let err = call_as(
+            "agent.removeApp",
+            json!({ "id": "names-no-app" }),
+            operator(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 500, "{}", err.1);
+        assert!(err.1.contains("not found"), "{}", err.1);
     }
 
     // A failed write must not read as "no such app": the operator would stop looking, and a
@@ -1228,14 +1250,14 @@ mod revoke_token_tests {
     #[tokio::test]
     async fn a_revoke_that_cannot_be_saved_is_a_server_error() {
         let (request_id, token) = approved_app();
-        apps_map::set_data_file_path("/nonexistent-dir-for-revoke-test/apps.json".to_string());
+        let db = crate::db::Ad4mDb::global_instance();
+        let taken = db.lock().unwrap().take();
         let result = revoke(&request_id).await;
-        crate::test_utils::use_test_apps_file();
+        *db.lock().unwrap() = taken;
 
         let err = result.unwrap_err();
         assert_eq!(err.0, 500, "{}", err.1);
-        assert!(is_revoked(&token), "the app stays revoked in memory");
-        apps_map::remove_app(&request_id).unwrap();
+        assert!(is_refused(&token), "the app stays revoked in memory");
     }
 
     // The reply lists every app; with tokens in it, the caller could act as any of them.
@@ -1254,6 +1276,99 @@ mod revoke_token_tests {
                 .all(|app| app["token"].as_str().unwrap_or_default().is_empty()),
             "{reply}"
         );
-        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    /// A user with one login, and that user's session.
+    fn user_with_login(name: &str) -> (String, String, Arc<RequestContext>) {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let email = crate::test_utils::managed_user(name);
+        let token = crate::user_management::generate_user_jwt(&email, name).unwrap();
+        let ctx = Arc::new(
+            RequestContext::open(&token, &Some("admin".into()), ListenerReach::Network).unwrap(),
+        );
+        (email, token, ctx)
+    }
+
+    // D14, and closes a leak: any user listed the operator's apps. Each caller lists the
+    // grants of the agent it acts as.
+    #[tokio::test]
+    async fn get_apps_lists_the_grants_of_the_callers_agent() {
+        let (app_request, _) = approved_app();
+        let (_, alice_token, alice) = user_with_login("apps-alice");
+        let (_, bob_token, bob) = user_with_login("apps-bob");
+        let alice_login = id_of(&alice_token).0;
+        let bob_login = id_of(&bob_token).0;
+
+        let listed = request_ids(&call_as("agent.getApps", json!({}), alice).await.unwrap());
+        assert_eq!(
+            listed,
+            [alice_login.clone()],
+            "alice sees her own login only"
+        );
+
+        let listed = request_ids(&call_as("agent.getApps", json!({}), bob).await.unwrap());
+        assert_eq!(listed, [bob_login.clone()]);
+
+        let listed = request_ids(
+            &call_as("agent.getApps", json!({}), operator())
+                .await
+                .unwrap(),
+        );
+        assert!(
+            listed.contains(&app_request),
+            "the operator sees the main agent's apps"
+        );
+        assert!(!listed.contains(&alice_login) && !listed.contains(&bob_login));
+    }
+
+    // D14: a user revokes and removes their own grants, never another user's or the main
+    // agent's; the operator revokes any.
+    #[tokio::test]
+    async fn a_user_revokes_only_their_own_grants() {
+        let (app_request, app_token) = approved_app();
+        let (alice_email, alice_token, alice) = user_with_login("own-alice");
+        let (_, bob_token, _) = user_with_login("own-bob");
+        let second = crate::user_management::generate_user_jwt(&alice_email, "phone").unwrap();
+
+        for value in [app_request.clone(), app_token.clone(), bob_token.clone()] {
+            let err = call_as(
+                "agent.revokeToken",
+                json!({ "token": value }),
+                alice.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, 404, "{}", err.1);
+        }
+        let err = call_as(
+            "agent.removeApp",
+            json!({ "id": app_request }),
+            alice.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.1.contains("not found"), "{}", err.1);
+        assert!(!is_refused(&app_token) && !is_refused(&bob_token));
+
+        // Her phone's login, by its request id (the id the app list shows).
+        let reply = call_as(
+            "agent.revokeToken",
+            json!({ "token": id_of(&second).0 }),
+            alice.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(is_refused(&second));
+        assert!(!is_refused(&alice_token), "her other login works");
+        assert_eq!(
+            request_ids(&reply).len(),
+            2,
+            "the reply lists her grants only"
+        );
+
+        // The operator revokes another user's grant.
+        revoke(&bob_token).await.unwrap();
+        assert!(is_refused(&bob_token));
     }
 }

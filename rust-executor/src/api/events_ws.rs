@@ -54,7 +54,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::agent::capabilities::*;
 use crate::agent::session::Session;
-use crate::agent::session_registry::SessionRegistry;
 use crate::agent::{did_for_context, AgentContext};
 
 /// Cached DID for a single WebSocket subscription, with lazy re-resolution.
@@ -721,9 +720,8 @@ async fn handle_events_ws(
 ) {
     log::info!("Events WebSocket connected");
 
-    // Fires when the token is revoked: the socket closes at once, not at the next event.
-    let revoked = tokio_util::sync::CancellationToken::new();
-    let _registered = SessionRegistry::global().register(&session, revoked.clone());
+    // Fires when the grant ends: the socket closes at once, not at the next event.
+    let revoked = session.ended();
 
     let interest: super::event_interest::SharedInterest = Default::default();
     let event_stream = build_event_stream(session, is_admin, can_approve_apps).await;
