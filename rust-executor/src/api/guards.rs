@@ -53,10 +53,58 @@ pub enum Guard {
         /// The capability, built from the resource's id (a perspective's capability names
         /// its uuid; the others ignore it).
         cap: fn(Vec<String>) -> Capability,
-        /// The resource's id in the params, e.g. [`uuid_param`]. None is 400.
-        id: fn(&Value) -> Option<String>,
+        /// Where the params hold the resource's id, e.g. [`UUID_PARAM`]. Missing is 400.
+        id: IdParam,
         owner: Owner,
     },
+}
+
+/// Where a [`Guard::Owns`] reads its resource's id in the params. A description, not a
+/// function, so the generated guard table in `api/AGENTS.md` shows the field the guard
+/// reads, and moving the id to another field changes the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdParam {
+    /// A string field, reached by this path of keys: `["uuid"]`, `["task", "taskId"]`.
+    Field(&'static [&'static str]),
+    /// The first of these string fields that is present: one param under several names.
+    FirstOf(&'static [&'static str]),
+    /// The string field `field` of the JSON object that the string param `param` holds.
+    InJson {
+        param: &'static str,
+        field: &'static str,
+    },
+}
+
+impl IdParam {
+    /// The id in `params`, `None` when the field is missing or not a string.
+    pub fn read(self, params: &Value) -> Option<String> {
+        let string = |value: &Value| value.as_str().map(str::to_string);
+        match self {
+            IdParam::Field(path) => {
+                string(path.iter().try_fold(params, |value, key| value.get(*key))?)
+            }
+            IdParam::FirstOf(names) => names
+                .iter()
+                .find_map(|name| params.get(*name))
+                .and_then(string),
+            IdParam::InJson { param, field } => {
+                let inner: Value = serde_json::from_str(params.get(param)?.as_str()?).ok()?;
+                string(inner.get(field)?)
+            }
+        }
+    }
+}
+
+/// How the guard table names the field: `uuid`, `task.taskId`, `perspectiveUuid|perspectiveUUID`,
+/// `auth(JSON).requestId`.
+impl std::fmt::Display for IdParam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IdParam::Field(path) => write!(f, "{}", path.join(".")),
+            IdParam::FirstOf(names) => write!(f, "{}", names.join("|")),
+            IdParam::InJson { param, field } => write!(f, "{param}(JSON).{field}"),
+        }
+    }
 }
 
 /// The kind of resource a [`Guard::Owns`] names, and how its owning agent is found.
@@ -104,16 +152,14 @@ impl Owner {
 pub const OPERATOR_ONLY: &str = "Admin credential required";
 
 /// The `uuid` field of the params: where most perspective methods name their perspective.
-pub fn uuid_param(params: &Value) -> Option<String> {
-    params.get("uuid")?.as_str().map(str::to_string)
-}
+pub const UUID_PARAM: IdParam = IdParam::Field(&["uuid"]);
 
 impl Guard {
     /// [`Guard::Owns`] on the perspective the `uuid` param names.
     pub fn perspective(cap: fn(Vec<String>) -> Capability) -> Guard {
         Guard::Owns {
             cap,
-            id: uuid_param,
+            id: UUID_PARAM,
             owner: Owner::Perspective,
         }
     }
@@ -138,7 +184,7 @@ impl Guard {
         let resource = match self {
             Guard::Owns { id, owner, .. } => Some((
                 *owner,
-                id(params).ok_or_else(|| {
+                id.read(params).ok_or_else(|| {
                     WsRpcError::bad_request(format!("{method} needs the {}'s id", owner.noun()))
                 })?,
             )),
@@ -235,5 +281,40 @@ mod tests {
 
         let app = RequestContext::app_for_test(vec![update]);
         assert!(lock.admit("agent.lock", &Value::Null, &app).await.is_ok());
+    }
+
+    #[test]
+    fn an_id_param_reads_the_field_it_names() {
+        use serde_json::json;
+        let nested = IdParam::Field(&["task", "taskId"]);
+        assert_eq!(
+            nested.read(&json!({ "task": { "taskId": "t1" } })),
+            Some("t1".into())
+        );
+        assert_eq!(nested.read(&json!({ "taskId": "t1" })), None);
+        assert_eq!(nested.read(&json!({ "task": { "taskId": 7 } })), None);
+
+        let aliases = IdParam::FirstOf(&["perspectiveUuid", "perspectiveUUID"]);
+        assert_eq!(
+            aliases.read(&json!({ "perspectiveUUID": "p" })),
+            Some("p".into())
+        );
+        assert_eq!(
+            aliases.read(&json!({ "perspectiveUuid": "a", "perspectiveUUID": "b" })),
+            Some("a".into())
+        );
+
+        let in_json = IdParam::InJson {
+            param: "auth",
+            field: "requestId",
+        };
+        let auth = json!({ "requestId": "r1", "auth": {} }).to_string();
+        assert_eq!(in_json.read(&json!({ "auth": auth })), Some("r1".into()));
+        assert_eq!(in_json.read(&json!({ "auth": "not json" })), None);
+
+        assert_eq!(UUID_PARAM.to_string(), "uuid");
+        assert_eq!(nested.to_string(), "task.taskId");
+        assert_eq!(aliases.to_string(), "perspectiveUuid|perspectiveUUID");
+        assert_eq!(in_json.to_string(), "auth(JSON).requestId");
     }
 }

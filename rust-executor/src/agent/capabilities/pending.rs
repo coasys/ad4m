@@ -10,7 +10,11 @@ use super::types::AuthInfo;
 use crate::agent::AgentContext;
 use crate::secret::Secret;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+/// The arrival order of the next request.
+static NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Wrong codes a request may receive before it is deleted. The code has six digits, so
 /// without a limit anyone who learned a request id could try every code.
@@ -24,9 +28,14 @@ pub const MAIN_AGENT_REQUEST_TTL_SECONDS: u64 = 10 * 60;
 pub const MANAGED_AGENT_REQUEST_TTL_SECONDS: u64 = 24 * 60 * 60;
 
 /// Requests held at most. Anyone may request a capability, so past this a new request evicts
-/// the unapproved one nearest its expiry instead of growing memory. Only an agent's owner
-/// approves, so a flood of requests evicts no approved one while unapproved ones remain.
+/// an unapproved one instead of growing memory ([`PendingRequests::request`]): first one for
+/// no agent, then one for the new request's own agent; an approved one never.
 pub const MAX_PENDING_REQUESTS: usize = 1024;
+
+/// Requests held at most for one target (an agent, or all emails without one together). Past
+/// this a new request evicts the oldest unapproved one for the same target, so a flood aimed at
+/// one agent stays within its share and leaves other agents' requests alone.
+pub const MAX_PENDING_REQUESTS_PER_TARGET: usize = 64;
 
 /// The agent a capability request is for (D16: an agent is its DID).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +95,8 @@ struct PendingRequest {
     /// Set by the approval; goes to the approver only. Always six digits ([`is_code`]).
     code: Option<Secret>,
     attempts: u8,
+    /// Order of arrival: a request with a smaller one is older.
+    seq: u64,
     /// Unix seconds.
     expires_at: u64,
 }
@@ -148,23 +159,47 @@ impl PendingRequests {
         pending
     }
 
-    /// Records a new request of the app `auth` for the agent `target`.
+    /// Records a new request of the app `auth` for the agent `target`. When the target already
+    /// has [`MAX_PENDING_REQUESTS_PER_TARGET`] requests, or all targets together
+    /// [`MAX_PENDING_REQUESTS`], an unapproved one goes, oldest first: one for the same target,
+    /// or, when all are full, one for no agent before one for the same target. Requests for
+    /// other agents and approved ones stay, so `Err` when nothing may go.
     pub fn request(
         &self,
         request_id: String,
         auth: AuthInfo,
         target: impl Into<RequestTarget>,
         now: u64,
-    ) {
+    ) -> Result<(), String> {
         let target = target.into();
         let mut pending = self.lock_swept(now);
-        if pending.len() >= MAX_PENDING_REQUESTS {
-            let nearest = pending
-                .iter()
-                .min_by_key(|(_, request)| (request.code.is_some(), request.expires_at))
-                .map(|(id, _)| id.clone());
-            if let Some(id) = nearest {
+        let oldest_unapproved =
+            |pending: &HashMap<String, PendingRequest>, of: &dyn Fn(&RequestTarget) -> bool| {
+                pending
+                    .iter()
+                    .filter(|(_, request)| request.code.is_none() && of(&request.target))
+                    .min_by_key(|(_, request)| request.seq)
+                    .map(|(id, _)| id.clone())
+            };
+        let same_target = |t: &RequestTarget| *t == target;
+        let for_target = pending.values().filter(|r| same_target(&r.target)).count();
+        if for_target >= MAX_PENDING_REQUESTS_PER_TARGET {
+            if let Some(id) = oldest_unapproved(&pending, &same_target) {
                 pending.remove(&id);
+            }
+        }
+        if pending.len() >= MAX_PENDING_REQUESTS {
+            let evicted = oldest_unapproved(&pending, &|t| *t == RequestTarget::NoAgent)
+                .or_else(|| oldest_unapproved(&pending, &same_target));
+            match evicted {
+                Some(id) => {
+                    pending.remove(&id);
+                }
+                None => {
+                    return Err(
+                        "Too many capability requests are waiting; try again later".to_string()
+                    )
+                }
             }
         }
         let expires_at = now + request_ttl(&target);
@@ -175,9 +210,11 @@ impl PendingRequests {
                 target,
                 code: None,
                 attempts: 0,
+                seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
                 expires_at,
             },
         );
+        Ok(())
     }
 
     /// The agent that the unexpired request `request_id` is for: whoever approves it must own
@@ -318,7 +355,9 @@ mod tests {
     }
 
     fn approved(pending: &PendingRequests, id: &str, now: u64) {
-        pending.request(id.to_string(), AuthInfo::default(), main(), now);
+        pending
+            .request(id.to_string(), AuthInfo::default(), main(), now)
+            .unwrap();
         pending
             .approve(id, AuthInfo::default(), "123456".into(), now)
             .unwrap();
@@ -356,7 +395,9 @@ mod tests {
             app_name: "asked".into(),
             ..AuthInfo::default()
         };
-        pending.request("a".into(), asked, alice.clone(), 0);
+        pending
+            .request("a".into(), asked, alice.clone(), 0)
+            .unwrap();
         let granted = AuthInfo {
             app_name: "granted".into(),
             // An approval cannot move the request to another agent.
@@ -406,8 +447,12 @@ mod tests {
     fn a_request_for_a_managed_agent_waits_a_day_and_one_for_the_main_agent_ten_minutes() {
         let pending = PendingRequests::default();
         let alice = AgentContext::managed("did:key:z6MkAlice".into());
-        pending.request("main".into(), AuthInfo::default(), main(), 0);
-        pending.request("managed".into(), AuthInfo::default(), alice, 0);
+        pending
+            .request("main".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
+        pending
+            .request("managed".into(), AuthInfo::default(), alice, 0)
+            .unwrap();
         assert_eq!(pending.expires_at("main"), Some(10 * 60));
         assert_eq!(pending.expires_at("managed"), Some(24 * 60 * 60));
 
@@ -431,12 +476,14 @@ mod tests {
     #[test]
     fn a_request_for_no_agent_waits_like_a_managed_one_and_redeems_nothing() {
         let pending = PendingRequests::default();
-        pending.request(
-            "nobody".into(),
-            AuthInfo::default(),
-            RequestTarget::NoAgent,
-            0,
-        );
+        pending
+            .request(
+                "nobody".into(),
+                AuthInfo::default(),
+                RequestTarget::NoAgent,
+                0,
+            )
+            .unwrap();
         assert_eq!(pending.expires_at("nobody"), Some(24 * 60 * 60));
         assert_eq!(pending.target("nobody", 0), Some(RequestTarget::NoAgent));
 
@@ -455,7 +502,9 @@ mod tests {
     #[test]
     fn the_approval_restarts_the_expiry() {
         let pending = PendingRequests::default();
-        pending.request("a".into(), AuthInfo::default(), main(), 0);
+        pending
+            .request("a".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
         pending
             .approve("a", AuthInfo::default(), "123456".into(), TTL - 1)
             .unwrap();
@@ -465,7 +514,9 @@ mod tests {
     #[test]
     fn an_expired_request_cannot_be_approved() {
         let pending = PendingRequests::default();
-        pending.request("a".into(), AuthInfo::default(), main(), 0);
+        pending
+            .request("a".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
         assert!(pending
             .approve("a", AuthInfo::default(), "123456".into(), TTL)
             .is_err());
@@ -477,34 +528,149 @@ mod tests {
     #[test]
     fn every_access_sweeps_the_expired_requests() {
         let pending = PendingRequests::default();
-        pending.request("old".into(), AuthInfo::default(), main(), 0);
-        pending.request("new".into(), AuthInfo::default(), main(), 100);
+        pending
+            .request("old".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
+        pending
+            .request("new".into(), AuthInfo::default(), main(), 100)
+            .unwrap();
         let _ = redeem(&pending, "unrelated", "000000", TTL + 50);
         assert!(!pending.contains("old"));
         assert!(pending.contains("new"));
-        pending.request("newest".into(), AuthInfo::default(), main(), TTL + 100);
+        pending
+            .request("newest".into(), AuthInfo::default(), main(), TTL + 100)
+            .unwrap();
         assert!(!pending.contains("new"));
         assert_eq!(pending.len(), 1);
     }
 
+    // A flood aimed at one agent evicts that agent's oldest unapproved requests, never an
+    // approved one, and stays within the agent's share.
     #[test]
-    fn a_flood_of_requests_evicts_the_unapproved_one_nearest_its_expiry() {
+    fn a_flood_for_one_agent_evicts_its_oldest_unapproved_request() {
         let pending = PendingRequests::default();
         approved(&pending, "approved", 0);
         // All inside one expiry period, so the sweep removes none; r1 is the oldest.
         let max = MAX_PENDING_REQUESTS as u64;
         for i in 1..=max {
-            pending.request(
-                format!("r{i}"),
-                AuthInfo::default(),
-                main(),
-                i * (TTL - 1) / max,
-            );
+            pending
+                .request(
+                    format!("r{i}"),
+                    AuthInfo::default(),
+                    main(),
+                    i * (TTL - 1) / max,
+                )
+                .unwrap();
         }
-        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS_PER_TARGET);
         assert!(pending.contains("approved"));
         assert!(!pending.contains("r1"));
-        assert!(pending.contains("r2"));
+        let newest = MAX_PENDING_REQUESTS - MAX_PENDING_REQUESTS_PER_TARGET + 2;
+        assert!(!pending.contains(&format!("r{}", newest - 1)));
+        assert!(pending.contains(&format!("r{newest}")));
+    }
+
+    // Requests for emails without an agent are silent and live a day; a flood of them used to
+    // evict the main agent's request (the nearest expiry), and the user's approval then found
+    // nothing.
+    #[test]
+    fn a_silent_flood_keeps_a_waiting_request() {
+        let pending = PendingRequests::default();
+        let alice = AgentContext::managed("did:key:z6MkAlice".into());
+        pending
+            .request("legit".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
+        pending
+            .request("alice".into(), AuthInfo::default(), alice, 0)
+            .unwrap();
+        for i in 0..MAX_PENDING_REQUESTS {
+            pending
+                .request(
+                    format!("f{i}"),
+                    AuthInfo::default(),
+                    RequestTarget::NoAgent,
+                    1,
+                )
+                .unwrap();
+        }
+        assert!(
+            pending.contains("legit"),
+            "requests for no agent evicted a real one"
+        );
+        assert!(pending.contains("alice"));
+        assert!(pending.contains(&format!("f{}", MAX_PENDING_REQUESTS - 1)));
+    }
+
+    // When every target is full, a new request evicts one for no agent first, then the oldest
+    // unapproved one for its own agent; never another agent's or an approved one.
+    #[test]
+    fn a_full_store_evicts_no_agent_then_the_same_agent_and_else_refuses() {
+        let pending = PendingRequests::default();
+        let agents = MAX_PENDING_REQUESTS / MAX_PENDING_REQUESTS_PER_TARGET;
+        let agent = |a: usize| AgentContext::managed(format!("did:key:z6Mk{a}"));
+        pending
+            .request(
+                "nobody".into(),
+                AuthInfo::default(),
+                RequestTarget::NoAgent,
+                0,
+            )
+            .unwrap();
+        for a in 0..agents {
+            for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+                let _ = pending.request(format!("a{a}-{i}"), AuthInfo::default(), agent(a), 1);
+            }
+        }
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+        // The last agent's last request evicted the one for no agent.
+        assert!(!pending.contains("nobody"));
+        assert!(pending.contains("a0-0"));
+
+        pending
+            .request("a0-new".into(), AuthInfo::default(), agent(0), 2)
+            .unwrap();
+        assert!(!pending.contains("a0-0"));
+        assert!(pending.contains("a1-0"));
+
+        // A new agent, or no agent: nothing it may evict.
+        let new_agent = AgentContext::managed("did:key:z6MkNew".into());
+        assert!(pending
+            .request("new".into(), AuthInfo::default(), new_agent, 2)
+            .is_err());
+        assert!(pending
+            .request(
+                "none".into(),
+                AuthInfo::default(),
+                RequestTarget::NoAgent,
+                2
+            )
+            .is_err());
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+
+        // An approved request is never evicted.
+        for i in 1..MAX_PENDING_REQUESTS_PER_TARGET {
+            pending
+                .approve(&format!("a1-{i}"), AuthInfo::default(), "123456".into(), 2)
+                .unwrap();
+        }
+        pending
+            .request("a1-new".into(), AuthInfo::default(), agent(1), 3)
+            .unwrap();
+        assert!(!pending.contains("a1-0"));
+        pending
+            .request("a1-newer".into(), AuthInfo::default(), agent(1), 3)
+            .unwrap();
+        assert!(!pending.contains("a1-new"));
+        pending
+            .approve("a1-newer", AuthInfo::default(), "123456".into(), 3)
+            .unwrap();
+        assert!(pending
+            .request("a1-last".into(), AuthInfo::default(), agent(1), 3)
+            .is_err());
+        assert!(pending.is_approved("a1-newer"));
+        assert!(
+            (1..MAX_PENDING_REQUESTS_PER_TARGET).all(|i| pending.is_approved(&format!("a1-{i}")))
+        );
     }
 
     #[test]
@@ -532,7 +698,9 @@ mod tests {
     #[test]
     fn codes_sent_before_the_approval_count_no_attempt() {
         let pending = PendingRequests::default();
-        pending.request("a".into(), AuthInfo::default(), main(), 0);
+        pending
+            .request("a".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
         for _ in 0..MAX_CODE_ATTEMPTS {
             assert_eq!(
                 redeem(&pending, "a", "000000", 0).err(),
@@ -551,7 +719,9 @@ mod tests {
     #[test]
     fn only_a_six_digit_code_approves_or_redeems() {
         let pending = PendingRequests::default();
-        pending.request("a".into(), AuthInfo::default(), main(), 0);
+        pending
+            .request("a".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
         let fullwidth = "\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}\u{FF16}";
         for code in ["", "12345", "1234567", "12345a", " 23456", fullwidth] {
             assert!(

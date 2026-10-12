@@ -353,7 +353,9 @@ mod app_approval_event_tests {
             capabilities: Some(vec![AGENT_READ_CAPABILITY.clone()]),
             user_email: None,
         };
-        let request_id = request_capability(auth.clone(), AgentContext::main_agent()).await;
+        let request_id = request_capability(auth.clone(), AgentContext::main_agent())
+            .await
+            .unwrap();
         let code = permit_capability(AuthInfoExtended {
             request_id: request_id.clone(),
             auth,
@@ -1379,9 +1381,10 @@ mod audience_matrix_tests {
                     trigger: String::new(),
                     perspective_ids: vec![Q.into()],
                     webhook_url: String::new(),
-                    webhook_auth: String::new(),
+                    webhook_auth: crate::secret::Secret::new(""),
                     owner_did: main.clone(),
-                },
+                }
+                .view(),
                 perspective_id: Q.into(),
                 trigger_match: "[{\"secret\":\"q\"}]".into(),
             },

@@ -326,16 +326,19 @@ async fn an_event_stream_that_ends_ends_the_session() {
 // follow the session's end.
 #[tokio::test]
 async fn a_revocation_cancels_the_calls_in_flight() {
+    use crate::api::guards::Guard;
     use crate::api::ws_handler::{HandlerMap, NoParams, WsRpcError};
     let (started, mut cancel_tokens) = mpsc::unbounded_channel();
     let mut map = HandlerMap::new();
+    // Every method needs a guard, or the dispatcher refuses it before the handler runs.
     map.method::<NoParams, bool>("test.wait", move |_, ctx: Arc<RequestContext>| {
         let started = started.clone();
         async move {
             started.send(ctx.cancel_token.clone().unwrap()).unwrap();
             std::future::pending::<Result<Value, WsRpcError>>().await
         }
-    });
+    })
+    .guard(Guard::Open);
     let session = Session::for_test(Principal::Agent(AgentContext::main_agent()))
         .with_caps(vec![ALL_CAPABILITY.clone()]);
     let grant = session.grant().unwrap().clone();

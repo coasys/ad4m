@@ -240,15 +240,17 @@ fn render_capability(cap: &Capability) -> String {
     format!("{}{}:{}", cap.with.domain, pointers, cap.can.join(","))
 }
 
-/// How the guard table names `guard`. A capability built from the resource's id shows `*`.
+/// How the guard table names `guard`. An owner guard names the resource and the param it
+/// reads the id from (`Owns(Perspective uuid, ..)`); a capability built from the resource's
+/// id shows `*`.
 fn render_guard(guard: &Guard) -> String {
     match guard {
         Guard::Open => "`Open`".to_string(),
         Guard::Operator => "`Operator`".to_string(),
         Guard::Cap(cap) => format!("`Cap({})`", render_capability(cap)),
         Guard::Executor(cap) => format!("`Executor({})`", render_capability(cap)),
-        Guard::Owns { cap, owner, .. } => format!(
-            "`Owns({owner:?}, {})`",
+        Guard::Owns { cap, id, owner } => format!(
+            "`Owns({owner:?} {id}, {})`",
             render_capability(&cap(vec!["*".to_string()]))
         ),
     }
@@ -311,6 +313,37 @@ fn with_guard_table(text: &str, table: &str) -> String {
         .expect("api/AGENTS.md has the guard-table end marker")
         + GUARD_TABLE_END.len();
     format!("{}{}{}", &text[..start], table, &text[end..])
+}
+
+/// An owner guard's row names the param it reads the resource's id from, so moving the id
+/// to another field changes the table (and so fails `the_guard_table_in_agents_md_is_current`
+/// until the table is regenerated).
+#[test]
+fn the_guard_table_names_the_param_an_owner_guard_reads() {
+    let table = render_guard_table(&build_handler_map());
+    let row = |method: &str| {
+        table
+            .lines()
+            .find(|line| line.starts_with(&format!("| `{method}` |")))
+            .unwrap_or_else(|| panic!("{method} has a row"))
+            .to_string()
+    };
+    for (method, param) in [
+        ("perspective.addLink", "Perspective uuid"),
+        ("ai.updateTask", "Task task.taskId"),
+        ("ai.prompt", "Task taskId"),
+        ("ai.removeTask", "Task id"),
+        ("agent.removeApp", "Grant id"),
+        ("agent.revokeToken", "Grant token"),
+        ("agent.permitCapability", "Request auth(JSON).requestId"),
+        (
+            "neighbourhood.publish",
+            "Perspective perspectiveUuid|perspectiveUUID",
+        ),
+    ] {
+        let row = row(method);
+        assert!(row.contains(&format!("`Owns({param}, ")), "{row}");
+    }
 }
 
 /// Rewrites the guard table in `api/AGENTS.md` on a generation run (`pnpm run

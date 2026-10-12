@@ -113,7 +113,9 @@ access check: a call that fails both gets the access answer.
 
 Notes on some methods:
 
-- `Open` handlers check the session's principal (`user.logout`, `user.revokeAllSessions`).
+- `Open` handlers check the session's principal (`user.logout`). `user.revokeAllSessions` is
+  `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
+  user's agent too; its handler checks the principal for a named user.
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
   and password hashes included. The stubs `user.credits` and `runtime.unyt*` answer 501 to the
   operator until each gets a handler and its real guard.
@@ -132,11 +134,13 @@ Notes on some methods:
 Which guard each method has, generated from the handler map
 (`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
 fails when it is stale; `pnpm run generate:api-types` in `core/` rewrites it with the SDK
-contracts:
+contracts. An `Owns` row names the resource, the param the guard reads its id from (an
+`IdParam`: a field path, `a|b` for aliases, `auth(JSON).requestId` for a field inside a JSON
+string param) and the capability:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-169 methods: Cap 54, Executor 33, Open 6, Operator 15, Owns 61.
+169 methods: Cap 55, Executor 33, Open 5, Operator 15, Owns 61.
 
 | Method | Guard |
 |---|---|
@@ -155,10 +159,10 @@ contracts:
 | `agent.import` | `Cap(agent:CREATE)` |
 | `agent.isLocked` | `Open` |
 | `agent.lock` | `Executor(agent:UPDATE)` |
-| `agent.permitCapability` | `Owns(Request, agent:PERMIT)` |
-| `agent.removeApp` | `Owns(Grant, agent:UPDATE)` |
+| `agent.permitCapability` | `Owns(Request auth(JSON).requestId, agent:PERMIT)` |
+| `agent.removeApp` | `Owns(Grant id, agent:UPDATE)` |
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
-| `agent.revokeToken` | `Owns(Grant, agent:UPDATE)` |
+| `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.status` | `Cap(agent:READ)` |
 | `agent.unlock` | `Executor(agent:SIGN)` |
@@ -170,15 +174,15 @@ contracts:
 | `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
 | `ai.modelLoadingStatus` | `Cap(artificial intelligence:READ)` |
 | `ai.models` | `Cap(artificial intelligence:READ)` |
-| `ai.prompt` | `Owns(Task, artificial intelligence:PROMPT)` |
+| `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
 | `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
-| `ai.removeTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
 | `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.tasks` | `Cap(artificial intelligence:READ)` |
 | `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |
 | `ai.transcriptionOpen` | `Cap(artificial intelligence:TRANSCRIBE)` |
 | `ai.updateModel` | `Executor(artificial intelligence:CREATE)` |
-| `ai.updateTask` | `Owns(Task, artificial intelligence:CREATE)` |
+| `ai.updateTask` | `Owns(Task task.taskId, artificial intelligence:CREATE)` |
 | `expression.create` | `Cap(expression:CREATE)` |
 | `expression.get` | `Cap(expression:READ)` |
 | `expression.getMany` | `Cap(expression:READ)` |
@@ -198,64 +202,64 @@ contracts:
 | `language.remove` | `Executor(language:DELETE)` |
 | `language.source` | `Cap(language:READ)` |
 | `language.writeSettings` | `Executor(language:UPDATE)` |
-| `neighbourhood.hasTelepresence` | `Owns(Perspective, neighbourhood:READ)` |
+| `neighbourhood.hasTelepresence` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
-| `neighbourhood.onlineAgents` | `Owns(Perspective, neighbourhood:READ)` |
-| `neighbourhood.otherAgents` | `Owns(Perspective, neighbourhood:READ)` |
-| `neighbourhood.publish` | `Owns(Perspective, neighbourhood:CREATE)` |
-| `neighbourhood.sendBroadcast` | `Owns(Perspective, neighbourhood:UPDATE)` |
-| `neighbourhood.sendSignal` | `Owns(Perspective, neighbourhood:UPDATE)` |
-| `neighbourhood.setOnlineStatus` | `Owns(Perspective, neighbourhood:UPDATE)` |
-| `perspective.acceptFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.acceptInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addLink` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addLinkExpression` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addLinks` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.addSdna` | `Owns(Perspective, perspective:UPDATE)` |
+| `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `neighbourhood.publish` | `Owns(Perspective perspectiveUuid|perspectiveUUID, neighbourhood:CREATE)` |
+| `neighbourhood.sendBroadcast` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.sendSignal` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.setOnlineStatus` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `perspective.acceptFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.acceptInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addAutoProcessor` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.all` | `Cap(perspective:READ)` |
-| `perspective.commitBatch` | `Owns(Perspective, perspective:UPDATE)` |
+| `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
-| `perspective.createBatch` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.createSubject` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.disposeQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.disposeSparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.evaluateGetters` | `Owns(Perspective, perspective:READ)` |
-| `perspective.executeCommands` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.flowValidOutputs` | `Owns(Perspective, perspective:READ)` |
-| `perspective.get` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
-| `perspective.getAllShacl` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getShacl` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getShaclNames` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getShaclTargetClass` | `Owns(Perspective, perspective:READ)` |
-| `perspective.getSubjectData` | `Owns(Perspective, perspective:READ)` |
-| `perspective.interpretationOverlays` | `Owns(Perspective, perspective:READ)` |
-| `perspective.keepAliveQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.keepAliveSparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.linkMutations` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.mintFlowReceipt` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.modelQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.modelSubscribe` | `Owns(Perspective, perspective:READ)` |
-| `perspective.proposeFlowTransition` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.publishSnapshot` | `Owns(Perspective, perspective:READ)` |
-| `perspective.queryLinks` | `Owns(Perspective, perspective:READ)` |
-| `perspective.queryProlog` | `Owns(Perspective, perspective:READ)` |
-| `perspective.querySparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.rejectFlowProposal` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.rejectInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.remove` | `Owns(Perspective, perspective:DELETE)` |
-| `perspective.removeAutoProcessor` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.removeLink` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.removeLinks` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.runInterpretation` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.runInterpretationWithHarness` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.snapshot` | `Owns(Perspective, perspective:READ)`, 404 → `null` |
-| `perspective.subjectClassesOf` | `Owns(Perspective, perspective:READ)` |
-| `perspective.subscribeQuery` | `Owns(Perspective, perspective:READ)` |
-| `perspective.subscribeSparql` | `Owns(Perspective, perspective:READ)` |
-| `perspective.update` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.updateLink` | `Owns(Perspective, perspective:UPDATE)` |
-| `perspective.verifyFlowReceipt` | `Owns(Perspective, perspective:READ)` |
+| `perspective.createBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
+| `perspective.getAllShacl` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getShacl` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.keepAliveQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.keepAliveSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.publishSnapshot` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.queryProlog` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.querySparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.rejectFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.rejectInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.remove` | `Owns(Perspective uuid, perspective:DELETE)` |
+| `perspective.removeAutoProcessor` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.removeLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
+| `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.verifyFlowReceipt` | `Owns(Perspective uuid, perspective:READ)` |
 | `runtime.addFriends` | `Executor(runtime.friends:CREATE)` |
 | `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
 | `runtime.addLinkLanguageTemplates` | `Executor(runtime.known_link_languages:CREATE)` |
@@ -305,7 +309,7 @@ contracts:
 | `user.logout` | `Open` |
 | `user.multiUserEnabled` | `Cap(runtime.user_management[enabled]:READ)` |
 | `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
-| `user.revokeAllSessions` | `Open` |
+| `user.revokeAllSessions` | `Cap(agent:UPDATE)` |
 | `user.setMultiUserEnabled` | `Operator` |
 | `user.verifyEmail` | `Cap(runtime.user_management:VERIFY)` |
 | `user.wallet` | `Executor(runtime.user_management:READ)` |
@@ -419,30 +423,38 @@ them against those two guards.
 - Capability flow (#1399, executor side; `agent/capabilities/mod.rs` + `pending.rs`):
   1. `agent.requestCapability { authInfo, agent? }` (anyone, AGENT_AUTH): `agent` is a managed
      user's email or an agent's DID, absent = the main agent (`requested_agent` returns a
-     `RequestTarget`: an agent keyed by DID, D16). An email resolves to its user's DID there;
-     an email no user has is still taken, as `RequestTarget::NoAgent`, so the answer reveals no
-     accounts: it reaches nobody, only the operator may approve it, its code mints nothing, and
-     it expires after 24 hours like a managed agent's. An unknown DID is 400. The request is a
-     `PendingRequest` in memory only: never on disk, 1024 at most (a new one evicts the
-     unapproved one nearest its expiry), 10 minutes for the main agent and 24 hours for a
-     managed agent, restarted at approval. Its approval request goes to the target agent's DID
+     `RequestTarget`: an agent keyed by DID, D16). An email resolves to its user's DID there,
+     read-only (`AgentService::did_for_email_read_only`: a shared database's record is read,
+     not imported; the import waits for the user's login); an email no user has is still
+     taken, as `RequestTarget::NoAgent`, so the answer reveals no accounts: it reaches nobody,
+     only the operator may approve it, its code mints nothing, and it expires after 24 hours
+     like a managed agent's. An unknown DID is 400; an app name, description, domain, URL or
+     icon over 1 KiB is 400. The request is a `PendingRequest` in memory only: never on disk,
+     1024 at most and 64 per target (all `NoAgent` requests are one target). Past a limit a
+     new request evicts an unapproved one, oldest first: for no agent, then for its own
+     target; never another agent's or an approved one, so when none may go it is refused.
+     A request lives 10 minutes for the main agent and 24 hours for a managed agent,
+     restarted at approval. Its approval request goes to the target agent's DID
      (`Event::approval_request`). Every request waits for that owner: the declared app name
      and domain are the caller's claim and approve nothing. `AuthInfo.user_email` on the
      request and the grant is only a display hint (the owner's email, from `email_for_did`).
   2. `agent.permitCapability { auth }`: its guard, `Owns { owner: Request }`, admits the
-     operator or a session acting as the request's agent (the same DID) with AGENT_PERMIT;
-     anyone else gets 404, as for a missing request. The approver may grant fewer capabilities
-     than asked; the target is fixed by the request. It returns a six-digit code, stored as a
-     `Secret`.
+     operator or an authenticated session acting as the request's agent (the same DID) with
+     AGENT_PERMIT; anyone else gets 404, as for a missing request. The approver may grant
+     fewer capabilities than asked, and no more than it holds (`caps_within`: each approved
+     capability keeps its overlap with the held ones, so several actions or `*` on one
+     pointer narrow rather than drop); the target is fixed by the request. It returns a
+     six-digit code, stored as a `Secret`.
   3. `agent.generateJwt { requestId, rand }` (anyone): `PendingRequests::redeem` checks the code
      and mints the grant on the request's agent in one locked step, with the approved
      capabilities capped at that agent's own (`grant_caps_for`: a managed agent holds its user's
      capabilities). The request goes only when the grant exists; a failed mint (locked wallet,
      database) leaves it approved and redeemable. Five wrong codes delete it; a code redeems
      once. `apps-changed` then goes to the grant's agent.
-  `capabilities::request_capability`, `permit_capability` and `generate_capability_token` are the
-  same steps for MCP (`mcp/tools/auth.rs`, which auto-permits only when `caller_can_permit` says
-  the caller may approve for the target) and the dev-mode auto-permit.
+  MCP (`mcp/tools/auth.rs`) calls these methods: the request and the redeem without a token,
+  the auto-permit as its caller, so `agent.permitCapability`'s guard decides whether the caller
+  may approve and its handler caps the approval at the caller's own capabilities.
+  `capabilities::permit_capability` is the dev-mode auto-permit.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

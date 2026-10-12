@@ -16,7 +16,7 @@ use crate::neighbourhoods::{self, install_neighbourhood_with_context};
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::{Guard, Owner};
+use super::guards::{Guard, IdParam, Owner};
 use super::perspectives_ws::guarded_perspective;
 use super::types::*;
 use super::ws_handler::{HandlerMap, WsRpcError};
@@ -34,13 +34,7 @@ fn neighbourhood_update(_: Vec<String>) -> Capability {
 
 /// The perspective `neighbourhood.publish` shares: `perspectiveUuid` (or the older
 /// `perspectiveUUID`).
-fn published_perspective(params: &Value) -> Option<String> {
-    params
-        .get("perspectiveUuid")
-        .or_else(|| params.get("perspectiveUUID"))?
-        .as_str()
-        .map(str::to_string)
-}
+const PUBLISHED_PERSPECTIVE: IdParam = IdParam::FirstOf(&["perspectiveUuid", "perspectiveUUID"]);
 
 async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
@@ -214,7 +208,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .long()
     .guard(Guard::Owns {
         cap: neighbourhood_create,
-        id: published_perspective,
+        id: PUBLISHED_PERSPECTIVE,
         owner: Owner::Perspective,
     });
     // The perspective that holds the neighbourhood decides who may use it.

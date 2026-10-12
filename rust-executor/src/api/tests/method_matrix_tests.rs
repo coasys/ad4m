@@ -25,7 +25,7 @@ use crate::agent::capabilities::{
 };
 use crate::agent::grants::{Grants, LiveGrant};
 use crate::agent::{AgentContext, AgentService};
-use crate::api::guards::{uuid_param, Guard, Owner};
+use crate::api::guards::{Guard, IdParam, Owner, UUID_PARAM};
 use crate::api::perspectives_ws::PerspectiveUuidParams;
 use crate::api::ws_handler::{build_handler_map, HandlerMap, NoParams, WsRpcError};
 use crate::types::{PerspectiveHandle, RequestContext};
@@ -49,6 +49,10 @@ pub(super) enum Caller {
     User,
     /// A second user with the guard's capability.
     OtherUser,
+    /// An app the user approved on their managed agent with only an unrelated narrow
+    /// capability ([`unrelated_capability`]), not the guard's: it acts as the user's agent,
+    /// so it owns the user's resources, but holds nothing the guards check.
+    UserAppWithout,
     /// No token: the anonymous capabilities only.
     Anonymous,
 }
@@ -75,6 +79,13 @@ pub(super) enum Expect {
     NotFound,
 }
 
+/// What [`Caller::UserAppWithout`] holds: querying one perspective that no row names. No
+/// guard checks it: a perspective guard builds its capability from the row's uuid, and every
+/// other perspective capability names `*`, which a single pointer does not cover.
+pub(super) fn unrelated_capability() -> Capability {
+    perspective_query_capability(vec!["matrix-unrelated-perspective".to_string()])
+}
+
 /// Whether a caller without a token holds `cap` (multi-user mode on: the widest set).
 fn anonymous_holds(cap: &Capability) -> bool {
     capability_matches(&anonymous_capabilities_when(true), cap)
@@ -91,6 +102,7 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (AppWithout, Granted),
             (AppWith, Granted),
             (User, Granted),
+            (UserAppWithout, Granted),
             (Anonymous, Granted),
         ],
         Guard::Operator => vec![
@@ -98,6 +110,7 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (AppWithout, Forbidden),
             (AppWith, Forbidden),
             (User, Forbidden),
+            (UserAppWithout, Forbidden),
             (Anonymous, Forbidden),
         ],
         // The capability alone: a caller without a token passes exactly when the anonymous
@@ -108,6 +121,7 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (AppWith, Granted),
             (User, Granted),
             (OtherUser, Granted),
+            (UserAppWithout, Forbidden),
             (
                 Anonymous,
                 if anonymous_holds(cap) {
@@ -122,6 +136,7 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (AppWithout, Forbidden),
             (AppWith, Granted),
             (User, Forbidden),
+            (UserAppWithout, Forbidden),
             (Anonymous, Forbidden),
         ],
         Guard::Owns { .. } => vec![],
@@ -148,6 +163,9 @@ pub(super) fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
         (User, MainAgents, NotFound),
         (User, Missing, NotFound),
         (OtherUser, UsersOwn, NotFound),
+        // The capability comes first: 403 even on its own agent's perspective.
+        (UserAppWithout, UsersOwn, Forbidden),
+        (UserAppWithout, MainAgents, Forbidden),
         (Anonymous, Unowned, Forbidden),
     ]
 }
@@ -173,6 +191,9 @@ fn agent_resource_rows() -> &'static [(Caller, Target, Expect)] {
         (User, Missing, NotFound),
         (OtherUser, UsersOwn, NotFound),
         (OtherUser, MainAgents, NotFound),
+        // The capability comes first: 403 even on its own agent's resource.
+        (UserAppWithout, UsersOwn, Forbidden),
+        (UserAppWithout, MainAgents, Forbidden),
         (Anonymous, UsersOwn, Forbidden),
     ]
 }
@@ -621,6 +642,9 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
         Caller::AppWith => RequestContext::app_for_test(caps()),
         Caller::User => RequestContext::user_for_test(USER_DID, caps()),
         Caller::OtherUser => RequestContext::user_for_test(OTHER_USER_DID, caps()),
+        Caller::UserAppWithout => {
+            RequestContext::user_for_test(USER_DID, vec![unrelated_capability()])
+        }
         // The most a caller without a token holds: multi-user mode on adds signing up,
         // logging in and verifying an email.
         Caller::Anonymous => RequestContext::for_session(
@@ -684,12 +708,14 @@ impl World {
         };
         let request = |name: &str, agent: AgentContext| {
             let id = format!("{run}-{name}-request");
-            PendingRequests::global().request(
-                id.clone(),
-                AuthInfo::default(),
-                agent,
-                crate::agent::grants::now(),
-            );
+            PendingRequests::global()
+                .request(
+                    id.clone(),
+                    AuthInfo::default(),
+                    agent,
+                    crate::agent::grants::now(),
+                )
+                .expect("a pending request");
             id
         };
         let user = || AgentContext::managed(USER_DID.to_string());
@@ -844,13 +870,13 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
         .or_null()
         .guard(Guard::Owns {
             cap: perspective_query_capability,
-            id: uuid_param,
+            id: UUID_PARAM,
             owner: Owner::Perspective,
         });
     map.method::<TaskIdParams, bool>("test.task", handler())
         .guard(Guard::Owns {
             cap: |_| AI_PROMPT_CAPABILITY.clone(),
-            id: |params| params.get("taskId")?.as_str().map(str::to_string),
+            id: IdParam::Field(&["taskId"]),
             owner: Owner::Task,
         });
     map.method::<NoParams, bool>("test.open", handler())
@@ -868,10 +894,28 @@ async fn every_method_admits_exactly_the_callers_its_guard_names() {
     let (failures, checked) = walk(&map, &world).await;
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // The test methods alone: Open, Operator and Executor × 5 rows, 2 Cap guards × 6 rows, 2
+    // The test methods alone: Open, Operator and Executor × 6 rows, 2 Cap guards × 7 rows, 2
     // perspective guards and 1 task guard: the walk reached them all.
-    let least = 3 * 5 + 2 * 6 + 2 * perspective_rows().len() + agent_resource_rows().len();
+    let least = 3 * 6 + 2 * 7 + 2 * perspective_rows().len() + agent_resource_rows().len();
     assert!(checked >= least, "only {checked} rows checked");
+}
+
+/// An app the user approved acts as the user's agent, but with only what it was granted: one
+/// with an unrelated narrow capability cannot end the user's logins and apps.
+#[tokio::test]
+async fn a_users_app_without_agent_update_cannot_revoke_the_users_sessions() {
+    let map = build_handler_map();
+    let app = context(Caller::UserAppWithout, None);
+    let refused = map
+        .admit("user.revokeAllSessions", &json!({}), &app)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 403, "{}", refused.message);
+    let user = context(Caller::User, Some(AGENT_UPDATE_CAPABILITY.clone()));
+    assert!(map
+        .admit("user.revokeAllSessions", &json!({}), &user)
+        .await
+        .is_ok());
 }
 
 /// `Guard::Cap` checks the capability alone, so a caller without a token reaches exactly the
@@ -1230,7 +1274,6 @@ fn only_methods_that_check_no_capability_are_open() {
             "runtime.info",
             "runtime.tlsDomain",
             "user.logout",
-            "user.revokeAllSessions",
         ]
     );
 }

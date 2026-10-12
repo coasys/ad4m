@@ -151,8 +151,10 @@ impl Ad4mMcpHandler {
 
     /// Context-free body of [`Self::request_capability`]: tests cannot build an rmcp
     /// `RequestContext`. Creating the request needs only that the tool stay reachable;
-    /// auto-permitting it (the inline code that generate_jwt mints into an ALL_CAPABILITY
-    /// token) needs the PERMIT capability, which a multi-user user token does not hold.
+    /// auto-permitting it (the inline code that generate_jwt mints into a token) needs a
+    /// session that may approve the request (`agent.permitCapability`'s guard): the
+    /// operator, or a session that acts as the requested agent and holds PERMIT, as a
+    /// user's own token does for that user's agent.
     pub(crate) async fn request_capability_as(
         &self,
         request: RequestAuth,
@@ -177,7 +179,10 @@ impl Ad4mMcpHandler {
     /// (a user for their own agent); never an anonymous caller, and never a caller whose
     /// token does not work (`None`). The code is the mint secret (`generate_jwt` exchanges it
     /// for a signed token on that agent), and returning it to any caller that could reach the
-    /// MCP port made `--admin-credential` decorative (issue #851, sub-problem 3).
+    /// MCP port made `--admin-credential` decorative (issue #851, sub-problem 3). The request
+    /// asks for ALL_CAPABILITY; the method's handler keeps only what the permitter's session
+    /// holds (`permit_capability_within`), and a grant on a user's agent holds no more than
+    /// that user does (`grant_caps_for`).
     ///
     /// Scope: without an admin credential, a caller with no token on a loopback
     /// listener is the operator, so it still gets the inline code. On a multi-user
@@ -244,9 +249,12 @@ impl Ad4mMcpHandler {
             auth: auth_info,
         };
         let permit = json!({ "auth": serde_json::to_string(&permit).unwrap_or_default() });
+        // As the permitter, through the method's guard and handler: the handler approves
+        // within the permitter's own capabilities (`permit_capability_within`).
         match call_method_as(permitter, "agent.permitCapability", permit).await {
-            // The guard's refusal: no PERMIT (403), or the request is for an agent the
-            // caller does not act as (404, D6).
+            // The guard's refusal: no PERMIT (403), the request is for an agent the caller
+            // does not act as (404, D6), or none of the requested capabilities is the
+            // caller's own (403).
             Err(e) if matches!(e.code, 401 | 403 | 404) => not_permitted(),
             Err(e) => json!({
                 "success": false,
