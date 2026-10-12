@@ -655,6 +655,27 @@ mod session_revocation_tests {
         );
     }
 
+    // Since #1399 an app the user approved acts as the user's agent too, with the subset the
+    // user approved. Revoking every grant on the agent is AGENT_UPDATE, as `agent.removeApp`.
+    #[tokio::test]
+    async fn an_app_on_a_users_agent_without_agent_update_cannot_revoke_the_users_sessions() {
+        setup();
+        let email = managed_user("narrow-app");
+        let login = generate_user_jwt(&email, "test").unwrap();
+        let narrow = granted_token(AuthInfo {
+            app_name: "narrow".into(),
+            user_email: Some(email.clone()),
+            capabilities: Some(vec![
+                crate::agent::capabilities::perspective_query_capability(vec!["*".into()]),
+            ]),
+            ..AuthInfo::default()
+        });
+        let refused = call("user.revokeAllSessions", json!({}), ctx(&narrow)).await;
+        assert!(matches!(refused, Err((403, _))), "{refused:?}");
+        assert!(open(&login).is_ok(), "the user's login survives");
+        assert!(open(&narrow).is_ok(), "the app's own grant survives");
+    }
+
     #[tokio::test]
     async fn logout_revokes_the_callers_token_only() {
         setup();
