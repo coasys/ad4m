@@ -124,11 +124,13 @@ async fn accept_refuses_a_stale_seal_and_writes_no_vote() {
     let minted = f.mint_one().await;
 
     // The cited task is edited: same ID, different content, different seal.
+    // Shared, as a peer's edit arrives: the seal is checked on shared graphs
+    // only, so a Local edit of ours would leave it reproducible.
     f.link(
         TASK,
         "ns://title",
         &literal("Onboard someone else"),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
 
@@ -161,11 +163,12 @@ async fn editing_evidence_after_settle_does_not_roll_back() {
     consensus_pass(&mut f).await;
     assert_eq!(f.derived().await.state, "scoped");
 
+    // Shared, as in test 13: a Local edit is one no shared read sees.
     f.link(
         TASK,
         "ns://title",
         &literal("Onboard someone else"),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
 
