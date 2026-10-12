@@ -314,6 +314,10 @@ pub(crate) async fn build_event_stream_for(
     let session_context = session.acts_as();
     // Hosting info names its user by the account's email: resolve the managed agent's once.
     // An agent whose account does not resolve matches no user's info (fail closed).
+    // For a managed agent this is `Some("")`, never `None`: `matches_hosting_user(None)`
+    // means "see every user's info" (the operator, the main agent), so turning a failed
+    // lookup into `None` would hand every user's credits and wallet to a session whose DID
+    // names no account. No account has the empty email, so `Some("")` matches nothing.
     let user_email = session_context
         .managed_did()
         .map(|did| crate::agent::AgentService::email_for_did(did).unwrap_or_default());
@@ -1702,6 +1706,69 @@ mod app_approval_event_tests {
                 .await
                 .is_err(),
             "a session that cannot approve apps received an app event"
+        );
+    }
+
+    // A managed agent whose DID names no account must see no user's hosting info: its
+    // filter is `Some("")`, and `None` would let every user's info through.
+    #[tokio::test]
+    async fn a_managed_agent_without_an_account_sees_no_users_hosting_info() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let real = "hosting.real@example.org";
+        crate::test_utils::create_test_user(real);
+        let ghost_did = "did:key:ghost";
+        assert!(crate::agent::AgentService::email_for_did(ghost_did).is_err());
+
+        let ghost = Arc::new(
+            Session::for_test(Principal::Agent(AgentContext::managed(ghost_did.into())))
+                .with_did(ghost_did),
+        );
+        let mut ghost_stream = build_event_stream(ghost, false, false).await;
+        // The operator sees every user's info: it proves the event went out.
+        let mut operator_stream = build_event_stream(unending(), false, false).await;
+
+        let info = serde_json::to_string(&crate::types::HostingUserInfo {
+            email: real.to_string(),
+            remaining_credits: "5".to_string(),
+            hot_wallet_address: None,
+            free_access: false,
+        })
+        .unwrap();
+        get_global_pubsub()
+            .await
+            .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &info)
+            .await;
+
+        let seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = operator_stream.next().await.expect("the stream stays open");
+                if event.contains(events::HOSTING_USER_INFO_CHANGED) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("the operator receives the hosting event");
+        assert!(seen.contains(real), "{}", seen);
+
+        let leaked = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match ghost_stream.next().await {
+                    Some(event) if event.contains(events::HOSTING_USER_INFO_CHANGED) => {
+                        break Some(event)
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            leaked.is_err(),
+            "a session whose DID names no account received hosting info, or its stream \
+             ended: {:?}",
+            leaked
         );
     }
 
