@@ -125,7 +125,12 @@ from the global config where `agent.requestCapability` uses it.
   the same frame a failed check sends. A grant revoked before the socket starts serving gives an
   already-cancelled child, so there is no race to check. Only the socket's own task writes the
   close frame. The RPC socket first delivers in-flight replies for up to `REPLY_GRACE`, so
-  `user.logout` gets its answer. A new socket type must take `session.ended()` too.
+  `user.logout` gets its answer; each call's `cancel_token` is a child of the socket's token, so
+  the calls still running are cancelled (401). Expiry closes an idle socket the same way:
+  every socket (and the SSE chat stream, and the RPC socket's event stream,
+  `build_event_stream`) also waits on `session.over()`, which completes when
+  the grant ends or the token expires (leeway included). A new socket type must watch
+  `session.over()` too.
 - Revocation is on grants (`agent::grants::Grants`): `agent.revokeToken` (by request id or by
   the token) and `agent.removeApp` act on grants of the caller's own agent, or any for the
   operator; another agent's grant answers as missing. `user.logout` revokes the caller's grant;

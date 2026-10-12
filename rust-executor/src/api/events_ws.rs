@@ -128,8 +128,9 @@ pub fn event_specs() -> Vec<EventSpec> {
 /// The event stream of a session's socket: the JSON message of each event the session may
 /// receive and `interest` (what the socket asked for with `events.watch`) wants. The
 /// session's DID is read per event, so a socket opened before the main agent had a DID gets
-/// its events once it has one. The stream ends when the session's grant ends (revoked or
-/// removed, without waiting for another event), and at the first event after
+/// its events once it has one. The stream ends when the session is over (`Session::over`:
+/// its grant revoked or removed, or its token expired, without waiting for another event),
+/// and at the first event after
 /// `session.check()` fails: expiry and revocation stop events as they stop requests.
 pub(crate) async fn build_event_stream(
     session: Arc<Session>,
@@ -139,7 +140,7 @@ pub(crate) async fn build_event_stream(
 
     let events = get_global_pubsub().await.subscribe_events();
     let check = session.clone();
-    let ended = session.ended();
+    let over = session.over();
     // The session decides who, the socket's interest what. An event the session may receive
     // checks the token even when the socket does not want it.
     Box::pin(
@@ -152,7 +153,7 @@ pub(crate) async fn build_event_stream(
             })
             .take_while(move |_| ready(check.check().is_ok()))
             .filter_map(ready)
-            .take_until(ended.cancelled_owned()),
+            .take_until(over),
     )
 }
 
@@ -1716,6 +1717,31 @@ mod token_expiry_tests {
             .await
             .expect("the stream ends when the grant does, without another event");
         assert!(next.is_none(), "a revoked session got {next:?}");
+    }
+
+    // Expiry ends the stream at once as a revocation does: it used to wait for the next
+    // event the session may receive, so an idle stream outlived its token.
+    #[tokio::test]
+    async fn an_expiring_grant_ends_the_event_stream_without_another_event() {
+        use crate::agent::capabilities::TOKEN_EXPIRY_LEEWAY_SECONDS;
+        use crate::agent::grants::{now, LiveGrant};
+        let agent = AgentContext::managed("did:key:events-user".into());
+        // Expired, leeway included, in about a second.
+        let grant = Arc::new(LiveGrant::for_test(
+            "expiring-events",
+            agent.clone(),
+            now() - TOKEN_EXPIRY_LEEWAY_SECONDS,
+        ));
+        let session = Session::for_test(Principal::Agent(agent))
+            .with_caps(get_user_default_capabilities())
+            .with_did("did:key:events-user")
+            .with_grant(grant);
+        let mut stream =
+            build_event_stream(Arc::new(session), event_interest::watching_all()).await;
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream ends at expiry, without another event");
+        assert!(next.is_none(), "an expired session got {next:?}");
     }
 
     #[tokio::test]

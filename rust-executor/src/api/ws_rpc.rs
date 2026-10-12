@@ -227,10 +227,11 @@ pub(crate) struct Connection {
     handler_map: Arc<HandlerMap>,
     /// Carries the session that every request checks again.
     ctx: Arc<RequestContext>,
-    /// Fires when the token stops working: a failed check, or the end of its grant (a child of
-    /// the grant's token, so a revocation closes the connection at once). The connection then
-    /// closes, so the client authenticates again instead of waiting on a socket that answers
-    /// nothing.
+    /// Fires when the token stops working: a failed check, the end of its grant (a child of
+    /// the grant's token, so a revocation closes the connection at once) or its expiry
+    /// ([`Session::over`](crate::agent::session::Session::over), watched by `serve`). It
+    /// cancels the calls in flight, and the connection then closes, so the client
+    /// authenticates again instead of waiting on a socket that answers nothing.
     session_over: CancellationToken,
     tx: mpsc::UnboundedSender<String>,
     inflight: InflightRegistry,
@@ -353,8 +354,9 @@ impl Connection {
         // the registry under the request id.  The handler races its
         // work against `cancel_token.cancelled()`; if the client sends
         // `request.cancel`, the racing future fires immediately and we
-        // reply with an `AbortError` (code 499).
-        let cancel_token = CancellationToken::new();
+        // reply with an `AbortError` (code 499). A child of `session_over`: a revocation or
+        // expiry cancels the calls in flight too.
+        let cancel_token = self.session_over.child_token();
         {
             let mut guard = self.inflight.lock().await;
             guard.insert(id.clone(), cancel_token.clone());
@@ -406,9 +408,13 @@ impl Connection {
             let response = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
-                    // 499 mirrors nginx's "Client Closed Request" status —
-                    // the OpenAPI SDKs and most HTTP clients recognise it.
-                    json!({"id": id, "error": {"code": 499, "message": "Request cancelled by client"}})
+                    if session_over.is_cancelled() {
+                        json!({"id": id, "error": {"code": 401, "message": token_ended_frame().reason.as_str()}})
+                    } else {
+                        // 499 mirrors nginx's "Client Closed Request" status —
+                        // the OpenAPI SDKs and most HTTP clients recognise it.
+                        json!({"id": id, "error": {"code": 499, "message": "Request cancelled by client"}})
+                    }
                 }
                 result = handler_map.dispatch(&msg_type, params, req_ctx) => {
                     match result {
@@ -449,10 +455,15 @@ where
         event_session_over.cancel();
     });
 
-    tokio::pin!(incoming);
+    let over = conn.ctx.session.over();
+    tokio::pin!(incoming, over);
     loop {
         let text = tokio::select! {
             _ = conn.session_over.cancelled() => break,
+            _ = &mut over => {
+                conn.session_over.cancel();
+                break;
+            }
             text = incoming.next() => text,
         };
         let Some(text) = text else { break };
@@ -737,6 +748,57 @@ mod socket_tests {
         for (name, ws) in &mut sockets {
             let close = close_within(ws, Duration::from_secs(3)).await;
             let (code, reason) = close.unwrap_or_else(|| panic!("{name}: no close at the revoke"));
+            assert_eq!(code, CLOSE_TOKEN_ENDED, "{name}");
+            assert_eq!(reason, token_ended_frame().reason.as_str(), "{name}");
+        }
+    }
+
+    // Expiry used to be noticed only at the next request or event, so an idle socket stayed
+    // open past it. Each socket now closes at expiry as it does at a revocation.
+    #[tokio::test]
+    async fn every_idle_socket_of_a_token_closes_with_1008_when_it_expires() {
+        use crate::agent::capabilities::TOKEN_EXPIRY_LEEWAY_SECONDS;
+        use crate::agent::grants::{now, Grants, LiveGrant};
+        use crate::agent::session::TokenId;
+        let addr = start_server().await;
+        // The JWT stays good; the grant expires, leeway included, in about three seconds.
+        let (token, claims) = token::sign_token("expiring".to_string(), 3600, None).unwrap();
+        let auth = AuthInfo {
+            app_name: "expiring".to_string(),
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+            ..AuthInfo::default()
+        };
+        Grants::global()
+            .insert(LiveGrant::new(
+                TokenId(claims.nonce().to_string()),
+                "req-expiring".to_string(),
+                crate::agent::AgentContext::main_agent(),
+                String::new(),
+                auth,
+                now() + 2 - TOKEN_EXPIRY_LEEWAY_SECONDS,
+                now(),
+            ))
+            .unwrap();
+
+        let mut sockets = vec![];
+        for (name, path) in [
+            ("rpc", "/api/v1/ws"),
+            ("rpc watching events", "/api/v1/ws"),
+            ("realtime", "/v1/realtime"),
+        ] {
+            let url = format!("ws://{addr}{path}?token={token}");
+            sockets.push((name, tokio_tungstenite::connect_async(url).await.unwrap().0));
+        }
+        // Events reach a socket over its RPC connection once it watches them; the event
+        // stream must end at expiry too, not keep the socket open.
+        let watching = &mut sockets[1].1;
+        let watch = json!({ "model-loading-status": null, "perspective-added": null });
+        let reply = call_with(watching, "watch", "events.watch", watch).await;
+        assert_eq!(reply["result"], true, "{reply}");
+
+        for (name, ws) in &mut sockets {
+            let close = close_within(ws, Duration::from_secs(8)).await;
+            let (code, reason) = close.unwrap_or_else(|| panic!("{name}: open past expiry"));
             assert_eq!(code, CLOSE_TOKEN_ENDED, "{name}");
             assert_eq!(reason, token_ended_frame().reason.as_str(), "{name}");
         }

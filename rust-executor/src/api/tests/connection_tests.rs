@@ -290,6 +290,62 @@ async fn an_event_stream_that_ends_ends_the_session() {
     .expect("serve returns once the event stream ends");
 }
 
+// A call in flight used to run on after its token was revoked: its cancel token did not
+// follow the session's end.
+#[tokio::test]
+async fn a_revocation_cancels_the_calls_in_flight() {
+    use crate::api::ws_handler::{HandlerMap, NoParams, WsRpcError};
+    let (started, mut cancel_tokens) = mpsc::unbounded_channel();
+    let mut map = HandlerMap::new();
+    map.method::<NoParams, bool>("test.wait", move |_, ctx: Arc<RequestContext>| {
+        let started = started.clone();
+        async move {
+            started.send(ctx.cancel_token.clone().unwrap()).unwrap();
+            std::future::pending::<Result<Value, WsRpcError>>().await
+        }
+    });
+    let session = Session::for_test(Principal::Agent(AgentContext::main_agent()))
+        .with_caps(vec![ALL_CAPABILITY.clone()]);
+    let grant = session.grant().unwrap().clone();
+    let (tx, mut out) = mpsc::unbounded_channel();
+    let (input, incoming) = mpsc::unbounded_channel::<String>();
+    let conn = Connection::new(
+        Arc::new(map),
+        Arc::new(RequestContext::for_session(session)),
+        tx,
+    );
+    let served = tokio::spawn(serve(
+        conn,
+        UnboundedReceiverStream::new(incoming),
+        Box::pin(futures::stream::pending()),
+    ));
+    input
+        .send(json!({ "id": "1", "type": "test.wait" }).to_string())
+        .unwrap();
+    let call = tokio::time::timeout(Duration::from_secs(5), cancel_tokens.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    grant.ended.cancel();
+    tokio::time::timeout(Duration::from_secs(2), call.cancelled())
+        .await
+        .expect("the revocation cancels the call");
+    let reply: Value = serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(2), out.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reply["id"], "1");
+    assert_eq!(reply["error"]["code"], 401, "{reply}");
+    tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .expect("serve returns at the revocation")
+        .unwrap();
+}
+
 #[tokio::test]
 async fn a_token_that_expired_gets_401_and_ends_the_connection() {
     // The client keeps its side open: only the failed token check may end `serve`.
