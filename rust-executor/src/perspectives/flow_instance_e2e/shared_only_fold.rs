@@ -1,4 +1,5 @@
 use super::*;
+use crate::perspectives::flow_context::gather_active_flow_contexts;
 use crate::perspectives::flow_instance::local_cached_state;
 
 // ---------------------------------------------------------------------------
@@ -115,5 +116,62 @@ async fn a_local_self_granted_role_does_not_count_toward_a_gated_edge() {
             (LinkStatus::Shared, "scoped".to_string(), 1),
         ],
         "(grant status, derived state, edges fired)"
+    );
+}
+
+/// The auto-processor runs as one agent and reads that agent's own cache
+/// (#987's cache-first read), on the shared-reads view its tick builds
+/// (#1324). Two agents on one perspective with different caches: each gets
+/// their own, and neither sees the other's. No proposal exists, so the fold
+/// says `identified`, and only a cache read can answer `scoped` or `done`.
+/// Before, the shared-reads view read no Local graph at all, so every
+/// auto-processor pass re-derived and both got `identified`.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_agents_auto_processor_reads_its_own_cached_state() {
+    let f = seed_flow(
+        serde_json::json!({
+            "name": "Delivery",
+            "namespace": "delivery://",
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                { "name": "scoped", "value": 0.5 },
+                { "name": "done", "value": 1.0 }
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] },
+                { "action_name": "Finish", "from_state": "scoped", "to_state": "done", "actions": [] }
+            ],
+        }),
+        "identified",
+    )
+    .await;
+    let alice = acting_did(&f);
+    let bob_ctx = second_agent("bob-own-flow-context@e2e.test");
+    let bob = crate::agent::did_for_context(&bob_ctx).unwrap();
+    for (did, ctx, state) in [(&alice, &f.ctx, "scoped"), (&bob, &bob_ctx, "done")] {
+        let mut own = f.perspective.clone().for_own_bookkeeping(did.clone());
+        advance_flow_instance_state(&mut own, &f.instance_uri, state, None, ctx)
+            .await
+            .expect("write the agent's own cache");
+    }
+    let subject = f.instances().await[0].subject.clone();
+
+    let mut seen = Vec::new();
+    for did in [&alice, &bob] {
+        // The view `run_auto_processor_tick` hands the extraction pass.
+        let tick_view = f
+            .perspective
+            .clone()
+            .for_viewer(did.clone())
+            .for_shared_reads();
+        let contexts =
+            gather_active_flow_contexts(&tick_view, std::slice::from_ref(&subject), None).await;
+        assert_eq!(contexts.len(), 1, "{contexts:?}");
+        seen.push(contexts[0].current_state.clone());
+    }
+    assert_eq!(
+        seen,
+        vec!["scoped", "done"],
+        "(Alice's context, Bob's context)"
     );
 }

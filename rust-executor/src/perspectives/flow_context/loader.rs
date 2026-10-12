@@ -273,11 +273,22 @@ pub async fn gather_active_flow_contexts(
     // *state* is bounded by the sync-triggered re-derive (`trigger.rs`, every
     // incoming flow link), but contention does not expire on its own — a
     // cached flow keeps `Unknown` until something re-folds it.
+    //
+    // The cache is the viewer's own Local link (#1360), so it is read on their
+    // own bookkeeping view even when `perspective` reads shared graphs only, as
+    // the auto-processor's does (#1324). That is the one Local read here, and
+    // it carries nothing private: the pass folds shared graphs only
+    // (`FlowInstance::read_set`), so the cache is derived from them alone.
+    // Everything else, the fallback derive included, stays on `perspective`.
+    let cache_view = perspective
+        .viewer()
+        .map(|viewer| perspective.clone().for_own_bookkeeping(viewer.to_string()));
+    let cache_view = cache_view.as_ref().unwrap_or(perspective);
     let mut resolved: Vec<ResolvedFlow> = Vec::with_capacity(records.len());
     let mut uncached: Vec<FlowInstanceRecord> = Vec::new();
     for record in records {
         match crate::perspectives::flow_instance::local_cached_state(
-            perspective,
+            cache_view,
             &record.instance_uri,
         )
         .await

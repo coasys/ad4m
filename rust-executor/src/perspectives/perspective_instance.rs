@@ -2933,6 +2933,12 @@ impl PerspectiveInstance {
         self.shared_reads
     }
 
+    /// The agent this instance reads for ([`Self::for_viewer`]); `None` on the
+    /// executor's own shared instance.
+    pub(crate) fn viewer(&self) -> Option<&str> {
+        self.viewer.as_deref()
+    }
+
     /// The graph scope a read on this instance runs in: [`Self::read_scope`]
     /// for the instance's viewer. Without a viewer, or after
     /// [`Self::for_shared_reads`], no Local graph: a requested one is refused.
