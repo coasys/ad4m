@@ -1729,11 +1729,17 @@ describe("a connected pair whose renegotiation went unanswered", () => {
         bus = new InMemoryBus()
     })
 
-    /** Alice and Bob, negotiated and connected, with Bob's descriptions droppable from here on. */
+    /** Alice and Bob, negotiated and connected, with Bob's descriptions and Alice's answers droppable from here on. */
     async function connectedPair() {
         const clock = makeClock()
         const bobLoses = { description: false }
-        const alice = await makeMesh(bus, "did:alice", CALL_ID, { now: clock.now })
+        const aliceLoses = { answer: false }
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, {
+            now: clock.now,
+            drop: (payload) =>
+                aliceLoses.answer &&
+                (payload as { description?: { type?: string } }).description?.type === "answer",
+        })
         const bob = await makeMesh(bus, "did:bob", CALL_ID, {
             now: clock.now,
             drop: (payload) => bobLoses.description && (payload as { kind?: string }).kind === "description",
@@ -1745,8 +1751,134 @@ describe("a connected pair whose renegotiation went unanswered", () => {
         bob.live().setConnectionState("connected")
         expect(alice.live().signalingState).toBe("stable")
         expect(bob.live().signalingState).toBe("stable")
-        return { clock, alice, bob, bobLoses }
+        return { clock, alice, bob, bobLoses, aliceLoses }
     }
+
+    /** The descriptions a mesh has published, newest last. */
+    const descriptions = (sent: unknown[]) =>
+        sent.filter((payload) => (payload as { kind?: string }).kind === "description")
+
+    it("repairs a renegotiation reordered behind the answer it follows", async () => {
+        // The case T20 found, pinned without timing: Bob answers Alice's
+        // offer, then offers his own media. His offer reaches Alice first,
+        // while hers is still out; Alice is impolite, so she reads it as glare
+        // and ignores it. Then the answer lands and the pair looks settled.
+        const { clock, alice, bob, bobLoses } = await connectedPair()
+        bobLoses.description = true
+
+        alice.live().restartIce()
+        await settleAll()
+        expect(bob.live().signalingState).toBe("stable")
+        bob.live().restartIce()
+        await settleAll()
+        const [answer, offer] = descriptions(bob.sent).slice(-2)
+        expect((answer as { description: { type: string } }).description.type).toBe("answer")
+        expect((offer as { description: { type: string } }).description.type).toBe("offer")
+
+        bus.deliverTo("did:alice", "did:bob", offer)
+        await settleAll()
+        bus.deliverTo("did:alice", "did:bob", answer)
+        await settleAll()
+        expect(alice.live().signalingState).toBe("stable")
+        expect(bob.live().signalingState).toBe("have-local-offer")
+
+        bobLoses.description = false
+        clock.advance(RECOVERY_INTERVAL_MS)
+        bob.mesh.tick()
+        await settleAll()
+
+        expect(bob.recoveries.map((r) => r.rung)).toEqual(["resend"])
+        expect(bob.live().signalingState).toBe("stable")
+        expect(alice.live().remoteDescription?.type).toBe("offer")
+        expect(alice.errors).toEqual([])
+        expect(bob.errors).toEqual([])
+    })
+
+    it("drops a late duplicate answer instead of reporting an error", async () => {
+        // Slow rather than lost: the resend fires, the peer answers both
+        // copies, and the second answer arrives with nothing left to settle.
+        const { clock, alice, bob, aliceLoses } = await connectedPair()
+
+        aliceLoses.answer = true
+        bob.live().restartIce()
+        await settleAll()
+        const late = descriptions(alice.sent).slice(-1)[0]
+        expect(bob.live().signalingState).toBe("have-local-offer")
+
+        aliceLoses.answer = false
+        clock.advance(RECOVERY_INTERVAL_MS)
+        bob.mesh.tick()
+        await settleAll()
+        expect(bob.live().signalingState).toBe("stable")
+
+        bus.deliverTo("did:bob", "did:alice", late)
+        await settleAll()
+
+        expect(bob.errors).toEqual([])
+        expect(bob.live().signalingState).toBe("stable")
+    })
+
+    it("stops repairing a peer that never answers a renegotiation, across rebuilds", async () => {
+        // Each rebuilt connection connects before it renegotiates, which resets
+        // a slot's own budget. The renegotiation budget is the peer's, so the
+        // resend → rebuild → connect → unanswered cycle still runs out.
+        const { clock, bob, bobLoses } = await connectedPair()
+        bobLoses.description = true
+
+        for (let round = 0; round < MAX_RECOVERY_ATTEMPTS + 2; round += 1) {
+            bob.live().setConnectionState("connected")
+            bob.live().restartIce()
+            await settleAll()
+            clock.advance(RECOVERY_INTERVAL_MS)
+            bob.mesh.tick()
+            await settleAll()
+        }
+        const spent = bob.recoveries.length
+        expect(spent).toBeGreaterThan(0)
+
+        bob.live().setConnectionState("connected")
+        bob.live().restartIce()
+        await settleAll()
+        for (let i = 0; i < 4; i += 1) {
+            clock.advance(RECOVERY_INTERVAL_MS)
+            bob.mesh.tick()
+            await settleAll()
+        }
+
+        expect(bob.recoveries).toHaveLength(spent)
+        expect(bob.recoveries.filter((r) => r.rung !== "ice-restart").length).toBeLessThanOrEqual(MAX_RECOVERY_ATTEMPTS)
+    })
+
+    it("gives a peer its renegotiation budget back once one is answered", async () => {
+        const { clock, bob, bobLoses } = await connectedPair()
+
+        bobLoses.description = true
+        bob.live().restartIce()
+        await settleAll()
+        clock.advance(RECOVERY_INTERVAL_MS)
+        bob.mesh.tick()
+        await settleAll()
+        expect(bob.recoveries.map((r) => r.rung)).toEqual(["resend"])
+
+        // The next renegotiation is answered, and the one after that is lost.
+        bobLoses.description = false
+        clock.advance(RECOVERY_INTERVAL_MS)
+        bob.mesh.tick()
+        await settleAll()
+        expect(bob.live().signalingState).toBe("stable")
+
+        for (let round = 0; round < MAX_RECOVERY_ATTEMPTS + 1; round += 1) {
+            bobLoses.description = true
+            bob.live().setConnectionState("connected")
+            bob.live().restartIce()
+            await settleAll()
+            bobLoses.description = false
+            clock.advance(RECOVERY_INTERVAL_MS)
+            bob.mesh.tick()
+            await settleAll()
+            expect(bob.live().signalingState).toBe("stable")
+        }
+    })
 
     it("resends an offer that never got its answer, though the pair reads connected", async () => {
         // The answerer's media travels in an offer of its own, sent once the
@@ -2164,12 +2296,73 @@ describe("createTelepresenceChannel", () => {
             addSignalHandler: async (handler) => { handlers.add(handler) },
             removeSignalHandler: (handler) => { handlers.delete(handler) },
         }
-        const signal = (author: string, data: { source?: unknown; predicate?: unknown; target?: unknown }) => {
-            const expression = { data: { links: [{ author, data }] } } as unknown as PerspectiveExpression
+        /** A signal as the executor delivers it, with both proofs checked and recorded in `valid`. */
+        const signal = (
+            author: string,
+            data: { source?: unknown; predicate?: unknown; target?: unknown },
+            proofs: { signer?: string; signalValid?: boolean | null; linkValid?: boolean } = {},
+        ) => {
+            const expression = {
+                author: proofs.signer ?? author,
+                // `null`: a proof the executor never evaluated.
+                proof: proofs.signalValid === null ? {} : { valid: proofs.signalValid ?? true },
+                data: { links: [{ author, data, proof: { valid: proofs.linkValid ?? true } }] },
+            } as unknown as PerspectiveExpression
             for (const handler of [...handlers]) handler(expression)
         }
         return { proxy, sends, handlers, signal }
     }
+
+    it("accepts only a link whose author signed it, inside a signal that author signed", async () => {
+        // The mesh acts on the sender id — offers, answers, resets, rebuilds —
+        // so an author claim the executor could not verify must never reach it.
+        const { proxy, signal } = fakeProxy()
+        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const heard: [string, unknown][] = []
+        channel.onMessage((from, payload) => heard.push([from, payload]))
+        await settle()
+        const message = (n: number) => ({ source: JSON.stringify({ n }), predicate: PREDICATE, target: "*" })
+
+        signal("did:bob", message(1), { linkValid: false })
+        signal("did:bob", message(2), { signalValid: false })
+        signal("did:bob", message(3), { signer: "did:mallory" })
+        signal("did:bob", message(4), { signalValid: null })
+        signal("did:bob", message(5))
+
+        expect(heard).toEqual([["did:bob", { n: 5 }]])
+    })
+
+    it("lets a forged reset change nothing on the mesh", async () => {
+        // End to end through the adapter: a reset whose link claims Bob but
+        // whose proof does not hold must not rebuild Alice's pair with Bob.
+        const { proxy, signal } = fakeProxy()
+        const alice = new MeshManager({
+            channel: createTelepresenceChannel(proxy, "did:alice"),
+            callId: CALL_ID,
+            selfId: "did:alice",
+            createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
+            sweepMs: 0,
+        })
+        meshes.push(alice)
+        await alice.join(stream())
+        alice.setRoster(["did:alice", "did:bob"])
+        await settle()
+        const before = alice.getParticipants()[0]?.stream
+        const recoveries: unknown[] = []
+        alice.on("peer-recovery", (...args: unknown[]) => recoveries.push(args))
+
+        const reset = { source: JSON.stringify({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "did:alice", kind: "reset" }), predicate: PREDICATE, target: "did:alice" }
+        signal("did:bob", reset, { linkValid: false })
+        signal("did:bob", reset, { signer: "did:mallory" })
+        await settleAll()
+
+        expect(recoveries).toEqual([])
+        expect(alice.getParticipants()[0]?.stream).toBe(before)
+
+        signal("did:bob", reset)
+        await settleAll()
+        expect(recoveries).toHaveLength(1)
+    })
 
     it("publishes over broadcast, addressed in the link target", () => {
         const { proxy, sends } = fakeProxy()
