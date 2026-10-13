@@ -63,6 +63,12 @@ impl PerspectiveInstance {
         Ok(match queries.get_mut(&id) {
             Some(q) if q.revision > 0 => (id, q.revision, q.last_result.clone()),
             Some(q) => {
+                // A model trigger was built before this result existed;
+                // point it at the nodes of the first result, so an edit to
+                // an instance in it re-runs the query (#1237).
+                if let Some(params) = q.model_query_params.as_mut() {
+                    params.trigger = params.trigger.with_result(&result);
+                }
                 q.last_result = result.clone();
                 (id, 0, result)
             }

@@ -55,8 +55,8 @@ enum ChangedPredicates {
     NoneRecorded,
     /// A predicate-less diff was seen — must check ALL subscriptions
     CheckAll,
-    /// Only specific predicates changed
-    Specific(HashSet<String>),
+    /// Only these links changed
+    Specific(subscription_triggers::Writes),
 }
 use uuid;
 use uuid::Uuid;
@@ -65,6 +65,8 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
+// Which writes re-run a model subscription (#1237).
+mod subscription_triggers;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -455,8 +457,10 @@ pub struct PerspectiveMemoryStats {
 /// no JSON metadata is held here.
 #[derive(Clone)]
 struct ModelSubscriptionParams {
-    class_name: String,
+    classes: super::model_query::QueryClasses,
     query_json: String,
+    /// Which writes re-run it; holds the nodes of `last_result`.
+    trigger: subscription_triggers::ModelTrigger,
 }
 
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
@@ -3936,11 +3940,35 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// [`Self::model_query`] over one class or a union of classes (#1238).
+    pub async fn model_query_classes(
+        &self,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await
+    }
+
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
     async fn model_query_within(
         &self,
         class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_classes_within(&classes, query_json, shape_wait)
+            .await
+    }
+
+    /// [`Self::model_query_within`] over one class or a union of classes
+    /// (#1238, [`super::model_query::execute_union_query`]). Every class the
+    /// union names is waited for under the one budget, as an included class is.
+    pub(super) async fn model_query_classes_within(
+        &self,
+        classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
@@ -3963,9 +3991,15 @@ impl PerspectiveInstance {
         // its includes reach get whatever this wait leaves (see the retry
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
-        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
+        let mut shapes = Vec::new();
+        for class_name in classes.names() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            shapes.push((
+                class_name.clone(),
+                self.get_shape_or_wait(class_name, remaining).await?,
+            ));
+        }
         let resolver = self.shape_resolver();
-        let shape = resolver.get_shape(class_name)?;
 
         if let Some(filter) = produced_by_flow {
             let valid = super::flow_instance::produced::flow_valid_outputs(
@@ -3974,16 +4008,18 @@ impl PerspectiveInstance {
                 filter.state.as_deref(),
             )
             .await?;
-            // Only outputs committed as the queried class pass; see
+            // Only outputs committed as a queried class pass; see
             // `output_matches_class` for why conformance alone is not enough.
             let allowed: std::collections::BTreeSet<String> = valid
                 .into_iter()
                 .filter(|v| {
-                    super::flow_instance::produced::output_matches_class(
-                        &v.output,
-                        class_name,
-                        &shape.target_class,
-                    )
+                    shapes.iter().any(|(class_name, shape)| {
+                        super::flow_instance::produced::output_matches_class(
+                            &v.output,
+                            class_name,
+                            &shape.target_class,
+                        )
+                    })
                 })
                 .map(|v| v.output.id)
                 .collect();
@@ -4018,14 +4054,27 @@ impl PerspectiveInstance {
         // `get_shape_or_wait` does not wait there.
         let mut waited_for: HashSet<String> = HashSet::new();
         let result = loop {
-            let err = match super::model_query::execute_model_query(
-                &self.sparql_store,
-                shape.as_ref(),
-                &query_input,
-                &resolver,
-            )
-            .await
-            {
+            let run = match classes {
+                super::model_query::QueryClasses::One(_) => {
+                    super::model_query::execute_model_query(
+                        &self.sparql_store,
+                        shapes[0].1.as_ref(),
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+                super::model_query::QueryClasses::Union(names) => {
+                    super::model_query::execute_union_query(
+                        &self.sparql_store,
+                        names,
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+            };
+            let err = match run {
                 Ok(result) => break result,
                 Err(err) => err,
             };
@@ -4109,8 +4158,8 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Record the predicates from a diff into `changed_predicates`.
-    /// `None` means "all predicates changed" (check everything).
+    /// Record the links of a diff into `changed_predicates`. A link without a
+    /// predicate makes it `CheckAll` (check everything).
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
         let mut changed = self.changed_predicates.lock().await;
 
@@ -4119,30 +4168,20 @@ impl PerspectiveInstance {
             return;
         }
 
-        // Collect predicates from the diff
-        let mut new_preds = HashSet::new();
-        let mut has_predicate_less = false;
-        for link in diff.additions.iter().chain(diff.removals.iter()) {
-            if let Some(ref pred) = link.data.predicate {
-                new_preds.insert(pred.clone());
-            } else {
-                has_predicate_less = true;
-                break;
-            }
-        }
+        // Collect the diff's links; a predicate-less one means check everything.
+        let writes =
+            subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
 
-        if has_predicate_less {
+        let Some(writes) = writes else {
             *changed = ChangedPredicates::CheckAll;
-        } else {
-            match &mut *changed {
-                ChangedPredicates::NoneRecorded => {
-                    *changed = ChangedPredicates::Specific(new_preds);
-                }
-                ChangedPredicates::Specific(existing) => {
-                    existing.extend(new_preds);
-                }
-                ChangedPredicates::CheckAll => unreachable!(),
+            return;
+        };
+        match &mut *changed {
+            ChangedPredicates::NoneRecorded => {
+                *changed = ChangedPredicates::Specific(writes);
             }
+            ChangedPredicates::Specific(existing) => existing.extend(writes),
+            ChangedPredicates::CheckAll => unreachable!(),
         }
     }
 
@@ -5846,16 +5885,28 @@ impl PerspectiveInstance {
     /// When link changes match the trigger predicates, `execute_model_query` is
     /// re-run in Rust and the change is pushed to the client as a delta
     /// update. Each call makes a new subscription (see `open_subscription`).
+    ///
+    /// `classes` is one class or a union (#1238). A union is one subscription:
+    /// it re-runs when a diff touches the trigger set of any class it names.
     pub async fn model_subscribe_and_query(
         &self,
-        class_name: String,
+        classes: super::model_query::QueryClasses,
         query_json: String,
         user_email: Option<String>,
         connection_id: String,
     ) -> Result<(String, u64, String), AnyError> {
         // Build trigger SPARQL from shape predicates resolved through the cache.
-        let trigger_predicates =
-            self.build_model_trigger_predicates(&class_name, Some(&query_json));
+        // Each class contributes its own trigger set; the matcher below is
+        // predicate-only, so the sets meet as their union.
+        let mut trigger_predicates: Vec<String> = classes
+            .names()
+            .iter()
+            .flat_map(|class_name| {
+                self.build_model_trigger_predicates(class_name, Some(&query_json))
+            })
+            .collect();
+        trigger_predicates.sort();
+        trigger_predicates.dedup();
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
@@ -5873,6 +5924,13 @@ impl PerspectiveInstance {
         };
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
+        let trigger = self.build_model_trigger(
+            classes.names().iter().map(String::as_str),
+            &query_json,
+            // No result yet: `open_subscription` points the trigger at the
+            // nodes of the first result when it stores it.
+            "",
+        );
 
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
@@ -5880,14 +5938,16 @@ impl PerspectiveInstance {
             user_email,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
-                class_name: class_name.clone(),
+                classes: classes.clone(),
                 query_json: query_json.clone(),
+                trigger,
             }),
             revision: 0,
             connection: connection_id,
         };
-        self.open_subscription(subscribed_query, self.model_query(&class_name, &query_json))
-            .await
+        let first_result =
+            self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
+        self.open_subscription(subscribed_query, first_result).await
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
@@ -5905,16 +5965,8 @@ impl PerspectiveInstance {
             predicates.extend(shape.predicates());
         }
 
-        // `links` reaches predicates the shape does not declare (a revocation
-        // tombstone); a subscription asking for one must re-run when it lands.
-        if let (Some(shape), Some(qj)) = (&shape, query_json) {
-            if let Ok(query) = serde_json::from_str::<super::model_query::ModelQueryInput>(qj) {
-                predicates.extend(super::model_query::links_trigger_predicates(
-                    shape,
-                    &query,
-                    &self.shape_resolver(),
-                ));
-            }
+        if let Some(qj) = query_json {
+            predicates.extend(self.model_query_side_predicates(shape.as_deref(), qj));
         }
 
         // Extract parent predicate from query JSON (parent-scoped subscriptions
@@ -5927,22 +5979,6 @@ impl PerspectiveInstance {
                     .and_then(|p| p.as_str())
                 {
                     predicates.push(pred.to_string());
-                }
-                // `producedByFlow` resolves through the flow's receipts and
-                // the flow catalogue, not the shape: re-run when a receipt's
-                // index entry or body lands (sync may deliver them apart) —
-                // the reads `load_flow_receipts` makes — or a flow is
-                // registered, whose definition is written with its
-                // `rdf://type ad4m://Flow` link.
-                if query
-                    .get("where")
-                    .and_then(|w| w.get("producedByFlow"))
-                    .is_some()
-                {
-                    use super::flow_instance::{produced, receipt};
-                    predicates.push(produced::FLOW_RECEIPT_INDEX_PREDICATE.to_string());
-                    predicates.push(receipt::FLOW_RECEIPT_CONTENT_PREDICATE.to_string());
-                    predicates.push("rdf://type".to_string());
                 }
             }
         }
@@ -5977,14 +6013,31 @@ impl PerspectiveInstance {
                 .collect::<Vec<_>>()
         };
 
+        // Store reads the model triggers make, shared by every subscription.
+        let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+
         // Create futures for each query check
         for (id, query_string, user_email, sub_predicates, model_params) in queries {
+            // Model subscriptions match each written link against their
+            // trigger (see `subscription_triggers`), not the predicate alone.
+            if let (Some(params), ChangedPredicates::Specific(ref writes)) =
+                (&model_params, &changed_predicates)
+            {
+                if !params.trigger.matches(writes, &mut trigger_lookups) {
+                    log::debug!(
+                        "⏭️ Skipping model subscription {} — no write matches it",
+                        id
+                    );
+                    continue;
+                }
+            }
             // Skip subscription if its predicates don't overlap with changed predicates
             // sub_predicates empty => always check (variable predicate in query)
             // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
             // ChangedPredicates::NoneRecorded => should not happen here, but skip if it does
-            if !sub_predicates.is_empty() {
-                if let ChangedPredicates::Specific(ref changed) = changed_predicates {
+            else if !sub_predicates.is_empty() {
+                if let ChangedPredicates::Specific(ref writes) = changed_predicates {
+                    let changed = &writes.predicates;
                     if sub_predicates.is_disjoint(changed) {
                         log::debug!(
                             "⏭️ Skipping subscription {} — predicates {:?} disjoint from changed {:?}",
@@ -5998,6 +6051,9 @@ impl PerspectiveInstance {
             } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
                 continue;
             }
+
+            #[cfg(test)]
+            subscription_triggers::reruns::note(&id);
 
             // Each future returns Option<(id, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
@@ -6017,7 +6073,11 @@ impl PerspectiveInstance {
                 // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
-                        .model_query_within(&params.class_name, &params.query_json, Duration::ZERO)
+                        .model_query_classes_within(
+                            &params.classes,
+                            &params.query_json,
+                            Duration::ZERO,
+                        )
                         .await
                     {
                         Ok(r) => r,
@@ -6069,6 +6129,10 @@ impl PerspectiveInstance {
                             result_string.len()
                         );
                         stored_query.revision += 1;
+                        // Watch the nodes of the new result (#1237).
+                        if let Some(params) = stored_query.model_query_params.as_mut() {
+                            params.trigger = params.trigger.with_result(&result_string);
+                        }
                         let old =
                             std::mem::replace(&mut stored_query.last_result, result_string.clone());
                         let delta = subscriptions::result_delta(
@@ -8292,19 +8356,21 @@ mod tests {
         // NoneRecorded + specific → Specific
         state = match state {
             ChangedPredicates::NoneRecorded => {
-                ChangedPredicates::Specific(["p1".to_string()].into())
+                let mut writes = subscription_triggers::Writes::new();
+                writes.record("s", "p1", "t");
+                ChangedPredicates::Specific(writes)
             }
             other => other,
         };
         assert!(matches!(state, ChangedPredicates::Specific(_)));
 
         // Specific + more specific → Specific (union)
-        if let ChangedPredicates::Specific(ref mut set) = state {
-            set.insert("p2".to_string());
+        if let ChangedPredicates::Specific(ref mut writes) = state {
+            writes.record("s", "p2", "t");
         }
-        if let ChangedPredicates::Specific(ref set) = state {
-            assert!(set.contains("p1"));
-            assert!(set.contains("p2"));
+        if let ChangedPredicates::Specific(ref writes) = state {
+            assert!(writes.predicates.contains("p1"));
+            assert!(writes.predicates.contains("p2"));
         }
 
         // Specific + predicate-less → CheckAll

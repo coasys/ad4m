@@ -28,6 +28,11 @@ import type {
 } from "./FlowInstance";
 
 
+/** The wire form of a model query's classes: `class_name` for one, `class_names` for a union. */
+function classParams(className: string | string[]): { class_name: string } | { class_names: string[] } {
+    return Array.isArray(className) ? { class_names: className } : { class_name: className }
+}
+
 export class PerspectiveClient {
     #apiClient: ApiClient
     #expressionClient?: ExpressionClient
@@ -124,9 +129,10 @@ export class PerspectiveClient {
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
+    /** `className` may name several classes: one query over their union (#1238). */
+    async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
+            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }
@@ -154,10 +160,10 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    /** Open a live model query. Updates arrive through {@link onQueryUpdate}. */
-    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<Subscribed> {
+    /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
+    async modelSubscribe(uuid: string, className: string | string[], queryJson: string): Promise<Subscribed> {
         return this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }
         )
     }
 
