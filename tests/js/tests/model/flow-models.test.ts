@@ -742,7 +742,7 @@ describe("FlowInstance wrapper — read + stub API", function () {
     await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
     const inst = await FlowInstance.start(p, "Delivery", "ad4m://task/currentstate");
 
-    const state = inst.currentState;
+    const state = inst.currentState!;
     expect(state.name).to.equal("Identified");
     // Object identity: same reference as the one on the shape.
     expect(state).to.equal(inst.shape.states[0]);

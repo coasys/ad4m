@@ -48,9 +48,13 @@
 //! replica was watching. So the **first** pass this agent runs over an
 //! instance — no row for it yet ([`FlowReplicaState::has_derived`]) — is a
 //! silent catch-up: it marks what has settled and writes the state, and
-//! emits nothing. From then on the instance has a row, so every later pass
-//! reports normally. The invariant: **no event flood on join; no missed
-//! events for edges that settle after catch-up.**
+//! returns no outcomes. It does publish one `flow-state-changed` with
+//! `caught_up` set, `from: None` and no fired proposals: the agent's clients
+//! had no state for the instance (`currentStateName` is `undefined` until
+//! then), and this is the only signal that they now have one. From then on
+//! the instance has a row, so every later pass reports normally. The
+//! invariant: **no flood of settles on join; no missed events for edges
+//! that settle after catch-up.**
 //!
 //! The agent that mints an instance seeds its row at the mint (Rust:
 //! `mint_flow_instance`; a client's `FlowInstance.start`: the local-write
@@ -347,11 +351,24 @@ pub async fn run_flow_consensus_pass(
         });
         if first_pass_here {
             log::debug!(
-                "run_flow_consensus_pass: first derivation of {} for {agent_did} on this replica — caught up silently at `{}` ({} settled edge(s) marked, none reported)",
+                "run_flow_consensus_pass: first derivation of {} for {agent_did} on this replica — caught up at `{}` ({} settled edge(s) marked, none reported)",
                 record.instance_uri,
                 derived.state,
                 fresh.len()
             );
+            // No outcomes and no fired proposals: those settles are history.
+            // But the state is news to this agent's clients — until now they
+            // had nothing to show — so the event goes out, marked.
+            FlowReplicaState::publish_state_changed(&FlowStateChangedEvent {
+                perspective_uuid: uuid.clone(),
+                agent_did: agent_did.clone(),
+                instance: record.instance_uri.clone(),
+                from: None,
+                to: derived.state.clone(),
+                fired_proposals: Vec::new(),
+                caught_up: true,
+            })
+            .await;
             continue;
         }
         // `from` is what this agent last recorded; a row seeded at mint has
@@ -365,9 +382,10 @@ pub async fn run_flow_consensus_pass(
                 perspective_uuid: uuid.clone(),
                 agent_did: agent_did.clone(),
                 instance: record.instance_uri.clone(),
-                from,
+                from: Some(from),
                 to: derived.state.clone(),
                 fired_proposals: recorded.newly_marked,
+                caught_up: false,
             })
             .await;
         }

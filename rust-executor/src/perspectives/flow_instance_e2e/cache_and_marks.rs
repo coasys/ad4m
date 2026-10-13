@@ -509,9 +509,10 @@ async fn a_newcomer_with_no_history_reports_the_first_settle_after_its_first_pas
 
 /// The upgrade from the `Local`-link bookkeeping: an executor that ran the
 /// old engine has history marked by `Local` links and empty tables. Its
-/// first pass must treat every instance as a catch-up — silent, no flood of
-/// events that were reported before the upgrade — and report what settles
-/// after it.
+/// first pass must treat every instance as a catch-up — no outcomes, no
+/// flood of settles that were reported before the upgrade — and report what
+/// settles after it. The catch-up does publish one `caughtUp` event: it is
+/// the state this agent's clients can now show, and their only signal of it.
 #[tokio::test(flavor = "multi_thread")]
 async fn after_an_upgrade_the_first_pass_is_a_silent_catch_up() {
     let mut f = seed_review_flow().await;
@@ -544,9 +545,18 @@ async fn after_an_upgrade_the_first_pass_is_a_silent_catch_up() {
         .await;
     let first = consensus_pass(&mut f).await;
     assert!(first.is_empty(), "no flood after an upgrade: {first:?}");
-    assert!(
-        flow_events(&mut events, &f.perspective.uuid).is_empty(),
-        "and no event either"
+    assert_eq!(
+        raw_flow_events(&mut events, &f.perspective.uuid),
+        vec![serde_json::json!({
+            "perspectiveUuid": f.perspective.uuid,
+            "agentDid": acting_did(&f),
+            "instance": instance,
+            "from": null,
+            "to": "review",
+            "firedProposals": [],
+            "caughtUp": true,
+        })],
+        "one caught-up event: the state, and no settles"
     );
     assert_eq!(f.cached_state().await, "review");
 
@@ -679,6 +689,21 @@ async fn a_synced_instance_is_not_seeded() {
 // flow-state-changed
 // ---------------------------------------------------------------------------
 
+/// [`flow_events`] as the JSON the socket carries.
+fn raw_flow_events(
+    rx: &mut tokio::sync::broadcast::Receiver<String>,
+    uuid: &str,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        let event: serde_json::Value = serde_json::from_str(&msg).expect("JSON");
+        if event["perspectiveUuid"] == uuid {
+            out.push(event);
+        }
+    }
+    out
+}
+
 /// The events on `rx` so far that belong to `uuid`, oldest first.
 fn flow_events(
     rx: &mut tokio::sync::broadcast::Receiver<String>,
@@ -714,9 +739,10 @@ async fn a_settle_publishes_one_flow_state_changed_event() {
             perspective_uuid: f.perspective.uuid.clone(),
             agent_did: acting_did(&f),
             instance: f.instance_uri.clone(),
-            from: "identified".into(),
+            from: Some("identified".into()),
             to: "scoped".into(),
             fired_proposals: vec![minted],
+            caught_up: false,
         }]
     );
 
@@ -748,8 +774,8 @@ async fn a_regression_publishes_an_event_without_fired_proposals() {
     let got = flow_events(&mut events, &f.perspective.uuid);
     assert_eq!(got.len(), 1, "got {got:?}");
     assert_eq!(
-        (got[0].from.as_str(), got[0].to.as_str()),
-        ("scoped", "identified")
+        (got[0].from.as_deref(), got[0].to.as_str()),
+        (Some("scoped"), "identified")
     );
     assert!(got[0].fired_proposals.is_empty());
 }

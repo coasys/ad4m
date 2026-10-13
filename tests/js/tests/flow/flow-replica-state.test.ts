@@ -139,4 +139,59 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
     releaseAdmin();
     await alice.perspective.remove(aliceP.uuid);
   });
+
+  // An agent's first pass over an instance with history is a catch-up: it
+  // reports no settles, but it does change what that agent reads, so its
+  // clients are told (`caughtUp`). Until then the instance is not derived
+  // for that agent, and the wrapper says so instead of guessing the first
+  // state.
+  it("an instance not derived here reads as unknown; the catch-up is published", async () => {
+    const handle = await alice.perspective.add("replica-state-catch-up");
+    const aliceP = (await alice.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    const flow = new SHACLFlow("CatchUpFlow", "replica-state-test://");
+    flow.consensusRule = { n: 1 };
+    flow.addState({ name: "Ready", value: 0 });
+    flow.addState({ name: "Mid", value: 1 });
+    flow.addState({ name: "Done", value: 2 });
+    flow.addTransition({ actionName: "Begin", fromState: "Ready", toState: "Mid", actions: [] });
+    flow.addTransition({ actionName: "Finish", fromState: "Mid", toState: "Done", actions: [] });
+    await aliceP.addFlow("CatchUpFlow", flow);
+
+    const subject = "replica-state://task/catch-up";
+    const inst = await FlowInstance.start(aliceP, "CatchUpFlow", subject);
+    const [minted] = await FlowInstance.findAll(aliceP, { subject });
+    expect(minted.currentStateName, "Alice minted it: it stands at the first state").to.equal(
+      "Ready",
+    );
+    expect((await inst.proposeTransition("Mid")).outcomes).to.have.lengthOf(1);
+
+    const adminEvents: any[] = [];
+    const releaseAdmin = admin.perspective.on("flow-state-changed", (e: any) =>
+      adminEvents.push(e),
+    );
+    await admin.agent.me();
+
+    // The admin agent can read Alice's perspective but is not an owner: no
+    // pass of Alice's runs for it, so it has never derived this instance.
+    const adminP = (await admin.perspective.byUUID(aliceP.uuid)) as PerspectiveProxy;
+    const [unseen] = await FlowInstance.findAll(adminP, { subject });
+    expect(unseen.currentStateName, "not derived by this agent yet: unknown, not `Ready`").to.be
+      .undefined;
+    expect(unseen.availableTransitions).to.deep.equal([]);
+
+    // Its first vote catches it up first (silently for outcomes), then
+    // reports exactly what the vote settled.
+    const result = await unseen.proposeTransition("Done");
+    expect(result.outcomes.map((o) => [o.fromState, o.toState])).to.deep.equal([["Mid", "Done"]]);
+
+    await waitUntil(() => adminEvents.length >= 2, 10_000, "the admin agent's two events");
+    const mine = adminEvents.filter((e) => e.perspectiveUuid === aliceP.uuid);
+    expect(mine.map((e) => [e.from, e.to, e.caughtUp, e.firedProposals])).to.deep.equal([
+      [null, "Mid", true, []],
+      ["Mid", "Done", false, [result.proposalUri]],
+    ]);
+
+    releaseAdmin();
+    await alice.perspective.remove(aliceP.uuid);
+  });
 });

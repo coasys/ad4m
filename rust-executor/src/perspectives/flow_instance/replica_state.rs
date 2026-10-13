@@ -31,25 +31,30 @@ use crate::pubsub::{get_global_pubsub, FLOW_STATE_CHANGED_TOPIC};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// One instance's state as `perspective.flowStates` returns it. Only derived
-/// rows are listed: an instance this agent minted but has not derived yet is
-/// at its flow's first state, and the client already knows that.
+/// One row of this agent's bookkeeping, as `perspective.flowStates` returns
+/// it. An instance with no entry is one this agent has neither derived nor
+/// minted here: a client must not guess its state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct FlowStateEntry {
     pub instance: String,
-    pub current_state: String,
-    /// RFC 3339 time of the pass that last wrote this state.
-    pub derived_at: String,
+    /// The state this agent's pass last derived. `None` for a row seeded at
+    /// mint and not derived yet: the instance stands at its flow's first
+    /// state, which only the flow definition names.
+    pub current_state: Option<String>,
+    /// RFC 3339 time of the pass that last wrote this state; `None` with it.
+    pub derived_at: Option<String>,
 }
 
 /// An instance's derived state moved, or an edge settled, on one agent's
 /// replica. Published once per change by that agent's pass, and delivered
 /// only to that agent's sockets.
 ///
-/// Never emitted for a catch-up pass (the first one over an instance here):
-/// whatever settled before this replica watched is not news.
+/// A catch-up pass (this agent's first over an instance here) publishes one
+/// too, with `caught_up` set: it reports no settles — whatever settled
+/// before this replica watched is not news — but it is the first state this
+/// agent's clients can show, and the only signal they get of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowStateChangedEvent {
@@ -58,12 +63,19 @@ pub struct FlowStateChangedEvent {
     /// against the socket's agent; nobody else receives the event.
     pub agent_did: String,
     pub instance: String,
-    pub from: String,
+    /// The state this agent had recorded before; for a seeded row, the
+    /// flow's first state. `None` exactly when `caught_up`: this agent had no
+    /// row, so its clients had no state to show (`currentStateName` is
+    /// `undefined`), and naming the first state would claim a move nobody saw.
+    pub from: Option<String>,
     pub to: String,
     /// Proposals this pass marked fired: the atoms of every edge that settled
     /// since the previous pass. Empty when the state moved without a new
-    /// settle, e.g. back, after a vote was withdrawn.
+    /// settle, e.g. back, after a vote was withdrawn — and on a catch-up,
+    /// whose marks record history rather than report it.
     pub fired_proposals: Vec<String>,
+    /// This was the agent's first pass over the instance here.
+    pub caught_up: bool,
 }
 
 /// What a recorded pass found in the table before writing.
@@ -120,7 +132,8 @@ impl FlowReplicaState {
             .collect())
     }
 
-    /// [`states`](Self::states) in the RPC's shape, ordered by instance.
+    /// Every row in the RPC's shape, ordered by instance — seeded ones too,
+    /// with no state, so a client can tell them from instances with no row.
     pub fn entries(
         perspective: &str,
         agent_did: &str,
@@ -128,12 +141,10 @@ impl FlowReplicaState {
     ) -> anyhow::Result<Vec<FlowStateEntry>> {
         Ok(Self::rows(perspective, agent_did, instances)?
             .into_iter()
-            .filter_map(|r| {
-                Some(FlowStateEntry {
-                    instance: r.instance,
-                    current_state: r.current_state?,
-                    derived_at: r.derived_at.unwrap_or_default(),
-                })
+            .map(|r| FlowStateEntry {
+                instance: r.instance,
+                derived_at: r.current_state.as_ref().and(r.derived_at),
+                current_state: r.current_state,
             })
             .collect())
     }
@@ -370,9 +381,17 @@ mod tests {
             FlowReplicaState::current_state(&p, ALICE, "i").unwrap(),
             None
         );
-        assert!(FlowReplicaState::entries(&p, ALICE, None)
-            .unwrap()
-            .is_empty());
+        // On the wire a seeded row is listed with no state, so a client can
+        // tell "minted here, at the first state" from "never seen here".
+        assert_eq!(
+            serde_json::to_value(FlowReplicaState::entries(&p, ALICE, None).unwrap()).unwrap(),
+            serde_json::json!([{ "instance": "i", "currentState": null, "derivedAt": null }])
+        );
+        assert_eq!(
+            serde_json::to_value(FlowReplicaState::entries(&p, BOB, None).unwrap()).unwrap(),
+            serde_json::json!([]),
+            "and an agent with no row gets nothing"
+        );
         assert_eq!(
             FlowReplicaState::record_pass(&p, ALICE, "i", Some("open"), &[])
                 .unwrap()
@@ -438,11 +457,14 @@ mod tests {
         );
         let entries = FlowReplicaState::entries(&p, ALICE, None).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].current_state, "done");
+        assert_eq!(entries[0].current_state.as_deref(), Some("done"));
+        let derived_at = entries[0]
+            .derived_at
+            .as_deref()
+            .expect("a derived row has a time");
         assert!(
-            chrono::DateTime::parse_from_rfc3339(&entries[0].derived_at).is_ok(),
-            "derivedAt is RFC 3339: {}",
-            entries[0].derived_at
+            chrono::DateTime::parse_from_rfc3339(derived_at).is_ok(),
+            "derivedAt is RFC 3339: {derived_at}"
         );
     }
 

@@ -67,13 +67,17 @@ import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
-/** One instance's state as this agent's executor last derived it — an entry
- *  of `PerspectiveProxy.flowStates()`. */
+/** One instance this agent's executor keeps bookkeeping for — an entry of
+ *  `PerspectiveProxy.flowStates()`. An instance with no entry has never been
+ *  derived nor minted by this agent here. */
 export interface FlowStateEntry {
   instance: string;
-  currentState: string;
-  /** RFC 3339 time of the derivation that wrote this state. */
-  derivedAt: string;
+  /** The state this agent's executor last derived, or `null` for an instance
+   *  this agent minted here and has not derived yet: it stands at its flow's
+   *  first state. */
+  currentState: string | null;
+  /** RFC 3339 time of the derivation that wrote `currentState`; `null` with it. */
+  derivedAt: string | null;
 }
 
 /** One fired flow transition, as returned by {@link FlowInstance.acceptProposal}
@@ -232,25 +236,27 @@ export class FlowInstance {
      */
     public readonly record: FlowInstanceRecord,
     /** See {@link currentStateName}. */
-    private readonly stateName: string,
+    private readonly stateName: string | undefined,
   ) {}
 
-  /** The state to show for `record`: this agent's recorded derivation when
-   *  there is one, else the flow's first state — an instance this agent
-   *  minted and has not derived yet, or one that synced in moments ago. */
+  /** The state to show for `record`, from this agent's `flowStates` entries:
+   *  the recorded derivation; the flow's first state for an instance this
+   *  agent minted and has not derived yet; `undefined` for one with no entry
+   *  — synced in, and not derived by this agent yet. */
   private static stateOf(
     shape: SHACLFlow,
     record: FlowInstanceRecord,
-    recorded: Map<string, string>,
-  ): string {
-    return recorded.get(record.id) ?? shape.states[0]?.name ?? "";
+    recorded: Map<string, string | null>,
+  ): string | undefined {
+    if (!recorded.has(record.id)) return undefined;
+    return recorded.get(record.id) ?? shape.states[0]?.name;
   }
 
   /** One `flowStates` round-trip for every record in `records`. */
   private static async recordedStates(
     perspective: PerspectiveProxy,
     records: FlowInstanceRecord[],
-  ): Promise<Map<string, string>> {
+  ): Promise<Map<string, string | null>> {
     if (records.length === 0) return new Map();
     const entries = await perspective.flowStates(records.map((r) => r.id));
     return new Map(entries.map((e) => [e.instance, e.currentState]));
@@ -299,7 +305,8 @@ export class FlowInstance {
    * (`PerspectiveProxy.flowStates`) — a display value, **never authority**:
    * anything that decides something (the fold, the mint pass) derives state
    * from the signed links present now. A run started by this call stands at
-   * the flow's first state.
+   * the flow's first state; an existing run this agent has not derived yet
+   * reads `undefined` (see {@link currentStateName}).
    *
    * @param perspective - The perspective the flow instance lives on
    * @param flowName - Name of a `SHACLFlow` already registered on the perspective
@@ -534,10 +541,16 @@ export class FlowInstance {
   /**
    * Name of the state this instance is in, as this agent's executor last
    * derived it when the wrapper was loaded (`PerspectiveProxy.flowStates`).
-   * An instance not derived here yet reads as its flow's first state. A
+   * An instance this agent minted and has not derived yet reads as its
+   * flow's first state.
+   *
+   * `undefined` means **not derived by this agent yet**: the run synced in
+   * (or the executor was upgraded) and no pass of this agent's has covered it.
+   * Show it as pending, not as the first state. The catch-up pass that
+   * derives it publishes `flow-state-changed` with `caughtUp: true`. A
    * snapshot: reload, or follow `PerspectiveProxy.onFlowStateChanged`.
    */
-  get currentStateName(): string {
+  get currentStateName(): string | undefined {
     return this.stateName;
   }
 
@@ -552,12 +565,14 @@ export class FlowInstance {
   }
 
   /**
-   * The `FlowState` object on the shape matching `currentStateName`.
+   * The `FlowState` object on the shape matching `currentStateName`, or
+   * `undefined` when that is (not derived by this agent yet).
    * Throws when the record's state name is not declared on the flow —
    * that's a "stale FlowInstance whose flow was edited under it" bug,
    * not a silent-fail case.
    */
-  get currentState(): FlowState {
+  get currentState(): FlowState | undefined {
+    if (this.currentStateName === undefined) return undefined;
     const s = this.shape.states.find((x) => x.name === this.currentStateName);
     if (!s) {
       throw new Error(
@@ -572,7 +587,8 @@ export class FlowInstance {
    * Every `FlowTransition` on the shape whose `fromState` matches
    * `currentStateName`. Order preserved from the shape.
    *
-   * Empty when the current state is terminal (no outgoing transitions).
+   * Empty when the current state is terminal (no outgoing transitions), or
+   * not derived by this agent yet.
    */
   get availableTransitions(): FlowTransition[] {
     return this.shape.transitions.filter((t) => t.fromState === this.currentStateName);

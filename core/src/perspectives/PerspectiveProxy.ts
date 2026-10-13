@@ -587,8 +587,13 @@ export class PerspectiveProxy {
     /**
      * Called whenever a flow instance on this perspective changes state on
      * this agent's executor, or an edge settles: `{ instance, from, to,
-     * firedProposals }`. Only this agent's sockets receive it. Not called for
-     * history the executor catches up on when it first sees an instance.
+     * firedProposals, caughtUp }`. Only this agent's sockets receive it.
+     *
+     * When the executor first derives an instance that already has history
+     * (it synced in, or the executor was upgraded) it is called once with
+     * `caughtUp: true`, `from: null` and no `firedProposals`: the settles
+     * before that are history, but `to` is the state to show for a run that
+     * read as not derived (`FlowInstance.currentStateName === undefined`).
      *
      * Returns a function that removes the handler; {@link dispose} removes
      * it too.

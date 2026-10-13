@@ -5,18 +5,32 @@
  * replica. Published once per change by that agent's pass, and delivered
  * only to that agent's sockets.
  *
- * Never emitted for a catch-up pass (the first one over an instance here):
- * whatever settled before this replica watched is not news.
+ * A catch-up pass (this agent's first over an instance here) publishes one
+ * too, with `caught_up` set: it reports no settles — whatever settled
+ * before this replica watched is not news — but it is the first state this
+ * agent's clients can show, and the only signal they get of it.
  */
 export type FlowStateChangedEvent = { perspectiveUuid: string, 
 /**
  * The agent whose replica derived this. The delivery filter matches it
  * against the socket's agent; nobody else receives the event.
  */
-agentDid: string, instance: string, from: string, to: string, 
+agentDid: string, instance: string, 
+/**
+ * The state this agent had recorded before; for a seeded row, the
+ * flow's first state. `None` exactly when `caught_up`: this agent had no
+ * row, so its clients had no state to show (`currentStateName` is
+ * `undefined`), and naming the first state would claim a move nobody saw.
+ */
+from: string | null, to: string, 
 /**
  * Proposals this pass marked fired: the atoms of every edge that settled
  * since the previous pass. Empty when the state moved without a new
- * settle, e.g. back, after a vote was withdrawn.
+ * settle, e.g. back, after a vote was withdrawn — and on a catch-up,
+ * whose marks record history rather than report it.
  */
-firedProposals: Array<string>, };
+firedProposals: Array<string>, 
+/**
+ * This was the agent's first pass over the instance here.
+ */
+caughtUp: boolean, };

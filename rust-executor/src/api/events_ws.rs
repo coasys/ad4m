@@ -2046,9 +2046,10 @@ mod event_spec_tests {
                     perspective_uuid: p(),
                     agent_did: "did:x".into(),
                     instance: "i".into(),
-                    from: "a".into(),
+                    from: Some("a".into()),
                     to: "b".into(),
                     fired_proposals: vec![],
+                    caught_up: false,
                 },
             ),
         ];
