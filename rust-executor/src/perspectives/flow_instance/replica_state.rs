@@ -30,6 +30,7 @@ use crate::db::{Ad4mDb, FlowReplicaStateRow};
 use crate::pubsub::{get_global_pubsub, FLOW_STATE_CHANGED_TOPIC};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One row of this agent's bookkeeping, as `perspective.flowStates` returns
 /// it. An instance with no entry is one this agent has neither derived nor
@@ -154,10 +155,16 @@ impl FlowReplicaState {
     /// What this agent has recorded for one instance — one primary-key read
     /// that answers both "is there a row?" and "what state?", which is what
     /// the pass needs per instance.
-    pub fn recorded(perspective: &str, agent_did: &str, instance: &str) -> anyhow::Result<PriorRow> {
-        Ad4mDb::with_global_instance(|db| db.get_flow_replica_state(perspective, agent_did, instance))
-            .map(PriorRow::from)
-            .map_err(|e| anyhow::anyhow!("reading the flow state of {instance}: {e}"))
+    pub fn recorded(
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+    ) -> anyhow::Result<PriorRow> {
+        Ad4mDb::with_global_instance(|db| {
+            db.get_flow_replica_state(perspective, agent_did, instance)
+        })
+        .map(PriorRow::from)
+        .map_err(|e| anyhow::anyhow!("reading the flow state of {instance}: {e}"))
     }
 
     /// This agent's derived state for one instance, if it has one.
@@ -181,35 +188,61 @@ impl FlowReplicaState {
 
     /// Note that `agent_did` minted `instance` on this replica, so its first
     /// pass reports what settles rather than catching up silently. A no-op
-    /// when a row exists. Returns whether one was inserted.
-    pub fn seed_minted(perspective: &str, agent_did: &str, instance: &str) -> anyhow::Result<bool> {
+    /// when a row exists, or once the perspective is torn down (see
+    /// [`record_pass`](Self::record_pass)). Returns whether one was inserted.
+    pub fn seed_minted(
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+        torn_down: &AtomicBool,
+    ) -> anyhow::Result<bool> {
         Ad4mDb::with_global_instance(|db| {
+            if torn_down.load(Ordering::Acquire) {
+                return Ok(false);
+            }
             db.seed_flow_replica_state(perspective, agent_did, instance)
         })
         .map_err(|e| anyhow::anyhow!("seeding flow state of {instance}: {e}"))
     }
 
-    /// Write `state` for the instance. Returns whether it changed.
+    /// Write `state` for the instance. Returns whether it changed; `false`
+    /// once the perspective is torn down, when nothing is written.
     pub fn set_current_state(
         perspective: &str,
         agent_did: &str,
         instance: &str,
         state: &str,
+        torn_down: &AtomicBool,
     ) -> anyhow::Result<bool> {
-        let before = Self::record_pass(perspective, agent_did, instance, Some(state), &[])?;
-        Ok(before.prior != PriorRow::Derived(state.to_string()))
+        Ok(Self::record_pass(
+            perspective,
+            agent_did,
+            instance,
+            Some(state),
+            &[],
+            torn_down,
+        )?
+        .is_some_and(|before| before.prior != PriorRow::Derived(state.to_string())))
     }
 
     /// One pass's write: the state (when `Some`) and the new fired marks,
     /// in one transaction. Returns what the row held before and which of
     /// `fired` this call was the first to mark.
+    ///
+    /// `None`, writing nothing, once `torn_down` — the perspective's
+    /// `is_teardown` — is set. `perspectives::remove_perspective` sets it
+    /// before it deletes the perspective's rows, and both the delete and
+    /// this check run under the one DB lock. So a pass still running when
+    /// the perspective goes either writes before the delete, which removes
+    /// the row, or finds the flag set: it cannot leave a row behind.
     pub fn record_pass(
         perspective: &str,
         agent_did: &str,
         instance: &str,
         state: Option<&str>,
         fired: &[String],
-    ) -> anyhow::Result<PassRecord> {
+        torn_down: &AtomicBool,
+    ) -> anyhow::Result<Option<PassRecord>> {
         if state == Some("") {
             return Err(anyhow::anyhow!(
                 "an empty state would read as `not yet derived`; refusing to record it for {instance}"
@@ -217,11 +250,17 @@ impl FlowReplicaState {
         }
         let at = chrono::Utc::now().to_rfc3339();
         Ad4mDb::with_global_instance(|db| {
+            if torn_down.load(Ordering::Acquire) {
+                return Ok(None);
+            }
             db.record_flow_replica_pass(perspective, agent_did, instance, state, fired, &at)
+                .map(Some)
         })
-        .map(|(before, newly_marked)| PassRecord {
-            prior: PriorRow::from(before),
-            newly_marked,
+        .map(|recorded| {
+            recorded.map(|(before, newly_marked)| PassRecord {
+                prior: PriorRow::from(before),
+                newly_marked,
+            })
         })
         .map_err(|e| anyhow::anyhow!("recording the flow pass over {instance}: {e}"))
     }
@@ -252,7 +291,8 @@ impl FlowReplicaState {
         instance: &str,
         proposals: &[String],
     ) -> anyhow::Result<()> {
-        Self::record_pass(perspective, agent_did, instance, None, proposals).map(|_| ())
+        let live = AtomicBool::new(false);
+        Self::record_pass(perspective, agent_did, instance, None, proposals, &live).map(|_| ())
     }
 
     /// Every proposal of `instance` this agent has marked fired, sorted.
@@ -307,6 +347,9 @@ mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::ensure_db_init;
 
+    /// The teardown flag of a perspective that is not being removed.
+    static LIVE: AtomicBool = AtomicBool::new(false);
+
     const ALICE: &str = "did:key:alice";
     const BOB: &str = "did:key:bob";
 
@@ -331,9 +374,9 @@ mod tests {
     #[test]
     fn set_current_state_reports_whether_it_changed() {
         let p = fresh();
-        assert!(FlowReplicaState::set_current_state(&p, ALICE, "i", "open").unwrap());
-        assert!(!FlowReplicaState::set_current_state(&p, ALICE, "i", "open").unwrap());
-        assert!(FlowReplicaState::set_current_state(&p, ALICE, "i", "done").unwrap());
+        assert!(FlowReplicaState::set_current_state(&p, ALICE, "i", "open", &LIVE).unwrap());
+        assert!(!FlowReplicaState::set_current_state(&p, ALICE, "i", "open", &LIVE).unwrap());
+        assert!(FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &LIVE).unwrap());
         assert_eq!(
             FlowReplicaState::current_state(&p, ALICE, "i")
                 .unwrap()
@@ -345,7 +388,7 @@ mod tests {
     #[test]
     fn an_empty_state_is_refused() {
         let p = fresh();
-        assert!(FlowReplicaState::set_current_state(&p, ALICE, "i", "").is_err());
+        assert!(FlowReplicaState::set_current_state(&p, ALICE, "i", "", &LIVE).is_err());
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
     }
 
@@ -354,7 +397,7 @@ mod tests {
     #[test]
     fn rows_are_per_agent() {
         let p = fresh();
-        FlowReplicaState::set_current_state(&p, ALICE, "i", "done").unwrap();
+        FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &LIVE).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
         assert!(!FlowReplicaState::has_derived(&p, BOB, "i").unwrap());
         assert!(!FlowReplicaState::is_fired(&p, BOB, "p1").unwrap());
@@ -368,9 +411,9 @@ mod tests {
     fn rows_are_per_perspective_and_removed_with_it() {
         let p = fresh();
         let q = fresh();
-        FlowReplicaState::set_current_state(&p, ALICE, "i", "done").unwrap();
+        FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &LIVE).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
-        FlowReplicaState::set_current_state(&q, ALICE, "i", "open").unwrap();
+        FlowReplicaState::set_current_state(&q, ALICE, "i", "open", &LIVE).unwrap();
 
         FlowReplicaState::remove_perspective(&p).unwrap();
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
@@ -388,8 +431,8 @@ mod tests {
     #[test]
     fn a_minted_row_has_derived_but_no_state() {
         let p = fresh();
-        assert!(FlowReplicaState::seed_minted(&p, ALICE, "i").unwrap());
-        assert!(!FlowReplicaState::seed_minted(&p, ALICE, "i").unwrap());
+        assert!(FlowReplicaState::seed_minted(&p, ALICE, "i", &LIVE).unwrap());
+        assert!(!FlowReplicaState::seed_minted(&p, ALICE, "i", &LIVE).unwrap());
         assert!(FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
         assert_eq!(
             FlowReplicaState::current_state(&p, ALICE, "i").unwrap(),
@@ -407,8 +450,9 @@ mod tests {
             "and an agent with no row gets nothing"
         );
         assert_eq!(
-            FlowReplicaState::record_pass(&p, ALICE, "i", Some("open"), &[])
+            FlowReplicaState::record_pass(&p, ALICE, "i", Some("open"), &[], &LIVE)
                 .unwrap()
+                .expect("not torn down")
                 .prior,
             PriorRow::Minted
         );
@@ -420,13 +464,19 @@ mod tests {
     fn a_mark_is_new_to_exactly_one_pass() {
         let p = fresh();
         let marks = ["p1".to_string(), "p2".to_string()];
-        let first = FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &marks).unwrap();
-        let second = FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &marks).unwrap();
+        let first = FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &marks, &LIVE)
+            .unwrap()
+            .expect("not torn down");
+        let second = FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &marks, &LIVE)
+            .unwrap()
+            .expect("not torn down");
         assert_eq!(first.newly_marked, marks.to_vec());
         assert!(second.newly_marked.is_empty());
         assert_eq!(second.prior, PriorRow::Derived("done".into()));
         // Per agent: Bob's first record of the same marks is new to him.
-        let bob = FlowReplicaState::record_pass(&p, BOB, "i", Some("done"), &marks).unwrap();
+        let bob = FlowReplicaState::record_pass(&p, BOB, "i", Some("done"), &marks, &LIVE)
+            .unwrap()
+            .expect("not torn down");
         assert_eq!(bob.newly_marked, marks.to_vec());
     }
 
@@ -434,8 +484,8 @@ mod tests {
     #[test]
     fn seeding_an_existing_row_is_a_no_op() {
         let p = fresh();
-        FlowReplicaState::set_current_state(&p, ALICE, "i", "done").unwrap();
-        assert!(!FlowReplicaState::seed_minted(&p, ALICE, "i").unwrap());
+        FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &LIVE).unwrap();
+        assert!(!FlowReplicaState::seed_minted(&p, ALICE, "i", &LIVE).unwrap());
         assert_eq!(
             FlowReplicaState::current_state(&p, ALICE, "i")
                 .unwrap()
@@ -453,12 +503,16 @@ mod tests {
             "i",
             Some("scoped"),
             &["p1".into(), "p2".into()],
+            &LIVE,
         )
-        .unwrap();
+        .unwrap()
+        .expect("not torn down");
         assert_eq!(first.prior, PriorRow::Absent);
         assert_eq!(first.newly_marked, vec!["p1".to_string(), "p2".into()]);
         let second =
-            FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &["p3".into()]).unwrap();
+            FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &["p3".into()], &LIVE)
+                .unwrap()
+                .expect("not torn down");
         assert_eq!(second.prior, PriorRow::Derived("scoped".into()));
         assert_eq!(second.newly_marked, vec!["p3".to_string()]);
         assert_eq!(
@@ -485,7 +539,7 @@ mod tests {
     #[test]
     fn marks_alone_leave_the_state_alone() {
         let p = fresh();
-        FlowReplicaState::set_current_state(&p, ALICE, "i", "open").unwrap();
+        FlowReplicaState::set_current_state(&p, ALICE, "i", "open", &LIVE).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
         assert_eq!(
@@ -504,7 +558,7 @@ mod tests {
     fn states_narrow_to_the_named_instances() {
         let p = fresh();
         for (i, s) in [("a", "x"), ("b", "y"), ("c", "z")] {
-            FlowReplicaState::set_current_state(&p, ALICE, i, s).unwrap();
+            FlowReplicaState::set_current_state(&p, ALICE, i, s, &LIVE).unwrap();
         }
         let only =
             FlowReplicaState::states(&p, ALICE, Some(&["a".into(), "c".into(), "zz".into()]))
@@ -515,11 +569,30 @@ mod tests {
         );
     }
 
+    /// Once the perspective is torn down, no write lands: not a pass's, not
+    /// a mint's, not a seed. `perspectives::remove_perspective` deletes the
+    /// rows after setting the flag, so a write that came later would leave
+    /// rows behind for good (Marvin, #1425).
+    #[test]
+    fn nothing_is_written_once_the_perspective_is_torn_down() {
+        let p = fresh();
+        let torn_down = AtomicBool::new(true);
+        assert_eq!(
+            FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &["p1".into()], &torn_down)
+                .unwrap(),
+            None
+        );
+        assert!(!FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &torn_down).unwrap());
+        assert!(!FlowReplicaState::seed_minted(&p, ALICE, "i", &torn_down).unwrap());
+        assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
+        assert!(!FlowReplicaState::is_fired(&p, ALICE, "p1").unwrap());
+    }
+
     /// Deleting a perspective through the DB's own path drops the rows too.
     #[test]
     fn db_remove_perspective_drops_flow_rows() {
         let p = fresh();
-        FlowReplicaState::set_current_state(&p, ALICE, "i", "done").unwrap();
+        FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &LIVE).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
         Ad4mDb::with_global_instance(|db| db.remove_perspective(&p)).unwrap();
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());

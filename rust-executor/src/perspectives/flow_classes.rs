@@ -209,6 +209,7 @@ pub(crate) async fn mint_flow_instance(
         &agent_did,
         &uri,
         initial_state,
+        &perspective.is_teardown,
     )
     .map_err(|e| anyhow::anyhow!("mint_flow_instance: {e:#}"))?;
     Ok(uri)

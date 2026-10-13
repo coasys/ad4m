@@ -336,8 +336,15 @@ pub async fn run_flow_consensus_pass(
             &record.instance_uri,
             stale_state.then_some(derived.state.as_str()),
             &to_mark,
+            &perspective.is_teardown,
         ) {
-            Ok(recorded) => recorded,
+            Ok(Some(recorded)) => recorded,
+            // The perspective is being removed: nothing was written for this
+            // instance, and nothing would be for the rest.
+            Ok(None) => {
+                log::debug!("run_flow_consensus_pass: {uuid} was torn down mid-pass; stopping");
+                return outcomes;
+            }
             Err(e) => {
                 log::warn!(
                     "run_flow_consensus_pass: recording {} failed (re-runs next pass): {e:#}",
