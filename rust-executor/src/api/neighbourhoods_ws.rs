@@ -157,6 +157,25 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Ok(Value::Bool(true))
 }
 
+/// The caller's own online status in the neighbourhood, as it last set it
+/// here, or `null`. Lets a client change part of its status without
+/// replacing the rest.
+async fn own_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let uuid = params.require_str("uuid")?;
+    let agent_context = AgentContext::from_request(&ctx);
+    let did = crate::agent::did_for_context(&agent_context)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let perspective = get_perspective(&uuid)
+        .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
+
+    Ok(serde_json::to_value(
+        perspective.online_status_of(&did).await,
+    )?)
+}
+
 async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
@@ -236,6 +255,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "neighbourhood.setOnlineStatus",
         set_online_status,
     );
+    map.method::<NeighbourhoodUuidParams, Option<PerspectiveExpression>>(
+        "neighbourhood.ownOnlineStatus",
+        own_online_status,
+    )
+    .read();
     map.method::<NeighbourhoodUuidParams, bool>("neighbourhood.hasTelepresence", has_telepresence)
         .read();
     map.method::<NeighbourhoodUuidParams, Vec<OnlineAgent>>(

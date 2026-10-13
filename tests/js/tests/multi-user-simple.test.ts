@@ -1867,22 +1867,22 @@ describe("Multi-User Simple integration tests", () => {
             console.log("✅ Signal exchange between main agent and managed user works correctly");
         });
 
-        // Two users of one hosted executor start a call with default options
-        // (`auto`, which goes mesh without a public SFU). The mesh roster comes
-        // from presence, so each must see the other's in-call status through
-        // `onlineAgents`.
-        it("two users on one executor find each other in a call session", async function () {
-            this.timeout(120000);
+        // Two users of one executor, both in a fresh neighbourhood whose link
+        // language is installed.
+        async function twoCoLocatedUsers(tag: string) {
             await adminAd4mClient!.runtime.setMultiUserEnabled(true);
-            await createTestUser("call1@example.com", "password1");
-            await createTestUser("call2@example.com", "password2");
-            const client1 = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("call1@example.com", "password1"));
-            const client2 = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("call2@example.com", "password2"));
+            const login = async (n: number) => {
+                const email = `${tag}${n}@example.com`;
+                await createTestUser(email, `password${n}`);
+                return new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser(email, `password${n}`));
+            };
+            const client1 = await login(1);
+            const client2 = await login(2);
             const did1 = (await client1.agent.status()).did!;
             const did2 = (await client2.agent.status()).did!;
 
-            const perspective1 = await client1.perspective.add("Call Session Neighbourhood");
-            const linkLanguage = await client1.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: "Call Session" }));
+            const perspective1 = await client1.perspective.add(`${tag} neighbourhood`);
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: tag }));
             const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(perspective1.uuid, linkLanguage.address, new Perspective([]));
             await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
             const perspective2 = (await client2.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl)!;
@@ -1892,6 +1892,16 @@ describe("Multi-User Simple integration tests", () => {
                 const s2 = (await client2.perspective.all()).find(p => p.uuid === perspective2.uuid)?.state;
                 return ready.includes(s1 as string) && ready.includes(s2 as string);
             }, { timeoutMs: 30000, label: "link language installed for both users" });
+            return { client1, client2, did1, did2, perspective1, perspective2 };
+        }
+
+        // Two users of one hosted executor start a call with default options
+        // (`auto`, which goes mesh without a public SFU). The mesh roster comes
+        // from presence, so each must see the other's in-call status through
+        // `onlineAgents`.
+        it("two users on one executor find each other in a call session", async function () {
+            this.timeout(120000);
+            const { client1, did1, did2, perspective1, perspective2 } = await twoCoLocatedUsers("call");
 
             const call1 = await joinCall(await perspective1.getNeighbourhoodProxy(), "co-located-room");
             const call2 = await joinCall(await perspective2.getNeighbourhoodProxy(), "co-located-room");
@@ -1901,6 +1911,44 @@ describe("Multi-User Simple integration tests", () => {
                 });
                 // Every member is hosted here, so `auto` may use this executor's SFU.
                 expect(await client1.neighbourhood.sfuServesAllMembers(perspective1.uuid)).to.be.true;
+            } finally {
+                await call1.session.destroy();
+                await call2.session.destroy();
+            }
+        });
+
+        // A call adds its presence link to the agent's status and takes it out
+        // again on leave: the app's own status links survive the call, and the
+        // others' rosters drop the agent that left.
+        it("a call keeps the app's own status and its end reaches the other user", async function () {
+            this.timeout(120000);
+            const { did1, did2, perspective1, perspective2 } = await twoCoLocatedUsers("leave");
+            const proxy1 = await perspective1.getNeighbourhoodProxy();
+            const proxy2 = await perspective2.getNeighbourhoodProxy();
+            await proxy1.setOnlineStatusU(new PerspectiveUnsignedInput([
+                { source: did1, predicate: "test://app/mood", target: "literal:string:busy" },
+            ]));
+            const predicatesOf = async (did: string) =>
+                ((await proxy2.onlineAgents()).find(a => a.did === did)?.status?.data?.links ?? [])
+                    .map((l: any) => l.data.predicate);
+
+            const call1 = await joinCall(proxy1, "leave-room");
+            const call2 = await joinCall(proxy2, "leave-room");
+            try {
+                await pollUntil(() => call1.roster.has(did2) && call2.roster.has(did1), {
+                    timeoutMs: 30000, label: "each user's call roster lists the other",
+                });
+                expect(await predicatesOf(did1)).to.include.members(["test://app/mood", "ad4m://session/in-call"]);
+
+                await call2.session.leave();
+                await pollUntil(() => call1.left.has(did2), {
+                    timeoutMs: 30000, label: "user 1's session sees user 2 leave",
+                });
+
+                await call1.session.leave();
+                const after = await predicatesOf(did1);
+                expect(after).to.include("test://app/mood");
+                expect(after).to.not.include("ad4m://session/in-call");
             } finally {
                 await call1.session.destroy();
                 await call2.session.destroy();

@@ -55,6 +55,12 @@ export class NeighbourhoodClient {
         return agents.map(({ did, status }) => ({ did, status: PerspectiveExpression.fromWire(status) }))
     }
 
+    /** The caller's own online status, as it last set it on this executor, or `null`. */
+    async ownOnlineStatus(perspectiveUUID: string): Promise<PerspectiveExpression | null> {
+        const status = await this.#apiClient.call('neighbourhood.ownOnlineStatus', { uuid: perspectiveUUID })
+        return status ? PerspectiveExpression.fromWire(status) : null
+    }
+
     async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<boolean> {
         return this.#apiClient.call('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status: Perspective.toWire(status) })
     }

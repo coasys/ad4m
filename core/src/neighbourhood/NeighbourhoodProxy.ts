@@ -51,6 +51,11 @@ export class NeighbourhoodProxy {
         return await this.#client.onlineAgents(this.#pID)
     }
 
+    /** This agent's own online status, as it last set it on this executor, or `null`. */
+    async ownOnlineStatus(): Promise<PerspectiveExpression | null> {
+        return await this.#client.ownOnlineStatus(this.#pID)
+    }
+
     /** Set this agent's online status with a signed perspective payload. */
     async setOnlineStatus(status: Perspective): Promise<boolean> {
         return await this.#client.setOnlineStatus(this.#pID, status)
@@ -141,6 +146,7 @@ export class NeighbourhoodProxy {
             // SFU ignores these — they remain unused when the resolved
             // topology selects the SFU path.
             channel: createTelepresenceChannel(proxy, proxy.#agentDid),
+            ownOnlineStatus: () => proxy.ownOnlineStatus(),
             setOnlineStatus: (status) => proxy.setOnlineStatusU(status),
             onlineAgents: () => proxy.onlineAgents(),
         })

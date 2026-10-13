@@ -148,6 +148,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.onlineAgents': [{ did: 'did:test:1', status: new Perspective() }],
     'sfu.status': { reachability: 'nat', isPublic: false, bindAddress: '127.0.0.1:9000', detail: 'nat' },
     'sfu.servesAllMembers': true,
+    'neighbourhood.ownOnlineStatus': null,
     'neighbourhood.setOnlineStatus': true,
     'neighbourhood.sendSignal': true,
     'neighbourhood.sendBroadcast': true,
@@ -1004,6 +1005,12 @@ describe('NeighbourhoodClient', () => {
         const result = await ad4m.neighbourhood.sendBroadcast('uuid-1', new Perspective(), true);
         expect(result).toBe(true);
         expect(lastRpcCall!.params.loopback).toBe(true);
+    });
+
+    test('ownOnlineStatus() returns null when the agent has set none', async () => {
+        expect(await ad4m.neighbourhood.ownOnlineStatus('uuid-1')).toBeNull();
+        expect(lastRpcCall!.type).toBe('neighbourhood.ownOnlineStatus');
+        expect(lastRpcCall!.params).toEqual({ uuid: 'uuid-1' });
     });
 
     test('sfuServesAllMembers() asks the executor about the perspective', async () => {

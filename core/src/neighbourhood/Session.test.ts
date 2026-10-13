@@ -287,6 +287,62 @@ describe("mesh path", () => {
         })
     })
 
+    // A call's presence is one link in the agent's status. The app's own links
+    // must survive the call, and the presence must go when the call ends.
+    describe("call presence in the agent's status", () => {
+        const appLink = { source: "did:me", predicate: "app://mood", target: "literal:string:busy" }
+        const inCall = { source: "did:me", predicate: "ad4m://session/in-call", target: "my-room" }
+        const statusWith = (...links: object[]) => ({ data: { links: links.map((data) => ({ data })) } })
+
+        function presenceSession(ownOnlineStatus: jest.Mock) {
+            const setOnlineStatus = jest.fn().mockResolvedValue(true)
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                setOnlineStatus,
+                ownOnlineStatus,
+                roomId: "my-room",
+                agentDid: "did:me",
+            }))
+            return { session, setOnlineStatus }
+        }
+
+        it("adds the presence link to the app's links on join", async () => {
+            const { session, setOnlineStatus } = presenceSession(jest.fn().mockResolvedValue(statusWith(appLink)))
+            await session.join(fakeMediaStream())
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink, inCall] })
+        })
+
+        it("takes the presence link out on leave and keeps the app's links", async () => {
+            const own = jest.fn().mockResolvedValue(statusWith(appLink))
+            const { session, setOnlineStatus } = presenceSession(own)
+            await session.join(fakeMediaStream())
+            own.mockResolvedValue(statusWith(appLink, inCall))
+            await session.leave()
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink] })
+        })
+
+        it("takes the presence link out on destroy", async () => {
+            const own = jest.fn().mockResolvedValue(statusWith(appLink))
+            const { session, setOnlineStatus } = presenceSession(own)
+            await session.join(fakeMediaStream())
+            own.mockResolvedValue(statusWith(appLink, inCall))
+            await session.destroy()
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink] })
+        })
+
+        it("restores the links it saw at join when the status cannot be read on leave", async () => {
+            const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
+            const own = jest.fn().mockResolvedValue(statusWith(appLink))
+            const { session, setOnlineStatus } = presenceSession(own)
+            await session.join(fakeMediaStream())
+            own.mockRejectedValue(new Error("rpc failed"))
+            await session.leave()
+            expect(setOnlineStatus).toHaveBeenLastCalledWith({ links: [appLink] })
+            consoleWarn.mockRestore()
+        })
+    })
+
     it("starts roster polling on join and stops on leave", async () => {
         jest.useFakeTimers()
 
