@@ -89,6 +89,36 @@ pub struct FlowReplicaStateRow {
     pub derived_at: Option<String>,
 }
 
+/// One agent's `flow_replica_state` row for one instance: the whole primary
+/// key, so a single index lookup.
+const FLOW_REPLICA_ROW_SQL: &str =
+    "SELECT instance, current_state, derived_at FROM flow_replica_state
+     WHERE perspective = ?1 AND agent_did = ?2 AND instance = ?3";
+
+/// One agent's rows on a perspective, ordered by instance: all of them
+/// (`instances: None`), or the `n` instances bound as `?3…` (`Some(n)`, n > 0).
+fn flow_replica_rows_sql(instances: Option<usize>) -> String {
+    let narrow = match instances {
+        None => String::new(),
+        Some(n) => {
+            let slots: Vec<String> = (3..3 + n).map(|i| format!("?{i}")).collect();
+            format!(" AND instance IN ({})", slots.join(", "))
+        }
+    };
+    format!(
+        "SELECT instance, current_state, derived_at FROM flow_replica_state
+         WHERE perspective = ?1 AND agent_did = ?2{narrow} ORDER BY instance"
+    )
+}
+
+fn flow_replica_row(row: &rusqlite::Row) -> rusqlite::Result<FlowReplicaStateRow> {
+    Ok(FlowReplicaStateRow {
+        instance: row.get(0)?,
+        current_state: row.get(1)?,
+        derived_at: row.get(2)?,
+    })
+}
+
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -1361,32 +1391,47 @@ impl Ad4mDb {
     /// `agent_did`'s rows on `perspective`, optionally narrowed to
     /// `instances`. A seeded row (minted here, not derived yet) comes back
     /// with `current_state: None`.
+    ///
+    /// The narrowing is in the query (`instance IN (…)`), so a read of a few
+    /// instances costs a few key lookups, not a scan of every row the agent
+    /// has here.
     pub fn get_flow_replica_states(
         &self,
         perspective: &str,
         agent_did: &str,
         instances: Option<&[String]>,
     ) -> Ad4mDbResult<Vec<FlowReplicaStateRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT instance, current_state, derived_at FROM flow_replica_state
-             WHERE perspective = ?1 AND agent_did = ?2 ORDER BY instance",
-        )?;
+        if instances.is_some_and(<[String]>::is_empty) {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare(&flow_replica_rows_sql(instances.map(<[String]>::len)))?;
+        let keys = [perspective, agent_did]
+            .into_iter()
+            .chain(instances.unwrap_or_default().iter().map(String::as_str));
         let rows = stmt
-            .query_map(params![perspective, agent_did], |row| {
-                Ok(FlowReplicaStateRow {
-                    instance: row.get(0)?,
-                    current_state: row.get(1)?,
-                    derived_at: row.get(2)?,
-                })
-            })?
+            .query_map(rusqlite::params_from_iter(keys), flow_replica_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(match instances {
-            None => rows,
-            Some(only) => rows
-                .into_iter()
-                .filter(|r| only.contains(&r.instance))
-                .collect(),
-        })
+        Ok(rows)
+    }
+
+    /// `agent_did`'s row for one instance — a primary-key lookup. `None`
+    /// when there is no row; `current_state: None` for a seeded one.
+    pub fn get_flow_replica_state(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+    ) -> Ad4mDbResult<Option<FlowReplicaStateRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                FLOW_REPLICA_ROW_SQL,
+                params![perspective, agent_did, instance],
+                flow_replica_row,
+            )
+            .optional()?)
     }
 
     /// Insert a NULL-state row unless one exists: "minted by this agent here".
@@ -1426,16 +1471,9 @@ impl Ad4mDb {
         let tx = self.conn.unchecked_transaction()?;
         let before = tx
             .query_row(
-                "SELECT instance, current_state, derived_at FROM flow_replica_state
-                 WHERE perspective = ?1 AND agent_did = ?2 AND instance = ?3",
+                FLOW_REPLICA_ROW_SQL,
                 params![perspective, agent_did, instance],
-                |row| {
-                    Ok(FlowReplicaStateRow {
-                        instance: row.get(0)?,
-                        current_state: row.get(1)?,
-                        derived_at: row.get(2)?,
-                    })
-                },
+                flow_replica_row,
             )
             .optional()?;
         if let Some(state) = state {
@@ -5982,5 +6020,99 @@ mod tests {
             .all(|r| r.proposal_action_hash.as_deref() != Some("hash2")));
 
         println!("✅ Multiple payment requests tests passed");
+    }
+
+    /// SQLite's plan for `sql`, one detail line per step.
+    fn query_plan(db: &Ad4mDb, sql: &str, keys: &[&str]) -> Vec<String> {
+        let mut stmt = db.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        stmt.query_map(rusqlite::params_from_iter(keys), |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    }
+
+    /// The pass reads one instance's row per instance it sweeps. Those reads,
+    /// and the narrowed batch read, must be key lookups on `instance` too:
+    /// filtering after a read of every row the agent has here made one sweep
+    /// O(instances²) (Marvin, #1425).
+    #[test]
+    fn flow_replica_reads_look_up_the_instance_by_key() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let key = "(perspective=? AND agent_did=? AND instance=?)";
+        // Control: the read of every row the agent has here — the statement
+        // both one-instance reads ran before — plans without `instance=?`,
+        // so the checks below tell the two shapes apart.
+        let all = query_plan(&db, &flow_replica_rows_sql(None), &["p", "a"]);
+        assert!(
+            !all.iter().any(|step| step.contains(key)),
+            "the unnarrowed read scans the agent's rows: {all:?}"
+        );
+        let one = query_plan(&db, FLOW_REPLICA_ROW_SQL, &["p", "a", "i"]);
+        assert!(
+            one.len() == 1 && one[0].starts_with("SEARCH") && one[0].contains(key),
+            "the one-instance read is a primary-key lookup: {one:?}"
+        );
+        let some = query_plan(
+            &db,
+            &flow_replica_rows_sql(Some(2)),
+            &["p", "a", "i", "j"],
+        );
+        assert!(
+            some.iter().any(|step| step.contains(key)),
+            "the narrowed read looks each instance up: {some:?}"
+        );
+    }
+
+    #[test]
+    fn flow_replica_reads_return_only_the_named_instances() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        for (agent, instance, state) in [
+            ("alice", "a", Some("x")),
+            ("alice", "b", None),
+            ("alice", "c", Some("z")),
+            ("bob", "a", Some("y")),
+        ] {
+            db.seed_flow_replica_state("p", agent, instance).unwrap();
+            if let Some(state) = state {
+                db.record_flow_replica_pass("p", agent, instance, Some(state), &[], "t")
+                    .unwrap();
+            }
+        }
+        db.seed_flow_replica_state("q", "alice", "a").unwrap();
+
+        let row = |instance: &str, state: Option<&str>| FlowReplicaStateRow {
+            instance: instance.to_string(),
+            current_state: state.map(str::to_string),
+            derived_at: state.map(|_| "t".to_string()),
+        };
+        assert_eq!(
+            db.get_flow_replica_state("p", "alice", "a").unwrap(),
+            Some(row("a", Some("x")))
+        );
+        assert_eq!(
+            db.get_flow_replica_state("p", "alice", "b").unwrap(),
+            Some(row("b", None)),
+            "a seeded row is a row, with no state"
+        );
+        assert_eq!(db.get_flow_replica_state("p", "alice", "zz").unwrap(), None);
+        assert_eq!(db.get_flow_replica_state("p", "carol", "a").unwrap(), None);
+
+        let named = ["c".to_string(), "a".into(), "zz".into(), "a".into()];
+        assert_eq!(
+            db.get_flow_replica_states("p", "alice", Some(&named))
+                .unwrap(),
+            vec![row("a", Some("x")), row("c", Some("z"))],
+            "ordered by instance, each once, unknown names skipped"
+        );
+        assert_eq!(
+            db.get_flow_replica_states("p", "alice", Some(&[])).unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            db.get_flow_replica_states("p", "alice", None).unwrap(),
+            vec![row("a", Some("x")), row("b", None), row("c", Some("z"))]
+        );
     }
 }

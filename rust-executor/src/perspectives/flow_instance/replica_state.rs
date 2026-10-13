@@ -151,20 +151,32 @@ impl FlowReplicaState {
             .collect())
     }
 
+    /// What this agent has recorded for one instance — one primary-key read
+    /// that answers both "is there a row?" and "what state?", which is what
+    /// the pass needs per instance.
+    pub fn recorded(perspective: &str, agent_did: &str, instance: &str) -> anyhow::Result<PriorRow> {
+        Ad4mDb::with_global_instance(|db| db.get_flow_replica_state(perspective, agent_did, instance))
+            .map(PriorRow::from)
+            .map_err(|e| anyhow::anyhow!("reading the flow state of {instance}: {e}"))
+    }
+
     /// This agent's derived state for one instance, if it has one.
     pub fn current_state(
         perspective: &str,
         agent_did: &str,
         instance: &str,
     ) -> anyhow::Result<Option<String>> {
-        Ok(Self::states(perspective, agent_did, Some(&[instance.to_string()]))?.remove(instance))
+        Ok(match Self::recorded(perspective, agent_did, instance)? {
+            PriorRow::Derived(state) => Some(state),
+            PriorRow::Minted | PriorRow::Absent => None,
+        })
     }
 
     /// Whether this agent has a row for the instance — derived here, or
     /// minted here. `false` is exactly the catch-up case of
     /// [`pass`](super::pass).
     pub fn has_derived(perspective: &str, agent_did: &str, instance: &str) -> anyhow::Result<bool> {
-        Ok(!Self::rows(perspective, agent_did, Some(&[instance.to_string()]))?.is_empty())
+        Ok(Self::recorded(perspective, agent_did, instance)? != PriorRow::Absent)
     }
 
     /// Note that `agent_did` minted `instance` on this replica, so its first
