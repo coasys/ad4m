@@ -6,6 +6,7 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { baseUrl, pollUntil, startExecutor, runHcLocalServices, gracefulShutdown, sleep } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
+import { joinCall } from "../helpers/call-session.js";
 import { ChildProcess } from 'node:child_process';
 import { LinkQuery } from "@coasys/ad4m";
 import { v4 as uuidv4 } from 'uuid';
@@ -1865,6 +1866,44 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("✅ Signal exchange between main agent and managed user works correctly");
         });
+
+        // Two users of one hosted executor start a call with default options
+        // (`auto`, which goes mesh without a public SFU). The mesh roster comes
+        // from presence, so each must see the other's in-call status through
+        // `onlineAgents`.
+        it("two users on one executor find each other in a call session", async function () {
+            this.timeout(120000);
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("call1@example.com", "password1");
+            await createTestUser("call2@example.com", "password2");
+            const client1 = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("call1@example.com", "password1"));
+            const client2 = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("call2@example.com", "password2"));
+            const did1 = (await client1.agent.status()).did!;
+            const did2 = (await client2.agent.status()).did!;
+
+            const perspective1 = await client1.perspective.add("Call Session Neighbourhood");
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: "Call Session" }));
+            const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(perspective1.uuid, linkLanguage.address, new Perspective([]));
+            await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            const perspective2 = (await client2.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl)!;
+            await pollUntil(async () => {
+                const ready = ["LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED", "SYNCED"];
+                const s1 = (await client1.perspective.all()).find(p => p.uuid === perspective1.uuid)?.state;
+                const s2 = (await client2.perspective.all()).find(p => p.uuid === perspective2.uuid)?.state;
+                return ready.includes(s1 as string) && ready.includes(s2 as string);
+            }, { timeoutMs: 30000, label: "link language installed for both users" });
+
+            const call1 = await joinCall(await perspective1.getNeighbourhoodProxy(), "co-located-room");
+            const call2 = await joinCall(await perspective2.getNeighbourhoodProxy(), "co-located-room");
+            try {
+                await pollUntil(() => call1.roster.has(did2) && call2.roster.has(did1), {
+                    timeoutMs: 30000, label: "each user's call roster lists the other",
+                });
+            } finally {
+                await call1.session.destroy();
+                await call2.session.destroy();
+            }
+        });
     });
 
     describe("Multi-Node Multi-User Integration", () => {
@@ -1916,6 +1955,9 @@ describe("Multi-User Simple integration tests", () => {
             node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort));
             await node2AdminClient.agent.generate("passphrase");
             await node2AdminClient.runtime.setMultiUserEnabled(true);
+
+            // Already on when the whole file runs; needed when this block runs alone (--grep).
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
 
             console.log("\n=== Creating users on Node 1 ===");
             // Create and login 2 users on node 1
@@ -2423,6 +2465,60 @@ describe("Multi-User Simple integration tests", () => {
             console.log("✅ All links have correct authors");
 
             console.log("\n✅ Cross-node link synchronization works correctly");
+        });
+
+        // Two users share node 1, a third is on node 2. Node 1's link language
+        // holds one status for the node, so node 2 must still see both node 1
+        // users in the call, and each node 1 user must see the other one and
+        // node 2's user.
+        it("users on a shared node and a remote node all find each other in a call session", async function () {
+            this.timeout(300000);
+            const perspective = await node1User1Client!.perspective.add("Mixed Call Neighbourhood");
+            const linkLanguage = await node1User1Client!.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: "Mixed Call" }));
+            const neighbourhoodUrl = await node1User1Client!.neighbourhood.publishFromPerspective(
+                perspective.uuid, linkLanguage.address, new Perspective([]));
+            await node1User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await node2User1Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // K2 space initialization after DNA install
+
+            // Same agent-info exchange as the tests above: no observable "K2 ready" state.
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                    const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const node2AgentInfos = await node2AdminClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
+                    await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
+                } catch (error) {
+                    console.log(`⚠️ Agent info exchange attempt ${attempt} failed:`, error);
+                }
+                if (attempt < 5) await sleep(3000);
+            }
+
+            const proxyFor = async (client: Ad4mClient) => {
+                const p = (await client.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl);
+                expect(p).to.not.be.undefined;
+                return await p!.getNeighbourhoodProxy();
+            };
+            const alice = await joinCall(await proxyFor(node1User1Client!), "mixed-room");
+            const bob = await joinCall(await proxyFor(node1User2Client!), "mixed-room");
+            const carol = await joinCall(await proxyFor(node2User1Client!), "mixed-room");
+            const sees = (call: { roster: Set<string> }, dids: string[]) => dids.every(d => call.roster.has(d));
+            try {
+                await pollUntil(() =>
+                    sees(alice, [node1User2Did, node2User1Did]) &&
+                    sees(bob, [node1User1Did, node2User1Did]) &&
+                    sees(carol, [node1User1Did, node1User2Did]),
+                {
+                    timeoutMs: 180000, intervalMs: 2000,
+                    label: "every call roster lists the other two",
+                });
+            } finally {
+                console.log("rosters:", { alice: [...alice.roster], bob: [...bob.roster], carol: [...carol.roster] });
+                await alice.session.destroy();
+                await bob.session.destroy();
+                await carol.session.destroy();
+            }
         });
     });
 
