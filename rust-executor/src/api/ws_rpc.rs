@@ -80,11 +80,10 @@ fn connection_context(
     admin_credential: &Option<Secret>,
     reach: ListenerReach,
 ) -> Result<Arc<RequestContext>, AuthError> {
-    Ok(Arc::new(RequestContext::open(
-        token,
-        admin_credential,
-        reach,
-    )?))
+    let mut ctx = RequestContext::open(token, admin_credential, reach)?;
+    // Live queries opened on this connection belong to it and end when it closes.
+    ctx.connection_id = Some(uuid::Uuid::new_v4().to_string());
+    Ok(Arc::new(ctx))
 }
 
 /// Close code for a connection whose token opens no session or stopped working (RFC 6455
@@ -157,9 +156,15 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
 
     let conn = Connection::new(handler_map, ctx.clone(), tx);
     // An anonymous socket (no token, for example on an executor that has an admin credential)
-    // gets no events: a stream that never yields.
+    // gets no events: a stream that never yields. The stream carries the updates of the live
+    // queries this connection opens, watched or not.
     let events: EventStream = if ctx.session.is_authenticated() {
-        super::events_ws::build_event_stream(ctx.session.clone(), conn.interest()).await
+        super::events_ws::build_event_stream(
+            ctx.session.clone(),
+            conn.interest(),
+            ctx.connection_id.clone(),
+        )
+        .await
     } else {
         Box::pin(futures::stream::pending())
     };
@@ -237,6 +242,8 @@ pub(crate) struct Connection {
     tx: mpsc::UnboundedSender<String>,
     inflight: InflightRegistry,
     interest: event_interest::SharedInterest,
+    /// Dispatched calls still running.
+    calls: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl Connection {
@@ -256,6 +263,7 @@ impl Connection {
             tx,
             inflight: Default::default(),
             interest: Default::default(),
+            calls: Default::default(),
         }
     }
 
@@ -368,7 +376,9 @@ impl Connection {
         let inflight = self.inflight.clone();
         let session_over = self.session_over.clone();
         let tx = tx.clone();
-        tokio::spawn(async move {
+        let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+        while calls.try_join_next().is_some() {}
+        calls.spawn(async move {
             // Check the session again on every request: expiry and revokeToken() take
             // effect at once for open connections, and end the connection.
             if let Err(e) = base_ctx.session.check() {
@@ -438,8 +448,11 @@ impl Connection {
 
 /// Serve one connection until `incoming` ends or the token stops working:
 /// answer each client message and forward `events`, a stream built with the
-/// connection's [`Connection::interest`]. When the client is gone the event
-/// task stops; calls still in flight finish on their own and reply to `tx`.
+/// connection's [`Connection::interest`] and its `connection_id`. When the
+/// client is gone the event task stops, the connection's subscriptions end,
+/// and calls still in flight finish and reply to `tx`. `events` ends when the
+/// token stops working (see `build_event_stream`), and that ends the session
+/// too.
 pub(crate) async fn serve<S>(conn: Connection, incoming: S, mut events: EventStream)
 where
     S: futures::Stream<Item = String>,
@@ -473,6 +486,19 @@ where
 
     event_task.abort();
     let _ = event_task.await;
+
+    // End the live queries now. A subscribe still in flight adds one after
+    // this sweep, so sweep again as each call ends.
+    let dispose = || async {
+        if let Some(connection_id) = &conn.ctx.connection_id {
+            crate::perspectives::dispose_connection_subscriptions(connection_id).await;
+        }
+    };
+    dispose().await;
+    let mut calls = std::mem::take(&mut *conn.calls.lock().unwrap_or_else(|e| e.into_inner()));
+    while calls.join_next().await.is_some() {
+        dispose().await;
+    }
 }
 
 #[cfg(test)]
@@ -521,6 +547,21 @@ mod connection_context_tests {
                 );
             }
         }
+    }
+
+    // Live queries belong to the connection that opened them, so each connection needs its
+    // own id; an HTTP request (`RequestContext::open` alone) has none.
+    #[test]
+    fn every_connection_gets_its_own_connection_id() {
+        setup_wallet();
+        setup_agent();
+        let admin = Some(crate::secret::Secret::from(ADMIN.to_string()));
+        let a = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
+        let b = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
+        assert!(a.connection_id.is_some());
+        assert_ne!(a.connection_id, b.connection_id);
+        let http = RequestContext::open(ADMIN, &admin, ListenerReach::Network).unwrap();
+        assert_eq!(http.connection_id, None);
     }
 
     #[test]

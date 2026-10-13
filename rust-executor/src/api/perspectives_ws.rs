@@ -10,6 +10,9 @@ use crate::agent::capabilities::*;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
 use crate::perspectives::model_query::QueryClasses;
+use crate::perspectives::perspective_instance::{
+    is_sparql_query, result_json, PROLOG_LIVE_QUERY_UNSUPPORTED,
+};
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
@@ -791,18 +794,72 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    // Live queries are SPARQL; Prolog live queries were removed.
+    if !is_sparql_query(&body.query) {
+        return Err(WsRpcError::bad_request(PROLOG_LIVE_QUERY_UNSUPPORTED));
+    }
+    let connection_id = connection_id(&ctx)?;
 
     let perspective = guarded_perspective(&params).await?;
 
-    let (subscription_id, result) = perspective
-        .subscribe_and_query(body.query, ctx.user_did().map(str::to_string))
+    let reply = perspective
+        .subscribe_and_query(body.query, connection_id, subscriber(&ctx))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    subscribed(reply)
+}
 
-    Ok(serde_json::to_value(PerspectiveSubscribeQueryResult {
+/// The RPC connection a subscription belongs to; a call without one (REST)
+/// cannot subscribe.
+fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    ctx.connection_id.clone().ok_or_else(|| {
+        WsRpcError::bad_request("Subscriptions need a WebSocket connection (/api/v1/ws)")
+    })
+}
+
+/// The agent a subscription runs as, whose sessions alone get its updates: the
+/// managed agent the caller acts as, `None` for the main agent.
+fn subscriber(ctx: &RequestContext) -> Option<String> {
+    ctx.user_did().map(str::to_string)
+}
+
+/// Reply to a subscribe call: the result as JSON at its revision (0 unless
+/// a change was published while the first result was computed).
+fn subscribed(
+    (subscription_id, revision, result): (String, u64, String),
+) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(PerspectiveSubscribed {
         subscription_id,
-        result,
+        result: result_json(&result),
+        revision,
     })?)
+}
+
+/// `perspective.resyncSubscription { uuid, subscriptionId }` →
+/// `{ revision, result }`: the current state of one of the caller's
+/// subscriptions. A client that sees a revision gap (an update whose
+/// `revision` is not the previous one + 1) replaces its copy with `result`
+/// and applies the updates after `revision`. 404 unless this connection
+/// opened the subscription.
+async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: ResyncSubscriptionRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let connection_id = connection_id(&ctx)?;
+    let perspective = guarded_perspective(&params).await?;
+    match perspective
+        .subscription_state(&body.subscription_id, &connection_id)
+        .await
+    {
+        Some((revision, result)) => Ok(serde_json::to_value(PerspectiveResynced {
+            revision,
+            result: result_json(&result),
+        })?),
+        None => Err(WsRpcError::not_found(format!(
+            "No subscription {} on this perspective",
+            body.subscription_id
+        ))),
+    }
 }
 
 async fn subscribe_sparql_query(
@@ -814,30 +871,17 @@ async fn subscribe_sparql_query(
     ))
 }
 
-async fn keep_alive_query(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: KeepAliveQueryRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    let perspective = guarded_perspective(&params).await?;
-    perspective
-        .keepalive_query(body.subscription_id)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
-}
-
-async fn dispose_query(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: DisposeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let connection_id = connection_id(&ctx)?;
     let perspective = guarded_perspective(&params).await?;
-    perspective
-        .dispose_query_subscription(body.subscription_id)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(
+        perspective
+            .dispose_query_subscription(&body.subscription_id, &connection_id)
+            .await,
+    ))
 }
 
 async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -1054,18 +1098,14 @@ async fn model_subscribe_handler(
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
+    let connection_id = connection_id(&ctx)?;
     let perspective = guarded_perspective(&params).await?;
 
-    let agent_did = ctx.user_did().map(str::to_string);
-    let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query(classes, query_json, agent_did)
+    let reply = perspective
+        .model_subscribe_and_query(classes, query_json, connection_id, subscriber(&ctx))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(serde_json::to_value(PerspectiveModelSubscribeResult {
-        subscription_id,
-        result: result_string,
-    })?)
+    subscribed(reply)
 }
 
 async fn run_interpretation_handler(
@@ -2376,27 +2416,22 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         commit_batch,
     )
     .guard(update());
-    map.method::<PerspectiveQueryParams, PerspectiveSubscribeQueryResult>(
+    map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
         "perspective.subscribeQuery",
         subscribe_query,
     )
     .guard(query());
-    map.method::<PerspectiveSubscriptionParams, bool>(
-        "perspective.keepAliveQuery",
-        keep_alive_query,
+    map.method::<PerspectiveSubscriptionParams, PerspectiveResynced>(
+        "perspective.resyncSubscription",
+        resync_subscription,
     )
     .guard(query());
     map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeQuery", dispose_query)
         .guard(query());
     // Always answers 501; the result type mirrors `perspective.subscribeQuery`.
-    map.method::<PerspectiveQueryParams, PerspectiveSubscribeQueryResult>(
+    map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
         "perspective.subscribeSparql",
         subscribe_sparql_query,
-    )
-    .guard(query());
-    map.method::<PerspectiveSubscriptionParams, bool>(
-        "perspective.keepAliveSparql",
-        keep_alive_query,
     )
     .guard(query());
     map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeSparql", dispose_query)
@@ -2413,7 +2448,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
-    map.method::<PerspectiveModelQueryParams, PerspectiveModelSubscribeResult>(
+    map.method::<PerspectiveModelQueryParams, PerspectiveSubscribed>(
         "perspective.modelSubscribe",
         model_subscribe_handler,
     )
@@ -2693,12 +2728,30 @@ pub struct PerspectiveCommitBatchParams {
     pub body: CommitBatchRequest,
 }
 
+/// Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`:
+/// the first result, as JSON, at its revision (0 unless a change was
+/// published while it was computed).
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct PerspectiveSubscribeQueryResult {
+pub struct PerspectiveSubscribed {
     pub subscription_id: String,
-    pub result: String,
+    #[ts(type = "any")]
+    pub result: Value,
+    #[ts(type = "number")]
+    pub revision: u64,
+}
+
+/// Reply to `perspective.resyncSubscription`: the subscription's current
+/// revision and the result it describes.
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveResynced {
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[ts(type = "any")]
+    pub result: Value,
 }
 
 #[derive(Deserialize, TS)]
@@ -2750,14 +2803,6 @@ fn query_classes(params: &Value) -> Result<QueryClasses, WsRpcError> {
             "Missing required parameter: 'class_name' (or 'class_names')".to_string(),
         )),
     }
-}
-
-/// Wire names stay snake_case, as the SDK reads them.
-#[derive(Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveModelSubscribeResult {
-    pub subscription_id: String,
-    pub result: String,
 }
 
 #[derive(Deserialize, TS)]

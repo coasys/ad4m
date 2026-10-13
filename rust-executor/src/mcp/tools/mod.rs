@@ -259,11 +259,13 @@ fn authenticated(opened: Opened) -> Result<Arc<Session>, String> {
     }
 }
 
-/// The RPC request context of `session`, as the RPC socket builds it.
+/// The RPC request context of `session`, as the RPC socket builds it. MCP has no RPC
+/// connection, so it opens no live query (a subscribe answers 400, as over REST).
 pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestContext {
     crate::types::RequestContext {
         cancel_token: None,
         session,
+        connection_id: None,
     }
 }
 

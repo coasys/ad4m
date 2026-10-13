@@ -289,6 +289,15 @@ pub(crate) fn publish_to_owners(topic: Topic, owners: Vec<String>, payload: impl
     get_global_pubsub_sync().publish_event(Event::new(topic, Audience::Dids(owners), payload));
 }
 
+/// End every live query the RPC connection `connection_id` opened.
+pub async fn dispose_connection_subscriptions(connection_id: &str) {
+    for perspective in all_perspectives() {
+        perspective
+            .dispose_connection_subscriptions(connection_id)
+            .await;
+    }
+}
+
 pub fn all_perspectives() -> Vec<PerspectiveInstance> {
     PERSPECTIVES
         .read()

@@ -7,8 +7,9 @@
 //! Typed [`Event`](crate::events::Event)s from `PubSub::publish_event` reach a
 //! socket when `Session::may_receive` (the audience and the event's capability) and
 //! `event_interest::wants` (what the socket asked for with `events.watch`; nothing until it
-//! does, live query updates aside) hold, as [`wire_message`]. Nothing here takes a lock or
-//! parses a payload.
+//! does, live query updates aside) hold, as [`wire_message`]. A live query update also names
+//! the RPC connection that opened the query (`Event::connection`) and reaches that
+//! connection's socket only. Nothing here takes a lock or parses a payload.
 //!
 //! ## Event types
 //!
@@ -34,7 +35,7 @@
 //! | `exception-occurred`          | `exception`   | approval requests: the agent asked, AGENT_PERMIT; else everyone | Exception occurred |
 //! | `transcription-text`          | (inline)      | the stream owner's DID | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | everyone               | AI model loading status              |
-//! | `query-subscription-update`   | (inline)      | owners (passes `events.watch`) | Live query subscription update |
+//! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
 //! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
 //! | `auto-processor-neighbourhood-state` | (inline) | owners                | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
@@ -53,8 +54,8 @@ use crate::pubsub::get_global_pubsub;
 use crate::types::{
     AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
     NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
-    PerspectiveLinkUpdatedEvent, PerspectiveQuerySubscriptionFilter, PerspectiveRemovedEvent,
-    PerspectiveStateFilter, TranscriptionTextFilter,
+    PerspectiveLinkUpdatedEvent, PerspectiveRemovedEvent, PerspectiveStateFilter,
+    QuerySubscriptionUpdateEvent, TranscriptionTextFilter,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -119,7 +120,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<ExceptionOccurredEvent>(ExceptionOccurred, false),
         EventSpec::of::<TranscriptionTextFilter>(AiTranscriptionText, false),
         EventSpec::of::<AIModelLoadingStatus>(AiModelLoadingStatus, false),
-        EventSpec::of::<PerspectiveQuerySubscriptionFilter>(PerspectiveQuerySubscription, true),
+        EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
     ]
@@ -132,29 +133,80 @@ pub fn event_specs() -> Vec<EventSpec> {
 /// its grant revoked or removed, or its token expired, without waiting for another event),
 /// and at the first event after
 /// `session.check()` fails: expiry and revocation stop events as they stop requests.
+///
+/// `connection_id` is the socket's RPC connection (`RequestContext::connection_id`). A live
+/// query update names the connection that opened the query (`Event::connection`): the
+/// stream drops it unless that is `connection_id`, and then it still needs
+/// `Session::may_receive`. When the stream lags, updates were dropped, maybe this
+/// connection's, so a stream with a connection sends one
+/// `{ "type": "query-subscription-update", "lagged": true }` and the client resyncs every
+/// live query.
 pub(crate) async fn build_event_stream(
     session: Arc<Session>,
     interest: SharedInterest,
+    connection_id: Option<String>,
+) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
+    let events = get_global_pubsub().await.subscribe_events();
+    event_stream_of(events, session, interest, connection_id)
+}
+
+/// [`build_event_stream`] over the receiver `events`.
+fn event_stream_of(
+    events: tokio::sync::broadcast::Receiver<Arc<Event>>,
+    session: Arc<Session>,
+    interest: SharedInterest,
+    connection_id: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::future::ready;
 
-    let events = get_global_pubsub().await.subscribe_events();
     let check = session.clone();
     let over = session.over();
-    // The session decides who, the socket's interest what. An event the session may receive
-    // checks the token even when the socket does not want it.
+    // The connection decides which socket, the session who, the socket's interest what. An
+    // event the session may receive checks the token even when the socket does not want it.
     Box::pin(
         BroadcastStream::new(events)
-            .filter_map(received)
-            .filter_map(move |event| {
-                ready(session.may_receive(&event).then(|| {
-                    event_interest::wants(&interest, &event).then(|| wire_message(&event))
-                }))
+            .filter_map(move |r| {
+                ready(match r {
+                    Ok(event) => {
+                        if !for_connection(&event, connection_id.as_deref()) {
+                            None
+                        } else {
+                            session.may_receive(&event).then(|| {
+                                event_interest::wants(&interest, &event)
+                                    .then(|| wire_message(&event))
+                            })
+                        }
+                    }
+                    Err(BroadcastStreamRecvError::Lagged(n)) => {
+                        // The socket's receiver fell more than the channel's capacity behind
+                        // (a slow client), so these events are gone for this socket.
+                        log::warn!(
+                            "events: a socket's event stream lagged and dropped {n} event(s)"
+                        );
+                        connection_id
+                            .is_some()
+                            .then(|| Some(QUERY_UPDATES_LAGGED.to_string()))
+                    }
+                })
             })
             .take_while(move |_| ready(check.check().is_ok()))
             .filter_map(ready)
             .take_until(over),
     )
+}
+
+/// The message that tells a connection its stream dropped events, maybe updates of its live
+/// queries (`QueryUpdatesLagged`): the client resyncs every live query.
+pub(crate) const QUERY_UPDATES_LAGGED: &str =
+    r#"{"type":"query-subscription-update","lagged":true}"#;
+
+/// Whether `event` may go to the socket of RPC connection `connection_id`: an event for no
+/// connection goes to every socket, a live query update only to its own connection's.
+fn for_connection(event: &Event, connection_id: Option<&str>) -> bool {
+    match &event.connection {
+        None => true,
+        Some(owner) => Some(owner.as_str()) == connection_id,
+    }
 }
 
 /// The socket message for `event`, built without parsing the payload again.
@@ -199,20 +251,6 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
 }
 
 // ── Event helper functions ──────────────────────────────────────────────────
-
-/// The message a socket's receiver got, or `None` when it lagged.
-fn received<T>(r: Result<T, BroadcastStreamRecvError>) -> futures::future::Ready<Option<T>> {
-    futures::future::ready(match r {
-        Ok(msg) => Some(msg),
-        Err(BroadcastStreamRecvError::Lagged(n)) => {
-            // The socket's receiver fell more than the channel's capacity behind (a slow
-            // client), so these events are gone for this socket. Say so: the client cannot
-            // know it missed them.
-            log::warn!("events: a socket's event stream lagged and dropped {n} event(s)");
-            None
-        }
-    })
-}
 
 /// An object payload's fields with `type` beside them.
 fn wrap_object(
@@ -341,7 +379,7 @@ mod app_approval_event_tests {
         let mut streams = Vec::new();
         for (name, session, approver) in sessions {
             let all = event_interest::watching_all();
-            streams.push((name, approver, build_event_stream(session, all).await));
+            streams.push((name, approver, build_event_stream(session, all, None).await));
         }
 
         let auth = AuthInfo {
@@ -400,7 +438,7 @@ mod app_approval_event_tests {
         crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
         let all = event_interest::watching_all();
         let operator = Arc::new(Session::for_test(Principal::Operator));
-        let mut stream = build_event_stream(operator, all).await;
+        let mut stream = build_event_stream(operator, all, None).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -495,20 +533,24 @@ mod typed_wire_tests {
     }
 
     // A live query update was the last string topic: its message was the update's fields
-    // beside `type`. The typed event sends the same message.
+    // beside `type`. The typed event sends the same message, without its connection: the
+    // routing key is not part of the wire message.
     #[test]
     fn a_live_query_update_goes_out_as_its_fields_beside_its_type() {
-        let update = crate::types::PerspectiveQuerySubscriptionFilter {
+        let update = crate::types::QuerySubscriptionUpdate {
             perspective_uuid: "p".into(),
             uuid: "p".into(),
             subscription_id: "s".into(),
-            result: "[]".into(),
+            revision: 2,
+            added: Some(vec![json!({ "s": "x" })]),
+            ..Default::default()
         };
         let event = Event::new(
             Topic::PerspectiveQuerySubscription,
             Audience::Dids(vec![]),
             &update,
-        );
+        )
+        .for_connection("c");
         assert_eq!(
             serde_json::from_str::<Value>(&wire_message(&event)).unwrap(),
             json!({
@@ -516,7 +558,8 @@ mod typed_wire_tests {
                 "perspectiveUuid": "p",
                 "uuid": "p",
                 "subscriptionId": "s",
-                "result": "[]",
+                "revision": 2,
+                "added": [{ "s": "x" }],
             })
         );
     }
@@ -608,9 +651,15 @@ mod audience_matrix_tests {
         Event::new(topic, audience, serde_json::Value::Null)
     }
 
+    /// The RPC connection of every matrix stream. A live query update for it reaches each
+    /// stream's session check, so the matrix pins its audience; `for_connection` pins the
+    /// connection (`a_query_update_reaches_only_its_connection`).
+    const MATRIX_CONNECTION: &str = "matrix-connection";
+
     /// A stream that watches every event, as a socket that asked for all of them.
     async fn open(session: Arc<Session>) -> Stream {
-        build_event_stream(session, event_interest::watching_all()).await
+        let connection = Some(MATRIX_CONNECTION.to_string());
+        build_event_stream(session, event_interest::watching_all(), connection).await
     }
 
     /// The streams of `sessions`, by name. An anonymous session gets no stream on a real
@@ -1665,7 +1714,7 @@ mod audience_matrix_tests {
             &serde_json::json!({ "link-added": ["wanted"] }),
             &interest,
         );
-        let mut stream: Stream = build_event_stream(session, interest).await;
+        let mut stream: Stream = build_event_stream(session, interest, None).await;
 
         let run = uuid::Uuid::new_v4().to_string();
         let tag = |case: &str| format!("{run}:{case}");
@@ -1753,7 +1802,13 @@ mod audience_matrix_tests {
         let mut writes = Vec::new();
         for (name, instance, subscriber) in &perspectives {
             instance
-                .send_subscription_update(tag(name), subscriber.clone(), "[]".into(), None)
+                .send_delta_update(
+                    tag(name),
+                    MATRIX_CONNECTION.into(),
+                    subscriber.clone(),
+                    1,
+                    Default::default(),
+                )
                 .await;
             // A write holds the handle from here until every stream has its updates.
             writes.push(instance.persisted.lock().await);
@@ -1794,6 +1849,148 @@ mod audience_matrix_tests {
     }
 }
 
+/// A live query update belongs to the RPC connection that opened the query (#1207) and to
+/// the subscriber's sessions that may query the perspective (the audience). A socket gets it
+/// only when both hold. Each test feeds its own channel, so other tests' events never mix in.
+#[cfg(test)]
+mod connection_routing_tests {
+    use super::*;
+    use crate::agent::capabilities::*;
+    use crate::agent::session::Principal;
+    use crate::agent::AgentContext;
+    use crate::events::Audience;
+    use serde_json::{json, Value};
+
+    const ALICE: &str = "did:key:routing-alice";
+    const P: &str = "routing-perspective";
+
+    fn user(did: &str, caps: Vec<Capability>) -> Arc<Session> {
+        let agent = AgentContext::managed(did.to_string());
+        Arc::new(
+            Session::for_test(Principal::Agent(agent))
+                .with_caps(caps)
+                .with_did(did),
+        )
+    }
+
+    fn alice() -> Arc<Session> {
+        user(ALICE, get_user_default_capabilities())
+    }
+
+    /// A delta update of subscription `subscription` at `revision`, for Alice, on the
+    /// connection `connection`.
+    fn update(subscription: &str, revision: u64, connection: &str) -> Arc<Event> {
+        let payload = crate::types::QuerySubscriptionUpdate {
+            perspective_uuid: P.into(),
+            uuid: P.into(),
+            subscription_id: subscription.into(),
+            revision,
+            ..Default::default()
+        };
+        let audience = Audience::Dids(vec![ALICE.to_string()]);
+        let event = Event::new(Topic::PerspectiveQuerySubscription, audience, payload);
+        Arc::new(event.for_connection(connection))
+    }
+
+    /// What a socket of `session` on `connection` sends for `events`, published to a
+    /// channel of `capacity` before the socket reads any.
+    async fn sent(
+        session: Arc<Session>,
+        connection: Option<&str>,
+        capacity: usize,
+        events: Vec<Arc<Event>>,
+    ) -> Vec<Value> {
+        let (tx, rx) = tokio::sync::broadcast::channel(capacity);
+        let stream = event_stream_of(
+            rx,
+            session,
+            SharedInterest::default(),
+            connection.map(str::to_string),
+        );
+        for event in events {
+            tx.send(event).unwrap();
+        }
+        drop(tx);
+        stream
+            .map(|m| serde_json::from_str::<Value>(&m).unwrap())
+            .collect()
+            .await
+    }
+
+    fn subscriptions(messages: &[Value]) -> Vec<&str> {
+        messages
+            .iter()
+            .filter_map(|m| m["subscriptionId"].as_str())
+            .collect()
+    }
+
+    // #1207: an update reaches only the connection that opened its query, even another
+    // socket of the same agent, and a socket without a connection gets none. It passes
+    // without `events.watch`, and leaves without its routing key.
+    #[tokio::test]
+    async fn a_query_update_reaches_only_its_connection() {
+        let events = || vec![update("s1", 1, "c1"), update("s2", 1, "c2")];
+        let on_c1 = sent(alice(), Some("c1"), 8, events()).await;
+        assert_eq!(subscriptions(&on_c1), vec!["s1"]);
+        assert_eq!(
+            on_c1[0],
+            json!({
+                "type": "query-subscription-update",
+                "perspectiveUuid": P,
+                "uuid": P,
+                "subscriptionId": "s1",
+                "revision": 1,
+            }),
+            "no connection key on the wire"
+        );
+        assert_eq!(
+            subscriptions(&sent(alice(), Some("c2"), 8, events()).await),
+            vec!["s2"]
+        );
+        assert!(sent(alice(), None, 8, events()).await.is_empty());
+    }
+
+    // The connection is not enough: its session must be in the audience and may query the
+    // perspective. Red when the socket routes by connection alone, as #1207 did.
+    #[tokio::test]
+    async fn a_connection_whose_session_may_not_receive_the_update_does_not_get_it() {
+        let events = || vec![update("s", 1, "c")];
+        assert_eq!(
+            subscriptions(&sent(alice(), Some("c"), 8, events()).await),
+            vec!["s"],
+            "the subscriber's own connection gets it"
+        );
+        let other_agent = user("did:key:routing-bob", get_user_default_capabilities());
+        assert!(
+            sent(other_agent, Some("c"), 8, events()).await.is_empty(),
+            "a session outside the audience"
+        );
+        let other_perspective = vec![perspective_query_capability(vec!["other".into()])];
+        assert!(
+            sent(user(ALICE, other_perspective), Some("c"), 8, events())
+                .await
+                .is_empty(),
+            "a session that may not query the perspective (its grant lost the capability)"
+        );
+    }
+
+    // A socket whose stream lagged lost events, maybe its live queries' updates: a socket
+    // on a connection is told once, and LiveQuery resyncs. One without a connection has no
+    // live queries, so it is not.
+    #[tokio::test]
+    async fn a_lagged_stream_tells_its_connection_to_resync() {
+        let events = || vec![update("s", 1, "c"), update("s", 2, "c")];
+        let on_c = sent(alice(), Some("c"), 1, events()).await;
+        assert_eq!(on_c.len(), 2, "{on_c:?}");
+        assert_eq!(
+            on_c[0],
+            json!({ "type": "query-subscription-update", "lagged": true })
+        );
+        assert_eq!(on_c[1]["revision"], json!(2));
+        assert!(sent(alice(), None, 1, events()).await.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod token_expiry_tests {
     use super::*;
@@ -1808,7 +2005,7 @@ mod token_expiry_tests {
     /// Builds a user's event stream, publishes one event and returns what the stream yields.
     async fn next_event(session: Session) -> Option<String> {
         let all = event_interest::watching_all();
-        let mut stream = build_event_stream(Arc::new(session), all).await;
+        let mut stream = build_event_stream(Arc::new(session), all, None).await;
         get_global_pubsub().await.publish_event(Event::new(
             Topic::AiModelLoadingStatus,
             crate::events::Audience::Everyone,
@@ -1851,7 +2048,7 @@ mod token_expiry_tests {
             .with_did("did:key:events-user")
             .with_grant(grant.clone());
         let mut stream =
-            build_event_stream(Arc::new(session), event_interest::watching_all()).await;
+            build_event_stream(Arc::new(session), event_interest::watching_all(), None).await;
         grant.ended.cancel();
         let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
@@ -1877,7 +2074,7 @@ mod token_expiry_tests {
             .with_did("did:key:events-user")
             .with_grant(grant);
         let mut stream =
-            build_event_stream(Arc::new(session), event_interest::watching_all()).await;
+            build_event_stream(Arc::new(session), event_interest::watching_all(), None).await;
         let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .expect("the stream ends at expiry, without another event");
@@ -2025,11 +2222,12 @@ mod event_spec_tests {
                     trigger_match: "[]".into(),
                 },
             }),
-            uuid_of(PerspectiveQuerySubscriptionFilter {
+            uuid_of(crate::types::QuerySubscriptionUpdate {
                 perspective_uuid: p(),
                 uuid: p(),
                 subscription_id: "s".into(),
-                result: "[]".into(),
+                revision: 1,
+                ..Default::default()
             }),
             uuid_of(AutoProcessorNeighbourhoodState::new(
                 "p",
