@@ -722,8 +722,14 @@ mod tests {
         // Record "scoped" WITHOUT any proposals.
         // Without cache-first, derive would return "identified" (no quorum).
         let did = crate::agent::did_for_context(&ctx).expect("did");
-        FlowReplicaState::set_current_state(&perspective.uuid, &did, &inst_uri, "scoped")
-            .expect("set_current_state");
+        FlowReplicaState::set_current_state(
+            &perspective.uuid,
+            &did,
+            &inst_uri,
+            "scoped",
+            &perspective.is_teardown,
+        )
+        .expect("set_current_state");
 
         let record = Ad4mMcpHandler::flow_instance_for(
             &perspective,

@@ -289,6 +289,7 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         &did,
         &inst_uri,
         "scoped",
+        &perspective.is_teardown,
     )
     .expect("record scoped");
 

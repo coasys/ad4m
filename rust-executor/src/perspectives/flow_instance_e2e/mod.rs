@@ -61,6 +61,7 @@ async fn forge_cached_state(f: &mut Fixture, state: &str) {
         &acting_did(f),
         &f.instance_uri,
         state,
+        &f.perspective.is_teardown,
     )
     .expect("forge the recorded state");
 }

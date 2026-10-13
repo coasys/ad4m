@@ -262,15 +262,14 @@ pub async fn run_flow_consensus_pass(
             .iter()
             .flat_map(|edge| edge.atom_uris.iter().cloned())
             .collect();
+        // One key lookup for the row: it says both whether this agent has
+        // one and what state it holds.
         let bookkeeping = FlowReplicaState::fired_among(&uuid, &agent_did, &settled_atoms)
             .and_then(|marked| {
-                let state =
-                    FlowReplicaState::current_state(&uuid, &agent_did, &record.instance_uri)?;
-                let has_row = state.is_some()
-                    || FlowReplicaState::has_derived(&uuid, &agent_did, &record.instance_uri)?;
-                Ok((marked, state, has_row))
+                let row = FlowReplicaState::recorded(&uuid, &agent_did, &record.instance_uri)?;
+                Ok((marked, row))
             });
-        let (already_marked, recorded_state, has_row) = match bookkeeping {
+        let (already_marked, prior_row) = match bookkeeping {
             Ok(b) => b,
             Err(e) => {
                 log::warn!(
@@ -289,7 +288,11 @@ pub async fn run_flow_consensus_pass(
         // an ordinary one, so an edge settling afterwards is not missed.
         // Invariant: no event flood on join; no missed events for edges that
         // settle after catch-up.
-        let first_pass_here = !has_row;
+        let first_pass_here = prior_row == PriorRow::Absent;
+        let recorded_state = match &prior_row {
+            PriorRow::Derived(state) => Some(state.as_str()),
+            PriorRow::Minted | PriorRow::Absent => None,
+        };
 
         // An edge is new to this replica when some atom that settled it is
         // not yet marked. The mark is bookkeeping, so this comparison can
@@ -315,7 +318,7 @@ pub async fn run_flow_consensus_pass(
                 contributing_proposal_uris: edge.atom_uris.clone(),
             });
         }
-        let stale_state = recorded_state.as_deref() != Some(derived.state.as_str());
+        let stale_state = recorded_state != Some(derived.state.as_str());
         if !stale_state && to_mark.is_empty() {
             continue;
         }
@@ -323,7 +326,7 @@ pub async fn run_flow_consensus_pass(
             log::debug!(
                 "run_flow_consensus_pass: healing {} — recorded `{}`, derived `{}`",
                 record.instance_uri,
-                recorded_state.as_deref().unwrap_or_default(),
+                recorded_state.unwrap_or_default(),
                 derived.state
             );
         }
@@ -333,8 +336,15 @@ pub async fn run_flow_consensus_pass(
             &record.instance_uri,
             stale_state.then_some(derived.state.as_str()),
             &to_mark,
+            &perspective.is_teardown,
         ) {
-            Ok(recorded) => recorded,
+            Ok(Some(recorded)) => recorded,
+            // The perspective is being removed: nothing was written for this
+            // instance, and nothing would be for the rest.
+            Ok(None) => {
+                log::debug!("run_flow_consensus_pass: {uuid} was torn down mid-pass; stopping");
+                return outcomes;
+            }
             Err(e) => {
                 log::warn!(
                     "run_flow_consensus_pass: recording {} failed (re-runs next pass): {e:#}",
