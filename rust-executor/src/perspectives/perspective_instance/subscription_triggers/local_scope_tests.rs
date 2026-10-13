@@ -141,6 +141,7 @@ async fn subscribe(p: &PerspectiveInstance, who: &AgentContext, query: Value) ->
         query.to_string(),
         who.user_email.clone(),
         None,
+        format!("conn-{}", who.user_email.as_deref().unwrap_or("main")),
     )
     .await
     .unwrap()
@@ -362,8 +363,14 @@ async fn a_union_query_reads_in_its_callers_scope() {
         "Bob's row was classified by Alice's Local flag: {bobs}"
     );
 
-    let (_, subscribed) = p
-        .model_subscribe_and_query(union, "{}".to_string(), bob.user_email.clone(), None)
+    let (_, _, subscribed) = p
+        .model_subscribe_and_query(
+            union,
+            "{}".to_string(),
+            bob.user_email.clone(),
+            None,
+            "c".into(),
+        )
         .await
         .unwrap();
     assert_eq!(ids(&subscribed), vec!["ns://n/shared"], "{subscribed}");

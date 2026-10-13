@@ -64,6 +64,7 @@ fn context(
         user_email: user_email.map(str::to_string),
         user_did: user_email.map(|email| AgentService::get_user_did_by_email(email).unwrap()),
         cancel_token: None,
+        connection_id: None,
     }
 }
 
@@ -754,9 +755,9 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     let alice_did = user(ALICE);
     user(BOB);
     let check = || TokenCheck::new("", true);
-    let mut alice = build_event_stream(check(), Some(ALICE.to_string()), false, false).await;
-    let mut bob = build_event_stream(check(), Some(BOB.to_string()), false, false).await;
-    let mut main = build_event_stream(check(), None, true, true).await;
+    let mut alice = build_event_stream(check(), Some(ALICE.to_string()), false, false, None).await;
+    let mut bob = build_event_stream(check(), Some(BOB.to_string()), false, false, None).await;
+    let mut main = build_event_stream(check(), None, true, true, None).await;
     let pubsub = get_global_pubsub().await;
 
     pubsub

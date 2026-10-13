@@ -1,38 +1,37 @@
-//! Shared query subscriptions are reference-counted.
+//! Subscribers of the same query never interfere.
 //!
-//! `subscribe_and_query` and `model_subscribe_and_query` hand every caller
-//! that registers the same (query, user) pair the same subscription id, so
-//! one re-evaluation and one push serve all of them. These tests prove the
-//! invariant that makes that sharing safe: a subscriber disposing its hold
-//! must not stop updates for the other holders. The entry is removed only
-//! when the last holder disposes.
+//! Every `subscribe_and_query` / `model_subscribe_and_query` call opens its own
+//! subscription, tied to the connection that made it. These tests prove the
+//! invariant that matters to apps: one subscriber disposing must not stop
+//! updates for another subscriber of the same query.
 //!
 //! The background `subscribed_queries_loop` is not running in these tests, so
 //! `check_subscribed_queries` is driven directly after the matching link is
-//! written. Pushes are observed on the global pubsub topic the WS layer
+//! written. Updates are observed on the global pubsub topic the WS layer
 //! forwards to clients.
 
 use super::*;
 use crate::perspectives::interpretation_test_support::{setup_perspective_no_llm, TASK_SDNA};
-use crate::pubsub::get_global_pubsub;
-use crate::types::PerspectiveQuerySubscriptionFilter;
+use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// Wait for a push for `subscription_id` on `rx`, ignoring pushes for other
-/// perspectives (the topic is global).
-async fn next_push_for(
+/// Wait for an update for `subscription_id` on `rx`, ignoring updates for
+/// other perspectives (the topic is global).
+async fn next_update_for(
     rx: &mut broadcast::Receiver<String>,
     perspective_uuid: &str,
     subscription_id: &str,
-) -> PerspectiveQuerySubscriptionFilter {
+) -> Value {
     let deadline = Duration::from_secs(10);
     let wait = async {
         loop {
             let msg = rx.recv().await.expect("pubsub receiver closed");
-            let filter: PerspectiveQuerySubscriptionFilter =
-                serde_json::from_str(&msg).expect("subscription push JSON");
-            if filter.uuid == perspective_uuid && filter.subscription_id == subscription_id {
-                return filter;
+            let update: Value = serde_json::from_str(&msg).expect("subscription update JSON");
+            if update["perspectiveUuid"] == perspective_uuid
+                && update["subscriptionId"] == subscription_id
+            {
+                return update;
             }
         }
     };
@@ -40,7 +39,7 @@ async fn next_push_for(
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "no push for subscription {} within {:?}",
+                "no update for subscription {} within {:?}",
                 subscription_id, deadline
             )
         })
@@ -51,43 +50,40 @@ async fn is_registered(perspective: &PerspectiveInstance, id: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn model_subscription_shared_by_two_holders_survives_one_dispose() {
+async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
     let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
     let query_json = r#"{"where":{"owner":"alice"}}"#;
 
-    let (id1, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), None, None)
+    let (id1, _, _) = perspective
+        .model_subscribe_and_query("Task".into(), query_json.into(), None, None, "c".into())
         .await
         .expect("first model subscribe");
-    let (id2, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), None, None)
+    let (id2, _, _) = perspective
+        .model_subscribe_and_query("Task".into(), query_json.into(), None, None, "c".into())
         .await
         .expect("second model subscribe");
-    assert_eq!(id1, id2, "same params must share one subscription id");
+    assert_ne!(id1, id2, "each subscriber gets its own subscription");
 
     let mut rx = get_global_pubsub()
         .await
         .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
         .await;
 
-    // First holder lets go: the entry must stay registered for the second one.
-    assert!(perspective
-        .dispose_query_subscription(id1.clone())
-        .await
-        .expect("first dispose"));
+    assert!(perspective.dispose_query_subscription(&id1, "c").await);
+    assert!(!is_registered(&perspective, &id1).await);
     assert!(
-        is_registered(&perspective, &id1).await,
-        "a shared subscription must survive one holder's dispose"
+        is_registered(&perspective, &id2).await,
+        "one subscriber's dispose must leave the other's subscription"
     );
 
-    // A matching Task lands; the remaining holder must still be pushed to.
+    // A matching Task lands; the remaining subscriber still gets the update.
     perspective
         .create_subject(
             SubjectClassOption {
                 class_name: Some("Task".to_string()),
                 query: None,
             },
-            "ad4m://task/shared-sub".to_string(),
+            "ad4m://task/kept".to_string(),
             Some(serde_json::json!({ "title": "ship it", "owner": "alice" })),
             None,
             &ctx,
@@ -99,59 +95,44 @@ async fn model_subscription_shared_by_two_holders_survives_one_dispose() {
         .check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::NoneRecorded)
         .await;
 
-    let push = next_push_for(&mut rx, &perspective.uuid, &id1).await;
+    let update = next_update_for(&mut rx, &perspective.uuid, &id2).await;
     assert!(
-        push.result.contains("ad4m://task/shared-sub"),
-        "push must carry the new Task, got: {}",
-        push.result
+        update.to_string().contains("ad4m://task/kept"),
+        "the update must carry the new Task, got: {update}"
     );
 
-    // Last holder lets go: now the entry is removed.
-    assert!(perspective
-        .dispose_query_subscription(id1.clone())
-        .await
-        .expect("second dispose"));
+    assert!(perspective.dispose_query_subscription(&id2, "c").await);
+    assert!(!is_registered(&perspective, &id2).await);
     assert!(
-        !is_registered(&perspective, &id1).await,
-        "the last dispose must remove the subscription"
-    );
-    assert!(
-        !perspective
-            .dispose_query_subscription(id1.clone())
-            .await
-            .expect("third dispose"),
+        !perspective.dispose_query_subscription(&id2, "c").await,
         "disposing an unknown id reports false"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
+async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes() {
     let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
     let query = "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".to_string();
 
-    let (id1, _) = perspective
-        .subscribe_and_query(query.clone(), None)
+    let (id1, _, _) = perspective
+        .subscribe_and_query(query.clone(), None, "a".into())
         .await
         .expect("first subscribe");
-    let (id2, _) = perspective
-        .subscribe_and_query(query.clone(), None)
+    let (id2, _, _) = perspective
+        .subscribe_and_query(query.clone(), None, "b".into())
         .await
         .expect("second subscribe");
-    assert_eq!(id1, id2, "same query must share one subscription id");
+    assert_ne!(id1, id2, "each subscriber gets its own subscription");
 
     let mut rx = get_global_pubsub()
         .await
         .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
         .await;
 
-    assert!(perspective
-        .dispose_query_subscription(id1.clone())
-        .await
-        .expect("first dispose"));
-    assert!(
-        is_registered(&perspective, &id1).await,
-        "a shared subscription must survive one holder's dispose"
-    );
+    // A connection can end only its own subscriptions.
+    assert!(!perspective.dispose_query_subscription(&id2, "a").await);
+    assert!(perspective.dispose_query_subscription(&id1, "a").await);
+    assert!(is_registered(&perspective, &id2).await);
 
     perspective
         .add_link(
@@ -174,20 +155,14 @@ async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
         )
         .await;
 
-    let push = next_push_for(&mut rx, &perspective.uuid, &id1).await;
+    let update = next_update_for(&mut rx, &perspective.uuid, &id2).await;
     assert!(
-        push.result.contains("ns://thing/1"),
-        "push must carry the new link, got: {}",
-        push.result
+        update.to_string().contains("ns://thing/1"),
+        "the update must carry the new link, got: {update}"
     );
-
-    assert!(perspective
-        .dispose_query_subscription(id1.clone())
-        .await
-        .expect("second dispose"));
-    assert!(
-        !is_registered(&perspective, &id1).await,
-        "the last dispose must remove the subscription"
+    assert_eq!(
+        update["connectionId"], "b",
+        "addressed to its own connection"
     );
 }
 
@@ -211,8 +186,8 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         setup_perspective_no_llm(&[("Task", TASK_SDNA), ("Note", NOTE_SDNA)]).await;
     let classes =
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
-    let (id, initial) = perspective
-        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None, None)
+    let (id, _, initial) = perspective
+        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None, None, "c".into())
         .await
         .expect("union model subscribe");
     assert!(initial.contains("\"totalCount\":0"), "{initial}");
@@ -262,11 +237,12 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
                 ChangedGraphs::NoneRecorded,
             )
             .await;
-        let push = next_push_for(&mut rx, &perspective.uuid, &id).await;
+        let update = next_update_for(&mut rx, &perspective.uuid, &id)
+            .await
+            .to_string();
         assert!(
-            push.result.contains(base) && push.result.contains(expected),
-            "a {changed} write must re-run the union subscription, got: {}",
-            push.result
+            update.contains(base) && update.contains(expected),
+            "a {changed} write must re-run the union subscription, got: {update}"
         );
     }
 }
@@ -282,8 +258,8 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         setup_perspective_no_llm(&[("Task", TASK_SDNA), ("Note", NOTE_SDNA)]).await;
     let classes =
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
-    let (id, _) = perspective
-        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None, None)
+    let (id, _, _) = perspective
+        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None, None, "c".into())
         .await
         .expect("union model subscribe");
 
@@ -321,16 +297,10 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         )
         .await;
 
-    let quiet = tokio::time::timeout(Duration::from_millis(1500), async {
-        loop {
-            let msg = rx.recv().await.expect("pubsub receiver closed");
-            let filter: PerspectiveQuerySubscriptionFilter =
-                serde_json::from_str(&msg).expect("subscription push JSON");
-            if filter.uuid == perspective.uuid && filter.subscription_id == id {
-                return filter;
-            }
-        }
-    })
+    let quiet = tokio::time::timeout(
+        Duration::from_millis(1500),
+        next_update_for(&mut rx, &perspective.uuid, &id),
+    )
     .await;
     assert!(
         quiet.is_err(),
@@ -338,31 +308,35 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
     );
 }
 
-/// The same classes in another order, or named twice, are one union and so
-/// one shared subscription (#1311).
+/// The same classes in another order, or named twice, are one union (#1311):
+/// each subscriber still gets its own subscription (no sharing), and both
+/// answer the same result.
 #[tokio::test(flavor = "multi_thread")]
-async fn union_model_subscriptions_share_regardless_of_class_order() {
+async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
     use crate::perspectives::model_query::QueryClasses;
     let (perspective, _shapes, _ctx) =
         setup_perspective_no_llm(&[("Task", TASK_SDNA), ("Note", NOTE_SDNA)]).await;
     let query_json = r#"{"includeUnverified":true}"#;
-    let (a, _) = perspective
+    let (a, _, result_a) = perspective
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Task".into(), "Note".into()]),
             query_json.into(),
             None,
             None,
+            "c".into(),
         )
         .await
         .expect("first union subscribe");
-    let (b, _) = perspective
+    let (b, _, result_b) = perspective
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Note".into(), "Task".into(), "Note".into()]),
             query_json.into(),
             None,
             None,
+            "c".into(),
         )
         .await
         .expect("second union subscribe");
-    assert_eq!(a, b, "equal unions must share one subscription id");
+    assert_ne!(a, b, "each subscriber gets its own subscription");
+    assert_eq!(result_a, result_b, "equal unions answer the same");
 }

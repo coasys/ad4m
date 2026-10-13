@@ -1347,10 +1347,16 @@ describe("Multi-User Simple integration tests", () => {
             const { subscriptionId } = await alice.perspective.subscribeQuery(aliceUuid, query);
             const aliceUpdates: string[] = [];
             const bobUpdates: string[] = [];
-            const stopAlice = alice.perspective.subscribeToQueryUpdates(subscriptionId, r => aliceUpdates.push(JSON.stringify(r)));
-            // Bob listens for Alice's subscription id. His client would drop an
-            // unknown id, so this listener sees what reaches his socket.
-            const stopBob = bob.perspective.subscribeToQueryUpdates(subscriptionId, r => bobUpdates.push(JSON.stringify(r)));
+            const stopAlice = alice.perspective.onQueryUpdate(u => {
+                if ("subscriptionId" in u && u.subscriptionId === subscriptionId) aliceUpdates.push(JSON.stringify(u));
+            });
+            // Every query update that reaches Bob's socket. He opened no live
+            // query, so nothing that names Alice's subscription or carries her
+            // Local link may arrive.
+            const stopBob = bob.perspective.onQueryUpdate(u => {
+                const text = JSON.stringify(u);
+                if (text.includes(subscriptionId) || text.includes("test://alice-draft")) bobUpdates.push(text);
+            });
 
             await alice.perspective.addLink(aliceUuid, new Link({ source: "test://alice-draft", predicate: "test://note", target: "test://secret" }), "local");
 

@@ -132,7 +132,7 @@ async fn record(p: &mut PerspectiveInstance, id: &str, class: &str, props: &[(&s
 /// batch window.
 async fn take_writes(p: &PerspectiveInstance) -> (ChangedPredicates, ChangedGraphs) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !p.trigger_prolog_subscription_check.load(Ordering::Acquire) {
+    while !p.trigger_subscription_check.load(Ordering::Acquire) {
         assert!(
             tokio::time::Instant::now() < deadline,
             "no write was recorded"
@@ -141,8 +141,7 @@ async fn take_writes(p: &PerspectiveInstance) -> (ChangedPredicates, ChangedGrap
     }
     // Every write's recorder runs on its own task; let the rest land.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    p.trigger_prolog_subscription_check
-        .store(false, Ordering::Release);
+    p.trigger_subscription_check.store(false, Ordering::Release);
     std::mem::replace(
         &mut *p.changed_predicates_and_graphs.lock().await,
         (ChangedPredicates::NoneRecorded, ChangedGraphs::NoneRecorded),
@@ -169,8 +168,8 @@ async fn check(p: &PerspectiveInstance) {
 async fn subscribe(p: &PerspectiveInstance, class: &str, query: Value) -> (String, Value) {
     let mut query = query;
     query["includeUnverified"] = json!(true);
-    let (id, result) = p
-        .model_subscribe_and_query(class.into(), query.to_string(), None, None)
+    let (id, _revision, result) = p
+        .model_subscribe_and_query(class.into(), query.to_string(), None, None, "c".into())
         .await
         .expect("model subscribe");
     (id, serde_json::from_str(&result).expect("result JSON"))
@@ -216,6 +215,46 @@ async fn an_included_records_edit_reruns_the_including_subscription() {
     );
     let now = last_result(&p, &id).await;
     assert!(now.to_string().contains("edited"), "{now}");
+}
+
+/// The subscription is registered before its first result exists, so its
+/// trigger starts without result nodes; storing the first result must point
+/// the trigger at them. An edit to a record the first result includes (a
+/// predicate matched only near a result node) then reaches the subscriber
+/// as update revision 1. Red when `open_subscription` keeps the empty
+/// trigger: the edit re-runs nothing and no update arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_to_a_record_in_the_first_result_sends_update_revision_1() {
+    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(&p, "Post", json!({ "include": { "comments": true } })).await;
+    assert!(first.to_string().contains("ns://c1"), "{first}");
+    let mut rx = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    add(&mut p, "ns://c1", "ns://text", "literal:string:edited").await;
+    check(&p).await;
+
+    let update = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let msg = rx.recv().await.expect("pubsub receiver closed");
+            let update: Value = serde_json::from_str(&msg).expect("update JSON");
+            if update["perspectiveUuid"] == json!(p.uuid) && update["subscriptionId"] == json!(id) {
+                return update;
+            }
+        }
+    })
+    .await
+    .expect("the edit must send an update");
+    assert_eq!(update["revision"], json!(1), "{update}");
+    assert!(update.to_string().contains("edited"), "{update}");
 }
 
 /// The same for a polymorphic include, whose members' class is not known

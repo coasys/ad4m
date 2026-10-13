@@ -2294,15 +2294,14 @@ describe("Prolog + Literals", () => {
                         queryBuilder.dispose();
                     });
 
-                    // Two subscribeQuery() callers on the same query share one
-                    // executor subscription, and each dispose() releases one hold.
-                    // A second dispose() of the same proxy must not release the
-                    // other proxy's hold.
-                    it("keeps a shared subscribeQuery subscription alive when one proxy is disposed twice", async () => {
+                    // Two subscribeQuery() callers on the same query each get their
+                    // own executor subscription. Disposing one, even twice, must not
+                    // stop the other's updates.
+                    it("keeps the other subscribeQuery subscription alive when one proxy is disposed twice", async () => {
                         const query = "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://shared-proxy>) }";
                         const subA = await perspective.subscribeQuery(query);
                         const subB = await perspective.subscribeQuery(query);
-                        expect(subB.id).to.equal(subA.id);
+                        expect(subB.id).to.not.equal(subA.id);
                         const callbackA = sinon.fake();
                         const callbackB = sinon.fake();
                         subA.onResult(callbackA);
@@ -2442,11 +2441,9 @@ describe("Prolog + Literals", () => {
                         expect(callback2.callCount).to.equal(1);
                     });
 
-                    // The executor hands every subscriber of the same query the
-                    // same subscription id and only drops it when the last holder
-                    // disposes. Before that, builder A's dispose removed the entry
-                    // builder B still relied on, so B never saw another update.
-                    it('keeps a shared subscription alive when another subscriber disposes', async () => {
+                    // Builder A's dispose must leave builder B's subscription on the
+                    // same query running.
+                    it('keeps another builder on the same query alive when one disposes', async () => {
                         const builderA = TestModel.query(perspective).where({ status: "active" });
                         const builderB = TestModel.query(perspective).where({ status: "active" });
                         const callbackA = sinon.fake();
