@@ -1814,6 +1814,11 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        // A `FlowInstance` minted by an agent this node acts for gets its
+        // bookkeeping row now, before any pass can treat it as a catch-up
+        // (#1424). Awaited, not spawned: a client's `start` is followed at
+        // once by a propose whose pass must see the row.
+        self.seed_minted_flow_instances(&decorated_diff).await;
 
         // Get handle without holding lock during pubsub operations
         let handle = {

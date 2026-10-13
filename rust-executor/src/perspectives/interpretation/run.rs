@@ -662,6 +662,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         };
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
+            context,
             &flow_subjects,
             flow_filter,
         )
@@ -1062,6 +1063,7 @@ pub async fn run_interpretation_with_harness_and_model(
     };
     let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
         perspective,
+        context,
         &flow_subjects,
         flow_filter,
     )

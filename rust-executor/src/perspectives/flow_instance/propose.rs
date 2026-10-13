@@ -7,7 +7,7 @@
 //!
 //! The invariants enforced here, each with a matching test:
 //! 1. `toState` must be reachable from the instance's **derived** state
-//!    (not the `currentState` Local cache).
+//!    (not this agent's recorded state).
 //! 2. If the target state carries a `requires` guard it must be satisfied on
 //!    this replica at mint time; an unmet guard is a hard error, not a skip.
 //!    The seal comes from [`recompute_evidence_seal`] — the same code every
@@ -250,7 +250,14 @@ pub async fn propose_flow_transition(
     // the two. Classifying only the first would mint past a joinable proposal
     // sitting behind a foreign one — and mint again on the next press, which is
     // invariant 4 broken in the one shape it exists to cover.
-    let live = find_live_proposals(perspective, &transition).await?;
+    let live = find_live_proposals(
+        &crate::perspectives::flow_evaluator::AgentProposals {
+            perspective,
+            agent_did: &acting_did,
+        },
+        &transition,
+    )
+    .await?;
     let mut already_voted = None;
     let mut joinable = None;
     let mut other_outputs = Vec::new();

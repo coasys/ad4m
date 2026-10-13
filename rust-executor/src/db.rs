@@ -80,6 +80,16 @@ pub struct ComputeLogEntry {
     pub credits_after: f64,
 }
 
+/// One `flow_replica_state` row. `current_state` is `None` for a row seeded
+/// at mint and not derived yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowReplicaStateRow {
+    pub instance: String,
+    pub current_state: Option<String>,
+    pub derived_at: Option<String>,
+}
+
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 lazy_static! {
@@ -458,6 +468,42 @@ impl Ad4mDb {
         )?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_compute_log_user_time ON compute_log(user_email, timestamp)",
+        )?;
+
+        // The flow engine's per-replica bookkeeping (#1424): what each agent's
+        // consensus pass last derived for an instance, and which proposals it
+        // has already recorded as fired. Never synced, never links, never an
+        // input to the fold — see `perspectives::flow_instance::replica_state`.
+        //
+        // `current_state` is NULL for a row seeded at mint ("minted by this
+        // agent here, not derived yet"): the row's presence is what makes the
+        // next pass an ordinary one rather than a silent catch-up.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_replica_state (
+                perspective TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
+                instance TEXT NOT NULL,
+                current_state TEXT,
+                derived_at TEXT,
+                PRIMARY KEY (perspective, agent_did, instance)
+            )",
+        )?;
+        // `instance` is not part of the key — a proposal belongs to exactly one
+        // instance — but it lets `flowFired` list one instance's history
+        // without walking the proposals' links.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_fired_mark (
+                perspective TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
+                proposal TEXT NOT NULL,
+                instance TEXT NOT NULL,
+                marked_at TEXT NOT NULL,
+                PRIMARY KEY (perspective, agent_did, proposal)
+            )",
+        )?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_flow_fired_mark_instance
+             ON flow_fired_mark(perspective, agent_did, instance)",
         )?;
 
         Ok(Self { conn })
@@ -1292,7 +1338,160 @@ impl Ad4mDb {
             [uuid],
         )?;
 
+        self.remove_flow_replica_rows(uuid)?;
+
         Ok(())
+    }
+
+    /// Every flow-bookkeeping row of `perspective`, for every agent. Part of
+    /// [`remove_perspective`](Self::remove_perspective); exposed for the flow
+    /// service's own `remove_perspective`.
+    pub fn remove_flow_replica_rows(&self, perspective: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM flow_replica_state WHERE perspective = ?1",
+            [perspective],
+        )?;
+        self.conn.execute(
+            "DELETE FROM flow_fired_mark WHERE perspective = ?1",
+            [perspective],
+        )?;
+        Ok(())
+    }
+
+    /// `agent_did`'s rows on `perspective`, optionally narrowed to
+    /// `instances`. A seeded row (minted here, not derived yet) comes back
+    /// with `current_state: None`.
+    pub fn get_flow_replica_states(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instances: Option<&[String]>,
+    ) -> Ad4mDbResult<Vec<FlowReplicaStateRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT instance, current_state, derived_at FROM flow_replica_state
+             WHERE perspective = ?1 AND agent_did = ?2 ORDER BY instance",
+        )?;
+        let rows = stmt
+            .query_map(params![perspective, agent_did], |row| {
+                Ok(FlowReplicaStateRow {
+                    instance: row.get(0)?,
+                    current_state: row.get(1)?,
+                    derived_at: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(match instances {
+            None => rows,
+            Some(only) => rows
+                .into_iter()
+                .filter(|r| only.contains(&r.instance))
+                .collect(),
+        })
+    }
+
+    /// Insert a NULL-state row unless one exists: "minted by this agent here".
+    /// Returns whether a row was inserted.
+    pub fn seed_flow_replica_state(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+    ) -> Ad4mDbResult<bool> {
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO flow_replica_state (perspective, agent_did, instance)
+             VALUES (?1, ?2, ?3)",
+            params![perspective, agent_did, instance],
+        )?;
+        Ok(inserted > 0)
+    }
+
+    /// Record one pass over one instance in a single transaction: set the
+    /// state (when `state` is `Some`) and add the fired marks. Returns the
+    /// row as it was before — `None` when there was no row at all.
+    ///
+    /// One transaction, so a crash can never leave marks recorded with the
+    /// state not advanced: the next pass would see the marks, find nothing
+    /// new, and never report the edge.
+    pub fn record_flow_replica_pass(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+        state: Option<&str>,
+        fired: &[String],
+        at: &str,
+    ) -> Ad4mDbResult<Option<FlowReplicaStateRow>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let before = tx
+            .query_row(
+                "SELECT instance, current_state, derived_at FROM flow_replica_state
+                 WHERE perspective = ?1 AND agent_did = ?2 AND instance = ?3",
+                params![perspective, agent_did, instance],
+                |row| {
+                    Ok(FlowReplicaStateRow {
+                        instance: row.get(0)?,
+                        current_state: row.get(1)?,
+                        derived_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(state) = state {
+            tx.execute(
+                "INSERT INTO flow_replica_state (perspective, agent_did, instance, current_state, derived_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (perspective, agent_did, instance)
+                 DO UPDATE SET current_state = excluded.current_state, derived_at = excluded.derived_at",
+                params![perspective, agent_did, instance, state, at],
+            )?;
+        }
+        for proposal in fired {
+            tx.execute(
+                "INSERT OR IGNORE INTO flow_fired_mark (perspective, agent_did, proposal, instance, marked_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![perspective, agent_did, proposal, instance, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(before)
+    }
+
+    /// The subset of `proposals` that `agent_did` has marked fired on
+    /// `perspective`.
+    pub fn get_flow_fired_among(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        proposals: &[String],
+    ) -> Ad4mDbResult<HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT 1 FROM flow_fired_mark
+             WHERE perspective = ?1 AND agent_did = ?2 AND proposal = ?3",
+        )?;
+        let mut fired = HashSet::new();
+        for proposal in proposals {
+            if stmt.exists(params![perspective, agent_did, proposal])? {
+                fired.insert(proposal.clone());
+            }
+        }
+        Ok(fired)
+    }
+
+    /// Every proposal of `instance` that `agent_did` has marked fired, sorted.
+    pub fn get_flow_fired_for_instance(
+        &self,
+        perspective: &str,
+        agent_did: &str,
+        instance: &str,
+    ) -> Ad4mDbResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT proposal FROM flow_fired_mark
+             WHERE perspective = ?1 AND agent_did = ?2 AND instance = ?3 ORDER BY proposal",
+        )?;
+        let proposals = stmt
+            .query_map(params![perspective, agent_did, instance], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(proposals)
     }
 
     /// Helper function to normalize predicate values from the database.

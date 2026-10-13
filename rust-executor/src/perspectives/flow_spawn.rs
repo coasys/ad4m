@@ -115,7 +115,7 @@ pub fn spawn_candidates(
 /// `stateName` link hasn't synced yet parses as `""` at value `0.0` and sorts
 /// to (or ties for) the front — partially-observed revisions are a real
 /// phenomenon (see the 2026-08-20 flake notes in `interpretation/overlay`).
-/// An instance minted at `currentState: ""` would be permanently stuck: no
+/// An instance minted at state `""` would be permanently stuck: no
 /// transition leaves `""`, and dedup suppresses on `(flow_uri, subject)`
 /// regardless of state, so the correct instance could never be minted either.
 /// A half-synced definition must spawn nothing.
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn half_synced_flow_with_empty_state_name_yields_no_initial_state() {
         // A `hasState` edge whose `stateName` link hasn't synced parses as
-        // `""` at value 0.0 and sorts to the front. Minting `currentState: ""`
+        // `""` at value 0.0 and sorts to the front. Minting at state `""`
         // would wedge the instance forever (no transition leaves `""`) AND
         // suppress the correct mint via (flow_uri, subject) dedup — so the
         // accessor must answer "spawn nothing" instead.

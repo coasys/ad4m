@@ -183,9 +183,9 @@ pub async fn accept_flow_proposal(
 /// retract, and a link that merely *claims* our authorship without a valid
 /// signature is not our action either, so it is left alone.
 ///
-/// There is deliberately no "already fired, refuse" guard. A `resolved_as →
-/// "fired"` mark is an index any member may write, not authority, and this
-/// engine reads no mark to decide anything. Retracting a vote that helped
+/// There is deliberately no "already fired, refuse" guard. A fired mark is
+/// this replica's own index (`replica_state`), not authority, and this engine
+/// reads no mark to decide anything. Retracting a vote that helped
 /// settle an edge therefore does move the flow back — that is the semantics
 /// stated in this module's parent doc, not a hole in this function: state is
 /// a function of the links present now.
