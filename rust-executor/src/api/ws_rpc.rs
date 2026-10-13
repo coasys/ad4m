@@ -76,6 +76,7 @@ pub async fn ws_rpc(
         user_email: user_email.clone(),
         user_did,
         cancel_token: None,
+        connection_id: Some(uuid::Uuid::new_v4().to_string()),
     });
 
     let token_check = TokenCheck::new(&token, is_admin);
@@ -119,6 +120,7 @@ async fn handle_ws(
             ctx.user_email.clone(),
             ctx.is_admin_credential,
             can_approve_apps,
+            ctx.connection_id.clone(),
         )
         .await
     } else {
@@ -193,6 +195,8 @@ pub(crate) struct Connection {
     tx: mpsc::UnboundedSender<String>,
     inflight: InflightRegistry,
     interest: event_interest::SharedInterest,
+    /// Dispatched calls still running.
+    calls: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl Connection {
@@ -213,6 +217,7 @@ impl Connection {
             tx,
             inflight: Default::default(),
             interest: Default::default(),
+            calls: Default::default(),
         }
     }
 
@@ -321,7 +326,9 @@ impl Connection {
         let token_check = self.token_check.clone();
         let session_over = self.session_over.clone();
         let tx = tx.clone();
-        tokio::spawn(async move {
+        let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+        while calls.try_join_next().is_some() {}
+        calls.spawn(async move {
             // Check the token again on every request: expiry and revokeToken() take
             // effect at once for open connections, and end the connection.
             if let Err(e) = token_check.check() {
@@ -384,8 +391,10 @@ impl Connection {
 
 /// Serve one connection until `incoming` ends or the token stops working:
 /// answer each client message and forward `events` that match the
-/// connection's interest. When the client is gone the event task stops;
-/// calls still in flight finish on their own and reply to `tx`.
+/// connection's interest. When the client is gone the event task stops, the
+/// connection's subscriptions end, and calls still in flight finish and reply
+/// to `tx`. `events` ends when the token stops working (see
+/// `build_event_stream`), and that ends the session too.
 pub(crate) async fn serve<S>(conn: Connection, incoming: S, events: EventStream)
 where
     S: futures::Stream<Item = String>,
@@ -416,6 +425,19 @@ where
 
     event_task.abort();
     let _ = event_task.await;
+
+    // End the live queries now. A subscribe still in flight adds one after
+    // this sweep, so sweep again as each call ends.
+    let dispose = || async {
+        if let Some(connection_id) = &conn.ctx.connection_id {
+            crate::perspectives::dispose_connection_subscriptions(connection_id).await;
+        }
+    };
+    dispose().await;
+    let mut calls = std::mem::take(&mut *conn.calls.lock().unwrap_or_else(|e| e.into_inner()));
+    while calls.join_next().await.is_some() {
+        dispose().await;
+    }
 }
 
 #[cfg(test)]
@@ -431,6 +453,7 @@ mod event_gate_tests {
             user_email: None,
             user_did: None,
             cancel_token: None,
+            connection_id: None,
         }
     }
 

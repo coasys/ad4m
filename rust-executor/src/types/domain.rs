@@ -32,6 +32,10 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// Id of the WS RPC connection the request arrived on, generated once
+    /// per socket. Live queries belong to it and end when it closes. `None`
+    /// outside the WS RPC socket.
+    pub connection_id: Option<String>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -1390,25 +1394,52 @@ pub struct QuerySubscription {
     pub result: String,
 }
 
+/// `query-subscription-update`: one change to a live query, delivered only
+/// to the connection that opened it, or [`QueryUpdatesLagged`].
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[serde(untagged)]
+pub enum QuerySubscriptionUpdateEvent {
+    Update(QuerySubscriptionUpdate),
+    Lagged(QueryUpdatesLagged),
+}
+
+/// The change from revision `revision - 1` to `revision` (see
+/// `perspective_instance::subscriptions::result_delta`): model results
+/// carry `ids`, `upsert` and `totalCount`; query results carry `added` and
+/// `removed` rows; a result that could not be diffed comes whole as
+/// `result`.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveQuerySubscriptionFilter {
+pub struct QuerySubscriptionUpdate {
     pub perspective_uuid: String,
     pub uuid: String,
     pub subscription_id: String,
-    pub result: String,
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub upsert: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub total_count: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub added: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Array<any>")]
+    pub removed: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "any")]
+    pub result: Option<serde_json::Value>,
 }
 
-impl GetValue for PerspectiveQuerySubscriptionFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.result.clone()
-    }
-}
-
-impl GetFilter for PerspectiveQuerySubscriptionFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.subscription_id.clone())
-    }
+/// The socket dropped updates, maybe for any of its live queries: every
+/// live query on it must resync.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct QueryUpdatesLagged {
+    #[ts(type = "true")]
+    pub lagged: bool,
 }

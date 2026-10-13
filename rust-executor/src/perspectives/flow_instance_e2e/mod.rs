@@ -13,7 +13,7 @@
 //! signed link, and eligibility is gated as-of each vote's own timestamp, so
 //! revocation only affects votes cast AFTER it — settled edges stay settled.
 
-use super::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
+use super::flow_classes::LEGACY_FLOW_CURRENT_STATE_PREDICATE;
 use super::flow_context::load_shacl_flows;
 use super::flow_evaluator::recompute_evidence_hash;
 use super::flow_evaluator_e2e::{
@@ -21,12 +21,13 @@ use super::flow_evaluator_e2e::{
 };
 use super::flow_instance::accept::{accept_flow_proposal, load_outputs, reject_flow_proposal};
 use super::flow_instance::atom::{
-    outputs_hash, OutputRef, OutputsRefusal, TransitionAtom, ACCEPTED_BY_PREDICATE, FIRED_MARK,
-    RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
+    outputs_hash, OutputRef, OutputsRefusal, TransitionAtom, ACCEPTED_BY_PREDICATE,
+    LEGACY_RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
+use super::flow_instance::replica_state::FlowReplicaState;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
@@ -51,14 +52,25 @@ fn acting_did(f: &Fixture) -> String {
     crate::agent::did_for_context(&f.ctx).expect("did_for_context")
 }
 
-/// A wrong value in this replica's OWN cache — what a stale or corrupted
-/// local `currentState` looks like. (A peer's write is a different shape,
-/// since the cache is `Local` now: see
-/// `a_peer_written_shared_cache_is_overridden_not_deleted`.)
+/// A wrong value in this agent's OWN recorded state — what a stale or
+/// corrupted entry looks like. Nobody else can write it: it is not a link
+/// (#1424).
 async fn forge_cached_state(f: &mut Fixture, state: &str) {
-    advance_flow_instance_state(&mut f.perspective, &f.instance_uri, state, None, &f.ctx)
-        .await
-        .expect("forge currentState");
+    FlowReplicaState::set_current_state(
+        &f.perspective.uuid,
+        &acting_did(f),
+        &f.instance_uri,
+        state,
+        &f.perspective.is_teardown,
+    )
+    .expect("forge the recorded state");
+}
+
+/// Forget everything this agent recorded on the fixture's perspective — the
+/// replica that has never derived this instance, as after a join or an
+/// upgrade from the `Local`-link bookkeeping.
+fn forget_bookkeeping(f: &Fixture) {
+    FlowReplicaState::remove_perspective(&f.perspective.uuid).expect("forget bookkeeping");
 }
 
 /// The evidence seal the engine would compute for `to_state` right now.
@@ -92,14 +104,21 @@ async fn propose_unverifiable(f: &mut Fixture, id: &str, from: &str, to: &str) -
         .await
 }
 
-/// A `resolved_as → "fired"` mark this replica did not derive — written
-/// `Shared`, as any member can write one on any proposal; that is precisely
-/// why the fold never reads it, and why the pass counts only `Local` marks.
+/// A fired mark on a proposal that never settled: in this agent's own table,
+/// and as the legacy `resolved_as → "fired"` link any member can still write.
+/// Neither is a fold input.
 async fn forge_fired_mark(f: &mut Fixture, proposal_uri: &str) {
+    FlowReplicaState::mark_fired(
+        &f.perspective.uuid,
+        &acting_did(f),
+        &f.instance_uri,
+        &[proposal_uri.to_string()],
+    )
+    .expect("forge a fired mark");
     f.link(
         proposal_uri,
-        RESOLVED_AS_PREDICATE,
-        &literal(FIRED_MARK),
+        LEGACY_RESOLVED_AS_PREDICATE,
+        &literal("fired"),
         LinkStatus::Shared,
     )
     .await;
@@ -219,14 +238,14 @@ async fn sync_committed_proposal_from(
     uri
 }
 
-/// A peer's `resolved_as → "fired"` mark, delivered as sync would deliver
-/// it: signed by their key, and therefore `Shared` on this replica.
+/// A peer's legacy `resolved_as → "fired"` mark link, delivered as sync
+/// would deliver it: signed by their key, and therefore `Shared` here.
 async fn sync_fired_mark_from(f: &mut Fixture, signer: &TestSigner, proposal_uri: &str) {
     let mark = signer.sign(
         Link {
             source: proposal_uri.to_string(),
-            predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
-            target: literal(FIRED_MARK),
+            predicate: Some(LEGACY_RESOLVED_AS_PREDICATE.to_string()),
+            target: literal("fired"),
         }
         .normalize(),
     );
@@ -236,13 +255,25 @@ async fn sync_fired_mark_from(f: &mut Fixture, signer: &TestSigner, proposal_uri
         .expect("sync a peer's fired mark");
 }
 
-/// Every `currentState` link on the fixture's instance, whoever wrote it.
-async fn current_state_links(f: &Fixture) -> Vec<crate::types::DecoratedLinkExpression> {
-    links_of(f, &f.instance_uri)
-        .await
-        .into_iter()
-        .filter(|l| l.data.predicate.as_deref() == Some(FLOW_CURRENT_STATE_PREDICATE))
-        .collect()
+/// Every legacy cache or mark link in the store, whoever wrote it and
+/// whatever its status. The engine writes none since #1424.
+async fn bookkeeping_links(f: &Fixture) -> Vec<crate::types::DecoratedLinkExpression> {
+    let mut found = Vec::new();
+    for predicate in [
+        LEGACY_FLOW_CURRENT_STATE_PREDICATE,
+        LEGACY_RESOLVED_AS_PREDICATE,
+    ] {
+        found.extend(
+            f.perspective
+                .get_links(&LinkQuery {
+                    predicate: Some(predicate.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links"),
+        );
+    }
+    found
 }
 
 async fn links_of(f: &Fixture, source: &str) -> Vec<crate::types::DecoratedLinkExpression> {
