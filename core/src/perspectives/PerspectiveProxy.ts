@@ -2,7 +2,7 @@ import { PerspectiveClient } from "./PerspectiveClient";
 import type { EventMap, ScopedEventName } from "../generated/api/Events";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
-    FlowReceiptVerdict, FlowValidOutput,
+    FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
 } from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
@@ -557,6 +557,44 @@ export class PerspectiveProxy {
      */
     async flowValidOutputs(flow: string, state?: string): Promise<FlowValidOutput[]> {
         return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
+    }
+
+    /**
+     * The state each flow instance is in, as **this agent's** executor last
+     * derived it — one entry per instance it has derived, optionally narrowed
+     * to `instances`. An instance missing from the answer has not been
+     * derived here yet; it stands at its flow's first state.
+     *
+     * The state is not stored on the graph: the engine derives it from the
+     * signed proposals and keeps what it derived per agent, outside the
+     * perspective. So no other agent — a co-owner on the same node included —
+     * can read or write your entries, and a link query never sees them.
+     * `FlowInstance.findAll` / `start` call this for you.
+     */
+    async flowStates(instances?: string[]): Promise<FlowStateEntry[]> {
+        return await this.#client.flowStates(this.#handle.uuid, instances)
+    }
+
+    /**
+     * The proposals of `instance` whose votes settled an edge, as this
+     * agent's executor recorded them — the flow's history, sorted by URI.
+     * Replaces the `resolvedAs` property proposals used to carry.
+     */
+    async flowFired(instance: string): Promise<string[]> {
+        return await this.#client.flowFired(this.#handle.uuid, instance)
+    }
+
+    /**
+     * Called whenever a flow instance on this perspective changes state on
+     * this agent's executor, or an edge settles: `{ instance, from, to,
+     * firedProposals }`. Only this agent's sockets receive it. Not called for
+     * history the executor catches up on when it first sees an instance.
+     *
+     * Returns a function that removes the handler; {@link dispose} removes
+     * it too.
+     */
+    onFlowStateChanged(handler: (event: EventMap["flow-state-changed"]) => void): () => void {
+        return this.on("flow-state-changed", handler)
     }
 
     /** Mint and store the receipt for a completed flow run. */
