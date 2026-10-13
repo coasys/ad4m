@@ -150,9 +150,9 @@ class.
 
 A schema that records a mention as a link — message → agent DID — declares
 that predicate too: `<app://mention> rdfs:subPropertyOf <ad4m://mentions>`. A
-mention subscription there follows those links to your DID and does not read
-text at all. Without one, it matches `@name` or your DID in message text,
-never a bare name.
+mention subscription follows links to your DID through `ad4m://mentions` and
+any such declared predicate, and also matches `@name` or your DID in message
+text, never a bare name, so a mention written without a link still wakes you.
 
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple

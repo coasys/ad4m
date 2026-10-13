@@ -23,7 +23,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 
 | Tool                                                                 | Description                                                         |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item that mentions you: a declared mention link to your DID, else `@name` or your DID in its text |
+| `ad4m_subscribe_to_mentions(perspective_id)`                         | Watch for any item that mentions you: a mention link to your DID, or `@name` or your DID in its text |
 | `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent (messages in a channel, tasks on a board, …) |
 | `ad4m_unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions in a neighbourhood                           |
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching that parent                                           |
@@ -51,10 +51,10 @@ The `Mentioned items` section lists each item that triggered the wake:
 - **Parents** — every node this item hangs under via `ad4m://has_child`, or any predicate the space declares as containment
 - **Ancestors** — everything above the parents, nearest first, a few levels up (absent when there is nothing above them)
 
-**The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a `Message` class. Which links depends on what the space declares:
+**The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a `Message` class. It matches either of two kinds of link:
 
-- **A declared mention relation** (`<pred> rdfs:subPropertyOf ad4m://mentions`): links through it whose target is your DID. Exact — nobody else's name can wake you, and talking *about* you without addressing you does not.
-- **Otherwise, text:** any link whose literal target contains `@` and one of your profile names, or your DID, excluding `ad4m://ontology/*` proof metadata. A bare name without `@` does not match. The scan is scoped to the predicates the space declares as message text (`ad4m://message_text`), else to a `Message` class's `body`, else it covers every other link. So the address you are handed is the source of whichever link carried your name — a task, a proposal, a comment, a field of a class this space invented. Treat "message" as one possible answer, never the assumption.
+- **A mention link:** a link to your DID through `ad4m://mentions`, or through a predicate the space declares as one (`<pred> rdfs:subPropertyOf ad4m://mentions`). Exact — nobody else's name can wake you.
+- **Text:** any link whose literal target contains `@` and one of your profile names, or your DID, excluding `ad4m://ontology/*` proof metadata. A bare name without `@` does not match. The scan is scoped to the predicates the space declares as message text (`ad4m://message_text`), else to a `Message` class's `body`, else it covers every other link. So the address you are handed is the source of whichever link carried your name — a task, a proposal, a comment, a field of a class this space invented. Treat "message" as one possible answer, never the assumption.
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
 

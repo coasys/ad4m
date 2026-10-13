@@ -1512,6 +1512,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Names are matched as @name, never bare
             expect(config.query).to.include('"@wakerbot"');
             expect(config.query).not.to.include('"wakerbot"');
+            // Mention links and text are watched together, so a mention
+            // written without a link still wakes the agent.
+            expect(config.mention_relations).to.deep.equal(["ad4m://mentions"]);
+            expect(config.query).to.include(" UNION ");
             // Query uses SPARQL with FILTER for mention matching
             expect(config.query).to.include("SELECT ?source ?predicate ?target WHERE");
             console.log("SPARQL query:", config.query);
