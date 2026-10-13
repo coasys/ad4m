@@ -710,6 +710,56 @@ describe("mesh roster polling edge cases", () => {
         expect(mockMeshManagerInstance.setRoster).toHaveBeenCalledWith([])
     })
 
+    it("skips a roster tick while the previous poll is still running", async () => {
+        jest.useFakeTimers()
+        try {
+            let answer: (agents: unknown[]) => void = () => {}
+            const onlineAgents = jest.fn().mockImplementation(() => new Promise((r) => { answer = r }))
+            const session = createSession(baseConfig({
+                topology: "mesh",
+                channel: fakeChannel(),
+                onlineAgents,
+            }))
+            await session.join(fakeMediaStream())
+            expect(onlineAgents).toHaveBeenCalledTimes(1)
+
+            // The first poll is still waiting: three ticks start no second one.
+            jest.advanceTimersByTime(9_000)
+            await Promise.resolve()
+            expect(onlineAgents).toHaveBeenCalledTimes(1)
+
+            answer([])
+            await Promise.resolve()
+            await Promise.resolve()
+            jest.advanceTimersByTime(3_000)
+            await Promise.resolve()
+            expect(onlineAgents).toHaveBeenCalledTimes(2)
+
+            await session.leave()
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it("drops a poll result that arrives after leave", async () => {
+        const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
+        let answer: (agents: unknown[]) => void = () => {}
+        const onlineAgents = jest.fn().mockImplementation(() => new Promise((r) => { answer = r }))
+        const session = createSession(baseConfig({
+            topology: "mesh",
+            channel: fakeChannel(),
+            onlineAgents,
+        }))
+        await session.join(fakeMediaStream())
+        await session.leave()
+        answer([])
+        await new Promise((r) => setTimeout(r, 10))
+
+        expect(mockMeshManagerInstance.setRoster).not.toHaveBeenCalled()
+        expect(consoleWarn).not.toHaveBeenCalled()
+        consoleWarn.mockRestore()
+    })
+
     it("handles onlineAgents rejection gracefully", async () => {
         const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
         const onlineAgents = jest.fn().mockRejectedValue(new Error("network error"))
