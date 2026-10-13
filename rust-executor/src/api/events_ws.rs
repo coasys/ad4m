@@ -38,6 +38,7 @@
 //! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
 //! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
 //! | `auto-processor-neighbourhood-state` | (inline) | owners                | Coarse-grained neighbourhood view of "someone is auto-processing" |
+//! | `flow-state-changed`          | (inline)      | `agentDid`, if an owner | A flow instance's state moved on that agent's replica (#1424) |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -102,6 +103,7 @@ pub fn event_specs() -> Vec<EventSpec> {
     use crate::perspectives::auto_processor::events::{
         AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     };
+    use crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent;
     use Topic::*;
     vec![
         EventSpec::of::<AgentStatusChangedEvent>(AgentStatusChanged, false),
@@ -123,6 +125,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
+        EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
     ]
 }
 
@@ -246,7 +249,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::AiModelLoadingStatus
         | Topic::PerspectiveQuerySubscription
         | Topic::AutoProcessorEvent
-        | Topic::AutoProcessorNeighbourhoodState => None,
+        | Topic::AutoProcessorNeighbourhoodState
+        | Topic::FlowStateChanged => None,
     }
 }
 
@@ -890,6 +894,50 @@ mod audience_matrix_tests {
                 ),
             ] {
                 cases.push((name.to_string(), event(topic, audience), to));
+            }
+        }
+        // A flow state change goes to the agent whose bookkeeping moved, if it owns the
+        // perspective (`matches_flow_state_agent` before): never to a co-owner or another
+        // user of this executor. It needs the query capability on its perspective, as
+        // `perspective.flowStates` does: the P reader gets the main agent's on P only.
+        {
+            use crate::perspectives::flow_instance::replica_state::{
+                state_changed_event, FlowStateChangedEvent,
+            };
+            let owners = |dids: &[&str]| dids.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+            let change = |agent: &str, on: &str| FlowStateChangedEvent {
+                perspective_uuid: on.to_string(),
+                agent_did: agent.to_string(),
+                instance: "instance".into(),
+                from: Some("a".into()),
+                to: "b".into(),
+                fired_proposals: vec![],
+                caught_up: false,
+            };
+            for (name, owners, agent, on, to) in [
+                ("of-a", owners(&[A, B]), A, Q, vec!["user A"]),
+                ("of-b", owners(&[A, B]), B, Q, vec!["user B"]),
+                ("of-a-not-owner", owners(&[B]), A, Q, vec![]),
+                (
+                    "of-main-on-p",
+                    owners(&[&main]),
+                    &main,
+                    P,
+                    [main_agent.as_slice(), &["P reader"]].concat(),
+                ),
+                (
+                    "of-main-on-q",
+                    owners(&[&main]),
+                    &main,
+                    Q,
+                    main_agent.to_vec(),
+                ),
+                ("unknown", vec![], A, Q, vec![]),
+            ] {
+                let e = state_changed_event(&owners, &change(agent, on));
+                assert_eq!(e.topic, Topic::FlowStateChanged);
+                assert_eq!(e.perspective.as_deref(), Some(on));
+                cases.push((format!("flow-state-changed-{name}"), e, to));
             }
         }
         // Exceptions go per type (`exception_visible` before): approval requests to the main
@@ -2236,6 +2284,17 @@ mod event_spec_tests {
                 "k",
                 NeighbourhoodPhase::Claimed,
             )),
+            uuid_of(
+                crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent {
+                    perspective_uuid: p(),
+                    agent_did: "did:x".into(),
+                    instance: "i".into(),
+                    from: Some("a".into()),
+                    to: "b".into(),
+                    fired_proposals: vec![],
+                    caught_up: false,
+                },
+            ),
         ];
         assert!(scoped.iter().all(|u| u == "p"));
     }
