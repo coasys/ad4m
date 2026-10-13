@@ -1509,6 +1509,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(config.query).to.be.a('string');
             expect(config.query).to.include("CONTAINS");
             expect(config.query).to.include("LCASE");
+            // Names are matched as @name, never bare
+            expect(config.query).to.include('"@wakerbot"');
+            expect(config.query).not.to.include('"wakerbot"');
             // Query uses SPARQL with FILTER for mention matching
             expect(config.query).to.include("SELECT ?source ?predicate ?target WHERE");
             console.log("SPARQL query:", config.query);
