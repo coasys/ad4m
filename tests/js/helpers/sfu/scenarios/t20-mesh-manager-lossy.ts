@@ -58,7 +58,7 @@ const CONNECT_TIMEOUT_MS = 90_000;
  * - both run on one operations chain, so a description applied while an offer
  *   is being created waits its turn instead of racing it.
  */
-function specPeerConnection(configuration: RTCConfiguration): RTCPeerConnection {
+export function specPeerConnection(configuration: RTCConfiguration): RTCPeerConnection {
   // Host candidates only: the agents share a machine, and CI has no STUN route.
   const pc = new wrtc.RTCPeerConnection({ ...configuration, iceServers: [] });
   const setLocal = pc.setLocalDescription.bind(pc);
@@ -188,7 +188,7 @@ interface Agent {
   sinks: any[];
 }
 
-function syntheticAudio(toneHz: number): { stream: MediaStream; stop: () => void } {
+export function syntheticAudio(toneHz: number): { stream: MediaStream; stop: () => void } {
   const source = new wrtc.nonstandard.RTCAudioSource();
   const track = source.createTrack();
   const sampleRate = 48_000;

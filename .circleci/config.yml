@@ -740,6 +740,10 @@ jobs:
       - setup_integration_test_environment:
           build_binaries: true
       - run:
+          # T21 runs calls in real neighbourhoods, so it needs the test languages published.
+          name: Prepare the test languages
+          command: cd ./tests/js && pnpm run prepare-test
+      - run:
           name: Run SFU wind tunnel tests
           command: cd ./tests/js && pnpm run test-sfu
           no_output_timeout: 30m

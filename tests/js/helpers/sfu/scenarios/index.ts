@@ -20,6 +20,7 @@ export { t17SessionDataChannel } from "./t17-session-data-channel.js";
 export { t18MeshSessionLifecycle } from "./t18-mesh-session-lifecycle.js";
 export { t19MeshDataChannel } from "./t19-mesh-data-channel.js";
 export { t20MeshManagerLossy } from "./t20-mesh-manager-lossy.js";
+export { t21ColocatedCall } from "./t21-colocated-call.js";
 
 // WebRTC mesh baselines
 export { w1Mesh2Peer } from "./w1-mesh-2peer.js";

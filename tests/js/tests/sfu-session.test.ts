@@ -5,6 +5,7 @@ import {
   t18MeshSessionLifecycle,
   t19MeshDataChannel,
   t20MeshManagerLossy,
+  t21ColocatedCall,
 } from "../helpers/sfu/scenarios/index.js";
 
 describe("SFU: Session surface", function () {
@@ -15,4 +16,6 @@ describe("SFU: Session surface", function () {
   sfuScenario(t18MeshSessionLifecycle);
   sfuScenario(t19MeshDataChannel);
   sfuScenario(t20MeshManagerLossy);
+  // Starts two executors with Holochain and the prepared test languages.
+  sfuScenario(t21ColocatedCall, 900_000);
 });
