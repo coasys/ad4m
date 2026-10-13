@@ -183,7 +183,10 @@ async fn a_default_graph_local_vote_counts_for_nothing() {
 
     let (mut f, proposal) = bobs_proposal_with_alices_default_graph_vote().await;
     let fired = consensus_pass(&mut f).await;
-    assert!(fired.is_empty(), "a default-graph Local vote fired: {fired:?}");
+    assert!(
+        fired.is_empty(),
+        "a default-graph Local vote fired: {fired:?}"
+    );
     assert_eq!(f.derived().await.state, "identified");
 
     let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
