@@ -1797,6 +1797,40 @@ impl PerspectiveInstance {
         Ok(result)
     }
 
+    /// The stored copy of `requested` that a removal or an update acts on.
+    ///
+    /// One signed expression can sit in more than one graph: the reifier IRI
+    /// leaves the graph out, so the same expression added to the default graph
+    /// and to a named graph is stored twice. With one copy, that copy. With
+    /// several, the one in the graph the request names (none = the default
+    /// graph), else an error: acting on whichever copy the store returns first
+    /// could remove the link from a graph the caller did not name.
+    fn stored_copy(
+        &self,
+        requested: &LinkExpression,
+    ) -> Result<Option<DecoratedLinkExpression>, AnyError> {
+        let mut copies = self.sparql_store.get_link_copies(
+            &requested.data.source,
+            requested.data.predicate.as_deref(),
+            &requested.data.target,
+            &requested.author,
+            &requested.timestamp,
+        )?;
+        if copies.len() <= 1 {
+            return Ok(copies.pop());
+        }
+        copies
+            .into_iter()
+            .find(|c| c.graph == requested.graph)
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Link is stored in more than one graph, none of them {}",
+                    requested.graph.as_deref().unwrap_or("the default graph")
+                )
+            })
+    }
+
     pub async fn remove_link(
         &mut self,
         link_expression: LinkExpression,
@@ -1811,16 +1845,8 @@ impl PerspectiveInstance {
 
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
             let decorated_link = self
-                .sparql_store
-                .get_link(
-                    &link_expression.data.source,
-                    link_expression.data.predicate.as_deref(),
-                    &link_expression.data.target,
-                    &link_expression.author,
-                    &link_expression.timestamp,
-                )?
+                .stored_copy(&link_expression)?
                 .ok_or(anyhow!("Link not found"))?;
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
@@ -1831,14 +1857,7 @@ impl PerspectiveInstance {
         } else {
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
-                &link_expression.data.source,
-                link_expression.data.predicate.as_deref(),
-                &link_expression.data.target,
-                &link_expression.author,
-                &link_expression.timestamp,
-            )? {
+            if let Some(decorated_link) = self.stored_copy(&link_expression)? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
@@ -2219,16 +2238,7 @@ impl PerspectiveInstance {
         }
         let handle = self.persisted.lock().await.clone();
 
-        // Query SPARQL store
-        let decorated_link_option = self.sparql_store.get_link(
-            &old_link.data.source,
-            old_link.data.predicate.as_deref(),
-            &old_link.data.target,
-            &old_link.author,
-            &old_link.timestamp,
-        )?;
-
-        let (_link, link_status) = match decorated_link_option {
+        let (_link, link_status) = match self.stored_copy(&old_link)? {
             Some(decorated) => {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
                 (LinkExpression::from(decorated), status)
@@ -2355,14 +2365,7 @@ impl PerspectiveInstance {
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
-                &link.data.source,
-                link.data.predicate.as_deref(),
-                &link.data.target,
-                &link.author,
-                &link.timestamp,
-            )? {
+            if let Some(decorated_link) = self.stored_copy(&link)? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));
@@ -6946,6 +6949,113 @@ mod tests {
             target: format!("https://{}.org", Faker.fake::<String>()),
             predicate: Some(format!("https://{}.net", Faker.fake::<String>())),
         }
+    }
+
+    /// One signed expression stored in the default graph (Shared) and in a
+    /// named graph (Local status). The reifier IRI leaves the graph out, so
+    /// both copies share it.
+    async fn one_expression_in_two_graphs(
+        perspective: &mut PerspectiveInstance,
+        source: &str,
+        graph: &str,
+    ) -> LinkExpression {
+        let added = perspective
+            .add_link(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some("test://p".to_string()),
+                    target: "test://o".to_string(),
+                },
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut in_graph = LinkExpression::from(added);
+        in_graph.graph = Some(graph.to_string());
+        in_graph.status = Some(LinkStatus::Local);
+        perspective.sparql_store.add_link(&in_graph).unwrap();
+        in_graph.graph = None;
+        in_graph.status = None;
+        in_graph
+    }
+
+    fn graphs_of(perspective: &PerspectiveInstance, source: &str) -> Vec<Option<String>> {
+        let mut graphs: Vec<Option<String>> = perspective
+            .sparql_store
+            .query_links(Some(source), None, None, None, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.graph)
+            .collect();
+        graphs.sort();
+        graphs
+    }
+
+    /// With one expression in two graphs, a removal or an update acts on the
+    /// copy in the graph the request names (none = the default graph), never on
+    /// whichever copy the store returns first.
+    #[tokio::test]
+    async fn an_expression_in_two_graphs_is_removed_and_updated_where_the_request_names() {
+        let mut p = setup().await;
+        let g = "ad4m://graph/two-copies".to_string();
+
+        // Remove the named-graph copy: the default-graph one stays.
+        let expr = one_expression_in_two_graphs(&mut p, "test://a", &g).await;
+        let mut named = expr.clone();
+        named.graph = Some(g.clone());
+        let removed = p.remove_link(named, None).await.unwrap();
+        assert_eq!(removed.status, Some(LinkStatus::Local));
+        assert_eq!(graphs_of(&p, "test://a"), vec![None]);
+
+        // Remove naming no graph: the default-graph copy goes.
+        let expr = one_expression_in_two_graphs(&mut p, "test://b", &g).await;
+        let removed = p.remove_link(expr, None).await.unwrap();
+        assert_eq!(removed.status, Some(LinkStatus::Shared));
+        assert_eq!(graphs_of(&p, "test://b"), vec![Some(g.clone())]);
+
+        // The same in a batch.
+        let expr = one_expression_in_two_graphs(&mut p, "test://c", &g).await;
+        let mut named = expr.clone();
+        named.graph = Some(g.clone());
+        let batch = p.create_batch().await;
+        p.remove_link(named, Some(batch.clone())).await.unwrap();
+        p.commit_batch(batch, &AgentContext::main_agent())
+            .await
+            .unwrap();
+        assert_eq!(graphs_of(&p, "test://c"), vec![None]);
+
+        // remove_links, naming the graph.
+        let expr = one_expression_in_two_graphs(&mut p, "test://d", &g).await;
+        let mut named = expr.clone();
+        named.graph = Some(g.clone());
+        let removed = p.remove_links(vec![named], None).await.unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].status, Some(LinkStatus::Local));
+        assert_eq!(graphs_of(&p, "test://d"), vec![None]);
+
+        // Update the named-graph copy: the new link takes that copy's status
+        // and the default-graph copy is untouched.
+        let expr = one_expression_in_two_graphs(&mut p, "test://e", &g).await;
+        let mut named = expr.clone();
+        named.graph = Some(g.clone());
+        let updated = p
+            .update_link(
+                named,
+                Link {
+                    source: "test://e-new".to_string(),
+                    predicate: Some("test://p".to_string()),
+                    target: "test://o".to_string(),
+                },
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.status, Some(LinkStatus::Local));
+        assert_eq!(graphs_of(&p, "test://e"), vec![None]);
     }
 
     /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
