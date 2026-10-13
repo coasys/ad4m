@@ -1,0 +1,61 @@
+name: Publish snapshot packages
+
+# Every push to `dev` and every pull request publishes `@coasys/ad4m` and `@coasys/ad4m-connect`
+# to pkg.pr.new, as a snapshot installable by URL:
+#
+#   pnpm add https://pkg.pr.new/@coasys/ad4m@<commit>
+#
+# A snapshot is not an npm release. Nothing reaches the npm registry, no version or tag moves, and
+# `npm install @coasys/ad4m` is unchanged. Releases stay with `publish_staging.yml` and
+# `publish.yml`. Snapshots let an app test and adopt a change to these packages minutes after it
+# merges, without waiting for the next staging release, and without building ad4m from source.
+#
+# Needs the pkg.pr.new GitHub App installed on this repository. Until it is, the publish step fails.
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+
+# A newer commit on the same branch or PR supersedes a run still in progress.
+concurrency:
+  group: publish-snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    # Only branches of this repository. A pull request from a fork would publish its code under
+    # this repository's name.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # pkg.pr.new authenticates the run through its GitHub App, not this token.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --no-frozen-lockfile
+
+      # The same build as the npm release in `publish_staging.yml`: core, then connect.
+      - name: Build modules
+        run: pnpm run build-npm-packages
+
+      # Both packages in one call, so connect's `workspace:` dependency on core is rewritten to the
+      # core snapshot from this same commit rather than to a released version. `--pnpm` packs with
+      # `pnpm pack`, which, unlike `npm pack`, resolves `workspace:` specifiers (#1217).
+      # `--commentWithSha` makes the PR comment link the commit's snapshot, which never changes,
+      # rather than the PR's, which moves with every push.
+      - name: Publish to pkg.pr.new
+        run: pnpm dlx pkg-pr-new@0.0.88 publish --pnpm --commentWithSha ./core ./connect
