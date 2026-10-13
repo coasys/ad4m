@@ -3,9 +3,10 @@
  *
  * Covers: ModelQueryBuilder.subscribe() initial callback, SPARQL live-query
  * re-fire on link-added and link-removed, dispose() stopping callbacks,
- * countSubscribe(), parent-scoped subscriptions, and the writes on related
- * records that re-run a subscription (#1237: includes, `where` filters and
- * quantifiers, dotted order keys, `producedByFlow`).
+ * countSubscribe(), parent-scoped subscriptions, re-opening after the
+ * client's socket reconnects, and the writes on related records that re-run
+ * a subscription (#1237: includes, `where` filters and quantifiers, dotted
+ * order keys, `producedByFlow`).
  *
  * Adapted from PR #694 subscription tests for our SPARQL-based subscription
  * system (ModelQueryBuilder.subscribe / countSubscribe / dispose).
@@ -28,7 +29,7 @@ import {
 } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
-import { wipePerspective } from "../../utils/utils.js";
+import { baseUrl, wipePerspective } from "../../utils/utils.js";
 import { TestComment, TestPost, TestReaction, TestTag, TestChannel } from "./models.js";
 
 // ── producedByFlow models (section 9) ────────────────────────────────────────
@@ -76,15 +77,18 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
 
   let ownStop: (() => Promise<void>) | null = null;
   let ad4m: Ad4mClient;
+  let apiPort: number;
   let perspective: PerspectiveProxy;
 
   before(async () => {
     const shared = getSharedAgent();
     if (shared) {
       ad4m = shared.client;
+      apiPort = shared.apiPort;
     } else {
       const agent = await startAgent("model-subscriptions");
       ad4m = agent.client;
+      apiPort = agent.apiPort;
       ownStop = agent.stop;
     }
     perspective = await ad4m.perspective.add("model-subscriptions-test");
@@ -208,6 +212,44 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
 
     const afterCount = await TestPost.query(perspective).count();
     expect(afterCount).to.equal(initialCount + 1);
+  });
+
+  // ── 5b. Reconnect ─────────────────────────────────────────────────────────
+
+  it("subscribe() keeps updating after the client's socket closes and reconnects", async () => {
+    // A second client whose sockets the test can reach through the public
+    // `webSocketImpl` option.
+    const sockets: WebSocket[] = [];
+    class TrackedWebSocket extends WebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    }
+    const client = new Ad4mClient(baseUrl(apiPort), undefined, { webSocketImpl: TrackedWebSocket });
+    const builder = TestPost.query((await client.perspective.byUUID(perspective.uuid))!);
+    try {
+      const all: TestPost[][] = [];
+      await builder.subscribe((r) => all.push(r));
+      expect(sockets).to.have.length(1);
+
+      sockets[0].close();
+      await waitUntil(
+        () => sockets.length === 2 && sockets[1].readyState === WebSocket.OPEN,
+        15_000,
+        "client reconnects",
+      );
+
+      const post = await TestPost.create(perspective, { title: "After Reconnect", body: "" });
+      await waitUntil(
+        () => all.some((batch) => batch.some((p) => p.id === post.id)),
+        15_000,
+        "subscription re-fires after the reconnect",
+      );
+    } finally {
+      builder.dispose();
+      client.close();
+    }
   });
 
   // ── 6. @HasMany relation changes trigger re-fire ──────────────────────────
