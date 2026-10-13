@@ -560,14 +560,15 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .auth_info
         .try_into()
         .map_err(|e: String| WsRpcError::bad_request(e))?;
-    crate::agent::capabilities::check_auth_info_bounds(&auth_info)
-        .map_err(WsRpcError::bad_request)?;
     // Dev-mode auto-permit speaks for the operator, who owns only the main agent: a request
     // on a managed agent always waits for that agent's owner (#1399).
     let operator_owns_target = target.is_main_agent();
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone(), target)
         .await
-        .map_err(WsRpcError::internal)?;
+        .map_err(|e| match e {
+            RequestCapabilityError::Invalid(e) => WsRpcError::bad_request(e),
+            RequestCapabilityError::Busy(e) => WsRpcError::too_many_requests(e),
+        })?;
 
     if operator_owns_target && crate::config::auto_permit_cap_requests() {
         log::debug!(
@@ -1811,6 +1812,26 @@ mod capability_request_tests {
         )
         .await
         .expect("the user default capabilities are taken");
+    }
+
+    // A store with no request that may go refuses a new one: the app may try again later, so
+    // the answer is 429, not a 500 that reads as the executor's fault.
+    #[tokio::test]
+    async fn a_request_to_a_full_store_is_429() {
+        setup();
+        let refused = {
+            let _full =
+                crate::agent::capabilities::pending::PendingRequests::global().fill_for_test();
+            call(
+                "agent.requestCapability",
+                json!({ "authInfo": auth_info(&[AGENT_READ_CAPABILITY.clone()]) }),
+                anonymous(),
+            )
+            .await
+        };
+        let err = refused.unwrap_err();
+        assert_eq!(err.0, 429, "{}", err.1);
+        assert!(err.1.contains("Too many capability requests"), "{}", err.1);
     }
 
     // D16: an email resolves to its user's DID at the edge. An email no user has is taken

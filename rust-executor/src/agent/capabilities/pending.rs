@@ -362,6 +362,43 @@ impl PendingRequests {
     fn len(&self) -> usize {
         self.lock().len()
     }
+
+    /// Sets the requests aside and fills the store with [`MAX_PENDING_REQUESTS`] approved
+    /// requests for no agent, which nothing evicts, so the next request is refused. The
+    /// requests set aside return when the guard drops. Requests other tests make meanwhile
+    /// are refused too, so a test holds the guard only around its own call.
+    #[cfg(test)]
+    pub fn fill_for_test(&'static self) -> FullStoreGuard {
+        let filled = (0..MAX_PENDING_REQUESTS)
+            .map(|i| {
+                let request = PendingRequest {
+                    auth: AuthInfo::default(),
+                    target: RequestTarget::NoAgent,
+                    code: Some(Secret::new("123456")),
+                    attempts: 0,
+                    seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
+                    expires_at: u64::MAX,
+                };
+                (format!("filled-{i}"), request)
+            })
+            .collect();
+        let aside = std::mem::replace(&mut *self.lock(), filled);
+        FullStoreGuard { store: self, aside }
+    }
+}
+
+/// See [`PendingRequests::fill_for_test`].
+#[cfg(test)]
+pub struct FullStoreGuard {
+    store: &'static PendingRequests,
+    aside: HashMap<String, PendingRequest>,
+}
+
+#[cfg(test)]
+impl Drop for FullStoreGuard {
+    fn drop(&mut self) {
+        *self.store.lock() = std::mem::take(&mut self.aside);
+    }
 }
 
 #[cfg(test)]
