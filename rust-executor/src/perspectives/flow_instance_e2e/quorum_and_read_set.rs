@@ -71,6 +71,65 @@ async fn n2_second_signer_accept_settles_and_replays() {
     assert!(format!("{err:#}").contains("stale"), "got {err:#}");
 }
 
+/// The settling accept must return the fire even when this replica has never
+/// derived the instance: no `Local` cache, so the pass after the vote would
+/// otherwise be `first_pass_here` and return nothing. That is Bob's accept
+/// in CI job 43034 — the debounced sync pass had not written his cache yet,
+/// and Alice's later sync pass was the one that logged the settle.
+///
+/// Red without the catch-up before the vote: `fired` is empty. No sleep.
+/// The cache the mint wrote is removed, and dropping it does not queue a
+/// pass that could rewrite it before the accept.
+#[tokio::test(flavor = "multi_thread")]
+async fn settling_accept_with_no_local_cache_returns_the_fire() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let proposal = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    // Let any definition sweep the rule change queued finish, then drop the
+    // cache it (or the mint) wrote. Accept is then this replica's first
+    // derivation of the instance.
+    f.perspective.settle_flow_passes().await;
+    let cached: Vec<_> = super::current_state_links(&f)
+        .await
+        .into_iter()
+        .filter(|l| l.status == Some(LinkStatus::Local))
+        .collect();
+    assert!(
+        !cached.is_empty(),
+        "precondition: the mint left a Local cache to drop"
+    );
+    for link in cached {
+        f.perspective
+            .remove_link(link.into(), None)
+            .await
+            .expect("drop local cache");
+    }
+    assert!(
+        super::current_state_links(&f)
+            .await
+            .iter()
+            .all(|l| l.status != Some(LinkStatus::Local)),
+        "precondition: no Local cache"
+    );
+
+    let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect("accept must land this replica's vote and sweep");
+    assert_eq!(
+        fired.len(),
+        1,
+        "the settling vote's call returns the fire, not the later sync pass: {fired:?}"
+    );
+    assert_eq!(fired[0].from_state, "identified");
+    assert_eq!(fired[0].to_state, "scoped");
+    assert!(fired[0].voters.contains(&bob.did));
+    assert!(fired[0].voters.contains(&acting_did(&f)));
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
 /// The read-set travels: serialise everything the engine read, fold the JSON
 /// back on a machine with no perspective, and reach the same verdict. This is
 /// what a minted Synergy token would carry as its backing — signed links for
