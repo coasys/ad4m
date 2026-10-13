@@ -242,6 +242,7 @@ export interface RpcMethods {
   "neighbourhood.join": { params: JoinNeighbourhoodRequest; result: PerspectiveHandle };
   "neighbourhood.onlineAgents": { params: NeighbourhoodUuidParams; result: Array<OnlineAgent> };
   "neighbourhood.otherAgents": { params: NeighbourhoodUuidParams; result: Array<string> };
+  "neighbourhood.ownOnlineStatus": { params: NeighbourhoodUuidParams; result: PerspectiveExpression | null };
   "neighbourhood.publish": { params: PublishNeighbourhoodRequest; result: string };
   "neighbourhood.sendBroadcast": { params: NeighbourhoodBroadcastParams; result: boolean };
   "neighbourhood.sendSignal": { params: NeighbourhoodSignalParams; result: boolean };
@@ -399,6 +400,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "neighbourhood.hasTelepresence",
   "neighbourhood.onlineAgents",
   "neighbourhood.otherAgents",
+  "neighbourhood.ownOnlineStatus",
   "perspective.all",
   "perspective.evaluateGetters",
   "perspective.flowFired",

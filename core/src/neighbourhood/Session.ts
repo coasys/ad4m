@@ -95,7 +95,10 @@ interface SessionImplConfig {
     channel?: SignallingChannel
     /** Publish call-presence via telepresence.  The session broadcasts
      *  membership so other agents' roster polls can discover it. */
-    setOnlineStatus?: (status: { links: { source: string; predicate: string; target: string }[] }) => Promise<boolean>
+    setOnlineStatus?: (status: { links: StatusLink[] }) => Promise<boolean>
+    /** This agent's current online status. The session adds its presence
+     *  link to it and takes it out again, leaving the app's own links. */
+    ownOnlineStatus?: () => Promise<{ data?: { links?: { data?: Partial<StatusLink> }[] } } | null>
     /** Poll for agents currently online in the neighbourhood.  The
      *  session reconciles the result against its mesh connections. */
     onlineAgents?: () => Promise<OnlineAgent[]>
@@ -116,6 +119,8 @@ interface SessionImplConfig {
  */
 const CALL_PRESENCE_PREDICATE = "ad4m://session/in-call"
 
+type StatusLink = { source: string; predicate?: string; target: string }
+
 /** How often (ms) the mesh session polls `onlineAgents` for roster changes. */
 const ROSTER_POLL_INTERVAL_MS = 3_000
 
@@ -123,7 +128,7 @@ export function createSession(config: SessionImplConfig): Session {
     const {
         api, roomId, agentDid, neighbourhoodUrl,
         topology, sfuConfig, iceServers,
-        channel, setOnlineStatus, onlineAgents,
+        channel, setOnlineStatus, ownOnlineStatus, onlineAgents,
         localSfuStatus, sfuServesAllMembers,
     } = config
 
@@ -175,19 +180,55 @@ export function createSession(config: SessionImplConfig): Session {
 
     // ── Mesh roster polling ─────────────────────────────────────────
 
+    /** The app's links in this agent's status when the call started — what
+     *  leaving restores if the status cannot be read then. */
+    let statusBeforeCall: StatusLink[] = []
+    let announced = false
+
+    /** This agent's status links, without this call's presence link. */
+    async function ownLinksWithoutCall(): Promise<StatusLink[]> {
+        const status = ownOnlineStatus ? await ownOnlineStatus() : null
+        const links: StatusLink[] = []
+        for (const link of status?.data?.links ?? []) {
+            const l = link.data
+            if (!l?.source || l.target === undefined) continue
+            if (l.predicate === CALL_PRESENCE_PREDICATE && l.target === roomId) continue
+            links.push({ source: l.source, target: l.target, ...(l.predicate ? { predicate: l.predicate } : {}) })
+        }
+        return links
+    }
+
     /**
-     * Announce this agent's call membership via telepresence presence.
-     * Other agents' roster polls will pick this up.
+     * Add this call's presence link to the agent's online status. Other
+     * agents' roster polls pick it up.
      */
     async function announceCallPresence(): Promise<void> {
         if (!setOnlineStatus) return
         try {
-            const links: { source: string; predicate: string; target: string }[] = [
-                { source: agentDid, predicate: CALL_PRESENCE_PREDICATE, target: roomId },
-            ]
-            await setOnlineStatus({ links })
+            statusBeforeCall = await ownLinksWithoutCall().catch((err) => {
+                console.warn("session: reading own status failed:", err)
+                return []
+            })
+            const presence = { source: agentDid, predicate: CALL_PRESENCE_PREDICATE, target: roomId }
+            await setOnlineStatus({ links: [...statusBeforeCall, presence] })
+            announced = true
         } catch (err) {
             console.warn("session: call-presence announcement failed:", err)
+        }
+    }
+
+    /** Take this call's presence link out of the agent's status again. */
+    async function withdrawCallPresence(): Promise<void> {
+        if (!setOnlineStatus || !announced) return
+        announced = false
+        try {
+            const links = await ownLinksWithoutCall().catch((err) => {
+                console.warn("session: reading own status failed:", err)
+                return statusBeforeCall
+            })
+            await setOnlineStatus({ links })
+        } catch (err) {
+            console.warn("session: withdrawing call presence failed:", err)
         }
     }
 
@@ -356,6 +397,7 @@ export function createSession(config: SessionImplConfig): Session {
             if (state !== "active") return
             setState("leaving")
             stopRosterPolling()
+            await withdrawCallPresence()
             if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
             if (meshManager) { await meshManager.leave(); meshManager = null }
             if (sfuManager) { await sfuManager.leave(); sfuManager = null }

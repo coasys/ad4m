@@ -4624,6 +4624,13 @@ impl PerspectiveInstance {
             .collect()
     }
 
+    /// The online status `did` last set in this neighbourhood on this
+    /// executor, if any.
+    pub async fn online_status_of(&self, did: &str) -> Option<PerspectiveExpression> {
+        let neighbourhood = self.persisted.lock().await.shared_url.clone()?;
+        hosted_status::status_of(&neighbourhood, did)
+    }
+
     /// Set `status` as its author's online status in this neighbourhood.
     ///
     /// The link language holds one status for this whole node, shared by every
