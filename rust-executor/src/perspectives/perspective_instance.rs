@@ -6601,6 +6601,11 @@ impl PerspectiveInstance {
             // Model subscriptions match each written link against their
             // trigger (see `subscription_triggers`), not the predicate alone.
             if let (Some(params), Some(writes)) = (&model_params, writes) {
+                // The lookups read as the subscriber, not in `graph_scope`, on
+                // purpose: one memo serves all of a subscriber's subscriptions.
+                // A subscription limited to a shared graph can then re-run on
+                // a flag in its subscriber's own Local graph. That costs a
+                // re-run, never a wrong result: the query runs in its scope.
                 let lookups = trigger_lookups
                     .entry(subscriber_did.clone())
                     .or_insert_with(|| {
