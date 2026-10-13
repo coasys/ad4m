@@ -775,6 +775,7 @@ mod tests {
             user_email: Some("alice@example.com".into()),
             user_did: did.map(String::from),
             cancel_token: None,
+            connection_id: None,
         };
         assert_eq!(caller_did(&user(None)).unwrap_err().code, 401);
         assert_eq!(
