@@ -2,8 +2,10 @@
 import type { IceServer } from "./IceServer";
 
 /**
- * A neighbourhood's call configuration, stored as a link in the
- * neighbourhood (see `sfu::config_store`).
+ * A neighbourhood's call configuration. Only `mode` and
+ * `maxMeshParticipants` are stored in the neighbourhood (see
+ * `sfu::config_store`); `sfu.getConfig` fills the node fields from the
+ * executor, and `sfu.setConfig` refuses them and `iceServers`.
  */
 export type SfuConfig = { 
 /**
@@ -11,7 +13,8 @@ export type SfuConfig = {
  */
 mode: "mesh" | "designated" | "gateway" | "cascaded", 
 /**
- * DID of the designated SFU peer (only used when `mode = "designated"`).
+ * Not stored, and `sfu.setConfig` refuses it: a client always joins
+ * its own executor's SFU.
  */
 designatedPeer?: string, 
 /**
@@ -23,26 +26,28 @@ fallback: "mesh" | "designated" | "gateway" | "cascaded",
  */
 maxMeshParticipants: number, 
 /**
- * DIDs of SFU peers in cascaded mode.
+ * This node's cascade peers (`--sfu-cascade-peers`), as
+ * `sfu.getConfig` reports them. Not stored in the neighbourhood.
  */
 sfuPeers?: Array<string>, 
 /**
- * Max participants per SFU node in cascaded mode.
+ * This node's capacity in a cascade (`--sfu-max-participants-per-node`),
+ * as `sfu.getConfig` reports it. Not stored in the neighbourhood.
  */
 maxParticipantsPerNode?: number, 
 /**
- * DID of the preferred SFU node in cascaded mode.  The cascade
- * manager routes new joins to this node first; overflow spills to
- * other nodes only when the preferred one reaches capacity.
- * Useful when a powerful hosted multi-user node serves most
- * participants and lighter personal executors act as fallbacks.
+ * The cascade node that takes redirected joins first
+ * (`--sfu-preferred-node`); overflow spills to other nodes only when
+ * it reaches capacity. Useful when a powerful hosted multi-user node
+ * serves most participants and lighter personal executors act as
+ * fallbacks. As `sfu.getConfig` reports it; not stored in the
+ * neighbourhood.
  */
 preferredSfuDid?: string, 
 /**
- * ICE servers (STUN + TURN) the SFU advertises to clients.  Empty
- * means "use whatever defaults the client ships with".  Clients
- * MUST treat this as authoritative when present — running the
- * TURN credential lifecycle from the SFU lets the host application
- * rotate keys without redeploying clients.
+ * ICE servers (STUN + TURN) for the SFU path, when an app passes this
+ * config to `createSession`. Never stored in the neighbourhood, where
+ * every member would sync every credential: `sfu.setConfig` refuses
+ * it and `sfu.getConfig` leaves it empty.
  */
 iceServers?: Array<IceServer>, };

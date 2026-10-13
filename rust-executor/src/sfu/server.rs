@@ -206,6 +206,10 @@ pub struct SfuServerConfig {
     /// STUN server (`host:port`) for the startup reachability probe; `None`
     /// skips it. See [`check_reachability`](super::reachability::check_reachability).
     pub stun_server: Option<String>,
+    /// DID of the cascade node that takes redirected joins first.
+    pub preferred_node: Option<String>,
+    /// DIDs of the configured cascade peers, as `sfu.getConfig` reports them.
+    pub cascade_peer_dids: Vec<String>,
 }
 
 impl Default for SfuServerConfig {
@@ -215,6 +219,8 @@ impl Default for SfuServerConfig {
         Self {
             bind_addr: SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 0),
             stun_server: None,
+            preferred_node: None,
+            cascade_peer_dids: Vec::new(),
         }
     }
 }

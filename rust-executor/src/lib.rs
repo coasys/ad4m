@@ -580,6 +580,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         let sfu_config = crate::sfu::server::SfuServerConfig {
             bind_addr: std::net::SocketAddr::new(bind_ip, 0),
             stun_server: config.sfu_stun_server.clone(),
+            preferred_node: config.sfu_preferred_node.clone(),
+            cascade_peer_dids: config
+                .sfu_cascade_peers
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|entry| entry.split_once('=').map(|(did, _)| did.to_string()))
+                .collect(),
         };
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
             Ok(svc) => info!(

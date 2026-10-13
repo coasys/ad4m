@@ -289,6 +289,14 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub sfu_stun_server: Option<String>,
+    /// DID of the cascade node that takes redirected joins first; others
+    /// get joins only when it is full. Unset: the least-loaded node.
+    #[arg(
+        long,
+        env = "AD4M_SFU_PREFERRED_NODE",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_preferred_node: Option<String>,
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -408,6 +416,7 @@ impl RunArgs {
         config.sfu_cascade_peers = self.sfu_cascade_peers;
         config.sfu_bind_addr = self.sfu_bind_addr;
         config.sfu_stun_server = self.sfu_stun_server;
+        config.sfu_preferred_node = self.sfu_preferred_node;
         Ok(ResolvedRun {
             config,
             unlock_passphrase: secrets.unlock_passphrase,
@@ -957,7 +966,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 36, "every flag of run has a variable");
+        assert_eq!(checked, 37, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
