@@ -6,11 +6,17 @@
  * Wraps two on-graph objects:
  *
  *   - `FlowInstanceRecord` — the raw @Model row minted by
- *     {@link FlowInstance.start}; carries `flow`, `subject`, `currentState`,
- *     and Ad4mModel's synthesised `createdAt`.
+ *     {@link FlowInstance.start}; carries `flowUri`, `subject` and
+ *     Ad4mModel's synthesised `createdAt`. Not the state: see below.
  *   - `SHACLFlow` — the flow definition the record is bound to. Held so
  *     `availableTransitions` / `currentState` object lookups don't require
  *     a per-call round-trip.
+ *
+ * The state is derived by the executor from the signed proposals and kept
+ * per agent outside the graph (#1424). The factories read it with one
+ * batched `PerspectiveProxy.flowStates` call, so `currentStateName` is the
+ * state as **this agent's** executor last derived it, at load time.
+ * Subscribe with `PerspectiveProxy.onFlowStateChanged` to follow it.
  *
  * Construct via the class factories — {@link FlowInstance.start} for the
  * mint path and {@link FlowInstance.findAll} for the read path — rather
@@ -23,7 +29,7 @@
  * - `uri`, `subject`, `flowName`, `currentStateName`, `startedAtMillis`
  *   accessors.
  * - `currentState` — resolves the `FlowState` on the shape whose name
- *   matches `record.currentState`.
+ *   matches `currentStateName`.
  * - `availableTransitions` — filters `shape.transitions` by `fromState`.
  * - `proposals()` — queries `FlowTransitionProposal` records that
  *   target this instance's URI.
@@ -41,9 +47,9 @@
  *   Its `FlowProposeResult` is what tells queued from no-op from stalled.
  *
  * Still absent (rather than shipped as `throw new Error("not yet")`
- * stubs): `fireAction`, and the subscriptions (`onStateChange`,
- * `onProposalAdded`, `onProposalResolved`) — they land with the
- * subscription-topic slice.
+ * stubs): `fireAction`, and per-instance subscriptions (`onProposalAdded`,
+ * `onProposalResolved`). State changes are perspective-wide:
+ * `PerspectiveProxy.onFlowStateChanged`.
  *
  * ## The guard-free rule
  *
@@ -60,6 +66,19 @@ import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+
+/** One instance this agent's executor keeps bookkeeping for — an entry of
+ *  `PerspectiveProxy.flowStates()`. An instance with no entry has never been
+ *  derived nor minted by this agent here. */
+export interface FlowStateEntry {
+  instance: string;
+  /** The state this agent's executor last derived, or `null` for an instance
+   *  this agent minted here and has not derived yet: it stands at its flow's
+   *  first state. */
+  currentState: string | null;
+  /** RFC 3339 time of the derivation that wrote `currentState`; `null` with it. */
+  derivedAt: string | null;
+}
 
 /** One fired flow transition, as returned by {@link FlowInstance.acceptProposal}
  *  (and, engine-side, by every consensus pass). */
@@ -209,14 +228,39 @@ export class FlowInstance {
     /** The flow definition this instance was minted against. */
     public readonly shape: SHACLFlow,
     /**
-     * The on-graph record — carries `flow`, `subject`, `currentState`
-     * and Ad4mModel's synthesised `createdAt`. Callers can reach into it
-     * for anything the wrapper doesn't expose directly, but should prefer
-     * the wrapper accessors so future refactors of the underlying shape
-     * don't ripple through their code.
+     * The on-graph record — carries `flowUri`, `subject` and Ad4mModel's
+     * synthesised `createdAt`. Callers can reach into it for anything the
+     * wrapper doesn't expose directly, but should prefer the wrapper
+     * accessors so future refactors of the underlying shape don't ripple
+     * through their code.
      */
     public readonly record: FlowInstanceRecord,
+    /** See {@link currentStateName}. */
+    private readonly stateName: string | undefined,
   ) {}
+
+  /** The state to show for `record`, from this agent's `flowStates` entries:
+   *  the recorded derivation; the flow's first state for an instance this
+   *  agent minted and has not derived yet; `undefined` for one with no entry
+   *  — synced in, and not derived by this agent yet. */
+  private static stateOf(
+    shape: SHACLFlow,
+    record: FlowInstanceRecord,
+    recorded: Map<string, string | null>,
+  ): string | undefined {
+    if (!recorded.has(record.id)) return undefined;
+    return recorded.get(record.id) ?? shape.states[0]?.name;
+  }
+
+  /** One `flowStates` round-trip for every record in `records`. */
+  private static async recordedStates(
+    perspective: PerspectiveProxy,
+    records: FlowInstanceRecord[],
+  ): Promise<Map<string, string | null>> {
+    if (records.length === 0) return new Map();
+    const entries = await perspective.flowStates(records.map((r) => r.id));
+    return new Map(entries.map((e) => [e.instance, e.currentState]));
+  }
 
   /**
    * Escape hatch used by {@link FlowInstance.start} and
@@ -229,8 +273,14 @@ export class FlowInstance {
     perspective: PerspectiveProxy,
     shape: SHACLFlow,
     record: FlowInstanceRecord,
+    currentStateName?: string,
   ): FlowInstance {
-    return new FlowInstance(perspective, shape, record);
+    return new FlowInstance(
+      perspective,
+      shape,
+      record,
+      currentStateName ?? FlowInstance.stateOf(shape, record, new Map()),
+    );
   }
 
   /**
@@ -251,13 +301,12 @@ export class FlowInstance {
    * on-graph record, so `currentState` / `availableTransitions` /
    * `proposals` accessors work without further round-trips.
    *
-   * The record's `currentState` is a per-replica cache the consensus engine
-   * writes as a local link. It is read back only for display — the cache-first
-   * path in `gather_active_flow_contexts` fills the state rendered into LLM
-   * context — and **never as authority**: anything that decides something
-   * (the fold, the mint pass) derives state from the signed links present now
-   * and does not consult the cache. Treat it as a display hint, not as the
-   * flow's state.
+   * `currentStateName` is the state this agent's executor last derived
+   * (`PerspectiveProxy.flowStates`) — a display value, **never authority**:
+   * anything that decides something (the fold, the mint pass) derives state
+   * from the signed links present now. A run started by this call stands at
+   * the flow's first state; an existing run this agent has not derived yet
+   * reads `undefined` (see {@link currentStateName}).
    *
    * @param perspective - The perspective the flow instance lives on
    * @param flowName - Name of a `SHACLFlow` already registered on the perspective
@@ -305,17 +354,24 @@ export class FlowInstance {
       const [first] = [...existing].sort(
         (a, b) => startedAt(a) - startedAt(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
       );
-      return FlowInstance.wrap(perspective, flow, first);
+      const recorded = await FlowInstance.recordedStates(perspective, [first]);
+      return FlowInstance.wrap(
+        perspective,
+        flow,
+        first,
+        FlowInstance.stateOf(flow, first, recorded),
+      );
     }
 
     // Store the flow's URI, not the bare name — see FlowInstanceRecord's
     // docstring for the collision-across-modules argument (James PR #929 R5).
+    // No state on the record: the executor seeds this agent's bookkeeping
+    // from this write, so its first settle is reported (#1424).
     const record = await FlowInstanceRecord.create(perspective, {
       flowUri: flow.flowUri,
       subject: baseExpression,
-      currentState: flow.states[0].name,
     });
-    return FlowInstance.wrap(perspective, flow, record);
+    return FlowInstance.wrap(perspective, flow, record, flow.states[0].name);
   }
 
   /**
@@ -419,7 +475,7 @@ export class FlowInstance {
     // means stripping the namespace + the `Flow` suffix. Records that
     // don't parse this way are treated as stale and skipped.
     const shapesByUri = new Map<string, SHACLFlow>();
-    const wrappers: FlowInstance[] = [];
+    const paired: Array<[FlowInstanceRecord, SHACLFlow]> = [];
     for (const record of records) {
       let shape = shapesByUri.get(record.flowUri);
       if (!shape) {
@@ -434,9 +490,16 @@ export class FlowInstance {
         shape = loaded;
         shapesByUri.set(record.flowUri, shape);
       }
-      wrappers.push(FlowInstance.wrap(perspective, shape, record));
+      paired.push([record, shape]);
     }
-    return wrappers;
+    // Every state in one round-trip, not one per instance.
+    const recorded = await FlowInstance.recordedStates(
+      perspective,
+      paired.map(([record]) => record),
+    );
+    return paired.map(([record, shape]) =>
+      FlowInstance.wrap(perspective, shape, record, FlowInstance.stateOf(shape, record, recorded)),
+    );
   }
 
   // ── Read accessors ────────────────────────────────────────────────────
@@ -475,9 +538,20 @@ export class FlowInstance {
     return this.record.flowUri;
   }
 
-  /** Name of the state this instance is currently in. */
-  get currentStateName(): string {
-    return this.record.currentState;
+  /**
+   * Name of the state this instance is in, as this agent's executor last
+   * derived it when the wrapper was loaded (`PerspectiveProxy.flowStates`).
+   * An instance this agent minted and has not derived yet reads as its
+   * flow's first state.
+   *
+   * `undefined` means **not derived by this agent yet**: the run synced in
+   * (or the executor was upgraded) and no pass of this agent's has covered it.
+   * Show it as pending, not as the first state. The catch-up pass that
+   * derives it publishes `flow-state-changed` with `caughtUp: true`. A
+   * snapshot: reload, or follow `PerspectiveProxy.onFlowStateChanged`.
+   */
+  get currentStateName(): string | undefined {
+    return this.stateName;
   }
 
   /**
@@ -491,12 +565,14 @@ export class FlowInstance {
   }
 
   /**
-   * The `FlowState` object on the shape matching `currentStateName`.
+   * The `FlowState` object on the shape matching `currentStateName`, or
+   * `undefined` when that is (not derived by this agent yet).
    * Throws when the record's state name is not declared on the flow —
    * that's a "stale FlowInstance whose flow was edited under it" bug,
    * not a silent-fail case.
    */
-  get currentState(): FlowState {
+  get currentState(): FlowState | undefined {
+    if (this.currentStateName === undefined) return undefined;
     const s = this.shape.states.find((x) => x.name === this.currentStateName);
     if (!s) {
       throw new Error(
@@ -511,7 +587,8 @@ export class FlowInstance {
    * Every `FlowTransition` on the shape whose `fromState` matches
    * `currentStateName`. Order preserved from the shape.
    *
-   * Empty when the current state is terminal (no outgoing transitions).
+   * Empty when the current state is terminal (no outgoing transitions), or
+   * not derived by this agent yet.
    */
   get availableTransitions(): FlowTransition[] {
     return this.shape.transitions.filter((t) => t.fromState === this.currentStateName);

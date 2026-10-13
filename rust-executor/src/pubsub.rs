@@ -174,6 +174,10 @@ lazy_static::lazy_static! {
     /// text otherwise).  Filtered by room membership in the events_ws
     /// fanout.
     pub static ref SFU_DATA_CHANNEL_TOPIC: String = "sfu-data-channel-topic".to_owned();
+    /// A flow instance's derived state moved on one agent's replica
+    /// (`FlowStateChangedEvent`). Per-agent bookkeeping (#1424), so the event
+    /// stream delivers it to that agent's sockets only.
+    pub static ref FLOW_STATE_CHANGED_TOPIC: String = "flow-state-changed-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.
