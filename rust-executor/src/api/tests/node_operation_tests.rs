@@ -25,6 +25,7 @@ fn user_session(email: &str) -> Arc<RequestContext> {
         user_email: Some(email.to_string()),
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     })
 }
 
@@ -37,6 +38,7 @@ fn operator_session() -> Arc<RequestContext> {
         user_email: None,
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     })
 }
 

@@ -99,9 +99,9 @@ async fn two_replicas_with_the_same_links_derive_the_same_state() {
 /// Nico's deletion ruling, pinned on the *write path* rather than on raw
 /// links: retracting our own vote through `reject_flow_proposal` moves a
 /// settled flow back. The engine has no "already fired, refuse" guard, and
-/// must not grow one — a `resolved_as → "fired"` mark is an index any member
-/// can write, so guarding on it would both read a forgeable link as authority
-/// and contradict the semantics that state follows the links present now.
+/// must not grow one — a fired mark is this replica's own index, not a fact
+/// about the graph, so guarding on it would read bookkeeping as authority and
+/// contradict the semantics that state follows the links present now.
 #[tokio::test(flavor = "multi_thread")]
 async fn rejecting_our_own_settled_vote_regresses_the_state() {
     let mut f = seed_satisfied_fixture(None).await;

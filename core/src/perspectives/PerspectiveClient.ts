@@ -13,7 +13,7 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import { AllInstancesResult } from "../model/types";
+import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
@@ -24,21 +24,13 @@ import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunIn
 // would otherwise be a cycle).
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
-    FlowReceiptVerdict, FlowValidOutput,
+    FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
 } from "./FlowInstance";
 
-function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
-    let finalResult: unknown = raw
 
-    if (typeof finalResult === 'string') {
-        try {
-            finalResult = JSON.parse(finalResult)
-        } catch (e) {
-            console.error(errorContext, e)
-        }
-    }
-
-    return finalResult as AllInstancesResult
+/** The wire form of a model query's classes: `class_name` for one, `class_names` for a union. */
+function classParams(className: string | string[]): { class_name: string } | { class_names: string[] } {
+    return Array.isArray(className) ? { class_names: className } : { class_name: className }
 }
 
 export class PerspectiveClient {
@@ -114,51 +106,33 @@ export class PerspectiveClient {
         return JSON.parse(result) as T
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
-        const response = await this.#apiClient.call(
-            'perspective.subscribeQuery', { uuid, query }
-        )
-        const { subscriptionId, result } = response
-        const parsed = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
-        return { subscriptionId, result: parsed }
+    /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
+    async subscribeQuery(uuid: string, query: string): Promise<Subscribed> {
+        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query })
     }
 
-    async perspectiveKeepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call(
-            'perspective.keepAliveQuery', { uuid, subscriptionId }
-        )
+    /** Every `query-subscription-update` event on this client's socket. */
+    onQueryUpdate(cb: (update: QueryUpdate | QueryLagged) => void): () => void {
+        return this.#apiClient.on('query-subscription-update', cb)
     }
 
-    async perspectiveDisposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call(
-            'perspective.disposeQuery', { uuid, subscriptionId }
-        )
-    }
-
-    subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        return this.#apiClient.on('query-subscription-update', (event) => {
-            if (event.subscriptionId !== subscriptionId) return
-            onData(normalizeQueryResult(event.result, 'Error parsing query subscription:'))
-        })
-    }
-
-    async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call(
-            'perspective.keepAliveQuery', { uuid, subscriptionId }
-        )
+    /** The current result and revision of a live query, after a revision gap. */
+    async resyncSubscription(uuid: string, subscriptionId: string): Promise<{ revision: number, result: any }> {
+        return this.#apiClient.call('perspective.resyncSubscription', { uuid, subscriptionId })
     }
 
     /** Ends the subscription on the executor. The caller releases its local listener
-     *  with the function `subscribeToQueryUpdates` returned. */
+     *  with the function {@link onQueryUpdate} returned. */
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
         return this.#apiClient.call(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
+    /** `className` may name several classes: one query over their union (#1238). */
+    async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
+            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }
@@ -186,14 +160,11 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
-        const response = await this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
+    /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
+    async modelSubscribe(uuid: string, className: string | string[], queryJson: string): Promise<Subscribed> {
+        return this.#apiClient.call(
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }
         )
-        return {
-            subscriptionId: response.subscription_id,
-            result: JSON.parse(response.result)
-        }
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
@@ -413,6 +384,22 @@ export class PerspectiveClient {
     async flowValidOutputs(uuid: string, flow: string, state?: string): Promise<FlowValidOutput[]> {
         return this.#apiClient.call(
             'perspective.flowValidOutputs', { uuid, flow, state },
+        )
+    }
+
+    /** The calling agent's recorded state of each flow instance it has
+     *  derived, optionally narrowed to `instances`. */
+    async flowStates(uuid: string, instances?: string[]): Promise<FlowStateEntry[]> {
+        return this.#apiClient.call(
+            'perspective.flowStates', { uuid, instances },
+        )
+    }
+
+    /** The proposals of `instance` the calling agent's replica recorded as
+     *  fired, sorted. */
+    async flowFired(uuid: string, instance: string): Promise<string[]> {
+        return this.#apiClient.call(
+            'perspective.flowFired', { uuid, instance },
         )
     }
 

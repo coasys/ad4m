@@ -524,7 +524,11 @@ jobs:
   # Windows Binary Build - Re-enabled now that V8 uses pre-built binaries
   # ============================================================================
   build-launcher-binary-windows:
-    runs-on: windows-latest
+    # windows-2022, not windows-latest: windows-latest became Windows Server
+    # 2025 with Visual Studio 18, which the node-gyp bundled in pnpm 9.15
+    # (10.2) cannot detect ("unknown version"), so `pnpm install` failed
+    # building better-sqlite3 / bigint-buffer. Revisit with a newer pnpm.
+    runs-on: windows-2022
 
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"

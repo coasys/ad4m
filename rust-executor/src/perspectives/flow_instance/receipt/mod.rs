@@ -130,7 +130,7 @@
 //! any receipt and it forges nothing: the binding that counts is inside the
 //! receipt's own content ([`FlowReceipt::outputs`]), and a verifier checks
 //! that the receipt names the node whose edge it followed. The edges have
-//! exactly the status `resolved_as` marks have — an index, never an input.
+//! exactly the status fired marks have — an index, never an input.
 
 pub mod commitment;
 pub mod dna;
