@@ -732,6 +732,7 @@ impl PerspectiveInstance {
             self.subscribed_queries_loop(),
             self.fallback_sync_loop(),
             self.auto_processor_supervisor(),
+            self.flow_pass_at_load(),
         );
     }
 

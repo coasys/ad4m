@@ -271,6 +271,41 @@ impl PerspectiveInstance {
         }
     }
 
+    /// One sweep over every instance, for every owner this node acts for,
+    /// as soon as this node's agent has a DID. Joined into
+    /// `start_background_tasks`, so it never blocks the perspective's load.
+    ///
+    /// Without it, nothing derives an instance until something touches it —
+    /// a vote, a mint, a synced diff. After an upgrade (empty tables) or for
+    /// an owner whose rows are missing, every run would read as not derived
+    /// until then. The sweep fills the rows; a catch-up reports no settles
+    /// and publishes one `caught_up` event per instance, which is how the
+    /// owner's clients learn the state.
+    ///
+    /// Queued like a synced revocation, so it coalesces with any pass already
+    /// waiting and debounces like one. A DID is all a pass needs: it reads
+    /// the local store and writes executor tables, and signs nothing.
+    pub(crate) async fn flow_pass_at_load(&self) {
+        loop {
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+            let has_did = crate::agent::AgentService::global_instance()
+                .lock()
+                .ok()
+                .and_then(|agent| agent.as_ref().map(|a| a.did.is_some()))
+                .unwrap_or(false);
+            if has_did {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        self.enqueue_flow_pass(FlowTouch {
+            every_instance: true,
+            ..FlowTouch::default()
+        });
+    }
+
     fn enqueue_flow_pass(&self, touch: FlowTouch) {
         if touch.is_empty() {
             return;
@@ -342,7 +377,7 @@ impl PerspectiveInstance {
                 if touch.definition {
                     "a flow definition changed"
                 } else {
-                    "a role revocation synced in"
+                    "a role revocation synced in, or the perspective loaded"
                 }
             );
             None

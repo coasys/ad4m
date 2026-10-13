@@ -184,6 +184,11 @@ pub async fn run_flow_consensus_pass(
         let agent_did = crate::agent::did_for_context(context)?;
         let mut flows_by_uri = load_shacl_flows(perspective).await?;
         retain_selected_flows(&mut flows_by_uri, flow_filter);
+        if flows_by_uri.is_empty() {
+            // No flow, so no record could be derived; this is most
+            // perspectives, swept once at load (`flow_pass_at_load`).
+            return anyhow::Ok((agent_did, flows_by_uri, Vec::new()));
+        }
         let records = match scope {
             Some(s) => load_flow_instances(perspective, &[scope_subject(s).to_string()]).await?,
             None => load_all_flow_instances(perspective).await?,
