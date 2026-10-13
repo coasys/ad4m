@@ -76,7 +76,8 @@ export interface SessionCreateOptions {
     topology?: SessionTopology
     neighbourhoodUrl?: string
     /** The neighbourhood's call config. With `topology: "auto"`, its mode decides: any SFU mode
-     *  runs through the SFU, `mesh` stays peer-to-peer. */
+     *  runs through the SFU, `mesh` stays peer-to-peer. Passing one is the app's statement that
+     *  every member reaches the same SFU. */
     sfuConfig?: SfuConfig
     /** NAT traversal for the mesh path. Takes precedence over `sfuConfig.iceServers`. */
     iceServers?: IceServer[]
@@ -98,14 +99,13 @@ interface SessionImplConfig {
     /** Poll for agents currently online in the neighbourhood.  The
      *  session reconciles the result against its mesh connections. */
     onlineAgents?: () => Promise<OnlineAgent[]>
-    /** Local executor's SFU status.  When `isPublic` equals true, the
-     *  session advertises SFU capability in call-presence so other
-     *  agents can auto-discover relay nodes. */
+    /** Local executor's SFU status. "auto" needs `isPublic`: clients
+     *  that are not on the executor's machine must reach its SFU. */
     localSfuStatus?: SfuStatus
-    /** Query available SFU nodes in the neighbourhood.  Used by the
-     *  "auto" topology resolver to discover relay nodes before falling
-     *  back to mesh. */
-    availableSfuNodes?: () => Promise<{ did: string; bindAddress: string }[]>
+    /** Whether every member of the neighbourhood is hosted on the local
+     *  executor, so all of them reach its SFU. "auto" picks the SFU only
+     *  when this resolves true. */
+    sfuServesAllMembers?: () => Promise<boolean>
 }
 
 /**
@@ -116,13 +116,6 @@ interface SessionImplConfig {
  */
 const CALL_PRESENCE_PREDICATE = "ad4m://session/in-call"
 
-/**
- * SFU capability predicate.  Published in call-presence when the local
- * executor's SFU has public reachability.  Other agents scan for this
- * predicate to auto-discover relay nodes in the neighbourhood.
- */
-export const SFU_AVAILABLE_PREDICATE = "ad4m://sfu/available"
-
 /** How often (ms) the mesh session polls `onlineAgents` for roster changes. */
 const ROSTER_POLL_INTERVAL_MS = 3_000
 
@@ -131,15 +124,13 @@ export function createSession(config: SessionImplConfig): Session {
         api, roomId, agentDid, neighbourhoodUrl,
         topology, sfuConfig, iceServers,
         channel, setOnlineStatus, onlineAgents,
-        localSfuStatus, availableSfuNodes,
+        localSfuStatus, sfuServesAllMembers,
     } = config
 
     let state: SessionState = "idle"
     let sfuManager: SfuManager | null = null
     let meshManager: MeshManager | null = null
     let rosterInterval: ReturnType<typeof setInterval> | null = null
-    /** SFU nodes discovered during auto-topology resolution. */
-    let discoveredSfuNodes: { did: string; bindAddress: string }[] = []
     const callbacks = new Map<SessionEvent, SessionEventCallback[]>()
     const trackListeners: ((stream: MediaStream, track: MediaStreamTrack) => void)[] = []
     const dataListeners: ((message: SfuDataMessage) => void)[] = []
@@ -158,37 +149,28 @@ export function createSession(config: SessionImplConfig): Session {
     /**
      * Resolve the effective topology.
      *
-     * Explicit "sfu" or "mesh" returns immediately.  "auto" checks:
-     * 1. If the local executor has a public SFU → use SFU.
-     * 2. If neighbourhood SFU discovery finds available nodes → use SFU
-     *    (stores discovered nodes in `discoveredSfuNodes` for the
-     *    SfuConfig the SfuManager receives).
-     * 3. Otherwise → fall back to mesh.
+     * Explicit "sfu" or "mesh" returns immediately; so does "auto" with an
+     * `sfuConfig`. Otherwise "auto" must not split the call: the SFU path
+     * joins this executor's SFU only, and the mesh path never reaches it.
+     * So it picks the SFU only when the executor says every member of the
+     * neighbourhood is hosted on it and its SFU is public. Anything else,
+     * including a failed check, is mesh.
      */
     async function resolveTopology(): Promise<"sfu" | "mesh"> {
         if (topology === "sfu") return "sfu"
         if (topology === "mesh") return "mesh"
 
-        // Explicit sfuConfig takes precedence in auto mode.
         if (sfuConfig) {
             return sfuConfig.mode === "mesh" ? "mesh" : "sfu"
         }
 
-        // Local executor has a public SFU — use it directly.
-        if (localSfuStatus?.isPublic) return "sfu"
-
-        // Discover SFU nodes from the neighbourhood's online agents.
-        if (availableSfuNodes) {
-            try {
-                discoveredSfuNodes = await availableSfuNodes()
-                if (discoveredSfuNodes.length > 0) return "sfu"
-            } catch (err) {
-                console.warn("session: SFU discovery failed, falling back to mesh:", err)
-            }
+        if (!localSfuStatus?.isPublic || !sfuServesAllMembers) return "mesh"
+        try {
+            return (await sfuServesAllMembers()) ? "sfu" : "mesh"
+        } catch (err) {
+            console.warn("session: SFU membership check failed, using mesh:", err)
+            return "mesh"
         }
-
-        // No SFU nodes found — use mesh.
-        return "mesh"
     }
 
     // ── Mesh roster polling ─────────────────────────────────────────
@@ -203,16 +185,6 @@ export function createSession(config: SessionImplConfig): Session {
             const links: { source: string; predicate: string; target: string }[] = [
                 { source: agentDid, predicate: CALL_PRESENCE_PREDICATE, target: roomId },
             ]
-            // Advertise SFU capability when the local executor has a
-            // publicly reachable SFU.  Other agents' topology resolution
-            // scans for this predicate to auto-discover relay nodes.
-            if (localSfuStatus?.isPublic) {
-                links.push({
-                    source: agentDid,
-                    predicate: SFU_AVAILABLE_PREDICATE,
-                    target: localSfuStatus.bindAddress,
-                })
-            }
             await setOnlineStatus({ links })
         } catch (err) {
             console.warn("session: call-presence announcement failed:", err)
@@ -362,27 +334,13 @@ export function createSession(config: SessionImplConfig): Session {
                 return
             }
 
-            // SFU path — build config from explicit sfuConfig or auto-discovered nodes.
+            // SFU path — this executor's SFU.
             const iceConfig = iceServers && iceServers.length > 0
                 ? { stun: iceServers.filter(s => s.urls.some(u => u.startsWith("stun:"))).flatMap(s => s.urls),
                     turn: iceServers.filter(s => s.urls.some(u => u.startsWith("turn:"))).map(s => ({ urls: s.urls.join(","), username: s.username || "", credential: s.credential || "" })) }
                 : undefined
 
-            // When no explicit SFU config exists but auto-discovery found
-            // SFU-capable nodes, synthesise a config that directs traffic
-            // to the first discovered node (designated mode, simplest).
-            let effectiveSfuConfig = sfuConfig
-            if (!effectiveSfuConfig && discoveredSfuNodes.length > 0) {
-                effectiveSfuConfig = {
-                    mode: discoveredSfuNodes.length > 1 ? "cascaded" : "designated",
-                    designatedPeer: discoveredSfuNodes[0].did,
-                    fallback: "mesh",
-                    maxMeshParticipants: 6,
-                    sfuPeers: discoveredSfuNodes.map(n => n.did),
-                }
-            }
-
-            sfuManager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, effectiveSfuConfig)
+            sfuManager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig)
             wireSfuEvents(sfuManager)
 
             dataUnsubscribe = sfuManager.subscribeDataChannel((msg) => {

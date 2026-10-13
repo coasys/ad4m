@@ -150,19 +150,26 @@ describe("topology resolution", () => {
         expect(MeshManager).toHaveBeenCalled()
     })
 
-    it("resolves 'auto' without sfuConfig to SFU when local SFU is public", async () => {
+    // "auto" must not split a call: the SFU path reaches only this executor's
+    // SFU, so it is right only when every member is hosted here.
+    const PUBLIC_SFU = { reachability: "public", isPublic: true, bindAddress: "1.2.3.4:0", detail: "" }
+
+    it("resolves 'auto' to SFU when the local SFU is public and hosts every member", async () => {
         const session = createSession(baseConfig({
             topology: "auto",
-            localSfuStatus: { reachability: "public", isPublic: true, bindAddress: "1.2.3.4:0", detail: "" },
+            localSfuStatus: PUBLIC_SFU,
+            sfuServesAllMembers: async () => true,
         }))
         await session.join(fakeMediaStream())
         expect(SfuManager).toHaveBeenCalled()
+        expect(MeshManager).not.toHaveBeenCalled()
     })
 
-    it("resolves 'auto' to mesh when no SFU nodes found", async () => {
+    it("resolves 'auto' to mesh when a member is hosted elsewhere, even with a public SFU", async () => {
         const session = createSession(baseConfig({
             topology: "auto",
-            availableSfuNodes: async () => [],
+            localSfuStatus: PUBLIC_SFU,
+            sfuServesAllMembers: async () => false,
             channel: fakeChannel(),
         }))
         await session.join(fakeMediaStream())
@@ -170,14 +177,43 @@ describe("topology resolution", () => {
         expect(SfuManager).not.toHaveBeenCalled()
     })
 
-    it("resolves 'auto' to SFU when neighbourhood has available SFU nodes", async () => {
+    it("resolves 'auto' to mesh when the executor cannot say who it hosts", async () => {
+        const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
         const session = createSession(baseConfig({
             topology: "auto",
-            availableSfuNodes: async () => [{ did: "did:sfu:node1", bindAddress: "5.6.7.8:9000" }],
+            localSfuStatus: PUBLIC_SFU,
+            sfuServesAllMembers: async () => { throw new Error("rpc failed") },
+            channel: fakeChannel(),
         }))
         await session.join(fakeMediaStream())
-        expect(SfuManager).toHaveBeenCalled()
-        expect(MeshManager).not.toHaveBeenCalled()
+        expect(MeshManager).toHaveBeenCalled()
+        expect(SfuManager).not.toHaveBeenCalled()
+        consoleWarn.mockRestore()
+    })
+
+    it("resolves 'auto' to mesh when the local SFU is not public", async () => {
+        const session = createSession(baseConfig({
+            topology: "auto",
+            localSfuStatus: { ...PUBLIC_SFU, reachability: "nat", isPublic: false },
+            sfuServesAllMembers: async () => true,
+            channel: fakeChannel(),
+        }))
+        await session.join(fakeMediaStream())
+        expect(MeshManager).toHaveBeenCalled()
+        expect(SfuManager).not.toHaveBeenCalled()
+    })
+
+    it("does not advertise its SFU in call presence", async () => {
+        const setOnlineStatus = jest.fn().mockResolvedValue(true)
+        const session = createSession(baseConfig({
+            topology: "mesh",
+            localSfuStatus: PUBLIC_SFU,
+            channel: fakeChannel(),
+            setOnlineStatus,
+        }))
+        await session.join(fakeMediaStream())
+        const links = setOnlineStatus.mock.calls.flatMap((c: any[]) => c[0].links)
+        expect(links.map((l: any) => l.predicate)).not.toContain("ad4m://sfu/available")
     })
 
     it("resolves 'auto' with sfuConfig.mode='designated' to SFU path", async () => {

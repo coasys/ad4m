@@ -322,34 +322,17 @@ export class NeighbourhoodClient {
         })
     }
 
-    // ── SFU discovery ──────────────────────────────────────────────────
+    // ── SFU topology ───────────────────────────────────────────────────
 
     /**
-     * Discover SFU-capable nodes in a neighbourhood by scanning online
-     * agents' presence links for the `ad4m://sfu/available` predicate.
-     *
-     * Returns an array of `{ did, bindAddress }` for each agent whose
-     * executor advertises a publicly reachable SFU.  Empty when no
-     * agents with public SFU capability appear in the neighbourhood.
+     * Whether every member of the neighbourhood is hosted on this
+     * executor — the members its SFU can serve. A call's "auto" topology
+     * uses the SFU only then: anyone else could not join the same room.
      *
      * @param perspectiveId  The neighbourhood's perspective handle UUID.
      */
-    async availableSfuNodes(
-        perspectiveId: string,
-    ): Promise<{ did: string; bindAddress: string }[]> {
-        const SFU_PREDICATE = "ad4m://sfu/available"
-        const agents = await this.onlineAgents(perspectiveId)
-        const nodes: { did: string; bindAddress: string }[] = []
-        for (const agent of agents) {
-            // The status is a signed perspective: its links sit under `data`.
-            for (const link of agent.status?.data?.links ?? []) {
-                const l = link.data
-                if (l?.predicate === SFU_PREDICATE && l.target) {
-                    nodes.push({ did: agent.did, bindAddress: l.target })
-                }
-            }
-        }
-        return nodes
+    async sfuServesAllMembers(perspectiveId: string): Promise<boolean> {
+        return this.#apiClient.call("sfu.servesAllMembers", { uuid: perspectiveId })
     }
 
     // ── SFU diagnostic / test-harness endpoints ────────────────────────
