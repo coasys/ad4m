@@ -727,9 +727,9 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     let alice_did = user(ALICE);
     user(BOB);
     // Only the stream's owner filter decides here: no session has a token that ends.
-    let mut alice = build_event_stream(user_ctx(ALICE).session, false, false).await;
-    let mut bob = build_event_stream(user_ctx(BOB).session, false, false).await;
-    let mut main = build_event_stream(admin_ctx().session, true, true).await;
+    let mut alice = build_event_stream(user_ctx(ALICE).session, false, false, None).await;
+    let mut bob = build_event_stream(user_ctx(BOB).session, false, false, None).await;
+    let mut main = build_event_stream(admin_ctx().session, true, true, None).await;
     let pubsub = get_global_pubsub().await;
 
     pubsub

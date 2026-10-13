@@ -8,6 +8,11 @@ pub(crate) fn admin_ctx() -> Arc<RequestContext> {
     Arc::new(RequestContext::operator_for_test())
 }
 
+/// `admin_ctx()` on the WS RPC connection `connection_id`.
+pub(crate) fn admin_conn_ctx(connection_id: &str) -> Arc<RequestContext> {
+    Arc::new(RequestContext::operator_for_test().on_connection(connection_id))
+}
+
 /// Unregisters the fixture perspective when the test ends (also on panic).
 pub(crate) struct Registered(pub String);
 impl Drop for Registered {
