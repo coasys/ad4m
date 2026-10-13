@@ -149,6 +149,17 @@ async fn take_writes(p: &PerspectiveInstance) -> (ChangedPredicates, ChangedGrap
     )
 }
 
+/// `p` as the main agent, who reads (and so can remove) these Local
+/// fixtures. The executor's own view reads no Local graph (#812).
+fn as_main(p: &PerspectiveInstance) -> PerspectiveInstance {
+    p.clone().for_viewer(crate::agent::did())
+}
+
+/// Store reads as the main agent, whose Local graph holds these fixtures.
+fn main_lookups(p: &PerspectiveInstance) -> StoreLookups<'_> {
+    StoreLookups::new(&p.sparql_store, Some(crate::agent::did()))
+}
+
 /// One subscription check over the writes since the last one.
 async fn check(p: &PerspectiveInstance) {
     let (writes, graphs) = take_writes(p).await;
@@ -359,7 +370,7 @@ async fn deleting_a_record_outside_the_page_reruns() {
     assert_eq!(shown.len(), 1, "{first}");
     let hidden = if shown[0] == "ns://p1" { f2 } else { f1 };
 
-    p.remove_link(hidden.into(), None)
+    as_main(&p).remove_link(hidden.into(), None)
         .await
         .expect("remove_link");
     check(&p).await;
@@ -469,7 +480,7 @@ async fn an_edit_moving_a_record_in_a_relation_property_order_reruns() {
     .await;
     assert_eq!(ids(&first), vec!["ns://p2", "ns://p1"], "k < m: {first}");
 
-    p.remove_link(old_text.into(), None)
+    as_main(&p).remove_link(old_text.into(), None)
         .await
         .expect("remove_link");
     add(&mut p, "ns://c1", "ns://text", "literal:string:a").await;
@@ -690,7 +701,7 @@ async fn a_literal_target_is_not_read_around() {
     let (ChangedPredicates::Specific(writes), _) = take_writes(&p).await else {
         panic!("expected recorded links");
     };
-    let mut lookups = StoreLookups::new(&p.sparql_store);
+    let mut lookups = main_lookups(&p);
     assert!(!trigger.matches(&writes, &mut lookups), "x9 is not a Post");
 
     let read: Vec<&String> = lookups
@@ -772,7 +783,7 @@ async fn a_trigger_over_two_classes_matches_a_create_of_either() {
 
     let matches = |trigger: &ModelTrigger, writes: &ChangedPredicates| match writes {
         ChangedPredicates::Specific(writes) => {
-            trigger.matches(writes, &mut StoreLookups::new(&p.sparql_store))
+            trigger.matches(writes, &mut main_lookups(&p))
         }
         _ => panic!("expected recorded links"),
     };

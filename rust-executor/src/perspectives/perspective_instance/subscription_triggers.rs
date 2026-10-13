@@ -45,6 +45,7 @@
 //! a write loses an update; an extra re-run costs one query. So every
 //! uncertain case falls back to re-running.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -55,7 +56,9 @@ use crate::perspectives::model_query::{
     conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
     WhereCondition,
 };
-use crate::perspectives::sparql_store::{canonical_target, stored_as_literal, SparqlStore};
+use crate::perspectives::sparql_store::{
+    canonical_target, graph_visible_to, local_graph_owner, stored_as_literal, SparqlStore,
+};
 use crate::types::DecoratedLinkExpression;
 
 /// Past this many distinct links in one batch, a batch keeps only its
@@ -70,11 +73,20 @@ const MAX_TRACKED_LINKS: usize = 10_000;
 const MAX_NEIGHBOURS: usize = 2_000;
 
 /// The writes of one subscription-check batch.
+///
+/// A batch holds every agent's writes, Local ones included. A subscription
+/// reads as its subscriber (#812), so it matches only the writes its
+/// subscriber can read: [`Writes::visible_to`]. Another agent's Local write
+/// must never re-run it.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Writes {
     /// Every predicate written or removed. Raw SPARQL subscriptions match on
     /// these alone.
     pub(super) predicates: HashSet<String>,
+    /// The predicates written or removed outside every Local graph.
+    shared_predicates: HashSet<String>,
+    /// The predicates written or removed in a Local graph, by its owner.
+    local_predicates: HashMap<String, HashSet<String>>,
     /// Each link written or removed, or `None` once the batch passed
     /// [`MAX_TRACKED_LINKS`].
     links: Option<HashSet<Written>>,
@@ -89,6 +101,8 @@ struct Written {
     target: String,
     /// `target` as it reads back from the store (see [`canonical_target`]).
     canonical: String,
+    /// The graph the link was written in; `None` is the default graph.
+    graph: Option<String>,
     /// The target is stored as an RDF literal: the link is a value on its
     /// source and never links into a record (see [`stored_as_literal`]).
     literal: bool,
@@ -97,14 +111,38 @@ struct Written {
 impl Writes {
     pub(super) fn new() -> Self {
         Writes {
-            predicates: HashSet::new(),
             links: Some(HashSet::new()),
+            ..Default::default()
         }
     }
 
-    /// Record one written or removed link that has a predicate.
+    /// Record one written or removed link that has a predicate, in the
+    /// default graph.
     pub(super) fn record(&mut self, source: &str, predicate: &str, target: &str) {
+        self.record_in(None, source, predicate, target);
+    }
+
+    /// Record one written or removed link that has a predicate, in `graph`
+    /// (`None`: the default graph).
+    pub(super) fn record_in(
+        &mut self,
+        graph: Option<&str>,
+        source: &str,
+        predicate: &str,
+        target: &str,
+    ) {
         self.predicates.insert(predicate.to_string());
+        match graph.and_then(local_graph_owner) {
+            Some(owner) => {
+                self.local_predicates
+                    .entry(owner.to_string())
+                    .or_default()
+                    .insert(predicate.to_string());
+            }
+            None => {
+                self.shared_predicates.insert(predicate.to_string());
+            }
+        }
         if let Some(links) = &mut self.links {
             if links.len() >= MAX_TRACKED_LINKS {
                 self.links = None;
@@ -115,14 +153,59 @@ impl Writes {
                     target: target.into(),
                     canonical: canonical_target(target),
                     literal: stored_as_literal(target),
+                    graph: graph.map(str::to_string),
                 });
             }
         }
     }
 
+    /// The writes `viewer` reads: every write outside a Local graph, and
+    /// those in `viewer`'s own. Exact even past [`MAX_TRACKED_LINKS`], since
+    /// the predicates are kept by graph owner. Borrowed when no other agent
+    /// wrote to a Local graph, which is every batch on a single-user
+    /// perspective.
+    pub(super) fn visible_to(&self, viewer: &str) -> Cow<'_, Writes> {
+        if self.local_predicates.keys().all(|owner| owner == viewer) {
+            return Cow::Borrowed(self);
+        }
+        let own = self.local_predicates.get(viewer);
+        Cow::Owned(Writes {
+            predicates: self
+                .shared_predicates
+                .iter()
+                .chain(own.into_iter().flatten())
+                .cloned()
+                .collect(),
+            shared_predicates: self.shared_predicates.clone(),
+            local_predicates: own
+                .map(|own| HashMap::from([(viewer.to_string(), own.clone())]))
+                .unwrap_or_default(),
+            links: self.links.as_ref().map(|links| {
+                links
+                    .iter()
+                    .filter(|l| l.graph.as_deref().is_none_or(|g| graph_visible_to(g, viewer)))
+                    .cloned()
+                    .collect()
+            }),
+        })
+    }
+
+    /// Whether nothing was written: a batch of other agents' Local writes,
+    /// seen by [`Writes::visible_to`].
+    pub(super) fn is_empty(&self) -> bool {
+        self.predicates.is_empty()
+    }
+
     /// Fold another batch's writes into this one.
     pub(super) fn extend(&mut self, other: Writes) {
         self.predicates.extend(other.predicates);
+        self.shared_predicates.extend(other.shared_predicates);
+        for (owner, predicates) in other.local_predicates {
+            self.local_predicates
+                .entry(owner)
+                .or_default()
+                .extend(predicates);
+        }
         match (&mut self.links, other.links) {
             (Some(mine), Some(theirs)) if mine.len() + theirs.len() <= MAX_TRACKED_LINKS => {
                 mine.extend(theirs)
@@ -137,7 +220,9 @@ impl From<HashSet<String>> for Writes {
     /// predicate matching. For tests that only care about predicates.
     fn from(predicates: HashSet<String>) -> Self {
         Writes {
+            shared_predicates: predicates.clone(),
             predicates,
+            local_predicates: HashMap::new(),
             links: None,
         }
     }
@@ -151,7 +236,12 @@ pub(super) fn writes_of<'a>(
     let mut writes = Writes::new();
     for link in links {
         let predicate = link.data.predicate.as_deref()?;
-        writes.record(&link.data.source, predicate, &link.data.target);
+        writes.record_in(
+            link.graph.as_deref(),
+            &link.data.source,
+            predicate,
+            &link.data.target,
+        );
     }
     Some(writes)
 }
@@ -760,6 +850,7 @@ impl ModelTrigger {
             target,
             canonical,
             literal,
+            graph: _,
         } = link;
         if rules.any.contains(predicate) {
             return true;
@@ -837,9 +928,14 @@ fn result_nodes(result: &str) -> HashSet<String> {
 
 /// Store reads for one subscription check, memoised across subscriptions:
 /// forty subscriptions asking whether the same node carries the same flag
-/// read it once.
+/// read it once. The reads are a subscriber's (#812): every graph but other
+/// agents' Local ones. So the memo is per subscriber too, and a
+/// subscription's re-run is never decided by a link its subscriber cannot
+/// read.
 pub(super) struct StoreLookups<'a> {
     store: &'a SparqlStore,
+    /// The agent the reads are for; `None` reads no Local graph.
+    viewer: Option<String>,
     flags: HashMap<(String, Flag), bool>,
     /// `(node, predicate)` → `(predicate, other end)` of each link touching
     /// the node, with that predicate (`None`: with any), or `None` past
@@ -852,9 +948,10 @@ pub(super) struct StoreLookups<'a> {
 type Neighbours = Option<Vec<(String, String)>>;
 
 impl<'a> StoreLookups<'a> {
-    pub(super) fn new(store: &'a SparqlStore) -> Self {
+    pub(super) fn new(store: &'a SparqlStore, viewer: Option<String>) -> Self {
         StoreLookups {
             store,
+            viewer,
             flags: HashMap::new(),
             neighbours: HashMap::new(),
         }
@@ -868,7 +965,7 @@ impl<'a> StoreLookups<'a> {
         // A failed read counts as an instance: re-run rather than miss.
         let hit = self
             .store
-            .has_triple(node, &flag.predicate, &flag.value)
+            .has_triple(node, &flag.predicate, &flag.value, self.viewer.as_deref())
             .unwrap_or(true);
         self.flags.insert(key, hit);
         hit
@@ -887,12 +984,13 @@ impl<'a> StoreLookups<'a> {
         };
         predicates.into_iter().any(|predicate| {
             let store = self.store;
+            let viewer = self.viewer.as_deref();
             let neighbours = self
                 .neighbours
                 .entry((node.to_string(), predicate.map(str::to_string)))
                 .or_insert_with(|| {
                     store
-                        .neighbours(node, predicate, MAX_NEIGHBOURS)
+                        .neighbours(node, predicate, MAX_NEIGHBOURS, viewer)
                         .ok()
                         .flatten()
                 });

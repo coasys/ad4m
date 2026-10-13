@@ -6786,7 +6786,7 @@ impl PerspectiveInstance {
         let now = Instant::now();
 
         // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
-        // model_query_params, and graph_scope.
+        // model_query_params, graph_scope and the subscriber.
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
@@ -6801,13 +6801,21 @@ impl PerspectiveInstance {
                         query.predicates.clone(),
                         query.model_query_params.clone(),
                         query.graph_scope.clone(),
+                        query.subscriber_did.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
 
-        // Store reads the model triggers make, shared by every subscription.
-        let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        // A subscription reads as its subscriber, so it is matched against
+        // the writes its subscriber reads, and the model triggers' store
+        // reads are made as that subscriber. Another agent's Local link
+        // never re-runs it, or decides that it does. Both are worked out once
+        // per subscriber and shared by that subscriber's subscriptions.
+        let mut visible_writes: HashMap<String, std::borrow::Cow<'_, subscription_triggers::Writes>> =
+            HashMap::new();
+        let mut trigger_lookups: HashMap<String, subscription_triggers::StoreLookups<'_>> =
+            HashMap::new();
 
         // Create futures for each query check
         for (
@@ -6818,6 +6826,7 @@ impl PerspectiveInstance {
             sub_predicates,
             model_params,
             graph_scope,
+            subscriber_did,
         ) in queries
         {
             // Check for timeout
@@ -6826,12 +6835,31 @@ impl PerspectiveInstance {
                 continue;
             }
 
+            let writes = match &changed_predicates {
+                ChangedPredicates::Specific(writes) => Some(
+                    &**visible_writes
+                        .entry(subscriber_did.clone())
+                        .or_insert_with(|| writes.visible_to(&subscriber_did)),
+                ),
+                _ => None,
+            };
+            if writes.is_some_and(|w| w.is_empty()) {
+                // Only other agents' Local writes: nothing this subscriber reads.
+                continue;
+            }
+
             // Model subscriptions match each written link against their
             // trigger (see `subscription_triggers`), not the predicate alone.
-            if let (Some(params), ChangedPredicates::Specific(ref writes)) =
-                (&model_params, &changed_predicates)
-            {
-                if !params.trigger.matches(writes, &mut trigger_lookups) {
+            if let (Some(params), Some(writes)) = (&model_params, writes) {
+                let lookups = trigger_lookups
+                    .entry(subscriber_did.clone())
+                    .or_insert_with(|| {
+                        subscription_triggers::StoreLookups::new(
+                            &self.sparql_store,
+                            Some(subscriber_did.clone()),
+                        )
+                    });
+                if !params.trigger.matches(writes, lookups) {
                     log::debug!(
                         "⏭️ Skipping model subscription {} — no write matches it",
                         id
@@ -6844,7 +6872,7 @@ impl PerspectiveInstance {
             // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
             // ChangedPredicates::NoneRecorded => should not happen here, but skip if it does
             else if !sub_predicates.is_empty() {
-                if let ChangedPredicates::Specific(ref writes) = changed_predicates {
+                if let Some(writes) = writes {
                     let changed = &writes.predicates;
                     if sub_predicates.is_disjoint(changed) {
                         log::debug!(

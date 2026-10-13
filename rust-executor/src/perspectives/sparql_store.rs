@@ -413,6 +413,19 @@ pub fn link_visible_to(link: &DecoratedLinkExpression, viewer: &str) -> bool {
         .is_none_or(|g| graph_visible_to(g, viewer))
 }
 
+/// Whether a read as `viewer` covers stored graph `graph`: the default graph
+/// and shared named graphs always, a Local graph only for its owner.
+/// `viewer: None` is the executor itself, which reads no Local graph.
+fn stored_graph_readable_by(graph: GraphNameRef<'_>, viewer: Option<&str>) -> bool {
+    match graph {
+        GraphNameRef::NamedNode(g) => match viewer {
+            Some(viewer) => graph_visible_to(g.as_str(), viewer),
+            None => !is_local_graph(g.as_str()),
+        },
+        GraphNameRef::DefaultGraph | GraphNameRef::BlankNode(_) => true,
+    }
+}
+
 /// Resolve a graph named by `viewer`: the alias becomes the viewer's own Local
 /// graph, and another agent's Local graph is refused. `viewer: None` is the
 /// executor itself, which may name any graph but has no alias to resolve.
@@ -1340,33 +1353,42 @@ impl SparqlStore {
         self.query_links(None, None, Some(target), None, None, None)
     }
 
-    /// Whether the link triple `source predicate target` is stored, whoever
-    /// wrote it. One index lookup on the direct triple, without reading the
-    /// link's annotations.
+    /// Whether the link triple `source predicate target` is stored in a graph
+    /// `viewer` reads (see [`stored_graph_readable_by`]), whoever wrote it.
+    /// One index lookup on the direct triple, without reading the link's
+    /// annotations. A link's triple lives in the link's own graph, so the
+    /// default graph alone misses Local links and named-graph records.
     pub(crate) fn has_triple(
         &self,
         source: &str,
         predicate: &str,
         target: &str,
+        viewer: Option<&str>,
     ) -> Result<bool, Error> {
         let target = target_to_storage_term(target);
-        Ok(self.store.contains(QuadRef::new(
-            NamedNodeRef::new_unchecked(source),
-            NamedNodeRef::new_unchecked(predicate),
-            target.as_ref(),
-            GraphNameRef::DefaultGraph,
-        ))?)
+        for quad in self.store.quads_for_pattern(
+            Some(NamedNodeRef::new_unchecked(source).into()),
+            Some(NamedNodeRef::new_unchecked(predicate)),
+            Some(target.as_ref()),
+            None,
+        ) {
+            if stored_graph_readable_by(quad?.graph_name.as_ref(), viewer) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// `(predicate, other end)` of every link triple with `node` at either
     /// end, and with `predicate` when one is given, other ends in wire
-    /// spelling. `None` when there are more than `limit`: the caller asked to
-    /// stop there.
+    /// spelling, in the graphs `viewer` reads (see [`Self::has_triple`]).
+    /// `None` when there are more than `limit`: the caller asked to stop there.
     pub(crate) fn neighbours(
         &self,
         node: &str,
         predicate: Option<&str>,
         limit: usize,
+        viewer: Option<&str>,
     ) -> Result<Option<Vec<(String, String)>>, Error> {
         let mut out = Vec::new();
         let as_subject = NamedNodeRef::new_unchecked(node);
@@ -1375,9 +1397,12 @@ impl SparqlStore {
             Some(as_subject.into()),
             predicate,
             None,
-            Some(GraphNameRef::DefaultGraph),
+            None,
         ) {
             let quad = quad?;
+            if !stored_graph_readable_by(quad.graph_name.as_ref(), viewer) {
+                continue;
+            }
             out.push((
                 quad.predicate.as_str().to_string(),
                 storage_term_to_target_string(&quad.object),
@@ -1391,9 +1416,12 @@ impl SparqlStore {
             None,
             predicate,
             Some(as_object.as_ref()),
-            Some(GraphNameRef::DefaultGraph),
+            None,
         ) {
             let quad = quad?;
+            if !stored_graph_readable_by(quad.graph_name.as_ref(), viewer) {
+                continue;
+            }
             let NamedOrBlankNode::NamedNode(source) = &quad.subject else {
                 continue;
             };
