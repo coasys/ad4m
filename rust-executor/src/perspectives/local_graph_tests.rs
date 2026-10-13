@@ -656,28 +656,29 @@ async fn a_local_graph_link_event_reaches_only_its_agent() {
     );
 }
 
-/// A subscription's update reaches its subscriber's session only. The result
-/// is computed as the subscriber reads, so it carries that agent's Local rows;
-/// a co-owner of the perspective must not get it.
+/// A subscription's update reaches its subscriber's connection only. The
+/// result is computed as the subscriber reads, so it carries that agent's
+/// Local rows; a co-owner of the perspective must not get it. Each update
+/// names the connection that opened the subscription, and the RPC socket
+/// delivers it to that connection alone (`events_ws::query_update_for`).
 #[tokio::test]
 async fn a_subscription_update_reaches_only_its_subscriber() {
-    use crate::api::events_ws::matches_query_subscription_owner;
     use crate::pubsub::PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC;
 
     let (alice, alice_did) = user("alice");
-    let (_, bob_did) = user("bob");
+    let (bob, bob_did) = user("bob");
     let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
-    // The session filter checks ownership through the global registry.
-    super::register_perspective(p.uuid.clone(), p.clone());
+    let query = "SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string();
 
-    let (subscription_id, initial) = p
-        .subscribe_and_query(
-            "SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string(),
-            alice.user_email.clone(),
-        )
+    let (alice_sub, _, initial) = p
+        .subscribe_and_query(query.clone(), alice.user_email.clone(), "alice-conn".into())
         .await
         .unwrap();
     assert!(!initial.contains("ad4m://s/secret"));
+    let (bob_sub, _, _) = p
+        .subscribe_and_query(query, bob.user_email.clone(), "bob-conn".into())
+        .await
+        .unwrap();
 
     let mut events = get_global_pubsub()
         .await
@@ -701,34 +702,44 @@ async fn a_subscription_update_reaches_only_its_subscriber() {
     .expect("the write was not recorded for the subscription check");
     p.check_subscriptions_now().await;
 
-    let update = loop {
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
-            .await
-            .expect("no subscription update was published")
-            .unwrap();
+    // Everything this perspective published within the window.
+    let mut updates = vec![];
+    while let Ok(Ok(msg)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), events.recv()).await
+    {
         let v: Value = serde_json::from_str(&msg).unwrap();
-        if v["subscriptionId"].as_str() == Some(subscription_id.as_str()) {
-            break msg;
+        if v["perspectiveUuid"].as_str() == Some(p.uuid.as_str()) {
+            updates.push(v);
         }
+    }
+    let for_sub = |id: &str| -> Vec<&Value> {
+        updates
+            .iter()
+            .filter(|v| v["subscriptionId"].as_str() == Some(id))
+            .collect()
     };
-    let v: Value = serde_json::from_str(&update).unwrap();
+    let alice_updates = for_sub(&alice_sub);
+    assert_eq!(alice_updates.len(), 1, "{updates:?}");
     assert!(
-        v["result"].as_str().unwrap().contains("ad4m://s/secret"),
-        "the update carries Alice's Local row: {update}"
+        alice_updates[0].to_string().contains("ad4m://s/secret"),
+        "the update carries Alice's Local row: {}",
+        alice_updates[0]
+    );
+    assert_eq!(
+        alice_updates[0]["connectionId"], "alice-conn",
+        "addressed to Alice's connection only"
     );
     assert!(
-        matches_query_subscription_owner(&update, Some(&alice_did), false).await,
-        "Alice's session gets her update"
+        for_sub(&bob_sub).is_empty(),
+        "Bob co-owns the perspective, but Alice's Local write is not his: {updates:?}"
     );
     assert!(
-        !matches_query_subscription_owner(&update, Some(&bob_did), false).await,
-        "Bob co-owns the perspective but didn't subscribe: {update}"
+        updates
+            .iter()
+            .filter(|v| v.to_string().contains("ad4m://s/secret"))
+            .all(|v| v["connectionId"] == "alice-conn"),
+        "no other connection is addressed with Alice's Local row: {updates:?}"
     );
-    assert!(
-        !matches_query_subscription_owner(&update, None, false).await,
-        "a session whose DID hasn't resolved gets nothing"
-    );
-    super::unregister_perspective(&p.uuid);
 }
 
 /// A signed link from a client carries its own graph. It gets the same rules
@@ -1704,10 +1715,11 @@ async fn a_subscriptions_first_result_holds_its_subscribers_local_rows() {
         .unwrap();
     }
 
-    let (_, sparql) = p
+    let (_, _, sparql) = p
         .subscribe_and_query(
             "SELECT ?s WHERE { ?s <t://text> ?o }".to_string(),
             alice.user_email.clone(),
+            "c".into(),
         )
         .await
         .unwrap();
@@ -1720,12 +1732,13 @@ async fn a_subscriptions_first_result_holds_its_subscribers_local_rows() {
         "SPARQL subscription's first result: {sparql}"
     );
 
-    let (_, model) = p
+    let (_, _, model) = p
         .model_subscribe_and_query(
             "Note".into(),
             "{}".to_string(),
             alice.user_email.clone(),
             None,
+            "c".into(),
         )
         .await
         .unwrap();

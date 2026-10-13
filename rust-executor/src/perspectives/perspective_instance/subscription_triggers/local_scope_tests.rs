@@ -141,6 +141,7 @@ async fn subscribe(p: &PerspectiveInstance, who: &AgentContext, query: Value) ->
         query.to_string(),
         who.user_email.clone(),
         None,
+        format!("conn-{}", who.user_email.as_deref().unwrap_or("main")),
     )
     .await
     .unwrap()
@@ -263,6 +264,120 @@ async fn a_record_in_a_named_graph_entering_the_filter_reruns() {
     );
 }
 
+/// One batch mixes a write only Alice reads (her Local Note) with one both
+/// read (a shared Note), checked once. `visible_to(bob)` must drop the first
+/// and keep the second: both subscriptions re-run once, and Bob's result,
+/// and the update sent to his connection, hold the shared Note only. A
+/// `visible_to` that drops too much loses Bob's re-run; one that keeps too
+/// much puts Alice's Note in his result (#812 review, Marvin's note 5).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mixed_batch_reruns_each_subscriber_on_what_they_read() {
+    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+
+    let (mut p, (alice, _), (bob, _)) = notes().await;
+    let main = AgentContext::main_agent();
+    check(&p).await;
+    let alices = subscribe(&p, &alice, json!({})).await;
+    let bobs = subscribe(&p, &bob, json!({})).await;
+    let mut updates = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    note(
+        &mut p,
+        "ns://note/alice",
+        "mine",
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS),
+    )
+    .await;
+    note(&mut p, "ns://note/shared", "ours", &main, None).await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&alices), 1, "one batch, one re-run for Alice");
+    assert_eq!(
+        reruns::count(&bobs),
+        1,
+        "the shared Note re-runs Bob's subscription"
+    );
+    assert_eq!(
+        ids(&last_result(&p, &alices).await),
+        vec!["ns://note/alice", "ns://note/shared"]
+    );
+    assert_eq!(
+        ids(&last_result(&p, &bobs).await),
+        vec!["ns://note/shared"],
+        "Bob's result holds the shared Note only"
+    );
+
+    let mut bob_updates = vec![];
+    while let Ok(msg) = updates.try_recv() {
+        let v: Value = serde_json::from_str(&msg).unwrap();
+        if v["subscriptionId"].as_str() == Some(bobs.as_str()) {
+            bob_updates.push(v);
+        }
+    }
+    assert_eq!(bob_updates.len(), 1, "{bob_updates:?}");
+    assert_eq!(bob_updates[0]["ids"], json!(["ns://note/shared"]));
+    assert!(
+        !bob_updates[0].to_string().contains("ns://note/alice"),
+        "Bob's update carries Alice's Local Note: {}",
+        bob_updates[0]
+    );
+    assert_eq!(
+        bob_updates[0]["connectionId"],
+        json!(format!("conn-{}", bob.user_email.as_deref().unwrap())),
+        "addressed to Bob's connection"
+    );
+}
+
+/// Past `MAX_TRACKED_LINKS` a batch keeps only its predicates (`links:
+/// None`), and every model subscription falls back to predicate matching.
+/// `visible_to` must still split those predicates by graph owner: Alice's
+/// Local writes alone are nothing Bob reads, and with one shared write in
+/// the same batch he reads only its predicate (#812 review, Marvin's note 2).
+#[test]
+fn visible_to_past_the_link_cap_keeps_only_what_the_viewer_reads() {
+    use super::{Writes, MAX_TRACKED_LINKS};
+    use crate::perspectives::sparql_store::local_graph_iri;
+    use std::collections::HashSet;
+
+    let (alice, bob) = ("did:key:alice", "did:key:bob");
+    let alice_local = local_graph_iri(alice);
+    let mut writes = Writes::new();
+    for i in 0..=MAX_TRACKED_LINKS {
+        writes.record_in(
+            Some(&alice_local),
+            &format!("ns://n/{i}"),
+            "ns://alice-only",
+            "literal:string:x",
+        );
+    }
+    assert!(writes.links.is_none(), "the batch is past the cap");
+    assert!(
+        writes.visible_to(bob).is_empty(),
+        "Bob reads none of Alice's Local writes"
+    );
+    assert_eq!(
+        writes.visible_to(alice).predicates,
+        HashSet::from(["ns://alice-only".to_string()])
+    );
+
+    writes.record_in(None, "ns://n/shared", "ns://status", "literal:string:done");
+    let bobs = writes.visible_to(bob);
+    assert_eq!(
+        bobs.predicates,
+        HashSet::from(["ns://status".to_string()]),
+        "Bob reads the shared predicate only"
+    );
+    assert!(bobs.links.is_none(), "still predicate matching");
+    assert_eq!(
+        writes.visible_to(alice).predicates,
+        HashSet::from(["ns://alice-only".to_string(), "ns://status".to_string()])
+    );
+}
+
 /// The `scan` lookup must not read another agent's Local graph either. Only
 /// Alice's Local flag makes `ns://n/x` a Note, so a shared write on its
 /// `status` re-runs her subscription and not Bob's.
@@ -362,8 +477,14 @@ async fn a_union_query_reads_in_its_callers_scope() {
         "Bob's row was classified by Alice's Local flag: {bobs}"
     );
 
-    let (_, subscribed) = p
-        .model_subscribe_and_query(union, "{}".to_string(), bob.user_email.clone(), None)
+    let (_, _, subscribed) = p
+        .model_subscribe_and_query(
+            union,
+            "{}".to_string(),
+            bob.user_email.clone(),
+            None,
+            "c".into(),
+        )
         .await
         .unwrap();
     assert_eq!(ids(&subscribed), vec!["ns://n/shared"], "{subscribed}");

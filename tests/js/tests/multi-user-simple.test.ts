@@ -1347,10 +1347,16 @@ describe("Multi-User Simple integration tests", () => {
             const { subscriptionId } = await alice.perspective.subscribeQuery(aliceUuid, query);
             const aliceUpdates: string[] = [];
             const bobUpdates: string[] = [];
-            const stopAlice = alice.perspective.subscribeToQueryUpdates(subscriptionId, r => aliceUpdates.push(JSON.stringify(r)));
-            // Bob listens for Alice's subscription id. His client would drop an
-            // unknown id, so this listener sees what reaches his socket.
-            const stopBob = bob.perspective.subscribeToQueryUpdates(subscriptionId, r => bobUpdates.push(JSON.stringify(r)));
+            const stopAlice = alice.perspective.onQueryUpdate(u => {
+                if ("subscriptionId" in u && u.subscriptionId === subscriptionId) aliceUpdates.push(JSON.stringify(u));
+            });
+            // Every query update that reaches Bob's socket. He opened no live
+            // query, so nothing that names Alice's subscription or carries her
+            // Local link may arrive.
+            const stopBob = bob.perspective.onQueryUpdate(u => {
+                const text = JSON.stringify(u);
+                if (text.includes(subscriptionId) || text.includes("test://alice-draft")) bobUpdates.push(text);
+            });
 
             await alice.perspective.addLink(aliceUuid, new Link({ source: "test://alice-draft", predicate: "test://note", target: "test://secret" }), "local");
 
@@ -1375,6 +1381,99 @@ describe("Multi-User Simple integration tests", () => {
             stopAlice();
             stopBob();
             await alice.perspective.disposeQuerySubscription(aliceUuid, subscriptionId);
+        });
+
+        // #812 review (Marvin, note 6): two users on one executor co-own a
+        // perspective and each opens a model subscription on it. A
+        // subscription is computed as its subscriber reads (the default graph,
+        // shared named graphs and their own Local graph), and its updates go
+        // to the subscriber's own connection. So each update carries only what
+        // its subscriber reads. Whether a write *re-runs* a subscription can't
+        // be seen from here, since an unchanged result sends nothing. The Rust
+        // tests in subscription_triggers/local_scope_tests.rs count re-runs.
+        it("runs each co-owner's model subscription on the data that co-owner reads", async function () {
+            this.timeout(300000);
+            const { Model, Property, Flag, Ad4mModel } = await import("@coasys/ad4m");
+            const LOCAL = "ad4m://local";
+
+            @Model({ name: "SubScopeNote" })
+            class SubScopeNote extends Ad4mModel {
+                @Flag({ through: "subscope://type", value: "subscope://note" })
+                type = "subscope://note";
+                @Property({ through: "subscope://status", resolveLanguage: "literal" })
+                status: string = "";
+            }
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("subscope1@example.com", "password1");
+            await createTestUser("subscope2@example.com", "password2");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("subscope1@example.com", "password1"));
+            const bob = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("subscope2@example.com", "password2"));
+
+            const own = await alice.perspective.add("Subscription scope");
+            const linkLanguage = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({ uid: uuidv4(), name: "Subscription scope" }));
+            const url = await alice.neighbourhood.publishFromPerspective(own.uuid, linkLanguage.address, new Perspective([]));
+            await bob.neighbourhood.joinFromUrl(url);
+            let bobUuid = "";
+            await pollUntil(async () => {
+                bobUuid = (await bob.perspective.all()).find(p => p.sharedUrl === url)?.uuid ?? "";
+                return !!bobUuid;
+            }, { timeoutMs: 15000, label: "Bob sees the neighbourhood" });
+            // One perspective with two co-owners: what differs is the reader,
+            // not the perspective. Two perspectives would pass for the wrong reason.
+            expect(bobUuid).to.equal(own.uuid);
+            const pa = (await alice.perspective.byUUID(own.uuid))!;
+            const pb = (await bob.perspective.byUUID(bobUuid))!;
+            for (const p of [pa, pb]) await (SubScopeNote as any).register(p);
+
+            // Bob's own Note, still open, in his Local graph.
+            const bobNote = await SubScopeNote.create(pb, { status: "open" }, { graph: LOCAL });
+
+            const aliceResults: string[][] = [];
+            const bobResults: string[][] = [];
+            const aliceQuery = SubScopeNote.query(pa).where({ status: "done" });
+            const bobQuery = SubScopeNote.query(pb).where({ status: "done" });
+            try {
+                // Settle the setup writes before subscribing, and the subscribes
+                // before the write under test, so no write shares a batch with
+                // the one under test.
+                await sleep(1000);
+                expect(await aliceQuery.subscribe(r => aliceResults.push(r.map(n => n.id)))).to.be.empty;
+                expect(await bobQuery.subscribe(r => bobResults.push(r.map(n => n.id)))).to.be.empty;
+                await sleep(1000);
+                expect(aliceResults, "an update before any write").to.be.empty;
+                expect(bobResults, "an update before any write").to.be.empty;
+
+                // 1. Alice's Local Note, done: her update carries it, Bob gets nothing.
+                const aliceNote = await SubScopeNote.create(pa, { status: "done" }, { graph: LOCAL });
+                await pollUntil(() => aliceResults.some(ids => ids.includes(aliceNote.id)),
+                    { timeoutMs: 15000, label: "Alice's update carries her Local Note" });
+                // Give a leaked update the time Alice's took, and then some.
+                await sleep(2000);
+                expect(bobResults, "Alice's Local Note changed Bob's subscription").to.be.empty;
+
+                // 2. Bob sets his own Local Note to done: his subscription updates.
+                expect(bobResults.flat(), "delivered before Bob's write").to.not.include(bobNote.id);
+                bobNote.status = "done";
+                await bobNote.save();
+                await pollUntil(() => bobResults.some(ids => ids.includes(bobNote.id)),
+                    { timeoutMs: 15000, label: "Bob's update carries his Local Note" });
+                expect(bobResults[bobResults.length - 1]).to.deep.equal([bobNote.id]);
+                await sleep(2000);
+                expect(aliceResults.flat(), "Bob's Local Note reached Alice").to.not.include(bobNote.id);
+
+                // 3. Control: a shared Note reaches both, next to each one's own Note.
+                const shared = await SubScopeNote.create(pa, { status: "done" });
+                await pollUntil(() => aliceResults.some(ids => ids.includes(shared.id))
+                    && bobResults.some(ids => ids.includes(shared.id)),
+                    { timeoutMs: 15000, label: "both updates carry the shared Note" });
+                expect([...aliceResults[aliceResults.length - 1]].sort()).to.deep.equal([aliceNote.id, shared.id].sort());
+                expect([...bobResults[bobResults.length - 1]].sort()).to.deep.equal([bobNote.id, shared.id].sort());
+                expect(bobResults.flat(), "Alice's Local Note reached Bob").to.not.include(aliceNote.id);
+            } finally {
+                aliceQuery.dispose();
+                bobQuery.dispose();
+            }
         });
 
         it("should use separate prolog pools for different users in shared neighbourhood", async () => {
