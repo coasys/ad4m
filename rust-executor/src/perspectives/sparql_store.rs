@@ -94,6 +94,22 @@ fn target_to_storage_term(target: &str) -> Term {
     Term::NamedNode(NamedNode::new_unchecked(target))
 }
 
+/// The spelling a link target reads back with after a store round trip. A
+/// `literal:` target is stored as an RDF literal and re-encoded on the way
+/// out, so `literal:string:a b` reads back as `literal:string:a%20b`. For
+/// comparing a written target with one read from the store.
+pub(crate) fn canonical_target(target: &str) -> String {
+    storage_term_to_target_string(&target_to_storage_term(target))
+}
+
+/// Whether a link target is stored as an RDF literal (`literal:string:`,
+/// `:number:`, `:boolean:`, `:json:`), not as a node. A link source is always
+/// stored as a node, so a triple whose object is such a literal never links
+/// into a record: it is a value on its source.
+pub(crate) fn stored_as_literal(target: &str) -> bool {
+    matches!(target_to_storage_term(target), Term::Literal(_))
+}
+
 /// Inverse of [`target_to_storage_term`]: render a stored [`Term`] back into
 /// the wire-format URL string the SDK / hydration layer expect.
 ///
@@ -395,6 +411,19 @@ pub fn link_visible_to(link: &DecoratedLinkExpression, viewer: &str) -> bool {
     link.graph
         .as_deref()
         .is_none_or(|g| graph_visible_to(g, viewer))
+}
+
+/// Whether a read as `viewer` covers stored graph `graph`: the default graph
+/// and shared named graphs always, a Local graph only for its owner.
+/// `viewer: None` is the executor itself, which reads no Local graph.
+fn stored_graph_readable_by(graph: GraphNameRef<'_>, viewer: Option<&str>) -> bool {
+    match graph {
+        GraphNameRef::NamedNode(g) => match viewer {
+            Some(viewer) => graph_visible_to(g.as_str(), viewer),
+            None => !is_local_graph(g.as_str()),
+        },
+        GraphNameRef::DefaultGraph | GraphNameRef::BlankNode(_) => true,
+    }
 }
 
 /// Resolve a graph named by `viewer`: the alias becomes the viewer's own Local
@@ -1322,6 +1351,90 @@ impl SparqlStore {
     /// Get all links with the given target.
     pub fn get_links_by_target(&self, target: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
         self.query_links(None, None, Some(target), None, None, None)
+    }
+
+    /// Whether the link triple `source predicate target` is stored in a graph
+    /// `viewer` reads (see [`stored_graph_readable_by`]), whoever wrote it.
+    /// One index lookup on the direct triple, without reading the link's
+    /// annotations. A link's triple lives in the link's own graph, so the
+    /// default graph alone misses Local links and named-graph records.
+    pub(crate) fn has_triple(
+        &self,
+        source: &str,
+        predicate: &str,
+        target: &str,
+        viewer: Option<&str>,
+    ) -> Result<bool, Error> {
+        let target = target_to_storage_term(target);
+        for quad in self.store.quads_for_pattern(
+            Some(NamedNodeRef::new_unchecked(source).into()),
+            Some(NamedNodeRef::new_unchecked(predicate)),
+            Some(target.as_ref()),
+            None,
+        ) {
+            if stored_graph_readable_by(quad?.graph_name.as_ref(), viewer) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `(predicate, other end)` of every link triple with `node` at either
+    /// end, and with `predicate` when one is given, other ends in wire
+    /// spelling, in the graphs `viewer` reads (see [`Self::has_triple`]).
+    /// `None` when there are more than `limit`: the caller asked to stop there.
+    pub(crate) fn neighbours(
+        &self,
+        node: &str,
+        predicate: Option<&str>,
+        limit: usize,
+        viewer: Option<&str>,
+    ) -> Result<Option<Vec<(String, String)>>, Error> {
+        let mut out = Vec::new();
+        let as_subject = NamedNodeRef::new_unchecked(node);
+        let predicate = predicate.map(NamedNodeRef::new_unchecked);
+        for quad in self
+            .store
+            .quads_for_pattern(Some(as_subject.into()), predicate, None, None)
+        {
+            let quad = quad?;
+            if !stored_graph_readable_by(quad.graph_name.as_ref(), viewer) {
+                continue;
+            }
+            out.push((
+                quad.predicate.as_str().to_string(),
+                storage_term_to_target_string(&quad.object),
+            ));
+            if out.len() > limit {
+                return Ok(None);
+            }
+        }
+        let as_object = target_to_storage_term(node);
+        for quad in self
+            .store
+            .quads_for_pattern(None, predicate, Some(as_object.as_ref()), None)
+        {
+            let quad = quad?;
+            if !stored_graph_readable_by(quad.graph_name.as_ref(), viewer) {
+                continue;
+            }
+            let NamedOrBlankNode::NamedNode(source) = &quad.subject else {
+                continue;
+            };
+            // A reifier's annotations can carry the same literal; they are
+            // not links.
+            if source.as_str().starts_with("link:") {
+                continue;
+            }
+            out.push((
+                quad.predicate.as_str().to_string(),
+                source.as_str().to_string(),
+            ));
+            if out.len() > limit {
+                return Ok(None);
+            }
+        }
+        Ok(Some(out))
     }
 
     /// Get all links with the given predicate.

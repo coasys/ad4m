@@ -2,8 +2,12 @@
 
 /**
  * Wire names stay snake_case, as the handlers read them.
+ *
+ * Exactly one of `class_name` and `class_names`: one class, or one query over
+ * the union of several (#1238), whose rows carry `__subjectClass` and
+ * `__subjectClasses`.
  */
-export type PerspectiveModelQueryParams = { uuid: string, class_name: string, query_json: string, 
+export type PerspectiveModelQueryParams = { uuid: string, class_name?: string, class_names?: Array<string>, query_json: string, 
 /**
  * Named graphs to read; the Local alias names the caller's own Local
  * graph. Absent: every graph the caller may read.
