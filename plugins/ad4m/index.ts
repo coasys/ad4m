@@ -835,8 +835,8 @@ Notes:
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
       "Creates a live waker subscription that wakes you when an item mentions you — a message, " +
-      "or an instance of whatever class this space defines. Where the space declares a mention " +
-      "relation, that is a link from the item to your DID; otherwise it is text carrying " +
+      "or an instance of whatever class this space defines. That is a mention link from the item " +
+      "to your DID (ad4m://mentions, or a predicate the space declares as one), or text carrying " +
       "@ and one of your profile names, or your DID. " +
       "Note: this is called automatically when you join or publish a neighbourhood.",
     parameters: {

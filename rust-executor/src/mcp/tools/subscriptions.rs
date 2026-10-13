@@ -185,7 +185,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. Where the perspective declares a mention relation (<pred> rdfs:subPropertyOf ad4m://mentions), it watches for links through that relation to this agent's DID — exact, and the woken item is the message. Otherwise it watches message text for @name (each profile name) or the full DID, case-insensitively (SPARQL CONTAINS); a bare name without @ does not match. The waker plugin resolves parent channels in a second query when the subscription fires. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. It watches links to this agent's DID through ad4m://mentions and any predicate the perspective declares as one (<pred> rdfs:subPropertyOf ad4m://mentions) — exact, and the woken item is the message — and also message text for @name (each profile name) or the full DID, case-insensitively (SPARQL CONTAINS), so a mention written without a link still wakes; a bare name without @ does not match. The waker plugin resolves parent channels in a second query when the subscription fires. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -257,7 +257,8 @@ impl Ad4mMcpHandler {
             None => Vec::new(),
         };
 
-        // A declared mention relation answers exactly; text is the fallback.
+        // Mention links answer exactly; text catches mentions written without
+        // one (pasted, imported, or by another bot). Both are watched.
         let relations: Vec<String> = match perspective {
             Some(ref p) => p
                 .mention_relations()
@@ -266,16 +267,12 @@ impl Ad4mMcpHandler {
                 .filter(|r| validate_sparql_iri(r).is_ok())
                 .cloned()
                 .collect(),
-            None => Vec::new(),
+            None => vec![crate::perspectives::mentions::MENTIONS.to_string()],
         };
-        let query = if !relations.is_empty() {
-            build_mention_relation_query(&relations, &did)
-        } else {
-            if text_predicates.is_empty() {
-                log::warn!("get_mention_waker_config: no message-text predicate declared and no `body` on a Message class, falling back to unscoped (but ontology-excluded) query");
-            }
-            build_mention_query(&names, &did, &text_predicates)
-        };
+        if text_predicates.is_empty() {
+            log::warn!("get_mention_waker_config: no message-text predicate declared and no `body` on a Message class, falling back to unscoped (but ontology-excluded) text match");
+        }
+        let query = build_mention_watch_query(&names, &did, &text_predicates, &relations);
 
         let sub_id = build_mention_sub_id(perspective_id);
 
@@ -300,34 +297,25 @@ impl Ad4mMcpHandler {
             "containment_predicates": containment,
             "mention_relations": relations,
             "subscription": subscription,
-            "message": if !relations.is_empty() {
-                format!(
-                    "Add the subscription entry to your waker config and restart the waker. \
-                     This single query watches for links to {} through [{}] in perspective {}.",
-                    did,
-                    relations.join(", "),
-                    perspective_id
-                )
-            } else {
-                format!(
-                    "Add the subscription entry to your waker config and restart the waker. \
-                     This single query watches for mentions of {} by {} in perspective {}.",
-                    did,
-                    if names.is_empty() {
-                        "DID only".to_string()
-                    } else {
-                        format!(
-                            "[{}] or",
-                            names
-                                .iter()
-                                .map(|n| format!("@{}", n))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    },
-                    perspective_id
-                )
-            },
+            "message": format!(
+                "Add the subscription entry to your waker config and restart the waker. \
+                 This single query watches for links to {} through [{}], and for {}the DID in message text, in perspective {}.",
+                did,
+                relations.join(", "),
+                if names.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(
+                        "[{}] or ",
+                        names
+                            .iter()
+                            .map(|n| format!("@{}", n))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                },
+                perspective_id
+            ),
         })
         .to_string()
     }
@@ -377,11 +365,23 @@ pub(crate) async fn mention_text_predicates(perspective: &PerspectiveInstance) -
 ///
 /// Pure over its inputs, so it unit-tests without an agent or perspective.
 pub fn build_mention_query(names: &[String], did: &str, text_predicates: &[String]) -> String {
-    let all_terms: Vec<String> = names
+    format!(
+        "SELECT ?source ?predicate ?target WHERE {{ {} }}",
+        mention_text_pattern(names, did, text_predicates)
+    )
+}
+
+/// The text half of a mention query: the graph pattern and filters inside
+/// `WHERE { … }`, so it can stand alone or be one branch of a UNION.
+fn mention_text_pattern(names: &[String], did: &str, text_predicates: &[String]) -> String {
+    let mut all_terms: Vec<String> = names
         .iter()
         .map(|n| format!("@{}", n.to_lowercase()))
         .chain(std::iter::once(did.to_lowercase()))
         .collect();
+    // A username and a given name often lower-case to the same term.
+    all_terms.sort();
+    all_terms.dedup();
     let mention_conditions: Vec<String> = all_terms
         .iter()
         .map(|t| {
@@ -400,14 +400,14 @@ pub fn build_mention_query(names: &[String], did: &str, text_predicates: &[Strin
             .map(|p| format!("\"{}\"", escape_sparql_literal(p)))
             .collect();
         return format!(
-            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) IN ({})) {} FILTER({}) }}",
+            "?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) IN ({})) {} FILTER({})",
             listed.join(", "),
             ontology_guard,
             mention_predicate
         );
     }
     format!(
-        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({}) }}",
+        "?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({})",
         ontology_guard, mention_predicate
     )
 }
@@ -416,14 +416,44 @@ pub fn build_mention_query(names: &[String], did: &str, text_predicates: &[Strin
 /// relation: links through any of `relations` whose target is the agent's DID.
 /// The source is the message, so the waker resolves its parents as usual.
 pub fn build_mention_relation_query(relations: &[String], did: &str) -> String {
+    format!(
+        "SELECT ?source ?predicate ?target WHERE {{ {} }}",
+        mention_relation_pattern(relations, did)
+    )
+}
+
+/// The relation half of a mention query, inside `WHERE { … }`.
+fn mention_relation_pattern(relations: &[String], did: &str) -> String {
     let listed: Vec<String> = relations
         .iter()
         .map(|r| format!("\"{}\"", escape_sparql_literal(r)))
         .collect();
     format!(
-        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) IN ({})) FILTER(STR(?target) = \"{}\") }}",
+        "?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) IN ({})) FILTER(STR(?target) = \"{}\")",
         listed.join(", "),
         escape_sparql_literal(did)
+    )
+}
+
+/// The mention query `get_mention_waker_config` hands the waker: links to the
+/// agent's DID through any of `relations`, UNION `@name` or the DID in message
+/// text. Either alone loses mentions: the relation misses every mention
+/// written without the app's picker, text misses a link with no text beside
+/// it. Both branches bind `?source` to the mentioning item. With no usable
+/// relation it is the text query alone.
+pub fn build_mention_watch_query(
+    names: &[String],
+    did: &str,
+    text_predicates: &[String],
+    relations: &[String],
+) -> String {
+    if relations.is_empty() {
+        return build_mention_query(names, did, text_predicates);
+    }
+    format!(
+        "SELECT ?source ?predicate ?target WHERE {{ {{ {} }} UNION {{ {} }} }}",
+        mention_relation_pattern(relations, did),
+        mention_text_pattern(names, did, text_predicates)
     )
 }
 
@@ -525,6 +555,33 @@ mod tests {
         );
         assert!(q.contains("STR(?target) = \"did:key:zAgent\""), "{q}");
         assert!(!q.contains("CONTAINS"), "no text matching: {q}");
+    }
+
+    #[test]
+    fn watch_query_takes_the_relation_and_the_text() {
+        let q = build_mention_watch_query(
+            &["Data".to_string(), "data".to_string()],
+            "did:key:zAgent",
+            &["we://text".to_string()],
+            &["ad4m://mentions".to_string(), "we://mention".to_string()],
+        );
+        let (relation, text) = q.split_once(" UNION ").expect("two branches");
+        assert!(
+            relation.contains("STR(?predicate) IN (\"ad4m://mentions\", \"we://mention\")")
+                && relation.contains("STR(?target) = \"did:key:zAgent\""),
+            "{q}"
+        );
+        assert!(
+            text.contains("STR(?predicate) IN (\"we://text\")") && text.contains("\"@data\""),
+            "{q}"
+        );
+        // Username and given name lower-case to one term, listed once.
+        assert_eq!(q.matches("\"@data\"").count(), 1, "{q}");
+        // No relation: the text query alone.
+        assert_eq!(
+            build_mention_watch_query(&["data".to_string()], "did:key:zAgent", &[], &[]),
+            build_mention_query(&["data".to_string()], "did:key:zAgent", &[])
+        );
     }
 
     #[test]

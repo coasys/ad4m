@@ -9,10 +9,14 @@
 //! <app://mention> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <ad4m://mentions>
 //! ```
 //!
-//! A mention subscription in such a perspective follows those links to the
-//! agent's DID and nothing else: no name collisions, an indexed lookup, and the
-//! woken item is the message itself. A perspective that declares none is
-//! matched in text, on `@name` or the DID.
+//! `ad4m://mentions` itself is always one of them, so an app can also write it
+//! directly without declaring anything.
+//!
+//! A mention subscription follows those links to the agent's DID — an exact,
+//! indexed match whose woken item is the message itself — and also matches
+//! `@name` or the DID in message text. A mention written without the app's
+//! picker (pasted, imported, or by another bot through MCP) has no link, and
+//! still has to wake its agent.
 
 use super::perspective_instance::PerspectiveInstance;
 use std::sync::Arc;
@@ -21,9 +25,12 @@ use std::sync::Arc;
 pub const MENTIONS: &str = "ad4m://mentions";
 
 impl PerspectiveInstance {
-    /// The predicates this perspective's authors declared to link a message
-    /// to the agents it mentions. Empty when none are declared.
+    /// The predicates linking a message to the agents it mentions:
+    /// `ad4m://mentions`, then each one this perspective's authors declared.
     pub async fn mention_relations(&self) -> Arc<Vec<String>> {
-        self.declared_for(MENTIONS).await
+        let declared = self.declared_for(MENTIONS).await;
+        let mut all = vec![MENTIONS.to_string()];
+        all.extend(declared.iter().cloned());
+        Arc::new(all)
     }
 }

@@ -2491,13 +2491,17 @@ async fn mention_scan_reads_the_declared_message_text() {
     );
 }
 
-/// A perspective that declares its mention relation is watched through it;
-/// one that declares none has no relations, so mentions fall back to text.
+/// `ad4m://mentions` is always a mention relation, so an app can write it
+/// without declaring anything; a declared one is added after it.
 #[tokio::test(flavor = "multi_thread")]
 async fn mention_relations_are_the_declared_ones() {
     let (handler, uuid, _guard) = setup(false).await;
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    assert!(perspective.mention_relations().await.is_empty());
+    // The base role alone until something is declared.
+    assert_eq!(
+        perspective.mention_relations().await.as_ref(),
+        &vec![crate::perspectives::mentions::MENTIONS.to_string()]
+    );
 
     add(
         &handler,
@@ -2509,8 +2513,51 @@ async fn mention_relations_are_the_declared_ones() {
     .await;
     assert_eq!(
         perspective.mention_relations().await.as_ref(),
-        &vec!["app://mention".to_string()]
+        &vec![
+            crate::perspectives::mentions::MENTIONS.to_string(),
+            "app://mention".to_string()
+        ]
     );
     // Another role's declaration is not a mention relation.
     assert!(perspective.message_text_predicates().await.is_empty());
+}
+
+/// The mention config watches the relation and the text together: a mention
+/// written without a link (by another bot, pasted) still wakes the agent in a
+/// perspective that declares a mention relation.
+#[tokio::test(flavor = "multi_thread")]
+async fn mention_config_watches_the_relation_and_the_text() {
+    let (handler, uuid, _guard) = setup(false).await;
+    add(
+        &handler,
+        &uuid,
+        "app://mention",
+        crate::perspectives::declared_roles::SUB_PROPERTY_OF,
+        crate::perspectives::mentions::MENTIONS,
+    )
+    .await;
+    let out = handler
+        .get_mention_waker_config(Parameters(
+            crate::mcp::tools::subscriptions::MentionWakerConfigParams {
+                perspective_id: uuid.clone(),
+                name_override: Some("wakerbot".to_string()),
+            },
+        ))
+        .await;
+    let config: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let query = config["query"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no query: {out}"));
+    let (relation, text) = query
+        .split_once(" UNION ")
+        .unwrap_or_else(|| panic!("relation and text, both: {query}"));
+    assert!(
+        relation.contains("\"ad4m://mentions\", \"app://mention\""),
+        "{query}"
+    );
+    assert!(text.contains("\"@wakerbot\""), "{query}");
+    assert_eq!(
+        config["mention_relations"],
+        serde_json::json!(["ad4m://mentions", "app://mention"])
+    );
 }
