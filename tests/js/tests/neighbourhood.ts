@@ -147,6 +147,56 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             })
 
 
+            // #1176: under the flow vocabulary a Shared link ends only by its
+            // author's signed retraction. Bob's executor refuses his removal of
+            // Alice's vote, so it never reaches the link language and Alice keeps
+            // it. (A removal that does arrive by sync is dropped on ingest; the
+            // Rust test t1_remote_removal_of_a_monotonic_link_is_dropped covers that.)
+            it("Bob's removal of Alice's acceptedBy link is refused and Alice keeps it", async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                const aliceP = await alice.perspective.add("monotonic")
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test monotonic links");
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP.uuid, socialContext.address, new Perspective())
+                const bobP = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (monotonic)" });
+
+                const aliceDid = (await alice.agent.me()).did
+                const query = new LinkQuery({source: 'ad4m://proposal-1176', predicate: 'ad4m://acceptedBy'})
+                await alice.perspective.addLink(aliceP.uuid, {source: 'ad4m://proposal-1176', predicate: 'ad4m://acceptedBy', target: aliceDid})
+
+                let bobLinks = await bob.perspective.queryLinks(bobP.uuid, query)
+                for (let tries = 0; bobLinks.length < 1 && tries < 60; tries++) {
+                    await sleep(1000)
+                    bobLinks = await bob.perspective.queryLinks(bobP.uuid, query)
+                }
+                expect(bobLinks.length, "Bob received Alice's vote").to.be.equal(1)
+
+                let refusal: any = null
+                try {
+                    await bob.perspective.removeLink(bobP.uuid, bobLinks[0])
+                } catch (e) {
+                    refusal = e
+                }
+                expect(refusal, "Bob's removeLink must fail").to.not.be.null
+                expect(String(refusal?.message ?? refusal)).to.contain("is monotonic")
+
+                // Give a removal that did get committed time to reach Alice.
+                await sleep(10000)
+                const aliceLinks = await alice.perspective.queryLinks(aliceP.uuid, query)
+                expect(aliceLinks.length, "Alice still holds her vote").to.be.equal(1)
+                const bobAfter = await bob.perspective.queryLinks(bobP.uuid, query)
+                expect(bobAfter.length, "and so does Bob's replica").to.be.equal(1)
+            })
+
             it('local link created by Alice NOT received by Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob

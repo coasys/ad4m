@@ -1,6 +1,7 @@
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
+use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective;
@@ -1624,7 +1625,9 @@ impl PerspectiveInstance {
 
         let mut seen_rem: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut unique_removals: Vec<LinkExpression> = Vec::new();
-        for link in diff.removals.iter() {
+        // A peer's removal never ends a monotonic link (#1176); dropped here
+        // rather than in `persist_link_diff`, whose local callers get an error.
+        for link in drop_monotonic_removals(diff.removals).iter() {
             let key_tuple = (
                 &link.author,
                 &link.timestamp,
@@ -1655,7 +1658,7 @@ impl PerspectiveInstance {
                 .collect(),
             removals: unique_removals.clone(),
         };
-        let decorated_diff = DecoratedPerspectiveDiff {
+        let mut decorated_diff = DecoratedPerspectiveDiff {
             additions: unique_additions
                 .iter()
                 .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
@@ -1667,7 +1670,9 @@ impl PerspectiveInstance {
         };
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff).await?;
+        self.persist_link_diff(&store_diff)
+            .await?
+            .fold_into(&mut decorated_diff);
 
         // If any of the inbound links change a class's SHACL definition,
         // drop that entry from the in-memory shape cache so the next
@@ -1767,6 +1772,7 @@ impl PerspectiveInstance {
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
             let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
+            refuse_monotonic_removal(&link_from_db, &status)?;
 
             diff.removals.push(link_from_db.clone());
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
@@ -1783,6 +1789,7 @@ impl PerspectiveInstance {
             )? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
+                refuse_monotonic_removal(&link_from_db, &status)?;
 
                 let diff = PerspectiveDiff::from_removals(vec![link_from_db.clone()]);
                 let decorated_link_result =
@@ -1942,11 +1949,13 @@ impl PerspectiveInstance {
         let diff = PerspectiveDiff::from_additions(vec![stored]);
         let decorated_link_expression =
             DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
-        let decorated_perspective_diff =
+        let mut decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&diff).await?;
+        self.persist_link_diff(&diff)
+            .await?
+            .fold_into(&mut decorated_perspective_diff);
 
         // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -2012,11 +2021,13 @@ impl PerspectiveInstance {
                     })
                     .collect(),
             );
-            let decorated_perspective_diff =
+            let mut decorated_perspective_diff =
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&perspective_diff).await?;
+            self.persist_link_diff(&perspective_diff)
+                .await?
+                .fold_into(&mut decorated_perspective_diff);
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
@@ -2073,6 +2084,9 @@ impl PerspectiveInstance {
             .into_iter()
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+        for link in &removals {
+            refuse_monotonic_removal(link, &self.removal_status(link, &status)?)?;
+        }
 
         let store_diff = PerspectiveDiff::from(
             additions
@@ -2092,7 +2106,7 @@ impl PerspectiveInstance {
                 })
                 .collect(),
         );
-        let decorated_diff = DecoratedPerspectiveDiff {
+        let mut decorated_diff = DecoratedPerspectiveDiff {
             additions: additions
                 .into_iter()
                 .map(|l| DecoratedLinkExpression::from((l, status.clone())))
@@ -2105,13 +2119,15 @@ impl PerspectiveInstance {
         };
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff).await?;
+        self.persist_link_diff(&store_diff)
+            .await?
+            .fold_into(&mut decorated_diff);
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&store_diff);
+            self.spawn_commit_and_handle_error(&committable(&store_diff));
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
@@ -2163,7 +2179,7 @@ impl PerspectiveInstance {
             &old_link.timestamp,
         )?;
 
-        let (_link, link_status) = match decorated_link_option {
+        let (link, link_status) = match decorated_link_option {
             Some(decorated) => {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
                 (LinkExpression::from(decorated), status)
@@ -2181,6 +2197,8 @@ impl PerspectiveInstance {
                 )))
             }
         };
+        // The old link is a removal.
+        refuse_monotonic_removal(&link, &link_status)?;
 
         check_consensus_rule_links([&new_link])?;
         let new_link_expression =
@@ -2193,7 +2211,11 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            diff.removals.push(old_link.clone());
+            // Queue the stored link with its stored status: the caller's
+            // `old_link` may carry none, which the commit reads as Shared.
+            let mut stored_old = link.clone();
+            stored_old.status = Some(link_status.clone());
+            diff.removals.push(stored_old);
             let mut new_link_expr = new_link_expression.clone();
             new_link_expr.status = Some(link_status.clone());
             diff.additions.push(new_link_expr.clone());
@@ -2202,20 +2224,22 @@ impl PerspectiveInstance {
         } else {
             let mut stored_new = new_link_expression.clone();
             stored_new.status = Some(link_status.clone());
-            let mut stored_old = old_link.clone();
+            let mut stored_old = link.clone();
             stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
             let decorated_old_link =
                 DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
-            let decorated_diff = DecoratedPerspectiveDiff::from(
+            let mut decorated_diff = DecoratedPerspectiveDiff::from(
                 vec![decorated_new_link_expression.clone()],
                 vec![decorated_old_link.clone()],
             );
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&diff).await?;
+            self.persist_link_diff(&diff)
+                .await?
+                .fold_into(&mut decorated_diff);
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2307,6 +2331,10 @@ impl PerspectiveInstance {
         // Skip if no links found
         if existing_links.is_empty() {
             return Ok(Vec::new());
+        }
+        // All or nothing: one refused link fails the whole call.
+        for (link, status) in &existing_links {
+            refuse_monotonic_removal(link, status)?;
         }
 
         if let Some(batch_id) = batch_id {
@@ -4033,7 +4061,13 @@ impl PerspectiveInstance {
         })
     }
 
-    pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+    /// Returns what `ad4m://flow/retracted` tombstones did on the way in
+    /// (`monotonic::RetractionEffects`); callers that publish the diff fold
+    /// it in so subscribers see what the store holds.
+    pub(crate) async fn persist_link_diff(
+        &self,
+        diff: &PerspectiveDiff,
+    ) -> Result<super::monotonic::RetractionEffects, AnyError> {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
@@ -4043,14 +4077,17 @@ impl PerspectiveInstance {
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
 
+        let effects = self.retraction_effects(&diff.additions)?;
+        let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
+
         // Removals first
-        for removal in &diff.removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
+        for removal in diff.removals.iter().cloned().chain(retracted) {
+            if let Err(e) = self.sparql_store.remove_link(&removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
-        for addition in &diff.additions {
+        for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
             if let Err(e) = self.sparql_store.add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
@@ -4072,7 +4109,7 @@ impl PerspectiveInstance {
         // configuration (smaller write_buffer_size, more memtables) or a
         // throttled background flush, not a per-write fsync.
 
-        Ok(())
+        Ok(effects)
     }
 
     /// Record the links of a diff into `changed_predicates`. A link without a
@@ -6545,6 +6582,11 @@ impl PerspectiveInstance {
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
+        // Backstop for a removal queued past the refusing entry points; the
+        // batch is dropped whole, as on any other commit error.
+        for link in &diff.removals {
+            refuse_monotonic_removal(link, link.status.as_ref().unwrap_or(&LinkStatus::Shared))?;
+        }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
         //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
@@ -6621,7 +6663,7 @@ impl PerspectiveInstance {
         }
 
         // Create combined diff for prolog update, SPARQL store update, and return value
-        let combined_diff = DecoratedPerspectiveDiff {
+        let mut combined_diff = DecoratedPerspectiveDiff {
             additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
@@ -6634,7 +6676,9 @@ impl PerspectiveInstance {
             //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-            self.persist_link_diff(&persist_diff).await?;
+            self.persist_link_diff(&persist_diff)
+                .await?
+                .fold_into(&mut combined_diff);
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(combined_diff.clone()).await;
@@ -9426,3 +9470,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "monotonic_tests.rs"]
+mod monotonic_tests;

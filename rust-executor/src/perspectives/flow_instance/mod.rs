@@ -10,9 +10,11 @@
 //! state. Nothing else moves it — not the `currentState` link (a cache this
 //! engine writes and never reads), not a `resolved_as → "fired"` mark (an
 //! index for UIs), not anyone's unsigned claim. And because state is a
-//! function of the links present *now*, deleting a link recomputes the state
-//! without it: remove a settled vote and the flow stands where it stood
-//! before that vote. That is the semantics, not a failure mode.
+//! function of the links present *now*, a link that ends recomputes the state
+//! without it: when its author retracts a settled vote the flow stands where
+//! it stood before that vote. That is the semantics, not a failure mode. Only
+//! the author ends a flow link, by a signed tombstone; a removal never does
+//! ([`crate::perspectives::monotonic`], #1176).
 //!
 //! # Pipeline
 //!

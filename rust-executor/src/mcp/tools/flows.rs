@@ -401,7 +401,7 @@ impl Ad4mMcpHandler {
     }
 
     #[tool(
-        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: deletes only the links this DID signed — your vote, or your whole proposal if you opened it. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Returns retracted_links: how many of your links were removed — one for a withdrawn vote, more when you retract a proposal you opened. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
+        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: retracts only the links this DID signed — your vote, or your whole proposal if you opened it — by writing one signed ad4m://flow/retracted tombstone per link, which removes it on every replica. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Returns retracted_links: how many of your links were retracted — one for a withdrawn vote, more when you retract a proposal you opened. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
     )]
     pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;
