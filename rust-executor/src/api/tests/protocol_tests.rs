@@ -19,6 +19,7 @@ pub(crate) fn admin_ctx() -> Arc<RequestContext> {
         user_email: None,
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     })
 }
 
@@ -32,6 +33,7 @@ pub(crate) fn no_cap_ctx() -> Arc<RequestContext> {
         user_email: None,
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     })
 }
 

@@ -49,7 +49,7 @@ use super::time::parse_link_timestamp;
 use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
+use crate::types::{DecoratedLinkExpression, LinkQuery};
 use outputs::named_outputs;
 use serde::{Deserialize, Serialize};
 
@@ -99,11 +99,13 @@ pub const PROPOSAL_URI_TAG: &str = "ad4m-flow-proposal-uri/v1";
 /// Proposal → a voting DID. A vote counts only when the link's author IS the
 /// DID it names, with a valid signature (see [`valid_votes`]).
 pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
-/// Proposal → bookkeeping about how the engine already recorded it.
-/// **Never an input to the fold** — see [`marked_fired`].
-pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
-/// The only [`RESOLVED_AS_PREDICATE`] value this engine writes.
-pub const FIRED_MARK: &str = "fired";
+/// Proposal → `"fired"`: the engine's fired mark as it was written before
+/// #1424, as a `Local` link. Nothing writes or reads it any more — marks live
+/// in [`replica_state`](super::replica_state) — and old links under it are dead
+/// data. Kept only so a perspective whose registered `FlowTransitionProposal`
+/// shape still declares it can be told to re-register
+/// (`flow_classes::ensure_flow_model_classes`).
+pub const LEGACY_RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
 /// Tombstone: role instance → revoked DID. Written instead of deleting the
 /// grant; the link's author-asserted timestamp is the revocation time. Source =
 /// role-instance URI, target = the DID — literal-encoded or raw, the reader
@@ -352,39 +354,6 @@ pub fn valid_votes(
     votes.dedup_by(|(_, later), (_, kept)| later.did == kept.did);
     votes.sort_by(|(a_at, a), (b_at, b)| (a_at, &a.did, &a.at).cmp(&(b_at, &b.did, &b.at)));
     votes.into_iter().map(|(_, v)| v).collect()
-}
-
-/// Whether **this replica** marked this proposal fired: a `Local`
-/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987), so
-/// a peer's mark is not a mark here — a forged one cannot mute this replica's
-/// once-only [`FireOutcome`](super::pass::FireOutcome).
-///
-/// # "This replica's" is only true of links this replica read
-///
-/// That guarantee used to rest on a peer's mark arriving `Shared`, which held
-/// while every [`ReadSet`](super::ReadSet) was built from the local store. A
-/// read-set now travels, and `status` is not signed, so on a *carried*
-/// read-set `Some(Local)` means only "whoever sent this claimed `Local`" —
-/// not an answer about this replica at all.
-///
-/// The gap is closed one layer up rather than here:
-/// [`reverified_link`](super::read_set::reverified_link) clears `status` on every
-/// carried link, so a re-verified read-set answers `false` for every
-/// proposal. That is the truthful answer — this replica has marked nothing it
-/// never read — and it is why this function must keep testing
-/// `== Some(Local)` rather than `!= Some(Shared)`, which would read the
-/// cleared value as a mark and hand the sender the forgery back.
-///
-/// Callers therefore get a meaningful answer only from a locally read
-/// read-set, which is the only place [`pass`](super::pass) uses it.
-///
-/// **Bookkeeping only.** The fold never reads it: it exists so a UI can list
-/// history and so the consensus pass knows which edges it has already
-/// recorded. A forged mark therefore moves nothing in either direction — it
-/// cannot fabricate history, and it cannot hide a proposal from the fold.
-pub fn marked_fired(links: &[DecoratedLinkExpression]) -> bool {
-    links_on(links, RESOLVED_AS_PREDICATE)
-        .any(|l| l.status == Some(LinkStatus::Local) && field_value(&l.data.target) == FIRED_MARK)
 }
 
 impl TransitionAtom {
@@ -759,99 +728,6 @@ mod tests {
             atom_of(&links),
             Err(AtomRejection::NoParseableTimestamp),
             "an undatable proposal is refused, not sorted"
-        );
-    }
-
-    /// A mark is this replica's own bookkeeping, so only a `Local` link is
-    /// one. A peer's mark arrives `Shared` — however well signed — and must
-    /// not count, or a forged mark could mute this replica's once-only
-    /// `FireOutcome` (#987). The mark never reaches the fold either way.
-    #[test]
-    fn only_a_local_fired_mark_is_a_mark() {
-        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
-        assert!(!marked_fired(&links));
-
-        let mut peer_mark = link(
-            RESOLVED_AS_PREDICATE,
-            &literal(FIRED_MARK),
-            MALLORY,
-            true,
-            T3,
-        );
-        peer_mark.status = Some(LinkStatus::Shared);
-        links.push(peer_mark);
-        assert!(
-            !marked_fired(&links),
-            "a peer's shared mark is not this replica's mark"
-        );
-
-        let mut own_mark = link(RESOLVED_AS_PREDICATE, &literal(FIRED_MARK), ALICE, true, T3);
-        own_mark.status = Some(LinkStatus::Local);
-        links.push(own_mark);
-        assert!(marked_fired(&links), "our own local mark is");
-
-        let mut other_value = link(RESOLVED_AS_PREDICATE, &literal("rejected"), ALICE, true, T3);
-        other_value.status = Some(LinkStatus::Local);
-        assert!(
-            !marked_fired(&[other_value]),
-            "only the `fired` value marks a proposal fired"
-        );
-    }
-
-    /// `only_a_local_fired_mark_is_a_mark` rests on a sentence that stopped
-    /// being true when this PR made `ReadSet` travel: "a peer's mark arrives
-    /// `Shared`". It arrives however the sender wrote it. `status` is not
-    /// signed and locality is not recomputable — it is a fact about *whose
-    /// store a link sits in* — so on a carried read-set `Some(Local)` says
-    /// only "the sender claimed `Local`".
-    ///
-    /// The seam answers it the one way it can: `reverified_link` clears
-    /// `status`, so a carried mark is not this replica's mark no matter what
-    /// it asserts. Note the fixture forges nothing else — the mark is validly
-    /// signed by Mallory and survives the signature half of `reverified`
-    /// untouched. Only the locality claim is dropped.
-    ///
-    /// Killing mutation: delete `link.status = None;` from `reverified_link`.
-    /// Every other test in the crate stays green — `marked_proposals` has one
-    /// production caller (`pass`, on this replica's own store), so this is
-    /// latent rather than live, and latent is exactly what an assertion is
-    /// for. Also red if `marked_fired` is rewritten to `!= Some(Shared)`,
-    /// which reads the cleared value as a mark and hands the claim back.
-    #[test]
-    fn a_carried_local_mark_is_not_this_replicas_mark() {
-        use super::super::{ProposalLinks, ReadSet};
-
-        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
-        let mut forged_mark = link(
-            RESOLVED_AS_PREDICATE,
-            &literal(FIRED_MARK),
-            MALLORY,
-            true,
-            T3,
-        );
-        forged_mark.status = Some(LinkStatus::Local);
-        links.push(forged_mark);
-
-        let arrived = ReadSet {
-            instance_uri: "flow://instance".into(),
-            subject: "subject://base".into(),
-            genesis: "review".into(),
-            proposals: vec![ProposalLinks {
-                uri: "proposal://p1".into(),
-                links,
-            }],
-            role_grants: vec![],
-        };
-
-        assert!(
-            arrived.marked_proposals().contains("proposal://p1"),
-            "precondition: read as handed over, the sender's claim IS taken as \
-             our mark — this is the forgery the seam exists to answer"
-        );
-        assert!(
-            arrived.reverified().marked_proposals().is_empty(),
-            "a carried `Local` mark must not count as this replica's: we have \
-             marked nothing we never read"
         );
     }
 }

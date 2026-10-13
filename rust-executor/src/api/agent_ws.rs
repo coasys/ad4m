@@ -1200,6 +1200,7 @@ mod app_management_tests {
             user_email: Some("apps.user@example.org".to_string()),
             user_did: None,
             cancel_token: None,
+            connection_id: None,
         });
         for (op, params) in [
             ("agent.removeApp", json!({ "id": "some-request-id" })),
@@ -1316,6 +1317,7 @@ mod revoke_token_tests {
             user_email: None,
             user_did: None,
             cancel_token: None,
+            connection_id: None,
         })
     }
 

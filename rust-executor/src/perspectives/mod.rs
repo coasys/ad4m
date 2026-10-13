@@ -297,6 +297,15 @@ pub async fn add_perspective(
     Ok(())
 }
 
+/// End every live query the RPC connection `connection_id` opened.
+pub async fn dispose_connection_subscriptions(connection_id: &str) {
+    for perspective in all_perspectives() {
+        perspective
+            .dispose_connection_subscriptions(connection_id)
+            .await;
+    }
+}
+
 pub fn all_perspectives() -> Vec<PerspectiveInstance> {
     PERSPECTIVES
         .read()
@@ -405,6 +414,23 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
 }
 
 pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
+    let removed_instance = {
+        let mut perspectives = PERSPECTIVES.write().unwrap();
+        perspectives
+            .remove(uuid)
+            .and_then(|instance_lock| instance_lock.into_inner().ok())
+    };
+
+    // Torn down BEFORE the rows are deleted. A flow pass still running holds
+    // a clone of this instance, and every flow-bookkeeping write checks the
+    // flag under the DB lock this delete takes (`FlowReplicaState::record_pass`).
+    // So such a write either lands before the delete and is removed with
+    // the rest, or sees the flag and writes nothing. Deleting first let it
+    // write after the delete, leaving rows for a perspective that is gone.
+    if let Some(ref instance) = removed_instance {
+        instance.teardown_background_tasks().await;
+    }
+
     if let Err(e) = Ad4mDb::global_instance()
         .lock()
         .expect("Couldn't get write lock on Ad4mDb")
@@ -415,16 +441,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         log::error!("Error removing perspective from db: {}", e);
     }
 
-    let removed_instance = {
-        let mut perspectives = PERSPECTIVES.write().unwrap();
-        perspectives
-            .remove(uuid)
-            .and_then(|instance_lock| instance_lock.into_inner().ok())
-    };
-
     if let Some(ref instance) = removed_instance {
-        instance.teardown_background_tasks().await;
-
         // Drop any link-language -> perspective cache entries that
         // pointed at this uuid. Without this, the cache keeps a
         // stale PerspectiveHandle forever; the slow-path fallback
@@ -934,6 +951,94 @@ mod tests {
         assert_eq!(imported_links[0].proof.signature, test_link.proof.signature);
 
         remove_perspective(&handle.uuid).await;
+    }
+
+    /// A flow pass that is still running when its perspective is removed
+    /// must not leave bookkeeping rows behind (Marvin, #1425). The removal
+    /// tears the perspective down before it can delete anything, so a pass
+    /// that writes after the delete sees the flag and writes nothing.
+    ///
+    /// The DB lock is held on another thread so the removal stops at its
+    /// delete; the flag must already be set by then. Before the fix the
+    /// removal waited on that lock first, with the perspective still live.
+    ///
+    /// The removal runs on its own thread and runtime, and this thread
+    /// polls with a blocking sleep, so the perspective's background tasks
+    /// (spawned on this runtime) cannot interleave with the window.
+    #[tokio::test]
+    async fn removal_tears_down_before_it_deletes_flow_rows() {
+        use crate::perspectives::flow_instance::replica_state::FlowReplicaState;
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        setup();
+        let handle = PerspectiveHandle::new_from_name("teardown order".to_string());
+        add_perspective(handle.clone(), None)
+            .await
+            .expect("add perspective");
+        // What a running pass holds: a clone sharing the teardown flag.
+        let in_flight = get_perspective(&handle.uuid).expect("perspective");
+
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let db = Ad4mDb::global_instance();
+            let _guard = db.lock().expect("db lock");
+            locked_tx.send(()).expect("signal locked");
+            // Returns on release or when the test drops the sender.
+            let _ = release_rx.recv();
+        });
+        locked_rx.recv().expect("holder took the lock");
+
+        let uuid = handle.uuid.clone();
+        let removal = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(remove_perspective(&uuid))
+                .is_some()
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !in_flight.is_teardown.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let torn_down_before_delete = in_flight.is_teardown.load(Ordering::Acquire);
+        drop(release_tx);
+        holder.join().expect("holder thread");
+        assert!(
+            removal.join().expect("removal thread"),
+            "the perspective was removed"
+        );
+        assert!(
+            torn_down_before_delete,
+            "the removal must tear the perspective down before it deletes its rows"
+        );
+
+        // The in-flight pass now records, after the delete.
+        let recorded = FlowReplicaState::record_pass(
+            &handle.uuid,
+            "did:key:alice",
+            "ad4m://flow/instance/1",
+            Some("open"),
+            &["ad4m://flow/proposal/1".to_string()],
+            &in_flight.is_teardown,
+        )
+        .expect("record_pass");
+        assert_eq!(recorded, None, "nothing is written");
+        assert!(
+            FlowReplicaState::states(&handle.uuid, "did:key:alice", None)
+                .expect("states")
+                .is_empty(),
+            "no row outlives the perspective"
+        );
+        assert!(!FlowReplicaState::is_fired(
+            &handle.uuid,
+            "did:key:alice",
+            "ad4m://flow/proposal/1"
+        )
+        .expect("is_fired"));
     }
 
     // Migration tests have been moved to src/perspectives/migration.rs

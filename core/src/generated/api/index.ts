@@ -40,6 +40,7 @@ export type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest"
 export type { QueryRequest } from "./QueryRequest";
 export type { RemoveLinkRequest } from "./RemoveLinkRequest";
 export type { RemoveLinksBulkRequest } from "./RemoveLinksBulkRequest";
+export type { ResyncSubscriptionRequest } from "./ResyncSubscriptionRequest";
 export type { RunInterpretationRequest } from "./RunInterpretationRequest";
 export type { SetDefaultModelRequest } from "./SetDefaultModelRequest";
 export type { SetFreeHostingEnabledRequest } from "./SetFreeHostingEnabledRequest";
