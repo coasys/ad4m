@@ -100,7 +100,8 @@ instance_query(perspective_id, class_name="Message", parent="<channel-id>", limi
 instance_transcript(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
   → the NEWEST N instances under parent, presented oldest-to-newest as a
     plain-text transcript: timestamp, author display name and DID, and the text
-    property (body by default; override with text_property).
+    property (the declared message-text property, else body; override with
+    text_property).
     One call, no id juggling — read channels with this, not with instance_query.
     limit defaults to 50 and is capped at 500.
 
@@ -138,6 +139,14 @@ it can keep them apart while every read here follows both: `get_children`,
 `instance_query(parent=…)`, `instance_transcript`, child subscriptions, and the
 parents and ancestors in a wake event. Writes (`add_child`,
 `instance_create(parent=…)`) still write `ad4m://has_child`.
+
+The same way, a schema says which of its predicates hold message text:
+`<app://body> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf>
+<ad4m://message_text>`, under the same signing rule. A mention subscription
+then scans exactly those predicates for your name, whatever the classes are
+called, and `instance_transcript` prints that property by default. A
+perspective that declares none falls back to the `body` property of a `Message`
+class.
 
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple

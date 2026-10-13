@@ -7,6 +7,7 @@
 use super::Ad4mMcpHandler;
 use crate::agent::AgentService;
 use crate::mcp::shacl;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -243,27 +244,23 @@ impl Ad4mMcpHandler {
 
         let perspective_id = &params.0.perspective_id;
 
-        // Discover the body property predicate from SHACL to scope the query.
-        // Without this, the query scans ALL links which is very slow on large perspectives.
+        // Scope the scan to the predicates that hold message text. Without
+        // this, the query scans ALL links, which is very slow on large
+        // perspectives. The perspective's declared message-text predicates
+        // come first; without any, the `body` property of a `Message` class.
         let perspective = self
             .get_readable_perspective(&params.0.perspective_id)
             .await
             .ok();
-        let body_predicate = if let Some(ref p) = perspective {
-            let props = shacl::load_class_properties(p, "Message").await;
-            props
-                .iter()
-                .find(|prop| prop.name.to_lowercase() == "body")
-                .and_then(|prop| prop.predicate.clone())
-                .filter(|p| validate_sparql_iri(p).is_ok())
-        } else {
-            None
+        let text_predicates = match perspective {
+            Some(ref p) => mention_text_predicates(p).await,
+            None => Vec::new(),
         };
 
-        if body_predicate.is_none() {
-            log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped (but ontology-excluded) query");
+        if text_predicates.is_empty() {
+            log::warn!("get_mention_waker_config: no message-text predicate declared and no `body` on a Message class, falling back to unscoped (but ontology-excluded) query");
         }
-        let query = build_mention_query(&names, &did, body_predicate.as_deref());
+        let query = build_mention_query(&names, &did, &text_predicates);
 
         let sub_id = build_mention_sub_id(perspective_id);
 
@@ -303,12 +300,35 @@ impl Ad4mMcpHandler {
     }
 }
 
+/// The predicates a mention subscription scans for the agent's names: the
+/// ones the perspective declares as message text, else the `body` property of
+/// a `Message` class, else none (the query then scans every predicate).
+pub(crate) async fn mention_text_predicates(perspective: &PerspectiveInstance) -> Vec<String> {
+    let declared = perspective.message_text_predicates().await;
+    let candidates: Vec<String> = if !declared.is_empty() {
+        declared.as_ref().clone()
+    } else {
+        shacl::load_class_properties(perspective, "Message")
+            .await
+            .iter()
+            .find(|prop| prop.name.to_lowercase() == "body")
+            .and_then(|prop| prop.predicate.clone())
+            .into_iter()
+            .collect()
+    };
+    candidates
+        .into_iter()
+        .filter(|p| validate_sparql_iri(p).is_ok())
+        .collect()
+}
+
 /// Build the SPARQL mention-detection query for the waker.
 ///
 /// CONTAINS does case-insensitive substring matching on the parsed literal
 /// target, so a message body containing any profile name or the agent DID
-/// matches. `body_predicate` scopes the scan to the message-body predicate when
-/// SHACL resolves it (much faster on large perspectives).
+/// matches. `text_predicates` scopes the scan to the predicates that hold
+/// message text when any are known (much faster on large perspectives); empty
+/// scans every predicate.
 ///
 /// Both the scoped and the unscoped-fallback query exclude `ad4m://ontology/*`
 /// predicates (author DID, timestamp, proofKey — see `sparql_store`). Without
@@ -321,7 +341,7 @@ impl Ad4mMcpHandler {
 /// otherwise break out of the CONTAINS literal and could inject query syntax.
 ///
 /// Pure over its inputs, so it unit-tests without an agent or perspective.
-pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&str>) -> String {
+pub fn build_mention_query(names: &[String], did: &str, text_predicates: &[String]) -> String {
     let all_terms: Vec<String> = names
         .iter()
         .map(|n| n.to_lowercase())
@@ -339,16 +359,22 @@ pub fn build_mention_query(names: &[String], did: &str, body_predicate: Option<&
     let mention_predicate = format!("({})", mention_conditions.join(" || "));
     // Never match proof metadata, else the DID term self-matches authored links.
     let ontology_guard = "FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))";
-    match body_predicate {
-        Some(pred) => format!(
-            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) = \"{}\") {} FILTER({}) }}",
-            pred, ontology_guard, mention_predicate
-        ),
-        None => format!(
-            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({}) }}",
-            ontology_guard, mention_predicate
-        ),
+    if !text_predicates.is_empty() {
+        let listed: Vec<String> = text_predicates
+            .iter()
+            .map(|p| format!("\"{}\"", escape_sparql_literal(p)))
+            .collect();
+        return format!(
+            "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) IN ({})) {} FILTER({}) }}",
+            listed.join(", "),
+            ontology_guard,
+            mention_predicate
+        );
     }
+    format!(
+        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({}) }}",
+        ontology_guard, mention_predicate
+    )
 }
 
 /// Build a mention-subscription id keyed on the perspective.
@@ -425,7 +451,7 @@ mod tests {
         let q = build_mention_query(
             &["alice".to_string()],
             "did:key:zAgent",
-            Some("ad4m://message_body"),
+            &["ad4m://message_body".to_string()],
         );
         assert!(
             q.contains("ad4m://message_body"),
@@ -438,10 +464,26 @@ mod tests {
     }
 
     #[test]
+    fn scoped_query_lists_every_text_predicate() {
+        let q = build_mention_query(
+            &["alice".to_string()],
+            "did:key:zAgent",
+            &[
+                "app://post-text".to_string(),
+                "app://comment-text".to_string(),
+            ],
+        );
+        assert!(
+            q.contains("STR(?predicate) IN (\"app://post-text\", \"app://comment-text\")"),
+            "{q}"
+        );
+    }
+
+    #[test]
     fn unscoped_fallback_still_excludes_ontology_proof_metadata() {
         // Regression: the fallback (no body predicate) used to be fully unscoped,
         // so the DID term matched the agent's own ad4m://ontology/author links.
-        let q = build_mention_query(&["alice".to_string()], "did:key:zAgent", None);
+        let q = build_mention_query(&["alice".to_string()], "did:key:zAgent", &[]);
         assert!(
             q.contains("FILTER(!STRSTARTS(STR(?predicate), \"ad4m://ontology/\"))"),
             "fallback must still exclude proof metadata"
@@ -453,7 +495,7 @@ mod tests {
         let q = build_mention_query(
             &["Alice".to_string(), "Bob".to_string()],
             "did:key:zABC",
-            None,
+            &[],
         );
         assert!(q.contains("\"alice\""), "name lowercased");
         assert!(q.contains("\"bob\""), "second name lowercased");
@@ -465,7 +507,7 @@ mod tests {
     fn query_escapes_quotes_and_backslashes_in_terms() {
         // A term containing a double-quote or backslash must not break out of the
         // CONTAINS string literal (SPARQL injection guard).
-        let q = build_mention_query(&["a\"b\\c".to_string()], "did:key:zX", None);
+        let q = build_mention_query(&["a\"b\\c".to_string()], "did:key:zX", &[]);
         assert!(q.contains("a\\\"b\\\\c"), "quote + backslash escaped: {q}");
         assert!(
             !q.contains("\"a\"b"),
@@ -477,7 +519,7 @@ mod tests {
     fn query_escapes_control_characters_in_terms() {
         // SPARQL STRING_LITERAL2 forbids raw CR/LF/TAB; a term carrying them must
         // be escaped, not embedded raw, or the query fails to parse.
-        let q = build_mention_query(&["a\nb\tc\rd".to_string()], "did:key:zX", None);
+        let q = build_mention_query(&["a\nb\tc\rd".to_string()], "did:key:zX", &[]);
         assert!(q.contains("a\\nb\\tc\\rd"), "control chars escaped: {q:?}");
         assert!(!q.contains('\n'), "no raw newline in the query: {q:?}");
         assert!(!q.contains('\t'), "no raw tab in the query: {q:?}");

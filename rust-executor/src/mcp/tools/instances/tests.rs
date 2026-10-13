@@ -2391,3 +2391,102 @@ async fn instance_query_follows_declared_containment() {
         "{found}"
     );
 }
+
+/// Adds one link through the MCP surface, asserting it landed.
+async fn add(handler: &Ad4mMcpHandler, uuid: &str, source: &str, predicate: &str, target: &str) {
+    let added = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.to_string(),
+                source: source.into(),
+                predicate: predicate.into(),
+                target: target.into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+}
+
+/// A class with neither `body` nor an identity property prints by default
+/// once the perspective declares which predicate holds its message text.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_transcript_prints_the_declared_message_text() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("Post", POST_SDNA),
+            ("User", USER_SDNA),
+            ("Comment", COMMENT_SDNA),
+        ],
+        false,
+    )
+    .await;
+    let made = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Comment".to_string(),
+                properties: Some(props(&[("text", json!("a declared remark"))])),
+                base_uri: Some("app://comment-1".into()),
+                parent: Some("app://thread".into()),
+            }))
+            .await,
+    );
+    assert_eq!(made["created"], true, "{made}");
+
+    let transcript = || async {
+        handler
+            .instance_transcript(Parameters(InstanceTranscriptParams {
+                perspective_id: uuid.clone(),
+                class_name: "Comment".into(),
+                parent: "app://thread".into(),
+                limit: None,
+                text_property: None,
+            }))
+            .await
+    };
+
+    // Nothing declared: no `body`, no identity property, so the caller is asked.
+    let before = transcript().await;
+    assert!(before.contains("text_property"), "{before}");
+
+    add(
+        &handler,
+        &uuid,
+        "ns://comment_text",
+        crate::perspectives::declared_roles::SUB_PROPERTY_OF,
+        crate::perspectives::message_text::MESSAGE_TEXT,
+    )
+    .await;
+    let after = transcript().await;
+    assert!(after.contains("a declared remark"), "{after}");
+}
+
+/// A mention subscription scans the declared message-text predicates; with
+/// none declared, the `body` of a `Message` class.
+#[tokio::test(flavor = "multi_thread")]
+async fn mention_scan_reads_the_declared_message_text() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    assert_eq!(
+        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
+        vec!["flux://body".to_string()]
+    );
+
+    for predicate in ["app://post-text", "app://comment-text"] {
+        add(
+            &handler,
+            &uuid,
+            predicate,
+            crate::perspectives::declared_roles::SUB_PROPERTY_OF,
+            crate::perspectives::message_text::MESSAGE_TEXT,
+        )
+        .await;
+    }
+    assert_eq!(
+        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
+        vec![
+            "app://comment-text".to_string(),
+            "app://post-text".to_string()
+        ]
+    );
+}
