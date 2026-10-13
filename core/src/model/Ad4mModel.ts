@@ -1336,7 +1336,7 @@ export class Ad4mModel {
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<Ad4mModel>> {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
-    const result = await perspective.modelQuery(classNames, queryJson, options);
+    const result = await perspective.modelQuery(classNames, queryJson, undefined, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
     const snapshotRelations = query.include
       ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
