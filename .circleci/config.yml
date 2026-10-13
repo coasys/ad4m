@@ -728,11 +728,17 @@ jobs:
             cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain
           no_output_timeout: 60m
 
+  # Wind tunnel: each scenario starts an executor, and several sleep on
+  # purpose (30s media/RTT, 60s churn, 35s TTL). About 15 minutes. That is
+  # a nightly measurement, not a merge check, so this job is only in
+  # `nightly-llm-e2e`. It builds its own binaries: that pipeline has no
+  # `build` job, and `build` deletes stashes older than 12 hours.
   integration-tests-sfu:
     machine: true
     resource_class: coasys/marvin
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          build_binaries: true
       - run:
           name: Run SFU wind tunnel tests
           command: cd ./tests/js && pnpm run test-sfu
@@ -872,13 +878,13 @@ workflows:
       - integration-tests-model:
           requires:
             - build
-      - integration-tests-sfu:
-          requires:
-            - build
 
-  # Nightly against `dev`. Fired by a CircleCI *scheduled pipeline*
-  # (visible under Project → Triggers), not by in-config cron.
-  # Same resource class (Marvin) so Ollama is local.
+  # Nightly against `dev`. An API trigger (or a Project Trigger) sets
+  # `run-nightly-llm`. In-config cron does not reach this project.
+  # Same resource class (Marvin) so Ollama is local. The SFU wind tunnel
+  # waits for llm-e2e: four runners share this host, and both jobs build
+  # Rust. A halted llm-e2e is success, so a quiet night still runs the tunnel.
+  # An llm-e2e failure skips the tunnel that night.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -886,3 +892,6 @@ workflows:
           # Provides `CIRCLECI_API_TOKEN` for the skip-if-unchanged preflight.
           context:
             - nightly-llm-e2e
+      - integration-tests-sfu:
+          requires:
+            - llm-e2e
