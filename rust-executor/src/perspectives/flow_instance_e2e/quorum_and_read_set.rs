@@ -168,8 +168,9 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
 /// so each of these is on the graph and must not show up twice or at all:
 /// a vote for Carol that Bob signed, a vote whose signature fails, Bob voting
 /// twice, the proposer accepting their own proposal, and a `proposer` link
-/// naming Bob that Mallory signed. `resolvedAs` reads
-/// only this replica's own mark, never a peer's Shared one.
+/// naming Bob that Mallory signed. The model carries no fired mark at all
+/// since #1424 — not a peer's legacy link, not this replica's own mark, which
+/// lives in its table.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -212,12 +213,12 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
             &mallory,
             None,
         ),
-        // A peer's Shared `resolved_as`: says nothing about what happened here.
+        // A peer's legacy `resolved_as`: says nothing about what happened here.
         sync_signed(
             Link {
                 source: minted.clone(),
-                predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
-                target: literal(FIRED_MARK),
+                predicate: Some(LEGACY_RESOLVED_AS_PREDICATE.to_string()),
+                target: literal("fired"),
             },
             &bob,
             None,
@@ -303,7 +304,7 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
     );
     assert!(
         p["resolvedAs"].is_null(),
-        "a peer's Shared mark is not this replica's"
+        "the model has no fired-mark property; a peer's legacy link does not surface"
     );
 
     for _ in 0..2 {
@@ -317,9 +318,12 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
             .await
             .expect("query proposals"),
     );
-    assert_eq!(
-        p["resolvedAs"].as_str(),
-        Some("fired"),
-        "the pass marked the edge it fired"
+    assert!(
+        p["resolvedAs"].is_null(),
+        "the mark is not on the model either"
+    );
+    assert!(
+        f.marked().await.contains(&minted),
+        "the pass marked the edge it fired — in this agent's table"
     );
 }
