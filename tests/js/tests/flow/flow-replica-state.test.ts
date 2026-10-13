@@ -14,6 +14,18 @@
  *  - another agent on the same executor neither receives the event nor reads
  *    the entries.
  *
+ * Who is who: Alice is a managed user and the owner of every perspective
+ * here. "admin" is the executor's main agent, connected with the admin
+ * credential. It is NOT an owner or a member of Alice's perspectives: the
+ * credential just lets it open them by UUID. That matters because the
+ * executor only runs flow passes for a perspective's owners. For an owner
+ * the catch-up is automatic — about 300 ms after flow links sync in, and
+ * once at perspective load — so an owner almost never reads an instance
+ * as "not derived yet". A non-owner reader has no pass at all until it
+ * votes, which makes it the one way, on a single executor, to observe that
+ * state on purpose. The second test relies on exactly that; the
+ * two-executor join case is in `flow-replica-join.ts`.
+ *
  * Run standalone (from tests/js, with a built executor):
  *   pnpm ts-mocha -p tsconfig.json --timeout 900000 --exit \
  *     tests/flow/flow-replica-state.test.ts
@@ -55,8 +67,9 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
     const aliceToken = await admin.agent.loginUser("alice@replica-state.local", "pass");
     alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken);
     aliceDid = (await alice.agent.me()).did;
-    // The admin credential can open Alice's perspective and acts as the main
-    // agent: a second agent on the same executor with access to her data.
+    // The admin client acts as the main agent. Its credential can open
+    // Alice's perspectives by UUID, but it is not their owner or a member, so
+    // no flow pass ever runs for it there (see the header).
     adminDid = (await admin.agent.me()).did;
     expect(aliceDid).to.not.equal(adminDid);
   });
@@ -112,9 +125,10 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
     const [reloaded] = await FlowInstance.findAll(aliceP, { subject: "replica-state://task/1" });
     expect(reloaded.currentStateName, "findAll reads the recorded state").to.equal("Done");
 
-    // Nothing on the graph: not for Alice, not for an agent that can read
-    // her perspective. Before #1424 both were Local links, which every agent
-    // with access to the perspective could list.
+    // Nothing on the graph: not for Alice, not for the admin agent reading
+    // her perspective through the admin credential. Before #1424 both were
+    // Local links, which every agent with access to the perspective could
+    // list.
     const adminP = (await admin.perspective.byUUID(aliceP.uuid)) as PerspectiveProxy;
     for (const p of [aliceP, adminP]) {
       for (const predicate of LEGACY_PREDICATES) {
@@ -122,8 +136,8 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
       }
     }
 
-    // The other agent's bookkeeping is its own: empty, though it can read
-    // the perspective.
+    // The admin agent's bookkeeping is its own, and empty: it can read the
+    // perspective, but it is not an owner, so no pass has run for it.
     expect(await adminP.flowStates()).to.deep.equal([]);
     expect(await adminP.flowFired(inst.uri)).to.deep.equal([]);
 
@@ -145,6 +159,14 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
   // clients are told (`caughtUp`). Until then the instance is not derived
   // for that agent, and the wrapper says so instead of guessing the first
   // state.
+  //
+  // To SEE "not derived yet" this test reads as the admin agent, which is
+  // not an owner of Alice's perspective and only opens it through the admin
+  // credential. No pass runs for a non-owner until it votes. For an owner
+  // the window is about 300 ms after its flow links sync in, and it is closed
+  // again at every perspective load, so on one executor this non-owner setup
+  // is the only deterministic way to observe the state. The owner's join
+  // case, across two executors, is `flow-replica-join.ts`.
   it("an instance not derived here reads as unknown; the catch-up is published", async () => {
     const handle = await alice.perspective.add("replica-state-catch-up");
     const aliceP = (await alice.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
@@ -171,8 +193,11 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
     );
     await admin.agent.me();
 
-    // The admin agent can read Alice's perspective but is not an owner: no
-    // pass of Alice's runs for it, so it has never derived this instance.
+    // The admin agent opens Alice's perspective through the admin credential.
+    // It is not an owner or a member, so `flow_pass_contexts` never names it
+    // and no pass — not the sync-triggered one, not the one at load — has
+    // derived this instance for it. That is the only reason it reads
+    // `undefined` here; an owner would be caught up within a debounce.
     const adminP = (await admin.perspective.byUUID(aliceP.uuid)) as PerspectiveProxy;
     const [unseen] = await FlowInstance.findAll(adminP, { subject });
     expect(unseen.currentStateName, "not derived by this agent yet: unknown, not `Ready`").to.be
