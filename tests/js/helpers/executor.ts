@@ -47,6 +47,9 @@ export type AgentHandle = {
   client: Ad4mClient;
   /** apiPort — useful if a second client needs to connect to the same executor */
   apiPort: number;
+  /** The executor's admin credential: a second client needs it, since a tokenless client is
+   *  anonymous once the executor has one. */
+  adminCredential: string;
   /** Kills the executor process; safe to call multiple times */
   stop(): Promise<void>;
 };
@@ -140,7 +143,7 @@ export async function startAgent(
     }
   }
 
-  return { client, apiPort, stop };
+  return { client, apiPort, adminCredential, stop };
 }
 
 /**
