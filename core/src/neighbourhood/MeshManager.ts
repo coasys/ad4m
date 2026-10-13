@@ -235,6 +235,19 @@ export function createTelepresenceChannel(
                 const link = signal?.data?.links?.[0]
                 if (!link?.author) return
 
+                /*
+                 * The sender is the link's author, so it has to be one: the
+                 * mesh acts on it (offers, answers, `reset`, rebuilds), and an
+                 * author is only a claim until a signature backs it. The
+                 * executor verifies both signatures on receipt and records the
+                 * result in `proof.valid`. Accept a link only when the signal's
+                 * signature and the link's own both hold, and both are by the
+                 * same agent — a valid link relayed inside another agent's
+                 * signal speaks for its author, not for whoever relayed it.
+                 */
+                if (signal.proof?.valid !== true || link.proof?.valid !== true) return
+                if (link.author !== signal.author) return
+
                 const { source, predicate, target } = link.data ?? {}
                 if (typeof predicate !== "string" || predicate !== RTC_PREDICATE) return
 
@@ -410,6 +423,8 @@ interface PeerSlot {
      * pair is up. See {@link MeshManager.dueForRepair}.
      */
     offeredAt: number
+    /** The pending offer was made while the pair was already connected: a renegotiation. */
+    renegotiating: boolean
     /** When this slot was created or last rebuilt — where the handshake deadline counts from. */
     since: number
     /** When the last repair was attempted, so rungs are spaced rather than fired in a burst. */
@@ -455,6 +470,14 @@ export class MeshManager {
     private outstanding = 0
     /** When a sweep last repaired something — see {@link REPAIR_SPACING_MS}. */
     private lastRepairAt = 0
+    /**
+     * Repairs of a connected pair's unanswered renegotiation, per peer, kept
+     * across rebuilds. A slot's `attempts` resets when its connection connects,
+     * which a rebuilt pair does before it renegotiates again — so a peer that
+     * never answers a renegotiation would be resent to and rebuilt forever.
+     * Cleared only when a renegotiation is answered.
+     */
+    private renegotiationRepairs: Map<string, number> = new Map()
 
     constructor(options: MeshManagerOptions) {
         this.channel = options.channel
@@ -586,6 +609,7 @@ export class MeshManager {
             this.channelUnsubscribe = null
         }
         this.pending.clear()
+        this.renegotiationRepairs.clear()
         for (const peerId of [...this.slots.keys()]) this.removePeer(peerId)
         this.outbound.clear()
         this.outboundStream = null
@@ -641,6 +665,7 @@ export class MeshManager {
         const slot = this.slots.get(peerId)
         if (this.closed || !slot) return
         slot.attempts = 0
+        this.renegotiationRepairs.delete(peerId)
         this.rebuild(peerId, { announce: true, rung: "rebuild" })
     }
 
@@ -795,6 +820,7 @@ export class MeshManager {
             lastResent: null,
             everConnected: false,
             offeredAt: 0,
+            renegotiating: false,
             since: this.now(),
             lastAttempt: 0,
             attempts: 0,
@@ -810,7 +836,10 @@ export class MeshManager {
                 await pc.setLocalDescription()
                 if (pc.localDescription) {
                     slot.lastSent = { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
-                    if (pc.localDescription.type === "offer") slot.offeredAt = this.now()
+                    if (pc.localDescription.type === "offer") {
+                        slot.offeredAt = this.now()
+                        slot.renegotiating = pc.connectionState === "connected"
+                    }
                     this.sendFrom(peerId, slot, { kind: "description", description: pc.localDescription })
                 }
             } catch (error) {
@@ -932,6 +961,7 @@ export class MeshManager {
         const slot = this.slots.get(peerId)
         if (!slot) return
         this.disconnect(peerId)
+        this.renegotiationRepairs.delete(peerId)
         this.emit("participant-left", this.participant(peerId, slot))
     }
 
@@ -1050,13 +1080,22 @@ export class MeshManager {
                 // performs the implicit rollback that lets it accept.
                 slot.ignoreOffer = !slot.polite && collision
                 if (slot.ignoreOffer) return
+                // An answer with no offer out is a late duplicate — the
+                // resend rung got one answer for each copy. Expected on this
+                // transport, so not an error.
+                if (description.type === "answer" && slot.pc.signalingState === "stable") return
 
                 await slot.pc.setRemoteDescription(description)
                 // An answer settles this side's offer, and accepting the
-                // peer's offer rolled it back. Either way none is pending,
-                // and a connected pair that settles has nothing to repair.
+                // peer's offer rolled it back. Either way none is pending.
+                // An answered renegotiation is the evidence the connected-pair
+                // repair waits for, so only that clears its budget.
+                if (description.type === "answer" && slot.renegotiating) {
+                    this.renegotiationRepairs.delete(peerId)
+                    if (slot.pc.connectionState === "connected") slot.attempts = 0
+                }
                 slot.offeredAt = 0
-                if (slot.pc.connectionState === "connected") slot.attempts = 0
+                slot.renegotiating = false
                 // Candidates become applicable exactly here. On an unordered
                 // transport a candidate overtaking its offer is the normal case.
                 slot.remoteReady = true
@@ -1161,6 +1200,9 @@ export class MeshManager {
         }
 
         const unanswered = slot.offeredAt > 0 && slot.pc.signalingState === "have-local-offer"
+        if (state === "connected") {
+            this.renegotiationRepairs.set(peerId, (this.renegotiationRepairs.get(peerId) ?? 0) + 1)
+        }
         if ((!slot.everConnected || unanswered) && slot.lastSent && slot.lastSent.sdp !== slot.lastResent) {
             slot.lastResent = slot.lastSent.sdp ?? null
             this.sendFrom(peerId, slot, { kind: "description", description: slot.lastSent })
@@ -1174,7 +1216,7 @@ export class MeshManager {
     }
 
     /** Whether this pair has been given long enough, and whether it is this side's turn to act. */
-    private dueForRepair(slot: PeerSlot, at: number): boolean {
+    private dueForRepair(peerId: string, slot: PeerSlot, at: number): boolean {
         const state = slot.pc.connectionState
         if (slot.attempts >= MAX_RECOVERY_ATTEMPTS) return false
         /*
@@ -1188,6 +1230,7 @@ export class MeshManager {
          */
         if (state === "connected") {
             if (!slot.offeredAt || slot.pc.signalingState !== "have-local-offer") return false
+            if ((this.renegotiationRepairs.get(peerId) ?? 0) >= MAX_RECOVERY_ATTEMPTS) return false
             return at - Math.max(slot.offeredAt, slot.lastAttempt) >= RECOVERY_INTERVAL_MS
         }
 
@@ -1219,7 +1262,7 @@ export class MeshManager {
         const at = this.now()
         if (this.lastRepairAt && at - this.lastRepairAt < REPAIR_SPACING_MS) return
         for (const [peerId, slot] of [...this.slots]) {
-            if (!this.dueForRepair(slot, at)) continue
+            if (!this.dueForRepair(peerId, slot, at)) continue
             this.lastRepairAt = at
             this.repair(peerId, slot)
             // One pair per sweep: a network that just came back has every pair

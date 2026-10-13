@@ -30,7 +30,9 @@
  *   - After one agent leaves, the remaining pair is still connected.
  */
 
+import { fork } from "node:child_process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { MeshManager, type SignallingChannel } from "@coasys/ad4m";
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
 
@@ -81,6 +83,31 @@ function specPeerConnection(configuration: RTCConfiguration): RTCPeerConnection 
       }
       return setRemote(description);
     });
+
+  /*
+   * The binding segfaults when a connection is closed under an operation that
+   * is still running, or asked to do anything after it closed — both of which
+   * the mesh does on purpose when it rebuilds a pair. A browser answers those
+   * with an InvalidStateError, so do that, and close only once the chain has
+   * drained.
+   */
+  let closed = false;
+  const refuse = () => Promise.reject(new Error("InvalidStateError: the connection is closed"));
+  const closeNative = pc.close.bind(pc);
+  const addCandidate = pc.addIceCandidate.bind(pc);
+  const guarded = <A extends unknown[], T>(op: (...args: A) => Promise<T>) => (...args: A): Promise<T> =>
+    closed ? refuse() : op(...args);
+  pc.setLocalDescription = guarded(pc.setLocalDescription);
+  pc.setRemoteDescription = guarded(pc.setRemoteDescription);
+  pc.addIceCandidate = guarded((candidate: RTCIceCandidateInit) => chain(() => addCandidate(candidate)));
+  pc.restartIce = ((restart) => () => {
+    if (!closed) restart();
+  })(pc.restartIce.bind(pc));
+  pc.close = () => {
+    if (closed) return;
+    closed = true;
+    void operations.then(closeNative);
+  };
   return pc as RTCPeerConnection;
 }
 
@@ -108,11 +135,11 @@ class LossyHub {
         const pair = `${selfId}->${String(to)}`;
         let lose = kind === "description" && typeof to === "string" && !this.droppedPairs.has(pair);
         if (lose) this.droppedPairs.add(pair);
-        // And once, carol's renegotiating offer to bob: the offer that carries
-        // her media, sent after the pair already reads `connected`.
+        // And once, the first renegotiating offer on any pair: the offer that
+        // carries the answerer's media, sent after the pair reads `connected`.
         const description = (payload as { description?: RTCSessionDescriptionInit }).description;
         const mlines = description?.sdp?.match(/^m=/gm)?.length ?? 0;
-        if (!lose && pair === `${AGENTS[2]}->${AGENTS[1]}` && description?.type === "offer" && mlines > 2 && !this.renegotiationsDropped) {
+        if (!lose && description?.type === "offer" && mlines > 2 && !this.renegotiationsDropped) {
           lose = true;
           this.renegotiationsDropped += 1;
         }
@@ -207,6 +234,14 @@ async function waitFor(condition: () => boolean, timeoutMs: number, what: string
  * already reads `connected`.
  */
 function listen(agent: Agent): void {
+  // A sink left on a track whose connection a rebuild closed is another way
+  // to crash the binding, so drop sinks for tracks no participant holds.
+  const current = new Set(agent.mesh.getParticipants().flatMap((p) => p.stream.getAudioTracks()));
+  agent.sinks = agent.sinks.filter((sink) => {
+    if (current.has(sink.track)) return true;
+    sink.stop();
+    return false;
+  });
   for (const participant of agent.mesh.getParticipants()) {
     if (!agent.frames.has(participant.did)) agent.frames.set(participant.did, 0);
     for (const track of participant.stream.getAudioTracks()) {
@@ -224,130 +259,172 @@ function hearsEveryone(agents: Agent[]): boolean {
   return agents.every((agent) => agents.every((other) => other === agent || (agent.frames.get(other.id) ?? 0) > 0));
 }
 
+/**
+ * How many times a run may be lost to the binding crashing before the
+ * scenario fails. An assertion failure is never retried.
+ */
+const BINDING_CRASH_RETRIES = 1;
+
 export const t20MeshManagerLossy: Scenario = {
   id: "t20",
   name: "Mesh manager over a lossy channel",
   description: "SDK MeshManager, 3 agents on libwebrtc, with lost, delayed and reordered signalling",
   managesOwnEnvironment: true,
 
+  /*
+   * In a child process. About one run in fifteen, `@roamhq/wrtc` segfaults
+   * inside its own native code while the mesh rebuilds connections — a
+   * crash in the test binding, which no browser shares. In-process, that
+   * takes down every other SFU scenario in the mocha run with it.
+   */
   async run(ctx: ScenarioContext): Promise<ScenarioResult> {
-    const { branch } = ctx;
-    const startTime = Date.now();
-    const samples: ScenarioResult["samples"] = [];
-    const metrics: Record<string, unknown> = {};
-    const failures: string[] = [];
-
-    if (!wrtc?.nonstandard) {
-      throw new Error("T20 needs @roamhq/wrtc (npm install --include=optional).");
+    const child = fileURLToPath(new URL("./t20-child.ts", import.meta.url));
+    const crashes: string[] = [];
+    for (let attempt = 0; attempt <= BINDING_CRASH_RETRIES; attempt += 1) {
+      const outcome = await new Promise<{ result?: ScenarioResult; signal?: string | null; code?: number | null }>((resolve) => {
+        const proc = fork(child, [ctx.branch], { execArgv: process.execArgv, stdio: "inherit" });
+        let result: ScenarioResult | undefined;
+        proc.on("message", (message) => { result = message as ScenarioResult; });
+        proc.on("exit", (code, signal) => resolve({ result, signal, code }));
+      });
+      if (outcome.result) {
+        if (crashes.length) outcome.result.metrics["binding_crashes"] = crashes;
+        return outcome.result;
+      }
+      crashes.push(outcome.signal ?? `exit ${outcome.code}`);
+      console.warn(`[t20] run ${attempt + 1} lost to the libwebrtc binding (${crashes.at(-1)})`);
     }
-
-    // The mesh constructs `MediaStream`s for its outbound and inbound tracks.
-    const previousMediaStream = (globalThis as any).MediaStream;
-    (globalThis as any).MediaStream = wrtc.MediaStream;
-
-    const hub = new LossyHub();
-    const agents: Agent[] = [];
-
-    try {
-      for (const [i, id] of AGENTS.entries()) {
-        const audio = syntheticAudio(440 + 220 * i);
-        const mesh = new MeshManager({
-          channel: hub.channel(id),
-          callId: CALL_ID,
-          selfId: id,
-          createPeerConnection: specPeerConnection,
-          sweepMs: 500,
-        });
-        const agent: Agent = { id, mesh, stopAudio: audio.stop, recoveries: [], frames: new Map(), sinks: [] };
-        mesh.on("peer-recovery", (peer: string, attempt: { rung: string }) => {
-          agent.recoveries.push({ peer, rung: attempt.rung });
-        });
-        mesh.on("error", (error: Error) => console.warn(`[t20] ${id}: ${error.message}`));
-        await mesh.join(audio.stream);
-        agents.push(agent);
-      }
-
-      // ── Every pair connects, though every opening description was lost ──
-      for (const agent of agents) agent.mesh.setRoster(AGENTS);
-      const connectMs = await waitFor(() => allConnected(agents), CONNECT_TIMEOUT_MS, "every pair to connect");
-      samples.push({ name: "mesh_connected", durationMs: connectMs, timestamp: Date.now() });
-
-      const repairs = agents.flatMap((agent) => agent.recoveries);
-      metrics["descriptions_dropped"] = hub.dropped;
-      metrics["messages_delivered"] = hub.delivered;
-      metrics["repairs"] = repairs.length;
-      metrics["repair_rungs"] = [...new Set(repairs.map((repair) => repair.rung))];
-      if (hub.dropped === 0) failures.push("the channel dropped no description, so recovery was not exercised");
-      if (repairs.length === 0) failures.push("every pair connected without a repair, despite lost descriptions");
-
-      // ── Audio flows on every pair, both ways ─────────────────────────
-      // Including carol → bob, whose renegotiating offer the channel lost
-      // after the pair had already connected.
-      try {
-        const audioMs = await waitFor(() => hearsEveryone(agents), CONNECT_TIMEOUT_MS, "audio on every pair");
-        samples.push({ name: "audio_everywhere", durationMs: connectMs + audioMs, timestamp: Date.now() });
-      } catch (error) {
-        failures.push(error instanceof Error ? error.message : String(error));
-      }
-      for (const agent of agents) {
-        for (const other of agents) {
-          if (other !== agent) metrics[`frames_${short(agent.id)}_from_${short(other.id)}`] = agent.frames.get(other.id) ?? 0;
-        }
-      }
-      metrics["renegotiations_dropped"] = hub.renegotiationsDropped;
-
-      // ── A pair rebuilt by hand reconnects, and its audio comes back ──
-      const [alice, bob, carol] = agents;
-      const before = alice.mesh.getParticipants().find((p) => p.did === bob.id)?.stream;
-      alice.mesh.reconnect(bob.id);
-      alice.frames.delete(bob.id);
-      bob.frames.delete(alice.id);
-      try {
-        const reconnectMs = await waitFor(() => hearsEveryone([alice, bob]), CONNECT_TIMEOUT_MS, "alice and bob to hear each other again");
-        samples.push({ name: "reconnect", durationMs: reconnectMs, timestamp: Date.now() });
-      } catch (error) {
-        failures.push(error instanceof Error ? error.message : String(error));
-      }
-      const after = alice.mesh.getParticipants().find((p) => p.did === bob.id)?.stream;
-      if (!after || after === before) failures.push("reconnect did not give alice a new stream from bob");
-
-      // ── One agent leaves; the others stay connected ───────────────────
-      await carol.mesh.leave();
-      alice.mesh.setRoster([alice.id, bob.id]);
-      bob.mesh.setRoster([alice.id, bob.id]);
-      await sleep(1_000);
-      if (alice.mesh.getParticipants().length !== 1) failures.push("alice still holds carol after she left");
-      if (alice.mesh.peerStates().get(bob.id) !== "connected") failures.push("alice and bob dropped when carol left");
-    } catch (error) {
-      failures.push(error instanceof Error ? error.message : String(error));
-    } finally {
-      for (const agent of agents) {
-        for (const sink of agent.sinks) sink.stop();
-        agent.stopAudio();
-        await agent.mesh.destroy();
-      }
-      hub.close();
-      (globalThis as any).MediaStream = previousMediaStream;
-    }
-
-    const passed = failures.length === 0;
-    metrics["failures"] = failures;
-    const endTime = Date.now();
-    return {
-      scenario: "t20",
-      branch,
-      startTime,
-      endTime,
-      durationMs: endTime - startTime,
-      passed,
-      metrics,
-      samples,
-      summary: passed
-        ? `3-agent mesh connected over a lossy channel (${metrics["repairs"]} repairs), audio on every pair, reconnect and leave clean`
-        : `FAILED: ${failures.join("; ")} — ${JSON.stringify(metrics)}`,
-    };
+    throw new Error(`T20 never completed: the libwebrtc binding crashed every run (${crashes.join(", ")})`);
   },
 };
+
+/** The scenario itself, run in the child (see `t20-child.ts`). */
+export async function runLossyMesh(branch: string): Promise<ScenarioResult> {
+  const startTime = Date.now();
+  const samples: ScenarioResult["samples"] = [];
+  const metrics: Record<string, unknown> = {};
+  const failures: string[] = [];
+
+  if (!wrtc?.nonstandard) {
+    throw new Error("T20 needs @roamhq/wrtc (npm install --include=optional).");
+  }
+
+  // The mesh constructs `MediaStream`s for its outbound and inbound tracks.
+  const previousMediaStream = (globalThis as any).MediaStream;
+  (globalThis as any).MediaStream = wrtc.MediaStream;
+
+  const hub = new LossyHub();
+  const agents: Agent[] = [];
+
+  try {
+    for (const [i, id] of AGENTS.entries()) {
+      const audio = syntheticAudio(440 + 220 * i);
+      const mesh = new MeshManager({
+        channel: hub.channel(id),
+        callId: CALL_ID,
+        selfId: id,
+        createPeerConnection: specPeerConnection,
+        sweepMs: 500,
+      });
+      const agent: Agent = { id, mesh, stopAudio: audio.stop, recoveries: [], frames: new Map(), sinks: [] };
+      mesh.on("peer-recovery", (peer: string, attempt: { rung: string }) => {
+        agent.recoveries.push({ peer, rung: attempt.rung });
+      });
+      mesh.on("error", (error: Error) => console.warn(`[t20] ${id}: ${error.message}`));
+      await mesh.join(audio.stream);
+      agents.push(agent);
+    }
+
+    // ── Every pair connects, though every opening description was lost ──
+    for (const agent of agents) agent.mesh.setRoster(AGENTS);
+    const connectMs = await waitFor(() => allConnected(agents), CONNECT_TIMEOUT_MS, "every pair to connect");
+    samples.push({ name: "mesh_connected", durationMs: connectMs, timestamp: Date.now() });
+
+    const repairs = agents.flatMap((agent) => agent.recoveries);
+    metrics["descriptions_dropped"] = hub.dropped;
+    metrics["messages_delivered"] = hub.delivered;
+    metrics["repairs"] = repairs.length;
+    metrics["repair_rungs"] = [...new Set(repairs.map((repair) => repair.rung))];
+    if (hub.dropped === 0) failures.push("the channel dropped no description, so recovery was not exercised");
+    if (repairs.length === 0) failures.push("every pair connected without a repair, despite lost descriptions");
+
+    // ── Audio flows on every pair, both ways ─────────────────────────
+    // Including the pair whose renegotiating offer the channel lost
+    // after the pair had already connected.
+    try {
+      const audioMs = await waitFor(() => hearsEveryone(agents), CONNECT_TIMEOUT_MS, "audio on every pair");
+      samples.push({ name: "audio_everywhere", durationMs: connectMs + audioMs, timestamp: Date.now() });
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+    for (const agent of agents) {
+      for (const other of agents) {
+        if (other !== agent) metrics[`frames_${short(agent.id)}_from_${short(other.id)}`] = agent.frames.get(other.id) ?? 0;
+      }
+    }
+    metrics["renegotiations_dropped"] = hub.renegotiationsDropped;
+    // Without this the scenario could pass having never lost the
+    // renegotiation it exists to test, if the negotiation order shifted.
+    if (hub.renegotiationsDropped !== 1) {
+      failures.push(`expected one renegotiating offer to be lost, lost ${hub.renegotiationsDropped}`);
+    }
+
+    // ── A pair rebuilt by hand reconnects, and its audio comes back ──
+    const [alice, bob, carol] = agents;
+    const before = alice.mesh.getParticipants().find((p) => p.did === bob.id)?.stream;
+    // Off the tracks this rebuild is about to close (see `listen`).
+    for (const agent of [alice, bob]) {
+      for (const sink of agent.sinks) sink.stop();
+      agent.sinks = [];
+    }
+    alice.mesh.reconnect(bob.id);
+    alice.frames.delete(bob.id);
+    bob.frames.delete(alice.id);
+    try {
+      const reconnectMs = await waitFor(() => hearsEveryone([alice, bob]), CONNECT_TIMEOUT_MS, "alice and bob to hear each other again");
+      samples.push({ name: "reconnect", durationMs: reconnectMs, timestamp: Date.now() });
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+    const after = alice.mesh.getParticipants().find((p) => p.did === bob.id)?.stream;
+    if (!after || after === before) failures.push("reconnect did not give alice a new stream from bob");
+
+    // ── One agent leaves; the others stay connected ───────────────────
+    await carol.mesh.leave();
+    alice.mesh.setRoster([alice.id, bob.id]);
+    bob.mesh.setRoster([alice.id, bob.id]);
+    await sleep(1_000);
+    if (alice.mesh.getParticipants().length !== 1) failures.push("alice still holds carol after she left");
+    if (alice.mesh.peerStates().get(bob.id) !== "connected") failures.push("alice and bob dropped when carol left");
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error));
+  } finally {
+    for (const agent of agents) {
+      for (const sink of agent.sinks) sink.stop();
+      agent.stopAudio();
+      await agent.mesh.destroy();
+    }
+    hub.close();
+    (globalThis as any).MediaStream = previousMediaStream;
+  }
+
+  const passed = failures.length === 0;
+  metrics["failures"] = failures;
+  const endTime = Date.now();
+  return {
+    scenario: "t20",
+    branch,
+    startTime,
+    endTime,
+    durationMs: endTime - startTime,
+    passed,
+    metrics,
+    samples,
+    summary: passed
+      ? `3-agent mesh connected over a lossy channel (${metrics["repairs"]} repairs), audio on every pair, reconnect and leave clean`
+      : `FAILED: ${failures.join("; ")} — ${JSON.stringify(metrics)}`,
+  };
+}
 
 function short(did: string): string {
   return did.split("-").pop() ?? did;
