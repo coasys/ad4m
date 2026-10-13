@@ -408,6 +408,9 @@ impl PerspectiveInstance {
             Some(instances)
         };
 
+        // After a vote's own pass, never between its write and that pass.
+        let lock = self.flow_pass_lock.clone();
+        let _passes = lock.lock().await;
         for context in self.flow_pass_contexts().await {
             let outcomes =
                 run_flow_consensus_pass(self, None, &context, None, instance_filter.as_deref())

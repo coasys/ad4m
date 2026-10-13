@@ -105,9 +105,11 @@ impl From<Option<FlowReplicaStateRow>> for PriorRow {
 }
 
 /// What [`FlowReplicaState::record_pass`] did: the row it found, and the
-/// marks it inserted. Two passes for one agent can overlap (a vote's own
-/// pass and a sync-triggered one); the transaction that inserts a mark is
-/// the one that reports its edge, so each edge is reported once.
+/// marks it inserted. The transaction that inserts a mark is the one that
+/// reports its edge, so each edge is reported once even if two passes for
+/// one agent overlap. Votes and background sweeps do not overlap (they share
+/// the perspective's `flow_pass_lock`, so a vote's own pass is the one that
+/// reports its settle); this covers passes run outside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PassRecord {
     pub prior: PriorRow,

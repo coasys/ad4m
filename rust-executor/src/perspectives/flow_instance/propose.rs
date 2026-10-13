@@ -64,7 +64,7 @@
 //! behaviour-preserving. Left for the change that owns the engine pass. See
 //! [`proposal_already_exists`](crate::perspectives::flow_evaluator).
 
-use super::accept::{accept_flow_proposal, load_outputs};
+use super::accept::{accept_flow_proposal_locked, load_outputs};
 use super::atom::{
     check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
     TransitionAtom,
@@ -145,6 +145,10 @@ pub async fn propose_flow_transition(
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<ProposeOutcome> {
+    // Held from the read that decides through the vote's own pass — see
+    // `accept_flow_proposal`.
+    let lock = perspective.flow_pass_lock.clone();
+    let _passes = lock.lock().await;
     let flows = load_shacl_flows(perspective).await?;
     let instances = load_all_flow_instances(perspective).await?;
     let record = instances
@@ -325,7 +329,7 @@ pub async fn propose_flow_transition(
         // second sweep here would find every mark already written and return
         // nothing.
         (None, Some(uri)) => {
-            let outcomes = accept_flow_proposal(perspective, &uri, context).await?;
+            let outcomes = accept_flow_proposal_locked(perspective, &uri, context).await?;
             (uri, false, true, outcomes)
         }
         // An open proposal on this edge commits to other outputs. A twin
