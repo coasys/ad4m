@@ -714,8 +714,19 @@ mod tests {
             .expect("load_flow_instances");
         assert_eq!(live.len(), 1, "the mint must be readable back");
         assert_eq!(live[0].instance_uri, spawned[0].instance_uri);
-        assert_eq!(live[0].current_state, "identified");
         assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+        // The minter records the initial state for itself (#1424).
+        let did = crate::agent::did_for_context(&ctx).expect("did");
+        assert_eq!(
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &did,
+                &live[0].instance_uri,
+            )
+            .expect("recorded state")
+            .as_deref(),
+            Some("identified")
+        );
 
         // Running again must not double-spawn — the live instance suppresses
         // the candidate. This is what makes the pass safe to call on every

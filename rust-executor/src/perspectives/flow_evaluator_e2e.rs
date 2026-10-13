@@ -290,11 +290,19 @@ impl Fixture {
         minted.into_iter().next().unwrap()
     }
 
+    /// What `run_engine_proposal_pass` would evaluate: the instances at their
+    /// DERIVED state, as the pass reads them — a loaded row carries none.
     async fn satisfied(&self) -> Vec<SatisfiedTransition> {
         let records = self.instances().await;
         let flows = load_shacl_flows(&self.perspective)
             .await
             .expect("load_shacl_flows");
+        let records: Vec<FlowInstanceRecord> =
+            crate::perspectives::flow_instance::derive_states(&self.perspective, &records, &flows)
+                .await
+                .into_iter()
+                .map(|derived| derived.record)
+                .collect();
         evaluate_flow_transitions(&self.perspective, &records, &flows, "did:key:acting").await
     }
 

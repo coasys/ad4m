@@ -34,7 +34,7 @@ use super::atom::{
     check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
     FLOW_INSTANCE_PREDICATE,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{catch_up_before_own_vote, run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -152,6 +152,9 @@ pub async fn accept_flow_proposal(
     if already {
         log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");
     } else {
+        // So the pass below reports what this vote settles, even when it is
+        // this agent's first contact with the instance.
+        catch_up_before_own_vote(perspective, context, &instance_uri).await;
         perspective
             .add_link(
                 Link {

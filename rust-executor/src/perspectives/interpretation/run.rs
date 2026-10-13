@@ -1989,8 +1989,16 @@ mod tests {
             "exactly one FlowInstance must spawn on the created Task"
         );
         assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+        let did = crate::agent::did_for_context(&ctx).expect("did");
         assert_eq!(
-            live[0].current_state, "identified",
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &did,
+                &live[0].instance_uri,
+            )
+            .expect("recorded state")
+            .as_deref(),
+            Some("identified"),
             "fresh instance starts in the flow's first state by value"
         );
     }

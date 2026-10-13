@@ -136,6 +136,35 @@ async fn another_agent_on_the_node_sees_none_of_this_agents_bookkeeping() {
     assert!(FlowReplicaState::is_fired(&uuid, &bob_did, &minted).expect("is_fired"));
 }
 
+/// A second agent whose FIRST contact with an instance is its own vote is
+/// told what that vote settled. Its pass after the vote would otherwise be
+/// its first — a silent catch-up — so `accept_flow_proposal` catches it up
+/// before writing the vote (`catch_up_before_own_vote`). History it never
+/// voted on stays unreported.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_agents_first_vote_reports_what_it_settles() {
+    let mut f = seed_review_flow().await;
+    // History Bob was not around for: review → changes_requested → review.
+    settle(&mut f, "h1", "review", "changes_requested").await;
+    settle(&mut f, "h2", "changes_requested", "review").await;
+    set_consensus_rule(&mut f, "review://Review.approved", r#"{"n":2}"#).await;
+    let open = propose(&mut f, "h3", "review", "approved").await;
+    assert!(consensus_pass(&mut f).await.is_empty(), "1 < n = 2");
+
+    let bob = second_agent("bob-first-vote@flow.local");
+    let fired = accept_flow_proposal(&mut f.perspective, &open, &bob)
+        .await
+        .expect("bob co-signs");
+    assert_eq!(
+        fired
+            .iter()
+            .map(|o| (o.from_state.as_str(), o.to_state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("review", "approved")],
+        "bob is told what his vote settled, and nothing from before he arrived"
+    );
+}
+
 /// Links the `Local`-link engine left behind are dead data: a `Local`
 /// `currentState` saying something else and a `Local` mark on the very
 /// proposal that settles. Neither is read — the mark does not mute this
@@ -414,13 +443,17 @@ async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[
 /// `the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
+    // Replica B is set up FIRST: every fixture re-keys the process's one main
+    // agent, so whichever is created last is the DID both replicas act as.
+    // Creating B after A's settles would make A's own later passes those of
+    // an agent A never saw — a catch-up on A as well.
+    let mut b = seed_review_flow().await;
     let mut a = seed_review_flow().await;
     let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
     let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
 
-    // Replica B: same definition, the flow instance as sync delivers it (no
-    // row), and A's history.
-    let mut b = seed_review_flow().await;
+    // B: same definition, the flow instance as sync delivers it (no row),
+    // and A's history.
     forget_bookkeeping(&b);
     replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
 

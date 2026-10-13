@@ -69,7 +69,7 @@ use super::atom::{
     check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
     TransitionAtom,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{catch_up_before_own_vote, run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -385,6 +385,9 @@ async fn mint(
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<(String, bool, bool, Vec<FireOutcome>)> {
+    // So the sweep reports what this proposal settles, even when it is this
+    // agent's first contact with the instance.
+    catch_up_before_own_vote(perspective, context, &transition.instance_uri).await;
     let uri = write_proposal(perspective, transition, acting_did, rationale, context).await?;
     let outcomes = sweep(perspective, &transition.instance_uri, context).await;
     Ok((uri, true, true, outcomes))

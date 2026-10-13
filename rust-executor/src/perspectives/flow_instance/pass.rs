@@ -83,6 +83,39 @@ pub struct FireOutcome {
     pub contributing_proposal_uris: Vec<String>,
 }
 
+/// Catch `context`'s agent up on `instance_uri` — silently, as every first
+/// pass is — when it has never derived that instance here. Called right
+/// before the agent writes a vote of its own (`accept`, `propose`).
+///
+/// Without it, an agent whose first contact with an instance is its own vote
+/// — a co-owner on the same node pressing a button on someone else's run —
+/// would have that vote's settle swallowed: the pass after the vote is its
+/// first, so it is a catch-up, and the agent would be told nothing fired.
+/// Catching up first records the history quietly, and the pass after the
+/// vote then reports exactly what the vote settled. Failures are logged and
+/// ignored: the worst case is the old behaviour, a silent first pass.
+pub(crate) async fn catch_up_before_own_vote(
+    perspective: &mut PerspectiveInstance,
+    context: &AgentContext,
+    instance_uri: &str,
+) {
+    let has_row = crate::agent::did_for_context(context).and_then(|did| {
+        FlowReplicaState::has_derived(&perspective.uuid, &did, instance_uri)
+    });
+    match has_row {
+        Ok(true) => {}
+        Ok(false) => {
+            let only = [instance_uri.to_string()];
+            let reported =
+                run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+            debug_assert!(reported.is_empty(), "a first pass reports nothing");
+        }
+        Err(e) => log::warn!(
+            "catch_up_before_own_vote: reading the bookkeeping of {instance_uri} failed;              the vote's own pass may catch up silently: {e:#}"
+        ),
+    }
+}
+
 /// One sweep over the `FlowInstance`s in scope, as `context`'s agent: derive
 /// each, and where that agent's recorded state or marks lag the fold, record
 /// them in one transaction and report what is new.
