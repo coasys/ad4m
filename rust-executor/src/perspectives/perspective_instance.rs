@@ -6035,13 +6035,12 @@ impl PerspectiveInstance {
             revision: 0,
             connection: connection_id,
         };
-        let first_result =
-            self.model_query_classes_within(
-                &classes,
-                &query_json,
-                graph_iris.as_deref(),
-                MODEL_QUERY_SHAPE_WAIT,
-            );
+        let first_result = self.model_query_classes_within(
+            &classes,
+            &query_json,
+            graph_iris.as_deref(),
+            MODEL_QUERY_SHAPE_WAIT,
+        );
         self.open_subscription(subscribed_query, first_result).await
     }
 
@@ -8787,7 +8786,12 @@ mod tests {
                 .expect("add Task");
         };
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, Duration::from_secs(10)),
+            perspective.model_query_within(
+                "Board",
+                NESTED_INCLUDE_QUERY,
+                None,
+                Duration::from_secs(10)
+            ),
             late_sync
         );
 
@@ -8812,7 +8816,7 @@ mod tests {
 
         let started = Instant::now();
         let err = perspective
-            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, None, budget)
             .await
             .expect_err("Task's shape never arrives");
         let elapsed = started.elapsed();
@@ -8841,7 +8845,7 @@ mod tests {
 
         let started = Instant::now();
         let err = perspective
-            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, None, budget)
             .await
             .expect_err("Task is not registered");
         let elapsed = started.elapsed();
@@ -8924,7 +8928,7 @@ mod tests {
         };
         let started = Instant::now();
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, SHARED_BUDGET),
+            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, None, SHARED_BUDGET),
             late_task
         );
         let elapsed = started.elapsed();
@@ -8958,7 +8962,7 @@ mod tests {
         };
         let started = Instant::now();
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, SHARED_BUDGET),
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, None, SHARED_BUDGET),
             late_board
         );
         let elapsed = started.elapsed();
@@ -8984,7 +8988,12 @@ mod tests {
 
         // No board has tasks yet, so hydration does not need `Task`.
         let (board_sub, _, _) = perspective
-            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), "c".into())
+            .model_subscribe_and_query(
+                "Board".into(),
+                NESTED_INCLUDE_QUERY.into(),
+                None,
+                "c".into(),
+            )
             .await
             .expect("subscribe to Board");
         let (other_sub, _, _) = perspective

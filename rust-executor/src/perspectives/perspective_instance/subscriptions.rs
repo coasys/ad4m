@@ -226,7 +226,7 @@ fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ChangedPredicates;
+    use super::super::{ChangedGraphs, ChangedPredicates};
     use super::result_delta;
     use crate::agent::AgentContext;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
@@ -315,6 +315,7 @@ mod tests {
             LinkStatus::Local,
             None,
             &AgentContext::main_agent(),
+            None,
         )
         .await
         .unwrap();
@@ -326,7 +327,7 @@ mod tests {
             .await
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await;
-        p.check_subscribed_queries(ChangedPredicates::CheckAll)
+        p.check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::NoneRecorded)
             .await;
         let mut out = vec![];
         let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
@@ -344,7 +345,7 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, _, initial) = p
-            .model_subscribe_and_query("Todo".into(), query.clone(), "c".into())
+            .model_subscribe_and_query("Todo".into(), query.clone(), None, "c".into())
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -415,7 +416,7 @@ mod tests {
         let first_result = async move {
             add(&mut writer, "test://a", "test://p", "test://b").await;
             writer
-                .check_subscribed_queries(ChangedPredicates::CheckAll)
+                .check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::NoneRecorded)
                 .await;
             Ok(stale)
         };
