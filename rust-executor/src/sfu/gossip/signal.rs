@@ -19,6 +19,13 @@
 //!
 //! No TCP sockets, no connection management, no retry logic — the
 //! host application's signalling layer handles all of that.
+//!
+//! **Not in use yet.** The executor builds [`TcpGossip`](super::tcp::TcpGossip)
+//! or [`NoopGossip`](super::NoopGossip) (`build_sfu_gossip` in `lib.rs`);
+//! nothing constructs this transport. Wiring it to neighbourhood
+//! telepresence signals is a follow-up, and that wiring has to accept a
+//! frame only from a member's verified signal whose author is the frame's
+//! `sender_did()`.
 
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -52,6 +59,8 @@ where
     }
 }
 
+/// Cascade gossip over the host's signalling channel. Unused until the
+/// telepresence wiring lands; see the module docs.
 pub struct SignalGossip {
     local_did: String,
     max_participants_per_node: u32,

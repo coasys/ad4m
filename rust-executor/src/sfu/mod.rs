@@ -23,6 +23,7 @@ pub mod types;
 
 mod service;
 
+// `SignalGossip` is not constructed yet: see `gossip::signal`.
 pub use gossip::{
     signal::{SignalGossip, SignalSender},
     tcp::GossipPeer,
