@@ -200,7 +200,9 @@ fn params(method: &str, fx: &Fixture) -> Value {
         | "perspective.interpretationOverlays"
         | "perspective.queryLinks"
         | "perspective.snapshot"
+        | "perspective.flowStates"
         | "perspective.subjectClassesOf" => json!({ "uuid": uuid }),
+        "perspective.flowFired" => json!({ "uuid": uuid, "instance": "test://leak" }),
         "perspective.getShacl" | "perspective.getShaclTargetClass" => {
             json!({ "uuid": uuid, "name": "Leak" })
         }
