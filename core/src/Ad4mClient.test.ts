@@ -147,6 +147,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.hasTelepresence': true,
     'neighbourhood.onlineAgents': [{ did: 'did:test:1', status: new Perspective() }],
     'sfu.status': { reachability: 'nat', isPublic: false, bindAddress: '127.0.0.1:9000', detail: 'nat' },
+    'sfu.servesAllMembers': true,
     'neighbourhood.setOnlineStatus': true,
     'neighbourhood.sendSignal': true,
     'neighbourhood.sendBroadcast': true,
@@ -1005,23 +1006,10 @@ describe('NeighbourhoodClient', () => {
         expect(lastRpcCall!.params.loopback).toBe(true);
     });
 
-    test('availableSfuNodes() reads the SFU link from the signed status perspective', async () => {
-        const onlineAgents = MOCK_RESPONSES['neighbourhood.onlineAgents'];
-        const status = (target: string, predicate = 'ad4m://sfu/available') => ({
-            author: 'did:other:1', timestamp: '2024-01-01T00:00:00.000Z',
-            data: { links: [{ ...wireLink('did:other:1', target), data: { source: 'did:other:1', predicate, target } }] },
-            proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
-        });
-        MOCK_RESPONSES['neighbourhood.onlineAgents'] = [
-            { did: 'did:sfu:1', status: status('1.2.3.4:9000') },
-            { did: 'did:other:2', status: status('x', 'ad4m://session/in-call') },
-        ];
-        try {
-            expect(await ad4m.neighbourhood.availableSfuNodes('uuid-1'))
-                .toEqual([{ did: 'did:sfu:1', bindAddress: '1.2.3.4:9000' }]);
-        } finally {
-            MOCK_RESPONSES['neighbourhood.onlineAgents'] = onlineAgents;
-        }
+    test('sfuServesAllMembers() asks the executor about the perspective', async () => {
+        expect(await ad4m.neighbourhood.sfuServesAllMembers('uuid-1')).toBe(true);
+        expect(lastRpcCall!.type).toBe('sfu.servesAllMembers');
+        expect(lastRpcCall!.params).toEqual({ uuid: 'uuid-1' });
     });
 
     test('SFU event subscriptions get only their events and are watched before the next call', async () => {

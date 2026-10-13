@@ -151,6 +151,7 @@ import type { SfuConfig } from "./SfuConfig";
 import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
 import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
 import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
+import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
@@ -347,6 +348,7 @@ export interface RpcMethods {
   "sfu.listRooms": { params: Record<string, never>; result: Array<SfuRoomInfo> };
   "sfu.qualityPreferences": { params: Record<string, never>; result: Array<SfuParticipantQualityPreference> };
   "sfu.sendData": { params: SfuSendDataParams; result: boolean };
+  "sfu.servesAllMembers": { params: SfuPerspectiveParams; result: boolean };
   "sfu.setConfig": { params: SfuSetConfigParams; result: boolean };
   "sfu.sfuPeerForNeighbourhood": { params: SfuNeighbourhoodParams; result: string | null };
   "sfu.sfuPeersForNeighbourhood": { params: SfuNeighbourhoodParams; result: Array<string> };
@@ -439,6 +441,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.getConfig",
   "sfu.listRooms",
   "sfu.qualityPreferences",
+  "sfu.servesAllMembers",
   "sfu.sfuPeerForNeighbourhood",
   "sfu.sfuPeersForNeighbourhood",
   "sfu.status",

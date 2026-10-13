@@ -106,8 +106,8 @@ export class NeighbourhoodProxy {
      * Create a WebRTC media session.  Call `session.join(localStream)` to connect.
      *
      * Fetches the local executor's SFU status (cached after the first
-     * call) and passes it into the session so public executors
-     * automatically advertise SFU capability in call-presence.
+     * call): with `topology: "auto"`, a session uses the SFU only when it
+     * is public and hosts every member of the neighbourhood.
      */
     async createSession(roomName: string, options?: SessionCreateOptions): Promise<Session> {
         // `perspective.getNeighbourhoodProxy()` builds the proxy without a DID; the session needs
@@ -136,7 +136,7 @@ export class NeighbourhoodProxy {
             sfuConfig: options?.sfuConfig,
             iceServers: options?.iceServers,
             localSfuStatus: this.#sfuStatusCache ?? undefined,
-            availableSfuNodes: () => proxy.availableSfuNodes(),
+            sfuServesAllMembers: () => proxy.#client.sfuServesAllMembers(proxy.#pID),
             // Mesh needs a signalling channel and presence callbacks.
             // SFU ignores these — they remain unused when the resolved
             // topology selects the SFU path.
@@ -160,14 +160,6 @@ export class NeighbourhoodProxy {
     // the neighbourhood URL explicitly — the proxy is per-perspective,
     // not per-neighbourhood, and the URL is owned by the consumer (Flux's
     // call context, the WE UI, etc).
-
-    /**
-     * Discover SFU-capable nodes by scanning online agents' presence
-     * in this neighbourhood for the `ad4m://sfu/available` predicate.
-     */
-    async availableSfuNodes(): Promise<{ did: string; bindAddress: string }[]> {
-        return await this.#client.availableSfuNodes(this.#pID)
-    }
 
     async sfuConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
         return await this.#client.sfuGetConfig(neighbourhoodUrl)

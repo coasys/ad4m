@@ -1899,6 +1899,8 @@ describe("Multi-User Simple integration tests", () => {
                 await pollUntil(() => call1.roster.has(did2) && call2.roster.has(did1), {
                     timeoutMs: 30000, label: "each user's call roster lists the other",
                 });
+                // Every member is hosted here, so `auto` may use this executor's SFU.
+                expect(await client1.neighbourhood.sfuServesAllMembers(perspective1.uuid)).to.be.true;
             } finally {
                 await call1.session.destroy();
                 await call2.session.destroy();
@@ -2513,6 +2515,9 @@ describe("Multi-User Simple integration tests", () => {
                     timeoutMs: 180000, intervalMs: 2000,
                     label: "every call roster lists the other two",
                 });
+                // Carol is on node 2, so `auto` must not use node 1's SFU.
+                const perspective1 = (await node1User1Client!.perspective.all()).find(p => p.sharedUrl === neighbourhoodUrl)!;
+                expect(await node1User1Client!.neighbourhood.sfuServesAllMembers(perspective1.uuid)).to.be.false;
             } finally {
                 console.log("rosters:", { alice: [...alice.roster], bob: [...bob.roster], carol: [...carol.roster] });
                 await alice.session.destroy();

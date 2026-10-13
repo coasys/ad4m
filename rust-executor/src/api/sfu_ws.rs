@@ -6,7 +6,8 @@
 //!
 //! Two gates, in this order:
 //! - a capability: reads (`getConfig`, `listRooms`, `sfuPeer*`, `status`,
-//!   `cascadeStatus`, `qualityPreferences`) need `NEIGHBOURHOOD_READ`, writes
+//!   `servesAllMembers`, `cascadeStatus`, `qualityPreferences`) need
+//!   `NEIGHBOURHOOD_READ`, writes
 //!   (`startRoom`, `stopRoom`, `setConfig`, `call*`, `addIceCandidate`,
 //!   `sendData`) need `NEIGHBOURHOOD_UPDATE`;
 //! - the neighbourhood. Every multi-user token holds both capabilities on
@@ -371,6 +372,45 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::Bool(ok))
 }
 
+/// Whether every member of a neighbourhood is hosted on this executor, so all
+/// of them can join its SFU. A call's `auto` topology uses the SFU only then:
+/// a member on another executor could not join the same room. Members are the
+/// DIDs the neighbourhood's link language knows plus its local owners
+/// (`PerspectiveInstance::others`); hosted are the main agent and the managed
+/// users. A neighbourhood with no known member answers `false`.
+async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let p: SfuPerspectiveParams = parse(params)?;
+    let perspective = crate::perspectives::get_perspective(&p.uuid).ok_or_else(|| {
+        WsRpcError::not_found(format!("No perspective found with uuid {}", p.uuid))
+    })?;
+    let shared_url = perspective
+        .persisted
+        .lock()
+        .await
+        .shared_url
+        .clone()
+        .ok_or_else(|| WsRpcError::bad_request("Not a neighbourhood".to_string()))?;
+    member_did(&ctx, &shared_url)?;
+    service()?;
+    let members = perspective
+        .others()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let mut hosted: Vec<String> = Ad4mDb::with_global_instance(|db| db.list_users())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|user| user.did)
+        .collect();
+    hosted.extend(crate::agent::did_for_context(&AgentContext::main_agent()).ok());
+    Ok(Value::Bool(all_hosted(&members, &hosted)))
+}
+
+fn all_hosted(members: &[String], hosted: &[String]) -> bool {
+    !members.is_empty() && members.iter().all(|did| hosted.contains(did))
+}
+
 /// Read-only query: SFU service status including public reachability.
 /// Clients use this to determine whether this executor can serve as an
 /// SFU relay for remote participants.
@@ -500,6 +540,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<SfuSendDataParams, bool>("sfu.sendData", send_data);
     map.method::<NoParams, SfuStatus>("sfu.status", sfu_status)
         .read();
+    map.method::<SfuPerspectiveParams, bool>("sfu.servesAllMembers", serves_all_members)
+        .read();
     map.method::<NoParams, SfuCascadeStatus>("sfu.cascadeStatus", cascade_status)
         .read();
     map.method::<NoParams, Vec<SfuParticipantQualityPreference>>(
@@ -594,6 +636,14 @@ pub struct SfuSendDataParams {
     pub binary: Option<bool>,
 }
 
+/// A neighbourhood by its perspective's UUID.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuPerspectiveParams {
+    pub uuid: String,
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -647,6 +697,15 @@ pub struct SfuParticipantQualityPreference {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn serves_all_members_only_when_every_member_is_hosted() {
+        let s = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        let hosted = s(&["did:main", "did:alice", "did:bob"]);
+        assert!(super::all_hosted(&s(&["did:alice", "did:bob"]), &hosted));
+        assert!(!super::all_hosted(&s(&["did:alice", "did:carol"]), &hosted));
+        assert!(!super::all_hosted(&[], &hosted));
+    }
+
     use super::*;
     use crate::api::tests::support::admin_ctx;
     use crate::api::ws_handler::build_handler_map;
@@ -756,6 +815,7 @@ mod tests {
                 "sfu.getConfig",
                 "sfu.listRooms",
                 "sfu.qualityPreferences",
+                "sfu.servesAllMembers",
                 "sfu.sfuPeerForNeighbourhood",
                 "sfu.sfuPeersForNeighbourhood",
                 "sfu.status",
