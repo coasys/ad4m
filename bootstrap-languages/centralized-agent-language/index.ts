@@ -2,7 +2,7 @@
  * # Centralized Agent Expression Store
  *
  * Expression language that stores agent expressions via a centralized
- * server (socket.ad4m.dev).
+ * server (mock.ad4m.dev).
  */
 
 import axiod from "https://deno.land/x/axiod/mod.ts";
@@ -11,6 +11,10 @@ import {
     agentDid,
     agentCreateSignedExpression,
 } from "@coasys/ad4m-ldk";
+
+// Central agent-expression server. Keep in sync with the Rust port in
+// rust-impl/src/lib.rs.
+const SERVER_URL = "https://mock.ad4m.dev";
 
 const language = defineLanguage({
     name: "centralized-agent-expression-store",
@@ -38,7 +42,7 @@ const language = defineLanguage({
 
             const expression = agentCreateSignedExpression(agentObj);
 
-            await axiod.post("https://socket.ad4m.dev/agent", {
+            await axiod.post(`${SERVER_URL}/agent`, {
                 data: {
                     did: agentObj.did,
                     expression,
@@ -50,7 +54,7 @@ const language = defineLanguage({
 
         async get(did: string): Promise<any> {
             console.log("Getting expression with did", did);
-            const data = await axiod.get("https://socket.ad4m.dev/agent", {
+            const data = await axiod.get(`${SERVER_URL}/agent`, {
                 params: { did },
             });
             return data.data.expression;

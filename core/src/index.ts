@@ -16,6 +16,7 @@ export * from "./Literal";
 export * from "./perspectives/Perspective";
 export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
+export * from "./perspectives/LiveQuery";
 export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
@@ -45,4 +46,4 @@ export * from './shacl/builders'
 export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
 export { RpcError, LONG_TIMEOUT_MS } from "./apiClient";
-export type { CallOptions } from "./apiClient";
+export type { CallOptions, EventFilter } from "./apiClient";

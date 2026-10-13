@@ -180,6 +180,14 @@ export interface ConsensusRule {
    * query are counted. Two evaluation shapes (design §7.2):
    *   Shape 1 — `didProperty` present: run once, extract DIDs from matches.
    *   Shape 2 — `$did` templated in `where`: run per candidate.
+   *
+   * The executor refuses a rule with a key it does not know, anywhere in
+   * the rule (a misspelt `fromRole`, or `grantedByFlow` inside it), and a
+   * key written twice. `addFlow` rejects such a definition before storing
+   * it, with an error naming the state and the key. A definition that
+   * arrived by sync is refused when read: the edge fires for nobody and the
+   * executor log names the key. It does not drop the key and read a wider
+   * gate.
    */
   fromRole?: ModelQuery;
 }
@@ -338,6 +346,47 @@ export interface FlowTransition {
  * ```
  */
 export class SHACLFlow {
+  /**
+   * Every predicate {@link toLinks} writes from the flow's own URI. The
+   * flow's URI also carries links the definition does not own (a receipt
+   * index, for one), so replacing a definition removes only these from it.
+   * Keep in step with `toLinks`.
+   */
+  static readonly FLOW_LEVEL_PREDICATES: readonly string[] = [
+    "rdf://type",
+    "ad4m://flowName",
+    "ad4m://interpretationHint",
+    "ad4m://inputTypes",
+    "ad4m://outputTypes",
+    "ad4m://creationHint",
+    "ad4m://context",
+    "ad4m://consensusRule",
+    "ad4m://hasState",
+    "ad4m://hasTransition",
+  ];
+
+  /**
+   * Every predicate {@link toLinks} writes from a state's or a transition's
+   * URI, plus the retired `ad4m://stateCheck`, so a re-add still clears it
+   * from an older definition. These URIs can carry links the definition does
+   * not own too (an app's label on a state, for one), so replacing a
+   * definition removes only these from them. Keep in step with `toLinks`.
+   */
+  static readonly STATE_AND_TRANSITION_PREDICATES: readonly string[] = [
+    "rdf://type",
+    "ad4m://stateName",
+    "ad4m://stateValue",
+    "ad4m://interpretationHint",
+    "ad4m://requires",
+    "ad4m://semanticCheck",
+    "ad4m://consensusRule",
+    "ad4m://stateCheck",
+    "ad4m://actionName",
+    "ad4m://fromState",
+    "ad4m://toState",
+    "ad4m://transitionActions",
+  ];
+
   /** Flow name (e.g., "TODO") */
   public name: string;
 

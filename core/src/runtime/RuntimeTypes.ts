@@ -115,11 +115,11 @@ export class HostingUserInfo {
 
 export class PaymentRequestResult {
     success: boolean;
-    message: string;
+    amountHOT: string;
 
-    constructor(success: boolean, message: string) {
+    constructor(success: boolean, amountHOT: string) {
         this.success = success;
-        this.message = message;
+        this.amountHOT = amountHOT;
     }
 }
 

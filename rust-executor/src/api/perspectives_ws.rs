@@ -1,14 +1,19 @@
 //! Perspective WS-native handlers.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
+use crate::perspectives::model_query::QueryClasses;
+use crate::perspectives::perspective_instance::{
+    is_sparql_query, result_json, PROLOG_LIVE_QUERY_UNSUPPORTED,
+};
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
@@ -19,7 +24,7 @@ use crate::pubsub::mark_credits_dirty;
 use crate::types::*;
 
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 // ── Helpers ──
 
@@ -28,7 +33,7 @@ use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 /// `SharedDb`. Running it directly on the async request thread stalls the
 /// tokio runtime for the whole RPC round-trip. Wrap it in
 /// `spawn_blocking` so only a blocking-pool worker waits on the network.
-async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
+pub(crate) async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
     if let Some(p) = get_perspective(uuid) {
         return Ok(p);
     }
@@ -435,7 +440,7 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let status = parse_link_status(body.status.as_deref());
 
@@ -478,7 +483,7 @@ async fn add_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let status = parse_link_status(body.status.as_deref());
     let links: Vec<Link> = body.links.into_iter().map(Link::from).collect();
@@ -513,7 +518,7 @@ async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     if let Some(batch_id) = body.batch_id {
         let mut removals = Vec::with_capacity(body.links.len());
@@ -556,7 +561,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let status = parse_link_status(body.status.as_deref());
 
@@ -575,7 +580,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         }
     }
 
-    Ok(serde_json::to_value(LinkMutationResponse {
+    Ok(serde_json::to_value(PerspectiveLinkDiff {
         additions: diff.additions,
         removals: diff.removals,
         updates: vec![],
@@ -624,7 +629,7 @@ async fn update_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let result = perspective
         .update_link(
@@ -671,7 +676,7 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     let query = params.require_str("query")?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let res = perspective
         .prolog_query_with_context(query, &agent_context)
@@ -837,7 +842,7 @@ async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     // Batch mode: entries array present
     if let Some(entries_val) = params.get("entries") {
@@ -899,7 +904,7 @@ async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let commands: Vec<crate::perspectives::perspective_instance::Command> =
         serde_json::from_str(&body.commands)
@@ -955,14 +960,14 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let diff = perspective
         .commit_batch(body.batch_id.clone(), &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    Ok(serde_json::to_value(LinkMutationResponse {
+    Ok(serde_json::to_value(PerspectiveLinkDiff {
         additions: diff.additions,
         removals: diff.removals,
         updates: vec![],
@@ -979,18 +984,72 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    // Live queries are SPARQL; Prolog live queries were removed.
+    if !is_sparql_query(&body.query) {
+        return Err(WsRpcError::bad_request(PROLOG_LIVE_QUERY_UNSUPPORTED));
+    }
+    let connection_id = connection_id(&ctx)?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    let (subscription_id, result) = perspective
-        .subscribe_and_query(body.query, ctx.user_email.clone())
+    let reply = perspective
+        .subscribe_and_query(body.query, connection_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    subscribed(reply)
+}
 
-    Ok(serde_json::to_value(SubscribeQueryResponse {
+/// The RPC connection a subscription belongs to; a call without one (REST)
+/// cannot subscribe.
+fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    ctx.connection_id.clone().ok_or_else(|| {
+        WsRpcError::bad_request("Subscriptions need a WebSocket connection (/api/v1/ws)")
+    })
+}
+
+/// Reply to a subscribe call: the result as JSON at its revision (0 unless
+/// a change was published while the first result was computed).
+fn subscribed(
+    (subscription_id, revision, result): (String, u64, String),
+) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(PerspectiveSubscribed {
         subscription_id,
-        result,
+        result: result_json(&result),
+        revision,
     })?)
+}
+
+/// `perspective.resyncSubscription { uuid, subscriptionId }` →
+/// `{ revision, result }`: the current state of one of the caller's
+/// subscriptions. A client that sees a revision gap (an update whose
+/// `revision` is not the previous one + 1) replaces its copy with `result`
+/// and applies the updates after `revision`. 404 unless this connection
+/// opened the subscription.
+async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(WsRpcError::forbidden)?;
+
+    let body: ResyncSubscriptionRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    match perspective
+        .subscription_state(&body.subscription_id, &connection_id(&ctx)?)
+        .await
+    {
+        Some((revision, result)) => Ok(serde_json::to_value(PerspectiveResynced {
+            revision,
+            result: result_json(&result),
+        })?),
+        None => Err(WsRpcError::not_found(format!(
+            "No subscription {} on this perspective",
+            body.subscription_id
+        ))),
+    }
 }
 
 async fn subscribe_sparql_query(
@@ -1010,26 +1069,6 @@ async fn subscribe_sparql_query(
     ))
 }
 
-async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let body: KeepAliveQueryRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    perspective
-        .keepalive_query(body.subscription_id)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
-}
-
 async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -1041,13 +1080,13 @@ async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     let body: DisposeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let connection_id = connection_id(&ctx)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    perspective
-        .dispose_query_subscription(body.subscription_id)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(
+        perspective
+            .dispose_query_subscription(&body.subscription_id, &connection_id)
+            .await,
+    ))
 }
 
 async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -1062,7 +1101,7 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let (resolved_class_name, parsed_initial_values) =
         match serde_json::from_str::<serde_json::Value>(&body.subject_class) {
@@ -1113,7 +1152,7 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
         class_name: Some(body.subject_class.clone()),
@@ -1199,7 +1238,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let class_name = params.require_str("class_name")?;
+    let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
     let graph_iris: Option<Vec<String>> = params
         .as_object()
@@ -1211,7 +1250,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query(&class_name, &query_json, graph_iris.as_deref()),
+        perspective.model_query_classes(&classes, &query_json, graph_iris.as_deref()),
     )
     .await;
 
@@ -1305,25 +1344,21 @@ async fn model_subscribe_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let class_name = params.require_str("class_name")?;
+    let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
     let graph_iris: Option<Vec<String>> = params
         .as_object()
         .and_then(|o| o.get("graph_iris"))
         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
+    let connection_id = connection_id(&ctx)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    let user_email = ctx.user_email.clone();
-    let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query(class_name, query_json, user_email, graph_iris)
+    let reply = perspective
+        .model_subscribe_and_query(classes, query_json, graph_iris, connection_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(serde_json::to_value(serde_json::json!({
-        "subscription_id": subscription_id,
-        "result": result_string,
-    }))?)
+    subscribed(reply)
 }
 
 async fn run_interpretation_handler(
@@ -1342,7 +1377,7 @@ async fn run_interpretation_handler(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     // Interpretation writes via `create_subject`, so link status derives from each
     // class's SDNA `local` flags (same rule as app code) — there is no caller-facing
     // link-status knob on this path.
@@ -1613,7 +1648,7 @@ async fn run_interpretation_with_harness_handler(
     }
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     // Class resolution mirrors `run_interpretation_handler`: explicit
     // selection if provided, otherwise every registered subject class in
@@ -1878,7 +1913,6 @@ async fn add_auto_processor_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    use crate::api::types::AddAutoProcessorRequest;
     use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
 
     let uuid = params.require_str("uuid")?;
@@ -1888,7 +1922,7 @@ async fn add_auto_processor_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: AddAutoProcessorRequest = serde_json::from_value(params.clone())
+    let body: PerspectiveAddAutoProcessorParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     // Validate before persisting: `load_processors` silently skips configs
@@ -1929,7 +1963,7 @@ async fn add_auto_processor_handler(
     }
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let emit_debug_events_write = body.emit_debug_events;
     let cfg = AutoProcessorConfig {
@@ -1982,10 +2016,9 @@ async fn remove_auto_processor_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    use crate::api::types::RemoveAutoProcessorRequest;
     use crate::perspectives::auto_processor::config::remove_processor;
 
-    let body: RemoveAutoProcessorRequest = serde_json::from_value(params.clone())
+    let body: PerspectiveRemoveAutoProcessorParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     check_capability(
         &ctx.capabilities,
@@ -1994,7 +2027,7 @@ async fn remove_auto_processor_handler(
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let removed = remove_processor(&mut perspective, &body.processor_id, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -2008,10 +2041,9 @@ async fn accept_interpretation_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    use crate::api::types::ResolveInterpretationRequest;
     use crate::perspectives::interpretation::overlay::accept_interpretation;
 
-    let body: ResolveInterpretationRequest = serde_json::from_value(params.clone())
+    let body: PerspectiveResolveInterpretationParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     check_capability(
         &ctx.capabilities,
@@ -2020,7 +2052,7 @@ async fn accept_interpretation_handler(
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     accept_interpretation(
         &mut perspective,
         &body.base,
@@ -2038,10 +2070,9 @@ async fn reject_interpretation_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    use crate::api::types::ResolveInterpretationRequest;
     use crate::perspectives::interpretation::overlay::reject_interpretation;
 
-    let body: ResolveInterpretationRequest = serde_json::from_value(params.clone())
+    let body: PerspectiveResolveInterpretationParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     check_capability(
         &ctx.capabilities,
@@ -2050,7 +2081,7 @@ async fn reject_interpretation_handler(
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     reject_interpretation(
         &mut perspective,
         &body.base,
@@ -2068,10 +2099,9 @@ async fn interpretation_overlays_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    use crate::api::types::InterpretationOverlaysRequest;
     use crate::perspectives::interpretation::overlay::list_overlays;
 
-    let body: InterpretationOverlaysRequest = serde_json::from_value(params.clone())
+    let body: PerspectiveUuidParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     check_capability(
         &ctx.capabilities,
@@ -2099,7 +2129,7 @@ async fn accept_flow_proposal_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let fired = crate::perspectives::flow_instance::accept::accept_flow_proposal(
         &mut perspective,
         &proposal_uri,
@@ -2122,7 +2152,7 @@ async fn reject_flow_proposal_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let retracted = crate::perspectives::flow_instance::accept::reject_flow_proposal(
         &mut perspective,
         &proposal_uri,
@@ -2132,7 +2162,9 @@ async fn reject_flow_proposal_handler(
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
     // How many of OUR links went, not a bare `true`: withdrawing one vote and
     // retracting a proposal we opened are different events on the same call.
-    Ok(serde_json::json!({ "retractedLinks": retracted }))
+    Ok(serde_json::to_value(PerspectiveRejectFlowProposalResult {
+        retracted_links: retracted,
+    })?)
 }
 
 async fn propose_flow_transition_handler(
@@ -2165,7 +2197,7 @@ async fn propose_flow_transition_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     // A `ProposeOutcome`, not a bare outcome list: an empty list cannot say
     // whether the click queued a live proposal, re-pressed one this agent had
     // already voted on, or landed on a stalled instance — and those want
@@ -2262,7 +2294,7 @@ async fn mint_flow_receipt_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let receipt = crate::perspectives::flow_instance::produced::mint_flow_receipt(
         &mut perspective,
         &instance_uri,
@@ -2309,8 +2341,9 @@ pub(crate) fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQue
 /// Simplified link triple returned by SHACL resolution endpoints.
 /// Matches the `{source, predicate, target}` shape that
 /// `SHACLShape.fromLinks()` in the TypeScript SDK expects.
-#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
-pub(crate) struct ShaclLinkTriple {
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct ShaclLinkTriple {
     pub source: String,
     pub predicate: String,
     pub target: String,
@@ -2546,7 +2579,7 @@ async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 
     match resolve_shacl_links(&perspective, &name).await? {
         Some((shape_uri, links)) => {
-            Ok(serde_json::json!({ "shapeUri": shape_uri, "links": links }))
+            Ok(serde_json::to_value(PerspectiveShacl { shape_uri, links })?)
         }
         None => Ok(Value::Null),
     }
@@ -2606,14 +2639,14 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     )
     .await?;
 
-    let mut results: Vec<Value> = Vec::with_capacity(names.len());
+    let mut results: Vec<PerspectiveNamedShacl> = Vec::with_capacity(names.len());
     for (name, maybe) in names.iter().zip(resolved.into_iter()) {
         match maybe {
-            Some((shape_uri, links)) => results.push(serde_json::json!({
-                "name": name,
-                "shapeUri": shape_uri,
-                "links": links,
-            })),
+            Some((shape_uri, links)) => results.push(PerspectiveNamedShacl {
+                name: name.clone(),
+                shape_uri,
+                links,
+            }),
             None => {
                 // `resolve_shacl_links` already logged the specific
                 // per-name drop at debug level; nothing to add here —
@@ -2631,86 +2664,672 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         )));
     }
 
-    Ok(Value::Array(results))
+    Ok(serde_json::to_value(results)?)
 }
 
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("perspective.all", list_perspectives);
-    map.register("perspective.get", get_perspective_handler);
-    map.register("perspective.create", create_perspective);
-    map.register("perspective.update", update_perspective_handler);
-    map.register("perspective.remove", delete_perspective);
-    map.register("perspective.snapshot", get_snapshot);
-    map.register("perspective.publishSnapshot", publish_snapshot);
-    map.register("perspective.queryLinks", query_links);
-    map.register("perspective.addLink", add_link);
-    map.register("perspective.addLinkExpression", add_link_expression);
-    map.register("perspective.addLinks", add_links_bulk);
-    map.register("perspective.updateLink", update_link);
-    map.register("perspective.removeLink", remove_link);
-    map.register("perspective.removeLinks", remove_links_bulk);
-    map.register("perspective.linkMutations", link_mutations);
-    map.register("perspective.queryProlog", query_prolog);
-    map.register("perspective.querySparql", query_sparql);
-    map.register("perspective.addSdna", add_sdna);
-    map.register("perspective.executeCommands", execute_commands);
-    map.register("perspective.createSubject", create_subject);
-    map.register("perspective.getSubjectData", get_subject_data);
-    map.register("perspective.createBatch", create_batch);
-    map.register("perspective.commitBatch", commit_batch);
-    map.register("perspective.subscribeQuery", subscribe_query);
-    map.register("perspective.keepAliveQuery", keep_alive_query);
-    map.register("perspective.disposeQuery", dispose_query);
-    map.register("perspective.subscribeSparql", subscribe_sparql_query);
-    map.register("perspective.keepAliveSparql", keep_alive_query);
-    map.register("perspective.disposeSparql", dispose_query);
-    map.register("perspective.modelQuery", model_query_handler);
-    map.register("perspective.subjectClassesOf", subject_classes_of_handler);
-    map.register("perspective.modelSubscribe", model_subscribe_handler);
-    map.register("perspective.evaluateGetters", evaluate_getters_handler);
-    map.register("perspective.namedGraphs", named_graphs);
-    map.register("perspective.removeNamedGraph", remove_named_graph);
-    map.register("perspective.runInterpretation", run_interpretation_handler);
-    map.register(
+    use crate::perspectives::flow_instance::{
+        pass::FireOutcome, produced::ValidOutput, propose::ProposeOutcome,
+    };
+    use crate::perspectives::interpretation::overlay::OverlayView;
+
+    map.method::<NoParams, Vec<PerspectiveHandle>>("perspective.all", list_perspectives)
+        .read();
+    map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>(
+        "perspective.get",
+        get_perspective_handler,
+    )
+    .read();
+    map.method::<CreatePerspectiveRequest, PerspectiveHandle>(
+        "perspective.create",
+        create_perspective,
+    );
+    map.method::<PerspectiveUpdateParams, PerspectiveHandle>(
+        "perspective.update",
+        update_perspective_handler,
+    );
+    map.method::<PerspectiveUuidParams, bool>("perspective.remove", delete_perspective);
+    map.method::<PerspectiveUuidParams, Option<crate::types::domain::Perspective>>(
+        "perspective.snapshot",
+        get_snapshot,
+    )
+    .read();
+    // Always answers 501; the result type is the snapshot URL it would return.
+    map.method::<PerspectiveUuidParams, String>("perspective.publishSnapshot", publish_snapshot);
+    map.method::<PerspectiveQueryLinksParams, Vec<DecoratedLinkExpression>>(
+        "perspective.queryLinks",
+        query_links,
+    )
+    .read();
+    map.method::<PerspectiveAddLinkParams, DecoratedLinkExpression>(
+        "perspective.addLink",
+        add_link,
+    );
+    map.method::<PerspectiveAddLinkExpressionParams, DecoratedLinkExpression>(
+        "perspective.addLinkExpression",
+        add_link_expression,
+    );
+    map.method::<PerspectiveAddLinksParams, Vec<DecoratedLinkExpression>>(
+        "perspective.addLinks",
+        add_links_bulk,
+    );
+    map.method::<PerspectiveUpdateLinkParams, DecoratedLinkExpression>(
+        "perspective.updateLink",
+        update_link,
+    );
+    map.method::<PerspectiveRemoveLinkParams, bool>("perspective.removeLink", remove_link);
+    map.method::<PerspectiveRemoveLinksParams, Vec<DecoratedLinkExpression>>(
+        "perspective.removeLinks",
+        remove_links_bulk,
+    );
+    map.method::<PerspectiveLinkMutationsParams, PerspectiveLinkDiff>(
+        "perspective.linkMutations",
+        link_mutations,
+    );
+    map.method::<PerspectiveQueryParams, String>("perspective.queryProlog", query_prolog)
+        .read();
+    map.method::<PerspectiveSparqlParams, String>("perspective.querySparql", query_sparql)
+        .read();
+    map.method::<PerspectiveAddSdnaParams, PerspectiveAddSdnaResult>(
+        "perspective.addSdna",
+        add_sdna,
+    );
+    map.method::<PerspectiveExecuteCommandsParams, ()>(
+        "perspective.executeCommands",
+        execute_commands,
+    );
+    map.method::<PerspectiveCreateSubjectParams, bool>("perspective.createSubject", create_subject);
+    map.method::<PerspectiveGetSubjectDataParams, String>(
+        "perspective.getSubjectData",
+        get_subject_data,
+    )
+    .read();
+    map.method::<PerspectiveUuidParams, String>("perspective.createBatch", create_batch);
+    map.method::<PerspectiveCommitBatchParams, PerspectiveLinkDiff>(
+        "perspective.commitBatch",
+        commit_batch,
+    );
+    map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
+        "perspective.subscribeQuery",
+        subscribe_query,
+    );
+    map.method::<PerspectiveSubscriptionParams, PerspectiveResynced>(
+        "perspective.resyncSubscription",
+        resync_subscription,
+    );
+    map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeQuery", dispose_query);
+    // Always answers 501; the result type mirrors `perspective.subscribeQuery`.
+    map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
+        "perspective.subscribeSparql",
+        subscribe_sparql_query,
+    );
+    map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeSparql", dispose_query);
+    map.method::<PerspectiveModelQueryParams, String>(
+        "perspective.modelQuery",
+        model_query_handler,
+    )
+    .read();
+    map.method::<PerspectiveSubjectClassesOfParams, std::collections::HashMap<String, Vec<String>>>(
+        "perspective.subjectClassesOf",
+        subject_classes_of_handler,
+    )
+    .read();
+    map.method::<PerspectiveModelQueryParams, PerspectiveSubscribed>(
+        "perspective.modelSubscribe",
+        model_subscribe_handler,
+    );
+    map.method::<PerspectiveEvaluateGettersParams, String>(
+        "perspective.evaluateGetters",
+        evaluate_getters_handler,
+    )
+    .read();
+    map.method::<PerspectiveUuidParams, Vec<String>>("perspective.namedGraphs", named_graphs)
+        .read();
+    map.method::<PerspectiveRemoveNamedGraphParams, bool>(
+        "perspective.removeNamedGraph",
+        remove_named_graph,
+    );
+    map.method::<RunInterpretationRequest, Vec<String>>(
+        "perspective.runInterpretation",
+        run_interpretation_handler,
+    )
+    .long();
+    map.method::<RunInterpretationWithHarnessRequest, Vec<String>>(
         "perspective.runInterpretationWithHarness",
         run_interpretation_with_harness_handler,
+    )
+    .long();
+    map.method::<PerspectiveAddAutoProcessorParams, String>(
+        "perspective.addAutoProcessor",
+        add_auto_processor_handler,
     );
-    map.register("perspective.addAutoProcessor", add_auto_processor_handler);
-    map.register(
+    map.method::<PerspectiveRemoveAutoProcessorParams, bool>(
         "perspective.removeAutoProcessor",
         remove_auto_processor_handler,
     );
-    map.register(
+    map.method::<PerspectiveResolveInterpretationParams, bool>(
         "perspective.acceptInterpretation",
         accept_interpretation_handler,
     );
-    map.register(
+    map.method::<PerspectiveResolveInterpretationParams, bool>(
         "perspective.rejectInterpretation",
         reject_interpretation_handler,
     );
-    map.register(
+    map.method::<PerspectiveUuidParams, Vec<OverlayView>>(
         "perspective.interpretationOverlays",
         interpretation_overlays_handler,
-    );
-    map.register(
+    )
+    .read();
+    map.method::<PerspectiveFlowProposalParams, Vec<FireOutcome>>(
         "perspective.acceptFlowProposal",
         accept_flow_proposal_handler,
     );
-    map.register(
+    map.method::<PerspectiveFlowProposalParams, PerspectiveRejectFlowProposalResult>(
         "perspective.rejectFlowProposal",
         reject_flow_proposal_handler,
     );
-    map.register(
+    map.method::<PerspectiveProposeFlowTransitionParams, ProposeOutcome>(
         "perspective.proposeFlowTransition",
         propose_flow_transition_handler,
     );
-    map.register("perspective.verifyFlowReceipt", verify_flow_receipt_handler);
-    map.register("perspective.flowValidOutputs", flow_valid_outputs_handler);
-    map.register("perspective.mintFlowReceipt", mint_flow_receipt_handler);
-    map.register("perspective.getShaclNames", get_shacl_names);
-    map.register("perspective.getShaclTargetClass", get_shacl_target_class);
-    map.register("perspective.getShacl", get_shacl);
-    map.register("perspective.getAllShacl", get_all_shacl);
+    map.method::<PerspectiveVerifyFlowReceiptParams, PerspectiveFlowReceiptVerdict>(
+        "perspective.verifyFlowReceipt",
+        verify_flow_receipt_handler,
+    )
+    .read();
+    map.method::<PerspectiveFlowValidOutputsParams, Vec<ValidOutput>>(
+        "perspective.flowValidOutputs",
+        flow_valid_outputs_handler,
+    )
+    .read();
+    map.method::<PerspectiveMintFlowReceiptParams, PerspectiveMintFlowReceiptResult>(
+        "perspective.mintFlowReceipt",
+        mint_flow_receipt_handler,
+    );
+    map.method::<PerspectiveUuidParams, Vec<String>>("perspective.getShaclNames", get_shacl_names)
+        .read();
+    map.method::<PerspectiveShaclNameParams, Option<String>>(
+        "perspective.getShaclTargetClass",
+        get_shacl_target_class,
+    )
+    .read();
+    map.method::<PerspectiveShaclNameParams, Option<PerspectiveShacl>>(
+        "perspective.getShacl",
+        get_shacl,
+    )
+    .read();
+    map.method::<PerspectiveUuidParams, Vec<PerspectiveNamedShacl>>(
+        "perspective.getAllShacl",
+        get_all_shacl,
+    )
+    .read();
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveUuidParams {
+    pub uuid: String,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveUpdateParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: UpdatePerspectiveRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveQueryLinksParams {
+    pub uuid: String,
+    #[ts(optional)]
+    pub source: Option<String>,
+    #[ts(optional)]
+    pub predicate: Option<String>,
+    #[ts(optional)]
+    pub target: Option<String>,
+    /// RFC 3339 timestamp; an unparsable value is ignored.
+    #[ts(optional)]
+    pub from_date: Option<String>,
+    /// RFC 3339 timestamp; an unparsable value is ignored.
+    #[ts(optional)]
+    pub until_date: Option<String>,
+    #[ts(optional, type = "number")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveAddLinkParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: AddLinkRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveAddLinkExpressionParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: AddLinkExpressionRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveAddLinksParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: AddLinksBulkRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveUpdateLinkParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: UpdateLinkRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveRemoveLinkParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: RemoveLinkRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveRemoveLinksParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: RemoveLinksBulkRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveLinkMutationsParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: LinkMutationsRequest,
+}
+
+/// Links a mutation or batch commit added and removed. `updates` stays empty.
+#[derive(Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveLinkDiff {
+    pub additions: Vec<DecoratedLinkExpression>,
+    pub removals: Vec<DecoratedLinkExpression>,
+    pub updates: Vec<DecoratedLinkExpression>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveQueryParams {
+    pub uuid: String,
+    pub query: String,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveSparqlParams {
+    pub uuid: String,
+    pub query: String,
+    /// Only `"sparql"` (the default) is accepted.
+    #[ts(optional)]
+    pub engine: Option<String>,
+    /// Named graphs to read. Absent: every graph.
+    #[ts(optional)]
+    pub graphs: Option<Vec<String>>,
+}
+
+/// One SDNA entry (`entries` absent) or a batch of them.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum PerspectiveAddSdnaParams {
+    Batch {
+        uuid: String,
+        entries: Vec<AddSdnaRequest>,
+    },
+    Single {
+        uuid: String,
+        #[serde(flatten)]
+        entry: AddSdnaRequest,
+    },
+}
+
+/// One flag per entry for a batch; one flag for a single entry.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum PerspectiveAddSdnaResult {
+    Batch(Vec<bool>),
+    Single(bool),
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveExecuteCommandsParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: ExecuteCommandsRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveCreateSubjectParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: CreateSubjectRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveGetSubjectDataParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: GetSubjectDataRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveCommitBatchParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: CommitBatchRequest,
+}
+
+/// Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`:
+/// the first result, as JSON, at its revision (0 unless a change was
+/// published while it was computed).
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveSubscribed {
+    pub subscription_id: String,
+    #[ts(type = "any")]
+    pub result: Value,
+    #[ts(type = "number")]
+    pub revision: u64,
+}
+
+/// Reply to `perspective.resyncSubscription`: the subscription's current
+/// revision and the result it describes.
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveResynced {
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[ts(type = "any")]
+    pub result: Value,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveSubscriptionParams {
+    pub uuid: String,
+    pub subscription_id: String,
+}
+
+/// Wire names stay snake_case, as the handlers read them.
+///
+/// Exactly one of `class_name` and `class_names`: one class, or one query over
+/// the union of several (#1238), whose rows carry `__subjectClass` and
+/// `__subjectClasses`.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveModelQueryParams {
+    pub uuid: String,
+    #[ts(optional)]
+    pub class_name: Option<String>,
+    #[ts(optional)]
+    pub class_names: Option<Vec<String>>,
+    pub query_json: String,
+    /// Named graphs to read. Absent: every graph.
+    #[ts(optional)]
+    pub graph_iris: Option<Vec<String>>,
+}
+
+/// The classes a `modelQuery` / `modelSubscribe` call names: `class_name` or
+/// `class_names`, never both and never neither.
+fn query_classes(params: &Value) -> Result<QueryClasses, WsRpcError> {
+    let one = params.opt_str("class_name");
+    let many: Option<Vec<String>> = match params.get("class_names") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| {
+            WsRpcError::bad_request(format!(
+                "Invalid parameter 'class_names': expected string[]: {e}"
+            ))
+        })?),
+    };
+    match (one, many) {
+        (Some(name), None) => Ok(QueryClasses::One(name)),
+        (None, Some(names)) if !names.is_empty() => Ok(QueryClasses::union(names)),
+        (None, Some(_)) => Err(WsRpcError::bad_request(
+            "Parameter 'class_names' must name at least one class".to_string(),
+        )),
+        (Some(_), Some(_)) => Err(WsRpcError::bad_request(
+            "Pass 'class_name' or 'class_names', not both".to_string(),
+        )),
+        (None, None) => Err(WsRpcError::bad_request(
+            "Missing required parameter: 'class_name' (or 'class_names')".to_string(),
+        )),
+    }
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveSubjectClassesOfParams {
+    pub uuid: String,
+    #[ts(optional)]
+    pub uris: Option<Vec<String>>,
+}
+
+/// Wire names stay snake_case, as the handler reads them.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveEvaluateGettersParams {
+    pub uuid: String,
+    pub class_name: String,
+    #[ts(optional)]
+    pub instance_ids: Option<Vec<String>>,
+    #[ts(optional)]
+    pub property_names: Option<Vec<String>>,
+}
+
+/// Register a neighbourhood auto-processor on a perspective. See
+/// `AutoProcessorConfig` for the semantics of each field.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveAddAutoProcessorParams {
+    pub uuid: String,
+    pub processor_id: String,
+    /// SPARQL `SELECT ?speaker ?text ?timestamp` over the source items.
+    pub source_scope_query: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub base_prefix: Option<String>,
+    pub interpretation_classes: Vec<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub flows: Option<Vec<String>>,
+    #[ts(type = "number")]
+    pub debounce_ms: i64,
+    #[serde(default)]
+    #[ts(optional)]
+    pub batch_min: Option<usize>,
+    pub batch_max: usize,
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub max_wait_ms: Option<i64>,
+    #[ts(type = "number")]
+    pub claim_ttl_ms: i64,
+    #[serde(default)]
+    #[ts(optional)]
+    pub dedup_strategy_json: Option<String>,
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub source_window_ms: Option<i64>,
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub max_tool_calls: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveRemoveAutoProcessorParams {
+    pub uuid: String,
+    pub processor_id: String,
+}
+
+/// `property` scopes the resolution to one predicate; omit it for the whole base.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveResolveInterpretationParams {
+    pub uuid: String,
+    pub base: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub property: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveFlowProposalParams {
+    pub uuid: String,
+    pub proposal_uri: String,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveRejectFlowProposalResult {
+    pub retracted_links: usize,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveProposeFlowTransitionParams {
+    pub uuid: String,
+    pub instance_uri: String,
+    pub to_state: String,
+    #[ts(optional)]
+    pub rationale: Option<String>,
+    #[ts(optional)]
+    pub outputs: Option<Vec<crate::perspectives::flow_instance::atom::OutputRef>>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveVerifyFlowReceiptParams {
+    pub uuid: String,
+    /// A `FlowReceipt` as `perspective.mintFlowReceipt` returned it. The
+    /// receipt tree carries no TS types, so the wire keeps it opaque.
+    pub receipt: Value,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum PerspectiveReceiptOutcome {
+    Verified,
+    Rejected,
+    Undecidable,
+}
+
+/// `verdict_wire`'s shape. The last three fields appear only when verified.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveFlowReceiptVerdict {
+    pub outcome: PerspectiveReceiptOutcome,
+    pub detail: String,
+    #[ts(optional)]
+    pub terminal_state: Option<String>,
+    #[ts(optional)]
+    pub outputs: Option<Vec<crate::perspectives::flow_instance::atom::OutputRef>>,
+    #[ts(optional)]
+    pub voters: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveFlowValidOutputsParams {
+    pub uuid: String,
+    pub flow: String,
+    /// Terminal-state name to filter by.
+    #[ts(optional)]
+    pub state: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveMintFlowReceiptParams {
+    pub uuid: String,
+    pub instance_uri: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveMintFlowReceiptResult {
+    pub receipt_uri: String,
+    /// The serialized `FlowReceipt`. The receipt tree carries no TS types,
+    /// so the wire keeps it opaque; pass it back to `verifyFlowReceipt`.
+    pub receipt: Value,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveRemoveNamedGraphParams {
+    pub uuid: String,
+    pub graph_iri: String,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveShaclNameParams {
+    pub uuid: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveShacl {
+    pub shape_uri: String,
+    pub links: Vec<ShaclLinkTriple>,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveNamedShacl {
+    pub name: String,
+    pub shape_uri: String,
+    pub links: Vec<ShaclLinkTriple>,
 }

@@ -2293,6 +2293,38 @@ describe("Prolog + Literals", () => {
 
                         queryBuilder.dispose();
                     });
+
+                    // Two subscribeQuery() callers on the same query each get their
+                    // own executor subscription. Disposing one, even twice, must not
+                    // stop the other's updates.
+                    it("keeps the other subscribeQuery subscription alive when one proxy is disposed twice", async () => {
+                        const query = "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://shared-proxy>) }";
+                        const subA = await perspective.subscribeQuery(query);
+                        const subB = await perspective.subscribeQuery(query);
+                        expect(subB.id).to.not.equal(subA.id);
+                        const callbackA = sinon.fake();
+                        const callbackB = sinon.fake();
+                        subA.onResult(callbackA);
+                        subB.onResult(callbackB);
+
+                        subA.dispose();
+                        subA.dispose();
+
+                        await perspective.add(new Link({
+                            source: "test://shared-proxy-source",
+                            predicate: "test://shared-proxy",
+                            target: "test://shared-proxy-target",
+                        }));
+
+                        await pollUntil(() => callbackB.callCount >= 1, {
+                            timeoutMs: 20000, intervalMs: 50,
+                            label: "remaining subscribeQuery proxy still receives updates after the other was disposed twice"
+                        });
+                        expect(JSON.stringify(callbackB.lastCall.args[0])).to.include("test://shared-proxy-target");
+                        expect(callbackA.callCount).to.equal(0);
+
+                        subB.dispose();
+                    });
                 });
 
                 describe('ModelQueryBuilder', () => {
@@ -2407,6 +2439,46 @@ describe("Prolog + Literals", () => {
                         // callback2: 1 (model2 save only)
                         expect(callback1.callCount).to.equal(1);
                         expect(callback2.callCount).to.equal(1);
+                    });
+
+                    // Builder A's dispose must leave builder B's subscription on the
+                    // same query running.
+                    it('keeps another builder on the same query alive when one disposes', async () => {
+                        const builderA = TestModel.query(perspective).where({ status: "active" });
+                        const builderB = TestModel.query(perspective).where({ status: "active" });
+                        const callbackA = sinon.fake();
+                        const callbackB = sinon.fake();
+
+                        const initialA = await builderA.subscribe(callbackA);
+                        const initialB = await builderB.subscribe(callbackB);
+                        expect(initialA.length).to.equal(0);
+                        expect(initialB.length).to.equal(0);
+
+                        // A lets go; the executor must keep the subscription for B.
+                        await builderA.dispose();
+
+                        const model = new TestModel(perspective);
+                        model.name = "Shared 1";
+                        model.status = "active";
+                        await model.save();
+
+                        await pollUntil(() => callbackB.callCount >= 1, {
+                            timeoutMs: 60000, intervalMs: 50,
+                            label: "remaining subscriber still receives updates after the other disposed"
+                        });
+                        expect(callbackB.lastCall.args[0].length).to.equal(1);
+                        expect(callbackB.lastCall.args[0][0].name).to.equal("Shared 1");
+                        expect(callbackA.callCount).to.equal(0);
+
+                        // B lets go too: nothing fires any more.
+                        await builderB.dispose();
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Shared 2";
+                        model2.status = "active";
+                        await model2.save();
+                        await assertStaysFalse(() => callbackA.callCount > 0 || callbackB.callCount > 1, {
+                            waitMs: 1000, intervalMs: 50, label: "no callbacks after both disposed"
+                        });
                     });
 
                     it('handles count subscriptions and disposal', async () => {

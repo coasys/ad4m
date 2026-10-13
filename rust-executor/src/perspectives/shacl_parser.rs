@@ -2,6 +2,8 @@ use crate::types::Link;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
+mod role_gate_keys;
+
 /// AD4M Action - represents a link operation (e.g., addLink, removeLink, setSingleTarget)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AD4MAction {
@@ -833,6 +835,59 @@ fn find_links<'a>(links: &'a [Link], source: &str, predicate: &str) -> Vec<&'a L
         .collect()
 }
 
+/// Decode one `consensusRule` literal. A key the reader does not know is an
+/// error, the same as a missing required field: serde would drop it, and on a
+/// role gate a dropped key widens the gate or removes it (#1144). See
+/// [`role_gate_keys`].
+///
+/// The rule is decoded from the string, not from the checked `Value`: a
+/// `Value` keeps only the last of duplicate keys, so decoding from it would
+/// read a rule the author did not write. The key check parses its own `Value`
+/// with duplicates refused at every level.
+fn decode_consensus_rule(target: &str) -> Result<ConsensusRule, String> {
+    let s = decode_literal_string(target)
+        .ok_or_else(|| "target is not a url-decodable `literal:string:`".to_string())?;
+    let value = role_gate_keys::parse_refusing_duplicate_keys(&s)?;
+    let errors = role_gate_keys::role_gate_key_errors(&value);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+/// The predicate a flow definition's `consensusRule` is written on, at the
+/// flow URI and at each state URI (`parse_flow_to_links`, `SHACLFlow.toLinks`).
+pub const CONSENSUS_RULE_PREDICATE: &str = "ad4m://consensusRule";
+
+/// Refuse, before anything is written, a `consensusRule` link this replica
+/// could not read back (#1144): a key the reader does not know, a key written
+/// twice, or a literal that does not decode. The reader fails closed on such
+/// a rule ([`read_consensus_rule`]), so storing it would leave a gate that
+/// refuses every edge it governs and names the key only in the executor log.
+/// Every local write path (`add_link`, `add_links`, `link_mutations`,
+/// `update_link`) runs this on its additions, so `addFlow` gets the error
+/// instead, naming the state or flow URI and the key. Sync is not checked: a
+/// definition arriving from a peer is stored as written and still refused
+/// when it is read.
+pub fn check_consensus_rule_links<'a>(
+    links: impl IntoIterator<Item = &'a Link>,
+) -> Result<(), AnyError> {
+    for link in links {
+        if link.predicate.as_deref() != Some(CONSENSUS_RULE_PREDICATE) {
+            continue;
+        }
+        if let Err(e) = decode_consensus_rule(&link.target) {
+            return Err(anyhow::anyhow!(
+                "flow definition refused: the `consensusRule` on `{}` cannot be read ({e}). \
+                 Nothing was stored. A stored rule with an unknown or duplicate key would \
+                 refuse every edge it governs (#1144).",
+                link.source
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Read the `consensusRule` at ONE scope — a flow URI, or one state URI —
 /// into the `(rule, unreadable)` pair the parser stores. Both scopes go
 /// through here so that one place decides what an unreadable rule is.
@@ -907,7 +962,7 @@ fn read_consensus_rule(links: &[Link], source: &str, scope: &str) -> (Option<Con
 
         // Exactly one authored rule. Unchanged #1079 behaviour: decode it,
         // and record a decode failure rather than erasing it.
-        [only] => match decode_json_literal::<ConsensusRule>(only) {
+        [only] => match decode_consensus_rule(only) {
             Ok(rule) => (Some(rule), false),
             Err(e) => {
                 log::warn!(
@@ -1447,6 +1502,32 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
              different property name.",
             reserved_collisions,
             RESERVED_PROPERTY_NAMES.join(", "),
+        ));
+    }
+
+    // `sh:datatype` makes a property's values encoded literals, which
+    // hydration decodes; `sh:class` / `target_class_name` make them instance
+    // URIs, which `include` hydrates against the target shape. One property
+    // cannot be both. The SDK refuses the pair at decoration time; this
+    // catches shapes written without the SDK (MCP `add_model`, raw WS-RPC).
+    let literal_and_instance: Vec<String> = shape
+        .properties
+        .iter()
+        .filter(|prop| {
+            prop.datatype.is_some() && (prop.class.is_some() || prop.target_class_name.is_some())
+        })
+        .map(|prop| {
+            prop.name
+                .clone()
+                .unwrap_or_else(|| extract_local_name(&prop.path))
+        })
+        .collect();
+    if !literal_and_instance.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Property {:?} declares both `datatype` (literal values) and a target class \
+             (`class` / `target_class_name`, model instances) — drop `datatype` to link \
+             instances, or drop the target class to store literals.",
+            literal_and_instance,
         ));
     }
 
@@ -2180,6 +2261,43 @@ mod tests {
             "target_class": "book://Post",
             "properties": [
                 { "path": "book://title", "name": "title", "datatype": "xsd://string" }
+            ]
+        }"#;
+        assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());
+    }
+
+    #[test]
+    fn parse_shacl_to_links_refuses_datatype_with_a_target_class() {
+        for target in [
+            r#""class": "book://AuthorShape""#,
+            r#""target_class_name": "Author""#,
+        ] {
+            let shacl_json = format!(
+                r#"{{
+                    "target_class": "book://Post",
+                    "properties": [
+                        {{ "path": "book://title", "name": "title", "datatype": "xsd://string" }},
+                        {{ "path": "book://writer", "name": "writer",
+                           "datatype": "xsd://string", "relation_kind": "hasOne", {target} }}
+                    ]
+                }}"#
+            );
+            let err = parse_shacl_to_links(&shacl_json, "Post").unwrap_err();
+            assert!(err.to_string().contains(r#"["writer"]"#), "{target}: {err}");
+            assert!(err.to_string().contains("datatype"), "{target}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_shacl_to_links_keeps_a_literal_relation_and_an_instance_relation() {
+        let shacl_json = r#"{
+            "target_class": "book://Post",
+            "properties": [
+                { "path": "book://tag", "name": "tags", "datatype": "xsd://string",
+                  "node_kind": "Literal", "relation_kind": "hasMany", "collection": true },
+                { "path": "book://writer", "name": "writer", "node_kind": "IRI",
+                  "relation_kind": "hasOne", "class": "book://AuthorShape",
+                  "target_class_name": "Author" }
             ]
         }"#;
         assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());

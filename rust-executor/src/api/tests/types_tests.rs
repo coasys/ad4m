@@ -318,32 +318,6 @@ fn parse_create_user_request() {
 }
 
 #[test]
-fn parse_login_user_request() {
-    let json = json!({"email": "user@example.com", "password": "pass123", "appName": "MyApp"});
-    let req: LoginUserRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.app_name, Some("MyApp".to_string()));
-}
-
-#[test]
-fn parse_login_user_request_minimal() {
-    let json = json!({"email": "user@example.com", "password": "pass123"});
-    let req: LoginUserRequest = serde_json::from_value(json).unwrap();
-    assert!(req.app_name.is_none());
-}
-
-#[test]
-fn parse_verify_email_request() {
-    let json = json!({
-        "email": "user@example.com",
-        "code": "123456",
-        "verificationType": "login"
-    });
-    let req: VerifyEmailRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.code, "123456");
-    assert_eq!(req.verification_type, Some("login".to_string()));
-}
-
-#[test]
 fn parse_set_multi_user_request() {
     let json = json!({"enabled": true});
     let req: SetMultiUserRequest = serde_json::from_value(json).unwrap();
@@ -449,41 +423,6 @@ fn parse_execute_commands_request() {
 
 // ── Hosting response types ──
 
-#[test]
-fn serialize_hosting_info_response() {
-    let resp = HostingInfoResponse {
-        user_info: Some(json!({"email": "test@example.com"})),
-        rates: Some(json!({"prompt": 0.001})),
-        version: Some(json!({"major": 1})),
-    };
-    let json = serde_json::to_value(&resp).unwrap();
-    assert_eq!(json["userInfo"]["email"], "test@example.com");
-    assert!(json["rates"]["prompt"].is_number());
-}
-
-#[test]
-fn serialize_hosting_wallet_response() {
-    let resp = HostingWalletResponse {
-        balance: Some(json!("100000")),
-        pubkey: Some("pubkey123".to_string()),
-    };
-    let json = serde_json::to_value(&resp).unwrap();
-    assert_eq!(json["pubkey"], "pubkey123");
-}
-
-#[test]
-fn serialize_link_mutation_response() {
-    let resp = LinkMutationResponse {
-        additions: vec![],
-        removals: vec![],
-        updates: vec![],
-    };
-    let json = serde_json::to_value(&resp).unwrap();
-    assert!(json["additions"].is_array());
-    assert!(json["removals"].is_array());
-    assert!(json["updates"].is_array());
-}
-
 // ── Verify Signature ──
 
 #[test]
@@ -498,35 +437,6 @@ fn parse_verify_signature_request() {
 }
 
 // ── Dev ──
-
-#[test]
-fn parse_email_test_request() {
-    let json = json!({"action": "enable"});
-    let req: EmailTestRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.action, "enable");
-    assert!(req.to.is_none());
-}
-
-#[test]
-fn parse_email_test_request_with_to() {
-    let json = json!({"action": "send", "to": "test@example.com"});
-    let req: EmailTestRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.to, Some("test@example.com".to_string()));
-}
-
-#[test]
-fn parse_email_test_request_with_expiry_fields() {
-    let json = json!({
-        "action": "set-expiry",
-        "email": "test@example.com",
-        "verificationType": "login",
-        "expiresAt": 1234567890
-    });
-    let req: EmailTestRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.email, Some("test@example.com".to_string()));
-    assert_eq!(req.verification_type, Some("login".to_string()));
-    assert_eq!(req.expires_at, Some(1234567890));
-}
 
 // ── Invalid input tests ──
 
@@ -575,36 +485,7 @@ fn snake_case_rejected() {
 
 // ── AI Transcription request types ──
 
-use crate::api::types::{
-    CloseTranscriptionRequest, FeedTranscriptionRequest, OpenTranscriptionRequest,
-};
-
-#[test]
-fn parse_open_transcription_request() {
-    let json = json!({"modelId": "whisper-small"});
-    let req: OpenTranscriptionRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.model_id, "whisper-small");
-    assert!(req.params.is_none());
-}
-
-#[test]
-fn parse_open_transcription_request_with_params() {
-    let json = json!({
-        "modelId": "whisper-medium",
-        "params": {
-            "startThreshold": 0.5,
-            "startWindow": 5,
-            "endThreshold": 0.3,
-            "endWindow": 10,
-            "timeBeforeSpeech": 2
-        }
-    });
-    let req: OpenTranscriptionRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.model_id, "whisper-medium");
-    let p = req.params.unwrap();
-    assert_eq!(p.start_threshold, Some(0.5));
-    assert_eq!(p.start_window, Some(5));
-}
+use crate::api::types::FeedTranscriptionRequest;
 
 #[test]
 fn parse_feed_transcription_request() {
@@ -615,13 +496,6 @@ fn parse_feed_transcription_request() {
     let req: FeedTranscriptionRequest = serde_json::from_value(json).unwrap();
     assert_eq!(req.stream_ids.len(), 2);
     assert_eq!(req.audio.len(), 4);
-}
-
-#[test]
-fn parse_close_transcription_request() {
-    let json = json!({"streamId": "abc-123"});
-    let req: CloseTranscriptionRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.stream_id, "abc-123");
 }
 
 // ── Agent infos contract regression tests ──

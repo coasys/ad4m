@@ -81,6 +81,7 @@
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
+//! | [`union`] | One query over several classes: per-class rows, one classification, one sort and page over the union |
 
 #[cfg(test)]
 mod collection_provenance_tests;
@@ -112,17 +113,19 @@ mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
 pub(crate) mod types;
+mod union;
 pub(crate) mod utils;
 
 /// The per-value condition evaluator, shared with the flow engine so a
 /// `fromRole` rule's `author` condition means the same thing whether it is
 /// applied to a grant row here or to a revocation tombstone there.
 pub(crate) use filtering::matches_condition;
+pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
 pub(crate) use links::{links_trigger_predicates, LINKS_KEY};
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
-pub(crate) use shape::load_shape_from_store;
+pub(crate) use shape::{load_shape_from_store, MissingShape};
 pub use types::{
     constrain_ids, take_produced_by_flow, IncludeValue, ModelQueryInput, ModelQueryResult,
     ModelShape, OrderDirection, ProducedByFlowFilter, ProjectionInput, Scope, ShapeResolver,
@@ -133,4 +136,5 @@ pub use types::{
 /// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
 /// storage on the same rule the SPARQL query builder uses.  See
 /// [`utils::is_safe_iri_target`] for the full contract.
+pub use union::{execute_union_query, QueryClasses};
 pub use utils::is_safe_iri_target;

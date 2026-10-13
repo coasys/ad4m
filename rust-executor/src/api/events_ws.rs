@@ -2,7 +2,10 @@
 //!
 //! Single WebSocket endpoint serving ALL event types.
 //! Each message is a JSON object `{ "type": "<event-type>", ...payload }`.
-//! Events are filtered per-user in multi-user mode.
+//! [`event_specs`] types every payload (exported to the SDK as `Events.ts`);
+//! each perspective-scoped payload carries a flat `perspectiveUuid`.
+//! Events are filtered per-user in multi-user mode, then to what the socket
+//! asked for with `events.watch` (nothing until it does).
 //!
 //! ## Event types
 //!
@@ -10,22 +13,22 @@
 //! |-------------------------------|---------------|------------------------|--------------------------------------|
 //! | `agent-status-changed`        | `agent`       | DID                    | Agent status changed                 |
 //! | `agent-updated`               | `agent`       | DID                    | Agent profile updated                |
-//! | `apps-changed`                | (inline)      | user                   | Installed apps changed               |
+//! | `apps-changed`                | (inline)      | `AGENT_PERMIT` holders | Installed apps changed (no token)    |
 //! | `hosting-user-info-changed`   | (inline)      | email                  | Hosting user info changed            |
 //! | `perspective-added`           | (inline)      | owner DID              | New perspective created              |
 //! | `perspective-removed`         | (inline)      | owner DID              | Perspective deleted                  |
 //! | `perspective-updated`         | (inline)      | owner DID              | Perspective metadata updated         |
-//! | `sync-state-change`           | (inline)      | broadcast              | Neighbourhood sync state changed     |
+//! | `sync-state-change`           | (inline)      | perspective owners     | Neighbourhood sync state changed     |
 //! | `link-added`                  | (inline)      | owner DID              | Link added to perspective            |
 //! | `link-removed`                | (inline)      | owner DID              | Link removed from perspective        |
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification`| perspective owner      | Notification triggered               |
-//! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
+//! | `notification-triggered`      | `notification` + `perspectiveUuid` | notification owner DID | Notification triggered |
+//! | `exception-occurred`          | `exception`   | per type, see [`exception_visible`] | Exception occurred      |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
-//! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
+//! | `query-subscription-update`   | (inline)      | own connection         | Live query update (`/api/v1/ws` only)|
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
@@ -34,12 +37,13 @@
 //! | Type     | Description                          |
 //! |----------|--------------------------------------|
 //! | `ping`   | Server responds with `{"type":"pong"}`|
+//! | `events.watch` / `events.unwatch` | Choose the events this socket gets (none until the first watch); see `event_interest.rs`. Same on `/api/v1/ws` |
 //!
 //! Other messages are silently ignored (future extensibility).
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
     response::IntoResponse,
@@ -68,14 +72,14 @@ use crate::agent::{did_for_context, AgentContext};
 /// don't know who this is" and filters must drop the event, not accept it.
 pub(crate) struct LazyDid {
     cached: Mutex<Option<String>>,
-    auth_token: String,
+    context: AgentContext,
 }
 
 impl LazyDid {
-    pub(crate) fn new(auth_token: String, initial: Option<String>) -> Self {
+    pub(crate) fn new(context: AgentContext, initial: Option<String>) -> Self {
         Self {
             cached: Mutex::new(initial),
-            auth_token,
+            context,
         }
     }
 
@@ -84,8 +88,7 @@ impl LazyDid {
     pub(crate) fn get(&self) -> Option<String> {
         let mut guard = self.cached.lock().unwrap();
         if guard.is_none() {
-            let ctx = AgentContext::from_auth_token(self.auth_token.clone());
-            *guard = did_for_context(&ctx).ok();
+            *guard = did_for_context(&self.context).ok();
         }
         guard.clone()
     }
@@ -103,6 +106,137 @@ use crate::pubsub::{
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
+use crate::types::{
+    AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
+    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveExpression,
+    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveRemovedWithOwner,
+    PerspectiveStateFilter, PerspectiveWithOwner, QuerySubscriptionUpdateEvent,
+    TranscriptionTextFilter,
+};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+/// The name of every event this socket emits. The stream builder and
+/// [`event_specs`] both use these, so an event cannot go out untyped.
+pub mod events {
+    pub const AGENT_STATUS_CHANGED: &str = "agent-status-changed";
+    pub const AGENT_UPDATED: &str = "agent-updated";
+    pub const APPS_CHANGED_EVENT: &str = "apps-changed";
+    pub const HOSTING_USER_INFO_CHANGED: &str = "hosting-user-info-changed";
+    pub const PERSPECTIVE_ADDED: &str = "perspective-added";
+    pub const PERSPECTIVE_REMOVED: &str = "perspective-removed";
+    pub const PERSPECTIVE_UPDATED: &str = "perspective-updated";
+    pub const SYNC_STATE_CHANGE: &str = "sync-state-change";
+    pub const LINK_ADDED: &str = "link-added";
+    pub const LINK_REMOVED: &str = "link-removed";
+    pub const LINK_UPDATED: &str = "link-updated";
+    pub const SIGNAL: &str = "signal";
+    pub const MESSAGE_RECEIVED: &str = "message-received";
+    pub const NOTIFICATION_TRIGGERED: &str = "notification-triggered";
+    pub const EXCEPTION_OCCURRED: &str = "exception-occurred";
+    pub const TRANSCRIPTION_TEXT: &str = "transcription-text";
+    pub const MODEL_LOADING_STATUS: &str = "model-loading-status";
+    pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
+    pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
+    pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
+
+    /// Every name above, in stream-builder order.
+    pub const ALL: [&str; 20] = [
+        AGENT_STATUS_CHANGED,
+        AGENT_UPDATED,
+        APPS_CHANGED_EVENT,
+        HOSTING_USER_INFO_CHANGED,
+        PERSPECTIVE_ADDED,
+        PERSPECTIVE_REMOVED,
+        PERSPECTIVE_UPDATED,
+        SYNC_STATE_CHANGE,
+        LINK_ADDED,
+        LINK_REMOVED,
+        LINK_UPDATED,
+        SIGNAL,
+        MESSAGE_RECEIVED,
+        NOTIFICATION_TRIGGERED,
+        EXCEPTION_OCCURRED,
+        TRANSCRIPTION_TEXT,
+        MODEL_LOADING_STATUS,
+        QUERY_SUBSCRIPTION_UPDATE,
+        AUTO_PROCESSOR_EVENT,
+        AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
+    ];
+}
+
+/// One emitted event: its name, the TypeScript type of its payload (the
+/// wire message without `type`) and whether it is about one perspective
+/// (carries `perspectiveUuid`, so `events.watch` can narrow it).
+pub struct EventSpec {
+    pub name: &'static str,
+    pub payload: super::ws_handler::TsType,
+    pub scoped: bool,
+}
+
+impl EventSpec {
+    fn of<T: ts_rs::TS + 'static>(name: &'static str, scoped: bool) -> Self {
+        Self {
+            name,
+            payload: super::ws_handler::TsType::of::<T>(),
+            scoped,
+        }
+    }
+}
+
+/// `agent-status-changed`: `{ agent }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct AgentStatusChangedEvent {
+    pub agent: AgentStatus,
+}
+
+/// `agent-updated`: `{ agent }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct AgentUpdatedEvent {
+    pub agent: Agent,
+}
+
+/// `message-received`: `{ message }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct MessageReceivedEvent {
+    pub message: PerspectiveExpression,
+}
+
+/// `exception-occurred`: `{ exception }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct ExceptionOccurredEvent {
+    pub exception: ExceptionInfo,
+}
+
+/// Every event the socket emits, with its payload type.
+pub fn event_specs() -> Vec<EventSpec> {
+    use crate::perspectives::auto_processor::events::{
+        AutoProcessorEvent, AutoProcessorNeighbourhoodState,
+    };
+    use events::*;
+    vec![
+        EventSpec::of::<AgentStatusChangedEvent>(AGENT_STATUS_CHANGED, false),
+        EventSpec::of::<AgentUpdatedEvent>(AGENT_UPDATED, false),
+        EventSpec::of::<Apps>(APPS_CHANGED_EVENT, false),
+        EventSpec::of::<HostingUserInfo>(HOSTING_USER_INFO_CHANGED, false),
+        EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_ADDED, true),
+        EventSpec::of::<PerspectiveRemovedWithOwner>(PERSPECTIVE_REMOVED, true),
+        EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_UPDATED, true),
+        EventSpec::of::<PerspectiveStateFilter>(SYNC_STATE_CHANGE, true),
+        EventSpec::of::<PerspectiveLinkWithOwner>(LINK_ADDED, true),
+        EventSpec::of::<PerspectiveLinkWithOwner>(LINK_REMOVED, true),
+        EventSpec::of::<PerspectiveLinkUpdatedWithOwner>(LINK_UPDATED, true),
+        EventSpec::of::<NeighbourhoodSignalFilter>(SIGNAL, true),
+        EventSpec::of::<MessageReceivedEvent>(MESSAGE_RECEIVED, false),
+        EventSpec::of::<NotificationTriggeredEvent>(NOTIFICATION_TRIGGERED, true),
+        EventSpec::of::<ExceptionOccurredEvent>(EXCEPTION_OCCURRED, false),
+        EventSpec::of::<TranscriptionTextFilter>(TRANSCRIPTION_TEXT, false),
+        EventSpec::of::<AIModelLoadingStatus>(MODEL_LOADING_STATUS, false),
+        EventSpec::of::<QuerySubscriptionUpdateEvent>(QUERY_SUBSCRIPTION_UPDATE, true),
+        EventSpec::of::<AutoProcessorEvent>(AUTO_PROCESSOR_EVENT, true),
+        EventSpec::of::<AutoProcessorNeighbourhoodState>(AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, true),
+    ]
+}
 
 /// GET /ws/events — WebSocket endpoint for all real-time events.
 ///
@@ -117,61 +251,91 @@ pub async fn events_ws(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let auth_token = context.auth_token.clone();
-    let user_email = user_email_from_token(auth_token.clone());
+    let user_email = context.user_email.clone();
     // Captured before the upgrade so the stream builder knows whether the
     // caller is an admin credential. Admin is the ONLY escape hatch for
     // per-DID filters — an ordinary session whose DID hasn't resolved yet
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
     let is_admin = context.is_admin_credential;
+    let can_approve_apps =
+        check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
+    let token_check = TokenCheck::new(&context.auth_token, is_admin);
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email, is_admin)))
+    Ok(ws.on_upgrade(move |socket| {
+        handle_events_ws(socket, token_check, user_email, is_admin, can_approve_apps)
+    }))
 }
 
 /// Build the merged event stream for a given user.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user.
+/// per-user. The stream ends at the first event after `token_check` fails.
+/// `connection_id` is the RPC connection whose live query updates the stream
+/// carries (`None`: no query updates).
 pub(crate) async fn build_event_stream(
-    auth_token: String,
+    token_check: TokenCheck,
     user_email: Option<String>,
     is_admin: bool,
+    can_approve_apps: bool,
+    connection_id: Option<String>,
+) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
+    // The session's own agent, taken from the session: a token that stops decoding cannot
+    // turn it into the main agent. Resolve the DID once at subscription time — avoids
+    // repeated DB / AgentService lookups on every single event. If the client connected
+    // before `agent.generate()` completed this returns `None`; the per-DID filters below
+    // fail closed on `None` until re-resolution succeeds.
+    let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
+    build_event_stream_for(
+        token_check,
+        resolved_did,
+        user_email,
+        is_admin,
+        can_approve_apps,
+        connection_id,
+    )
+    .await
+}
+
+/// [`build_event_stream`] with the session DID already resolved (tests
+/// inject one directly).
+pub(crate) async fn build_event_stream_for(
+    token_check: TokenCheck,
+    resolved_did: Option<String>,
+    user_email: Option<String>,
+    is_admin: bool,
+    can_approve_apps: bool,
+    connection_id: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
 
-    // Resolve the DID once at subscription time — avoids repeated JWT decode +
-    // DB / AgentService lookups on every single event. If the client connected
-    // before `agent.generate()` completed this returns `None`; the per-DID
-    // filters below fail closed on `None` until re-resolution succeeds.
-    let resolved_did: Option<String> = {
-        let ctx = AgentContext::from_auth_token(auth_token.clone());
-        did_for_context(&ctx).ok()
-    };
+    let session_context = AgentContext::for_session(user_email.clone());
 
     // Clone the pre-resolved DID for each filter closure
     let d_persp_added = resolved_did.clone();
     let d_persp_removed = resolved_did.clone();
     let d_persp_updated = resolved_did.clone();
+    // Lazy for the same reason as the auto-processor below: the launcher's socket opens
+    // before `agent.generate()` on first run, and must still get sync-state afterwards.
+    // Like the auto-processor cell, it resolves from the session, never from the token.
+    let d_sync = Arc::new(LazyDid::new(session_context.clone(), resolved_did.clone()));
     let d_link_added = resolved_did.clone();
     let d_link_removed = resolved_did.clone();
     let d_link_updated = resolved_did.clone();
     let d_agent_status = resolved_did.clone();
     let d_agent_updated = resolved_did.clone();
-    let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
-    let d_notif = resolved_did.clone();
-    let d_query_sub = resolved_did.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
-    // #881: "Resolve the DID after it becomes available"). Both auto-processor
-    // streams share the same lazy cell — one resolution serves both.
-    let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
+    // #881: "Resolve the DID after it becomes available"). The auto-processor
+    // and notification streams share one lazy cell.
+    let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
+    let d_notif = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -260,24 +424,27 @@ pub(crate) async fn build_event_stream(
     // ── Agent events ──
     let s_status = did_stream_nested!(
         pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await,
-        "agent-status-changed",
+        events::AGENT_STATUS_CHANGED,
         "agent",
         d_agent_status,
         matches_agent_did
     );
     let s_agent_updated = did_stream_nested!(
         pubsub.subscribe(&AGENT_UPDATED_TOPIC).await,
-        "agent-updated",
+        events::AGENT_UPDATED,
         "agent",
         d_agent_updated,
         matches_agent_did
     );
-    let s_apps = did_stream!(
-        pubsub.subscribe(&APPS_CHANGED).await,
-        "apps-changed",
-        d_apps,
-        matches_apps_user
-    );
+    // Apps belong to the node owner: only sessions that can approve apps see their changes.
+    let s_apps = BroadcastStream::new(pubsub.subscribe(&APPS_CHANGED).await)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| async move {
+            match result {
+                Ok(msg) if can_approve_apps => Some(wrap_event(events::APPS_CHANGED_EVENT, &msg)),
+                _ => None,
+            }
+        });
 
     let s_hosting = {
         let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
@@ -288,7 +455,7 @@ pub(crate) async fn build_event_stream(
                 async move {
                     match result {
                         Ok(ref msg) if matches_hosting_user(msg, email.as_deref()) => {
-                            Some(wrap_event("hosting-user-info-changed", msg))
+                            Some(wrap_event(events::HOSTING_USER_INFO_CHANGED, msg))
                         }
                         _ => None,
                     }
@@ -299,61 +466,67 @@ pub(crate) async fn build_event_stream(
     // ── Perspective lifecycle ──
     let s_persp_added = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await,
-        "perspective-added",
+        events::PERSPECTIVE_ADDED,
         d_persp_added
     );
     let s_persp_removed = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await,
-        "perspective-removed",
+        events::PERSPECTIVE_REMOVED,
         d_persp_removed
     );
     let s_persp_updated = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await,
-        "perspective-updated",
+        events::PERSPECTIVE_UPDATED,
         d_persp_updated
     );
-    let s_sync = broadcast_stream!(
-        pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await,
-        "sync-state-change"
-    );
+    let s_sync = BroadcastStream::new(pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let did_cell = d_sync.clone();
+            async move {
+                match result {
+                    Ok(ref msg) if matches_sync_state_owner(msg, did_cell.get().as_deref()) => {
+                        Some(wrap_event(events::SYNC_STATE_CHANGE, msg))
+                    }
+                    _ => None,
+                }
+            }
+        });
 
     // ── Link events ──
     let s_link_added = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await,
-        "link-added",
+        events::LINK_ADDED,
         d_link_added
     );
     let s_link_removed = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_REMOVED_TOPIC).await,
-        "link-removed",
+        events::LINK_REMOVED,
         d_link_removed
     );
     let s_link_updated = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_UPDATED_TOPIC).await,
-        "link-updated",
+        events::LINK_UPDATED,
         d_link_updated
     );
 
     // ── Neighbourhood signals ──
     // Lazy DID resolution: the WebSocket may connect before agent.generate()
-    // completes, leaving resolved_did as None. Resolve on each signal event
-    // so that by the time signals actually flow, the DID is available.
+    // completes, leaving resolved_did as None. The shared lazy cell resolves
+    // again until a DID exists, so by the time signals flow, it is available.
     let s_signal = {
         let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
-        let token = auth_token.clone();
+        let d_signal = d_auto_processor.clone();
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let token = token.clone();
+                let d_signal = d_signal.clone();
                 async move {
                     match result {
                         Ok(ref msg) => {
-                            let did = {
-                                let ctx = AgentContext::from_auth_token(token.clone());
-                                did_for_context(&ctx).ok()
-                            };
+                            let did = d_signal.get();
                             if matches_signal_recipient(msg, did.as_deref()) {
-                                Some(wrap_event("signal", msg))
+                                Some(wrap_event(events::SIGNAL, msg))
                             } else {
                                 None
                             }
@@ -367,44 +540,58 @@ pub(crate) async fn build_event_stream(
     // ── Runtime events ──
     let s_msg = broadcast_stream_nested!(
         pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await,
-        "message-received",
+        events::MESSAGE_RECEIVED,
         "message"
     );
-    let s_notif = did_stream_nested!(
-        pubsub
+    // Inlined (not `did_stream!`) so the filter reads the shared `LazyDid`.
+    let s_notif = {
+        let rx = pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-            .await,
-        "notification-triggered",
-        "notification",
-        d_notif,
-        matches_notification_owner
-    );
-    let s_exc = broadcast_stream_nested!(
-        pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
-        "exception-occurred",
-        "exception"
-    );
+            .await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did = d_notif.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) if matches_notification_owner(msg, did.get().as_deref()) => {
+                            Some(wrap_event(events::NOTIFICATION_TRIGGERED, msg))
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
+    let s_exc =
+        BroadcastStream::new(pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| async move {
+                match result {
+                    Ok(msg) if exception_visible(&msg, can_approve_apps) => Some(
+                        wrap_event_nested(events::EXCEPTION_OCCURRED, "exception", &msg),
+                    ),
+                    _ => None,
+                }
+            });
 
     // ── AI events ──
     let s_trans = did_stream!(
         pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await,
-        "transcription-text",
+        events::TRANSCRIPTION_TEXT,
         d_trans,
         matches_transcription_user
     );
     let s_loading = broadcast_stream!(
         pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await,
-        "model-loading-status"
+        events::MODEL_LOADING_STATUS
     );
 
-    // ── Query subscriptions ──
-    let s_query_sub = did_stream!(
+    // ── Query subscriptions: only the connection that opened one ──
+    let s_query_sub = query_update_stream(
         pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
-        "query-subscription-update",
-        d_query_sub,
-        matches_query_subscription_owner
+        connection_id,
     );
 
     // ── Auto-processor step signals ──
@@ -432,18 +619,10 @@ pub(crate) async fn build_event_stream(
                 let did_cell = d_auto_processor.clone();
                 async move {
                     let current_did = did_cell.get();
-                    match result {
-                        Ok(ref msg)
-                            if matches_auto_processor_pass_owner(
-                                msg,
-                                current_did.as_deref(),
-                                admin,
-                            ) =>
-                        {
-                            Some(wrap_event("auto-processor-event", msg))
-                        }
-                        _ => None,
-                    }
+                    let msg = result.ok()?;
+                    matches_auto_processor_pass_owner(&msg, current_did.as_deref(), admin)
+                        .await
+                        .then(|| wrap_event(events::AUTO_PROCESSOR_EVENT, &msg))
                 }
             })
     };
@@ -467,18 +646,14 @@ pub(crate) async fn build_event_stream(
                 let did_cell = d_auto_processor_state.clone();
                 async move {
                     let current_did = did_cell.get();
-                    match result {
-                        Ok(ref msg)
-                            if matches_auto_processor_neighbourhood_state_reader(
-                                msg,
-                                current_did.as_deref(),
-                                admin,
-                            ) =>
-                        {
-                            Some(wrap_event("auto-processor-neighbourhood-state", msg))
-                        }
-                        _ => None,
-                    }
+                    let msg = result.ok()?;
+                    matches_auto_processor_neighbourhood_state_reader(
+                        &msg,
+                        current_did.as_deref(),
+                        admin,
+                    )
+                    .await
+                    .then(|| wrap_event(events::AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, &msg))
                 }
             })
     };
@@ -510,18 +685,26 @@ pub(crate) async fn build_event_stream(
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
-    Box::pin(top)
+    // Events end with the token: expiry and revokeToken() stop them as they stop requests.
+    Box::pin(top.take_while(move |_| futures::future::ready(token_check.check().is_ok())))
 }
 
 async fn handle_events_ws(
     mut socket: WebSocket,
-    auth_token: String,
+    token_check: TokenCheck,
     user_email: Option<String>,
     is_admin: bool,
+    can_approve_apps: bool,
 ) {
     log::info!("Events WebSocket connected");
 
-    let mut event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let interest: super::event_interest::SharedInterest = Default::default();
+    let event_stream =
+        build_event_stream(token_check, user_email, is_admin, can_approve_apps, None).await;
+    let mut event_stream = Box::pin(super::event_interest::filter_stream(
+        event_stream,
+        interest.clone(),
+    ));
 
     loop {
         tokio::select! {
@@ -533,17 +716,23 @@ async fn handle_events_ws(
                             break;
                         }
                     }
-                    None => break, // All streams ended (shouldn't happen with broadcast)
+                    // The stream ends when the token stops working.
+                    None => {
+                        let close = CloseFrame {
+                            code: 1008,
+                            reason: "token expired or revoked".into(),
+                        };
+                        let _ = socket.send(Message::Close(Some(close))).await;
+                        break;
+                    }
                 }
             }
             // Handle incoming WebSocket messages
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&*text) {
-                            if parsed.get("type").and_then(|v| v.as_str()) == Some("ping") {
-                                let _ = socket.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
-                            }
+                        if let Some(reply) = client_message_reply(&text, &interest) {
+                            let _ = socket.send(Message::Text(reply.into())).await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
@@ -560,6 +749,25 @@ async fn handle_events_ws(
     }
 }
 
+/// The reply to a client message on the events socket: `pong` for `ping`,
+/// the `events.watch` / `events.unwatch` reply, or `None` (ignored).
+fn client_message_reply(
+    text: &str,
+    interest: &super::event_interest::SharedInterest,
+) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if msg_type == "ping" {
+        return Some(r#"{"type":"pong"}"#.to_string());
+    }
+    super::event_interest::handle_control(
+        msg_type,
+        parsed.get("id").unwrap_or(&serde_json::Value::Null),
+        parsed.get("params").unwrap_or(&serde_json::json!({})),
+        interest,
+    )
+}
+
 // ── Event helper functions ──────────────────────────────────────────────────
 
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -569,7 +777,13 @@ pub(crate) fn handle_broadcast_result(
 ) -> Option<Result<String, u64>> {
     match r {
         Ok(msg) => Some(Ok(msg)),
-        Err(BroadcastStreamRecvError::Lagged(n)) => Some(Err(n)),
+        Err(BroadcastStreamRecvError::Lagged(n)) => {
+            // The socket's receiver fell more than the channel's capacity behind (a slow
+            // client, or an ownership filter waiting on a perspective lock), so these events
+            // are gone for this socket. Say so: the client cannot know it missed them.
+            log::warn!("events_ws: a socket's event stream lagged and dropped {n} event(s)");
+            Some(Err(n))
+        }
     }
 }
 
@@ -635,19 +849,45 @@ pub(crate) fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
     }
 }
 
-pub(crate) fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::Object(auth)) = map.get("auth") {
-                    if let Some(serde_json::Value::String(user_did)) = auth.get("user_did") {
-                        return user_did == did;
-                    }
-                }
-            }
-            true
-        }
+/// A capability request carries the request id that `agent.generateJwt` redeems, and a
+/// notification install request carries the webhook's credentials, so only sessions that can
+/// approve apps receive them. The listed kinds go to every session; anything unreadable goes
+/// only to approvers.
+pub(crate) fn exception_visible(msg: &str, can_approve_apps: bool) -> bool {
+    use crate::types::ExceptionType;
+    if can_approve_apps {
+        return true;
+    }
+    let Ok(exception) = serde_json::from_str::<ExceptionInfo>(msg) else {
+        return false;
+    };
+    // No `_` arm: a new exception type does not compile until someone decides who sees it.
+    match exception.r#type {
+        ExceptionType::LanguageIsNotLoaded
+        | ExceptionType::ExpressionIsNotVerified
+        | ExceptionType::AgentIsUntrusted => true,
+        ExceptionType::CapabilityRequested | ExceptionType::InstallNotificationRequest => false,
+    }
+}
+
+/// A sync-state event carries the whole perspective record (owners, neighbourhood), so it
+/// reaches only sessions that may access the perspective: its owners, and the node's main
+/// agent for an unowned one. The same rule as `helpers::can_access_perspective`.
+pub(crate) fn matches_sync_state_owner(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return false;
+    };
+    let Some(handle) = serde_json::from_str::<serde_json::Value>(msg)
+        .ok()
+        .and_then(|event| event.get("perspective").cloned())
+        .and_then(|p| serde_json::from_value::<crate::types::PerspectiveHandle>(p).ok())
+    else {
+        return false;
+    };
+    if handle.is_unowned() {
+        crate::agent::AgentService::with_global_instance(|agent| agent.did.as_deref() == Some(did))
+    } else {
+        handle.is_owned_by(did)
     }
 }
 
@@ -679,35 +919,80 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
     }
 }
 
-pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(uuid)) = map
-                    .get("perspectiveId")
-                    .or_else(|| map.get("perspective_id"))
-                {
-                    return perspective_is_owned_by(uuid, did);
-                }
-            }
-            true
-        }
+/// A triggered notification carries its owner's trigger matches and webhook
+/// secret, so only sessions whose DID equals `notification.notification.ownerDid`
+/// receive it. The perspective's other owners do not. A session without a DID,
+/// or a malformed event, matches nothing.
+pub(crate) fn matches_notification_owner(msg: &str, session_did: Option<&str>) -> bool {
+    session_did.is_some_and(|did| {
+        serde_json::from_str::<NotificationTriggeredEvent>(msg)
+            .is_ok_and(|event| event.notification.notification.owner_did == did)
+    })
+}
+
+/// Multi-user: only events about a perspective the session owns. An event
+/// without `perspectiveUuid`, or one that does not parse, reaches nobody: every
+/// publisher of these topics sets the field. Test-only since query updates route by
+/// connection; the tests use it to pin `perspective_is_owned_by`'s waiting.
+#[cfg(test)]
+pub(crate) async fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return true;
+    };
+    match event_perspective_uuid(msg) {
+        Some(uuid) => perspective_is_owned_by(&uuid, did).await,
+        None => false,
     }
 }
 
-pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(uuid)) = map.get("uuid") {
-                    return perspective_is_owned_by(uuid, did);
-                }
-            }
-            true
-        }
+/// The event's `perspectiveUuid`, if `msg` is a JSON object holding one.
+fn event_perspective_uuid(msg: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(msg)
+        .ok()?
+        .get("perspectiveUuid")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Whether `did` owns the event's perspective. Resolved before the synchronous
+/// `_with` filters run, because the check waits for the perspective handle.
+/// Admins and unresolved DIDs never need it.
+async fn event_perspective_owned(msg: &str, current_did: Option<&str>, is_admin: bool) -> bool {
+    match (is_admin, current_did, event_perspective_uuid(msg)) {
+        (false, Some(did), Some(uuid)) => perspective_is_owned_by(&uuid, did).await,
+        _ => false,
     }
+}
+
+/// The `query-subscription-update` events of the connection `connection_id`.
+/// When the topic lags, updates were dropped, maybe this connection's: it
+/// gets one `{ "type": "query-subscription-update", "lagged": true }`, and
+/// the client resyncs every live query.
+fn query_update_stream(
+    rx: tokio::sync::broadcast::Receiver<String>,
+    connection_id: Option<String>,
+) -> impl futures::stream::Stream<Item = String> + Send {
+    tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |r| {
+        let event = match r {
+            Ok(msg) => query_update_for(&msg, connection_id.as_deref()),
+            Err(BroadcastStreamRecvError::Lagged(_)) => connection_id
+                .as_ref()
+                .map(|_| r#"{"type":"query-subscription-update","lagged":true}"#.to_string()),
+        };
+        async move { event }
+    })
+}
+
+/// The `query-subscription-update` event for `msg` if it belongs to the
+/// connection `connection_id`, without the routing key.
+fn query_update_for(msg: &str, connection_id: Option<&str>) -> Option<String> {
+    let mut update: serde_json::Map<String, serde_json::Value> = serde_json::from_str(msg).ok()?;
+    match update.remove("connectionId") {
+        Some(serde_json::Value::String(owner)) if Some(owner.as_str()) == connection_id => {}
+        _ => return None,
+    }
+    update.insert("type".into(), "query-subscription-update".into());
+    Some(serde_json::Value::Object(update).to_string())
 }
 
 /// Auto-processor events are delivered ONLY to the DID whose pass produced
@@ -725,17 +1010,13 @@ pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&s
 /// administrator access."
 ///
 /// Neighbourhood-state filter is similarly gated below.
-pub(crate) fn matches_auto_processor_neighbourhood_state_reader(
+pub(crate) async fn matches_auto_processor_neighbourhood_state_reader(
     msg: &str,
     current_did: Option<&str>,
     is_admin: bool,
 ) -> bool {
-    matches_auto_processor_neighbourhood_state_reader_with(
-        msg,
-        current_did,
-        is_admin,
-        perspective_is_owned_by,
-    )
+    let owned = event_perspective_owned(msg, current_did, is_admin).await;
+    matches_auto_processor_neighbourhood_state_reader_with(msg, current_did, is_admin, |_, _| owned)
 }
 
 fn matches_auto_processor_neighbourhood_state_reader_with(
@@ -763,12 +1044,13 @@ fn matches_auto_processor_neighbourhood_state_reader_with(
     owned_check(uuid, did)
 }
 
-pub(crate) fn matches_auto_processor_pass_owner(
+pub(crate) async fn matches_auto_processor_pass_owner(
     msg: &str,
     current_did: Option<&str>,
     is_admin: bool,
 ) -> bool {
-    matches_auto_processor_pass_owner_with(msg, current_did, is_admin, perspective_is_owned_by)
+    let owned = event_perspective_owned(msg, current_did, is_admin).await;
+    matches_auto_processor_pass_owner_with(msg, current_did, is_admin, |_, _| owned)
 }
 
 fn matches_auto_processor_pass_owner_with(
@@ -808,26 +1090,24 @@ fn matches_auto_processor_pass_owner_with(
     }
 }
 
-fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
-    use crate::perspectives::get_perspective;
-    // Fail closed when we cannot verify ownership. Previously this returned
-    // `true` for a missing perspective / lock contention, which let non-admin
-    // sessions receive events (notably auto-processor neighbourhood-state,
-    // CodeRabbit #903 fix) without a successful access check. Intentionally
-    // public unowned perspectives still deliver via the `is_unowned()` branch.
-    match get_perspective(uuid) {
-        Some(instance) => match instance.persisted.try_lock() {
-            Ok(handle) => {
-                if handle.is_unowned() {
-                    true
-                } else {
-                    handle.is_owned_by(did)
-                }
-            }
-            Err(_) => false,
-        },
-        None => false,
-    }
+/// Whether `did` owns (or nobody owns) perspective `uuid`. Fails closed for an
+/// unknown perspective. Waits for the handle: a `try_lock` here dropped every
+/// event published while a write held it, so live queries missed updates.
+async fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
+    let Some(instance) = crate::perspectives::get_perspective(uuid) else {
+        return false;
+    };
+    let did = did.to_string();
+    // Spawned so the runtime polls the lock, not the socket's event stream. The
+    // tokio Mutex hands the permit to the first waiter, which keeps it until it
+    // is polled; a stream parked behind a slow socket send would hold the
+    // handle, and stall every writer of the perspective.
+    tokio::spawn(async move {
+        let handle = instance.persisted.lock().await;
+        handle.is_unowned() || handle.is_owned_by(&did)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1073,30 +1353,112 @@ mod auto_processor_neighbourhood_state_tests {
 
 #[cfg(test)]
 mod perspective_is_owned_by_tests {
-    //! Regression for CodeRabbit #903 CR #2. The prod `perspective_is_owned_by`
-    //! must fail closed when the perspective is not in the global registry
-    //! or when the try_lock fails. This unit test covers the missing branch
-    //! directly (the global `PERSPECTIVES` registry is empty in this test
-    //! context, so `get_perspective(uuid)` returns None); the lock-contention
-    //! branch is exercised by the same code path — both `Err(_)` and `None`
-    //! return `false` — and end-to-end by any tests that hold a persisted
-    //! lock while events fire.
-    use super::perspective_is_owned_by;
+    //! `perspective_is_owned_by` fails closed for a perspective that is not
+    //! registered (CodeRabbit #903), and waits for a perspective whose handle
+    //! a write holds instead of failing: a failed `try_lock` here used to drop
+    //! live-query updates published during writes.
+    use super::{
+        handle_broadcast_result, matches_auto_processor_neighbourhood_state_reader,
+        matches_auto_processor_pass_owner, matches_perspective_owner, perspective_is_owned_by,
+        wrap_event,
+    };
+    use crate::perspectives::perspective_instance::PerspectiveInstance;
+    use crate::perspectives::{register_perspective, unregister_perspective};
+    use crate::types::PerspectiveHandle;
+    use futures::StreamExt;
+    use std::time::Duration;
+    use tokio_stream::wrappers::BroadcastStream;
 
-    #[test]
-    fn missing_perspective_returns_false() {
-        assert!(!perspective_is_owned_by(
-            "not-a-registered-perspective-uuid",
-            "did:key:alice"
-        ));
+    #[tokio::test]
+    async fn missing_perspective_returns_false_for_any_did() {
+        for did in ["did:key:alice", "", "did:key:admin"] {
+            assert!(!perspective_is_owned_by("not-a-registered-perspective", did).await);
+        }
     }
 
-    #[test]
-    fn missing_perspective_returns_false_for_any_did() {
-        // No DID is special here — even one that looks admin-like fails
-        // closed when the perspective can't be looked up.
-        assert!(!perspective_is_owned_by("missing", ""));
-        assert!(!perspective_is_owned_by("missing", "did:key:admin"));
+    #[tokio::test]
+    async fn waits_for_a_handle_a_write_holds() {
+        let handle = PerspectiveHandle::new_with_owner("owned".into(), "did:key:alice".into());
+        let uuid = handle.uuid.clone();
+        let instance = PerspectiveInstance::new(handle, None);
+        let persisted = instance.persisted.clone();
+        register_perspective(uuid.clone(), instance);
+
+        let write = persisted.lock().await;
+        let update =
+            serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" }).to_string();
+        let check =
+            tokio::spawn(
+                async move { matches_perspective_owner(&update, Some("did:key:alice")).await },
+            );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !check.is_finished(),
+            "the check waits for the write, it does not fail"
+        );
+        drop(write);
+        assert!(
+            check.await.unwrap(),
+            "the owner receives the update once the write ends"
+        );
+
+        assert!(!perspective_is_owned_by(&uuid, "did:key:bob").await);
+        unregister_perspective(&uuid);
+    }
+
+    #[tokio::test]
+    async fn a_parked_check_does_not_keep_the_handle_after_the_write() {
+        let handle = PerspectiveHandle::new_with_owner("p".into(), "did:key:alice".into());
+        let uuid = handle.uuid.clone();
+        let instance = PerspectiveInstance::new(handle, None);
+        let persisted = instance.persisted.clone();
+        register_perspective(uuid.clone(), instance);
+        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
+        // The same chain as `owned_stream!`.
+        let mut stream = Box::pin(
+            BroadcastStream::new(rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .filter_map(move |result| async move {
+                    let msg = result.ok()?;
+                    matches_perspective_owner(&msg, Some("did:key:bob"))
+                        .await
+                        .then(|| wrap_event("query-subscription-update", &msg))
+                }),
+        );
+        let write = persisted.lock().await;
+        let update = serde_json::json!({ "perspectiveUuid": uuid, "subscriptionId": "s" });
+        tx.send(update.to_string()).unwrap();
+        assert!(futures::poll!(stream.next()).is_pending());
+        drop(write);
+        // The socket loop is busy in `socket.send` and does not poll the stream.
+        let next_writer = tokio::time::timeout(Duration::from_millis(300), persisted.lock()).await;
+        let parked = next_writer.is_err();
+        drop(next_writer);
+        unregister_perspective(&uuid);
+        assert!(
+            !parked,
+            "a parked ownership check holds the handle after the write released it"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_processor_filters_refuse_a_non_owner() {
+        let handle = PerspectiveHandle::new_with_owner("p".into(), "did:key:alice".into());
+        let uuid = handle.uuid.clone();
+        register_perspective(uuid.clone(), PerspectiveInstance::new(handle, None));
+        let state = serde_json::json!({ "perspectiveUuid": uuid }).to_string();
+        let pass = serde_json::json!({ "perspectiveUuid": uuid, "agentDid": "did:key:bob" });
+        let pass = pass.to_string();
+        assert!(
+            matches_auto_processor_neighbourhood_state_reader(&state, Some("did:key:alice"), false)
+                .await
+        );
+        assert!(
+            !matches_auto_processor_neighbourhood_state_reader(&state, Some("did:key:bob"), false)
+                .await
+        );
+        assert!(!matches_auto_processor_pass_owner(&pass, Some("did:key:bob"), false).await);
+        unregister_perspective(&uuid);
     }
 }
 
@@ -1111,7 +1473,10 @@ mod lazy_did_tests {
     fn resolved_at_construction_stays_resolved() {
         // Happy path: the caller already had a DID at socket-open time.
         // `get()` returns it verbatim, no re-resolution attempt needed.
-        let lazy = LazyDid::new("token".into(), Some("did:key:alice".into()));
+        let lazy = LazyDid::new(
+            crate::agent::AgentContext::main_agent(),
+            Some("did:key:alice".into()),
+        );
         assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
         // Idempotent — repeated calls keep returning the same DID.
         assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
@@ -1131,4 +1496,482 @@ mod lazy_did_tests {
     // agent — reproducing it as a pure Rust unit test would require standing
     // up an in-process `AgentContext` + `agent::generate()` + DB, which is
     // what the integration suite already does.
+}
+
+#[cfg(test)]
+mod notification_owner_filter_tests {
+    //! A triggered notification carries the owner's trigger matches and
+    //! webhook secret, so only the owner's sessions may receive it.
+    use super::matches_notification_owner;
+    use crate::types::{Notification, NotificationTriggeredEvent, TriggeredNotification};
+
+    fn event(owner: &str) -> String {
+        serde_json::to_string(&NotificationTriggeredEvent {
+            perspective_uuid: "perspective".to_string(),
+            notification: TriggeredNotification {
+                notification: Notification {
+                    id: "notification".to_string(),
+                    granted: true,
+                    description: String::new(),
+                    app_name: String::new(),
+                    app_url: String::new(),
+                    app_icon_path: String::new(),
+                    trigger: String::new(),
+                    perspective_ids: vec!["perspective".to_string()],
+                    webhook_url: String::new(),
+                    webhook_auth: "secret".to_string(),
+                    owner_did: owner.to_string(),
+                },
+                perspective_id: "perspective".to_string(),
+                trigger_match: "[]".to_string(),
+            },
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn triggered_notification_reaches_only_its_owners_sessions() {
+        let main_agents = event("did:key:main");
+        assert!(matches_notification_owner(
+            &main_agents,
+            Some("did:key:main")
+        ));
+        assert!(!matches_notification_owner(
+            &main_agents,
+            Some("did:key:alice")
+        ));
+
+        let alices = event("did:key:alice");
+        assert!(matches_notification_owner(&alices, Some("did:key:alice")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:bob")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:main")));
+        assert!(!matches_notification_owner(&alices, None));
+    }
+
+    #[test]
+    fn malformed_event_reaches_nobody() {
+        assert!(!matches_notification_owner(
+            "not json",
+            Some("did:key:main")
+        ));
+        assert!(!matches_notification_owner(
+            r#"{"perspectiveUuid":"p","notification":{}}"#,
+            Some("did:key:main")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod app_approval_event_tests {
+    use super::*;
+    use crate::types::{ExceptionInfo, ExceptionType};
+    use std::time::Duration;
+
+    fn exception(kind: ExceptionType) -> String {
+        serde_json::to_string(&ExceptionInfo {
+            title: "title".to_string(),
+            message: "message".to_string(),
+            r#type: kind,
+            addon: Some("{\"requestId\":\"request-1\"}".to_string()),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn capability_requests_reach_only_sessions_that_can_approve_apps() {
+        let request = exception(ExceptionType::CapabilityRequested);
+        assert!(exception_visible(&request, true));
+        assert!(!exception_visible(&request, false));
+    }
+
+    // Notification install requests carry the webhook's credentials.
+    #[test]
+    fn notification_install_requests_reach_only_sessions_that_can_approve_apps() {
+        let request = exception(ExceptionType::InstallNotificationRequest);
+        assert!(exception_visible(&request, true));
+        assert!(!exception_visible(&request, false));
+    }
+
+    // Sync-state events used to reach every session with the perspective's full record.
+    #[test]
+    fn sync_state_events_reach_only_the_perspectives_owners() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let event = |owners: Option<Vec<&str>>| {
+            serde_json::json!({
+                "perspective": {
+                    "uuid": "p-1",
+                    "state": "Synced",
+                    "owners": owners,
+                },
+                "state": "\"Synced\"",
+            })
+            .to_string()
+        };
+        let owned = event(Some(vec!["did:key:alice"]));
+        assert!(matches_sync_state_owner(&owned, Some("did:key:alice")));
+        assert!(!matches_sync_state_owner(&owned, Some("did:key:bob")));
+        assert!(!matches_sync_state_owner(&owned, None));
+
+        let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
+            .expect("the test agent has a DID");
+        let unowned = event(None);
+        assert!(matches_sync_state_owner(&unowned, Some(&main_did)));
+        assert!(!matches_sync_state_owner(&unowned, Some("did:key:bob")));
+        assert!(!matches_sync_state_owner("not json", Some(&main_did)));
+    }
+
+    #[test]
+    fn other_exceptions_reach_every_session() {
+        let untrusted = exception(ExceptionType::AgentIsUntrusted);
+        assert!(exception_visible(&untrusted, false));
+        assert!(exception_visible(&untrusted, true));
+    }
+
+    #[test]
+    fn unreadable_exceptions_reach_only_sessions_that_can_approve_apps() {
+        assert!(!exception_visible("not json", false));
+        assert!(exception_visible("not json", true));
+    }
+
+    // An app token used to reach every connected socket through `apps-changed`, including
+    // sockets that never authenticated. Only sessions that can approve apps get the event now.
+    #[tokio::test]
+    async fn sessions_that_cannot_approve_apps_never_see_app_events() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let pubsub = get_global_pubsub().await;
+        let mut other =
+            build_event_stream(TokenCheck::new("", false), None, false, false, None).await;
+        let mut approver =
+            build_event_stream(TokenCheck::new("", false), None, false, true, None).await;
+
+        pubsub
+            .publish(&APPS_CHANGED, &"{\"requestId\":\"request-1\"}".to_string())
+            .await;
+        pubsub
+            .publish(
+                &EXCEPTION_OCCURRED_TOPIC,
+                &exception(ExceptionType::CapabilityRequested),
+            )
+            .await;
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), approver.next())
+                .await
+                .expect("the approver receives both events")
+                .expect("the stream stays open");
+            seen.push(event);
+        }
+        assert!(
+            seen.iter().any(|e| e.contains("apps-changed")),
+            "{:?}",
+            seen
+        );
+        assert!(
+            seen.iter().any(|e| e.contains("exception-occurred")),
+            "{:?}",
+            seen
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), other.next())
+                .await
+                .is_err(),
+            "a session that cannot approve apps received an app event"
+        );
+    }
+
+    // A type this build does not know may carry anything, so it goes to approvers only.
+    #[test]
+    fn exceptions_of_an_unknown_type_reach_only_sessions_that_can_approve_apps() {
+        let unknown = r#"{"title":"t","message":"m","type":"SOME_NEW_TYPE","addon":"secret"}"#;
+        assert!(!exception_visible(unknown, false));
+        assert!(exception_visible(unknown, true));
+    }
+
+    // Goes through `build_event_stream`, so a sync-state stream that broadcasts, or that
+    // keeps the DID it saw at connect time, fails here. The socket opens before the main
+    // agent has a DID, as the launcher's does on first run.
+    #[tokio::test]
+    async fn sync_state_reaches_a_socket_opened_before_the_did_resolved() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
+            .expect("the test agent has a DID");
+        crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
+        let mut stream =
+            build_event_stream(TokenCheck::new("", false), None, false, false, None).await;
+        crate::agent::AgentService::with_mutable_global_instance(|a| {
+            a.did = Some(main_did.clone())
+        });
+
+        let event = |uuid: &str, owner: &str| {
+            serde_json::json!({
+                "perspective": { "uuid": uuid, "state": "Synced", "owners": [owner] },
+                "state": "\"Synced\"",
+            })
+            .to_string()
+        };
+        let pubsub = get_global_pubsub().await;
+        pubsub
+            .publish(
+                &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
+                &event("sync-of-another-agent", "did:key:someone-else"),
+            )
+            .await;
+        pubsub
+            .publish(
+                &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
+                &event("sync-of-the-main-agent", &main_did),
+            )
+            .await;
+
+        let received = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = stream.next().await.expect("the stream stays open");
+                if event.contains("sync-state-change") {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("the socket gets sync-state once the DID exists");
+        assert!(received.contains("sync-of-the-main-agent"), "{}", received);
+    }
+}
+
+#[cfg(test)]
+mod token_expiry_tests {
+    use super::*;
+    use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
+    use std::time::Duration;
+
+    /// Builds a user's event stream, publishes one event and returns what the stream yields.
+    async fn next_event(token_check: TokenCheck) -> Option<String> {
+        // The stream resolves the session's DID through the wallet.
+        setup_wallet();
+        let mut stream = build_event_stream(
+            token_check,
+            Some("events.user@example.org".to_string()),
+            false,
+            false,
+            None,
+        )
+        .await;
+        get_global_pubsub()
+            .await
+            .publish(
+                &AI_MODEL_LOADING_STATUS,
+                &r#"{"model":"m","status":"loading"}"#.to_string(),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream must answer, not hang")
+    }
+
+    // A connection kept its event stream after its token expired.
+    #[tokio::test]
+    async fn a_token_that_expired_after_connect_ends_the_event_stream() {
+        let an_hour_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        let expired = TokenCheck::with_expiry("user-jwt", an_hour_ago);
+        assert!(next_event(expired).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_valid_token_keeps_its_event_stream() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token =
+            crate::user_management::generate_user_jwt("events.user@example.org", "test").unwrap();
+        assert!(next_event(TokenCheck::new(&token, false)).await.is_some());
+    }
+}
+
+#[cfg(test)]
+mod events_socket_message_tests {
+    use crate::api::event_interest::SharedInterest;
+    use futures::StreamExt;
+    use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn a_lagged_query_topic_tells_the_connection_to_resync() {
+        let updates = |connection: Option<&str>| {
+            let (tx, rx) = tokio::sync::broadcast::channel(1);
+            for revision in [1, 2] {
+                let msg =
+                    json!({ "subscriptionId": "s", "revision": revision, "connectionId": "c" });
+                tx.send(msg.to_string()).unwrap();
+            }
+            let stream = super::query_update_stream(rx, connection.map(String::from));
+            stream
+                .map(|e| serde_json::from_str::<Value>(&e).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            updates(Some("c")).await,
+            vec![
+                json!({ "type": "query-subscription-update", "lagged": true }),
+                json!({ "type": "query-subscription-update", "subscriptionId": "s", "revision": 2 }),
+            ]
+        );
+        assert!(
+            updates(None).await.is_empty(),
+            "a socket with no live queries gets nothing"
+        );
+    }
+
+    #[test]
+    fn events_socket_watch_round_trip_carries_the_request_id() {
+        let interest: SharedInterest = Default::default();
+        let reply = |text: &str| -> serde_json::Value {
+            serde_json::from_str(&super::client_message_reply(text, &interest).unwrap()).unwrap()
+        };
+        assert_eq!(
+            reply(r#"{"id":"w1","type":"events.watch","params":{"agent-updated":null}}"#),
+            json!({ "id": "w1", "result": true })
+        );
+        assert_eq!(
+            reply(r#"{"id":"u1","type":"events.unwatch"}"#),
+            json!({ "id": "u1", "result": true })
+        );
+        assert_eq!(reply(r#"{"type":"ping"}"#), json!({ "type": "pong" }));
+        assert!(super::client_message_reply(r#"{"type":"other"}"#, &interest).is_none());
+        assert!(super::client_message_reply("not json", &interest).is_none());
+    }
+}
+
+#[cfg(test)]
+mod event_spec_tests {
+    use super::{event_specs, events};
+    use crate::types::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn every_emitted_event_has_exactly_one_spec() {
+        let specs: Vec<&str> = event_specs().iter().map(|s| s.name).collect();
+        let unique: BTreeSet<&str> = specs.iter().copied().collect();
+        assert_eq!(unique.len(), specs.len(), "duplicate spec: {specs:?}");
+        assert_eq!(unique, events::ALL.into_iter().collect::<BTreeSet<_>>());
+    }
+
+    #[test]
+    fn nested_payloads_keep_their_wire_key() {
+        let wire = super::wrap_event_nested(events::AGENT_UPDATED, "agent", r#"{"did":"d"}"#);
+        let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(v["agent"]["did"], "d");
+        let _: super::AgentUpdatedEvent = serde_json::from_value(v).unwrap();
+    }
+
+    /// Serializes a scoped payload's publish struct and checks the flat
+    /// `perspectiveUuid` that `events.watch` narrows by.
+    fn uuid_of(payload: impl serde::Serialize) -> String {
+        serde_json::to_value(payload).unwrap()["perspectiveUuid"]
+            .as_str()
+            .expect("scoped payload carries perspectiveUuid")
+            .to_string()
+    }
+
+    #[test]
+    fn scoped_payloads_serialize_perspective_uuid() {
+        use crate::perspectives::auto_processor::events::{
+            AutoProcessorNeighbourhoodState, NeighbourhoodPhase,
+        };
+        let p = || "p".to_string();
+        let handle = PerspectiveHandle {
+            uuid: p(),
+            ..Default::default()
+        };
+        let scoped = [
+            uuid_of(PerspectiveWithOwner {
+                perspective_uuid: p(),
+                perspective: handle.clone(),
+                owner: "o".into(),
+            }),
+            uuid_of(PerspectiveRemovedWithOwner {
+                perspective_uuid: p(),
+                uuid: p(),
+                owner: "o".into(),
+            }),
+            uuid_of(PerspectiveStateFilter {
+                perspective_uuid: p(),
+                state: PerspectiveState::Private,
+                perspective: handle.clone(),
+            }),
+            uuid_of(PerspectiveLinkWithOwner {
+                perspective_uuid: p(),
+                ..Default::default()
+            }),
+            uuid_of(PerspectiveLinkUpdatedWithOwner {
+                perspective_uuid: p(),
+                ..Default::default()
+            }),
+            uuid_of(NeighbourhoodSignalFilter {
+                perspective_uuid: p(),
+                perspective: handle,
+                ..Default::default()
+            }),
+            uuid_of(NotificationTriggeredEvent {
+                perspective_uuid: p(),
+                notification: TriggeredNotification {
+                    notification: serde_json::from_value(serde_json::json!({
+                        "id": "n", "granted": true, "description": "", "appName": "",
+                        "appUrl": "", "appIconPath": "", "trigger": "", "perspectiveIds": [],
+                        "webhookUrl": "", "webhookAuth": "", "ownerDid": "did:x",
+                    }))
+                    .unwrap(),
+                    perspective_id: p(),
+                    trigger_match: "[]".into(),
+                },
+            }),
+            uuid_of(crate::types::QuerySubscriptionUpdate {
+                perspective_uuid: p(),
+                uuid: p(),
+                subscription_id: "s".into(),
+                revision: 1,
+                ..Default::default()
+            }),
+            uuid_of(AutoProcessorNeighbourhoodState::new(
+                "p",
+                "proc",
+                "did:x",
+                "k",
+                NeighbourhoodPhase::Claimed,
+            )),
+        ];
+        assert!(scoped.iter().all(|u| u == "p"));
+    }
+}
+
+#[cfg(test)]
+mod perspective_owner_filter_tests {
+    use super::matches_perspective_owner;
+
+    #[tokio::test]
+    async fn filters_by_the_flat_perspective_uuid() {
+        let unknown = r#"{"perspectiveUuid":"no-such-perspective","notification":{}}"#;
+        assert!(
+            !matches_perspective_owner(unknown, Some("did:x")).await,
+            "an unverifiable owner fails closed"
+        );
+        assert!(
+            matches_perspective_owner(unknown, None).await,
+            "single-user"
+        );
+        assert!(
+            !matches_perspective_owner(r#"{"notification":{}}"#, Some("did:x")).await,
+            "an event without perspectiveUuid fails closed"
+        );
+        assert!(
+            !matches_perspective_owner("not json", Some("did:x")).await,
+            "an event that does not parse fails closed"
+        );
+    }
 }

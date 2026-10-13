@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import Ad4mConnect from './core';
 import { setLocal, getLocal } from './utils';
+import { AgentStatus, Ad4mClient } from '@coasys/ad4m';
 
 const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockAgent = {
     isLocked: vi.fn().mockResolvedValue(false),
-    status: vi.fn().mockResolvedValue({ isInitialized: true }),
+    status: vi.fn(),
     requestCapability: vi.fn().mockResolvedValue('req-123'),
     generateJwt: vi.fn().mockResolvedValue('jwt-token'),
     hostingUserInfo: vi.fn().mockResolvedValue({
@@ -19,9 +20,8 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
     loginUser: vi.fn().mockResolvedValue('jwt-from-login'),
     createUser: vi.fn().mockResolvedValue({ success: true }),
     signMessage: vi.fn().mockResolvedValue({ signature: 'sig', publicKey: 'pk' }),
-    addHostingUserInfoChangedListener: vi.fn(),
     computeLog: vi.fn().mockResolvedValue([]),
-    requestPayment: vi.fn().mockResolvedValue({ success: true, message: 'OK' }),
+    requestPayment: vi.fn().mockResolvedValue({ success: true, amountHOT: '100' }),
   };
 
   const mockRuntime = {
@@ -31,6 +31,7 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
 
   const mockClientInstance = {
     close: vi.fn(),
+    on: vi.fn(),
     agent: mockAgent,
     runtime: mockRuntime,
   };
@@ -39,10 +40,13 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
 });
 
 // Mock @coasys/ad4m
-vi.mock('@coasys/ad4m', () => ({
+vi.mock('@coasys/ad4m', async (importOriginal) => ({
+  ...(await importOriginal() as any),
   Ad4mClient: vi.fn().mockImplementation(() => mockClientInstance),
-  VerificationRequestResult: {},
 }));
+
+/** What \`agent.status\` resolves to: built by the real AgentStatus, which turns a missing flag into false. */
+const agentStatus = (obj: object) => new AgentStatus(obj);
 
 // Mock only checkConnection and isEmbedded from utils (keep the real localStorage helpers)
 vi.mock('./utils', async (importOriginal) => {
@@ -78,11 +82,12 @@ describe('Ad4mConnect', () => {
     mockAgent.loginUser.mockClear();
     mockAgent.createUser.mockClear();
     mockClientInstance.close.mockClear();
+    (Ad4mClient as any).mockClear();
     mockRuntime.info.mockClear();
     mockRuntime.multiUserEnabled.mockClear();
     // Restore default implementations
     mockAgent.isLocked.mockResolvedValue(false);
-    mockAgent.status.mockResolvedValue({ isInitialized: true });
+    mockAgent.status.mockResolvedValue(agentStatus({ isInitialized: true, isUnlocked: true }));
   });
 
   describe('constructor', () => {
@@ -172,9 +177,153 @@ describe('Ad4mConnect', () => {
     });
   });
 
+  describe('connect() — round trips', () => {
+    /*
+      Every standalone connect waited on the health check before opening the socket, then asked
+      isLocked, then status — three round trips before an app could make its first call. The health
+      check now runs beside the auth read, and an unlocked session answers in one call.
+    */
+    it('asks for status without waiting on the health check', async () => {
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const { checkConnection } = await import('./utils');
+      let releaseHealth!: () => void;
+      (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: true }));
+
+      const conn = new Ad4mConnect(defaultOptions);
+      const connecting = conn.connect();
+      await vi.waitFor(() => expect(mockAgent.status).toHaveBeenCalled());
+      releaseHealth();
+      await connecting;
+
+      expect(conn.authState).toBe('authenticated');
+    });
+
+    it('does not ask isLocked when status says the wallet is unlocked', async () => {
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: true }));
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('authenticated');
+    });
+
+    it('reads a locked wallet from status alone', async () => {
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: false }));
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('locked');
+    });
+
+    it('reads a status without isUnlocked as locked, without asking isLocked', async () => {
+      // AgentStatus turns a missing flag into false, so no status answer is ambiguous.
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true }));
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('locked');
+    });
+
+    it('reads a node with no agent yet as locked', async () => {
+      // isInitialized decides on its own, whatever isUnlocked says.
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: false, isUnlocked: true }));
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('locked');
+    });
+
+    it('reports a locked wallet, not a bad token, when status is refused', async () => {
+      // isLocked needs no capability, so it can tell the two apart where status cannot.
+      mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
+      mockAgent.isLocked.mockResolvedValueOnce(true);
+      setLocal('ad4m-token', 'kept-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(conn.authState).toBe('locked');
+      expect(conn.token).toBe('kept-token');
+    });
+
+    it('applies nothing from the auth read when the health check fails', async () => {
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
+      mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
+      setLocal('ad4m-token', 'kept-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      const auth: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => auth.push(e.detail));
+
+      await expect(conn.connect()).rejects.toThrow('Not an AD4M executor');
+      expect(conn.connectionState).toBe('error');
+      expect(conn.token).toBe('kept-token');
+      expect(auth).toEqual([]);
+    });
+
+    it('throws the health error without waiting for an auth read that never settles', async () => {
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
+      // An unreachable socket: the auth read hangs.
+      mockAgent.status.mockImplementationOnce(() => new Promise(() => {}));
+      const conn = new Ad4mConnect(defaultOptions);
+
+      await expect(conn.connect()).rejects.toThrow('Not an AD4M executor');
+      expect(conn.connectionState).toBe('error');
+    });
+  });
+
+  describe('connect() — token and unchecked URLs', () => {
+    // ApiClient puts the token in the socket URL, so it must not reach a URL /health has not accepted.
+    it('opens no socket to a URL other than the stored one until /health accepts it', async () => {
+      const { checkConnection } = await import('./utils');
+      let releaseHealth!: () => void;
+      (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
+      setLocal('ad4m-token', 'remote-jwt');
+      setLocal('ad4m-url', 'https://remote.example');
+      const conn = new Ad4mConnect({ ...defaultOptions, url: 'http://localhost:12000' });
+
+      const connecting = conn.connect();
+      await vi.waitFor(() => expect(checkConnection).toHaveBeenCalledWith('http://localhost:12000'));
+      expect(Ad4mClient).not.toHaveBeenCalled();
+
+      releaseHealth();
+      await connecting;
+      expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'remote-jwt');
+      expect(getLocal('ad4m-url')).toBe('http://localhost:12000');
+      expect(conn.authState).toBe('authenticated');
+    });
+
+    it('never opens a socket to an unchecked URL that fails /health', async () => {
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
+      setLocal('ad4m-token', 'remote-jwt');
+      const conn = new Ad4mConnect({ ...defaultOptions, url: 'http://localhost:12000' });
+
+      await expect(conn.connect()).rejects.toThrow('Not an AD4M executor');
+      expect(Ad4mClient).not.toHaveBeenCalled();
+      expect(getLocal('ad4m-url')).toBeFalsy();
+    });
+
+    it('opens the socket beside the health check for the stored URL', async () => {
+      const { checkConnection } = await import('./utils');
+      let releaseHealth!: () => void;
+      (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
+      setLocal('ad4m-token', 'local-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const conn = new Ad4mConnect(defaultOptions);
+
+      const connecting = conn.connect();
+      await vi.waitFor(() => expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'local-jwt'));
+      releaseHealth();
+      await connecting;
+      expect(conn.authState).toBe('authenticated');
+    });
+  });
+
   describe('checkAuth()', () => {
     it('sets auth to locked when agent is locked', async () => {
-      mockAgent.isLocked.mockResolvedValueOnce(true);
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: false }));
 
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();
@@ -329,13 +478,14 @@ describe('Ad4mConnect', () => {
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();
       const release = vi.fn();
-      mockAgent.addHostingUserInfoChangedListener.mockClear().mockReturnValue(release);
+      mockClientInstance.on.mockClear().mockReturnValue(release);
 
       conn.startCreditSubscription();
       conn.startCreditSubscription();
       conn.stopCreditPolling();
 
-      expect(mockAgent.addHostingUserInfoChangedListener).toHaveBeenCalledTimes(2);
+      expect(mockClientInstance.on).toHaveBeenCalledTimes(2);
+      expect(mockClientInstance.on).toHaveBeenCalledWith('hosting-user-info-changed', expect.any(Function));
       expect(release).toHaveBeenCalledTimes(1);
     });
 

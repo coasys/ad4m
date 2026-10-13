@@ -39,14 +39,13 @@ export function subscribeToPerspective(
   const removedKey = `perspective-${perspective.uuid}-removed`;
 
   if (!subscribers.has(addedKey)) {
-    console.log("subscribing!");
-    perspective.addListener("link-added", (link) => {
+    perspective.on("link-added", ({ link }) => {
       subscribers.get(addedKey)!.forEach((cb) => cb(link));
     });
   }
 
   if (!subscribers.has(removedKey)) {
-    perspective.addListener("link-removed", (link) => {
+    perspective.on("link-removed", ({ link }) => {
       subscribers.get(removedKey)!.forEach((cb) => cb(link));
     });
   }

@@ -2,8 +2,10 @@
 //!
 //! 19 handlers covering agent info, auth, trust, entanglement, and profile.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::{
@@ -18,8 +20,9 @@ use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
+use super::guards::{refuse_user_session, session_agent_context};
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 /// Convert a client-supplied profile link into the decorated form, **deriving
 /// the validity verdict on this replica** rather than believing the caller.
@@ -112,7 +115,7 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 /// agent.byDid — get agent by DID
@@ -185,7 +188,13 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: UpdateProfileRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // If dm_language provided, update it
+    // A user session updates the user's own profile, never the node's main agent.
+    if let Some(user_email) = ctx.user_email.clone() {
+        let agent = update_user_profile(user_email, body).await?;
+        publish_agent_updated(&agent).await;
+        return Ok(serde_json::to_value(agent)?);
+    }
+
     if let Some(dm_lang) = body.dm_language {
         AgentService::with_mutable_global_instance(|agent_service| {
             if let Some(ref mut agent) = agent_service.agent {
@@ -204,93 +213,100 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         }
     }
 
-    // If public_perspective provided, update it
     if let Some(pub_persp) = body.public_perspective {
-        // For multi-user mode
-        if let Some(user_email) = ctx.user_email.clone() {
-            let agent_data = AgentService::get_user_agent_data(&user_email)
-                .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
+        let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
+            .links
+            .iter()
+            .map(link_expression_input_to_decorated)
+            .collect();
 
-            let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
-                .links
-                .iter()
-                .map(|lei| link_expression_input_to_decorated(lei))
-                .collect();
-
-            let agent = Agent {
-                did: agent_data.did,
-                direct_message_language: None,
-                perspective: Some(DomainPerspective {
+        AgentService::with_mutable_global_instance(|agent_service| {
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.perspective = Some(DomainPerspective {
                     links: decorated_links,
-                }),
-            };
-
-            AgentService::with_global_instance(|agent_service| {
-                agent_service.store_user_agent_profile(&user_email, &agent)
-            })
-            .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
-
-            if let Err(e) =
-                AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email))
-                    .await
-            {
-                log::warn!(
-                    "Failed to publish updated user profile to agent language: {}",
-                    e
-                );
-            }
-
-            return Ok(serde_json::to_value(agent)?);
-        } else {
-            // Main agent path
-            let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
-                .links
-                .iter()
-                .map(|lei| link_expression_input_to_decorated(lei))
-                .collect();
-
-            AgentService::with_mutable_global_instance(|agent_service| {
-                if let Some(ref mut agent) = agent_service.agent {
-                    agent.perspective = Some(DomainPerspective {
-                        links: decorated_links,
-                    });
-                    if let Some(ref passphrase) = agent_service.passphrase {
-                        agent_service.save(passphrase.clone());
-                    }
+                });
+                if let Some(ref passphrase) = agent_service.passphrase {
+                    agent_service.save(passphrase.clone());
                 }
-            });
-
-            if let Err(e) =
-                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
-            {
-                log::warn!(
-                    "Failed to publish agent expression after profile update: {}",
-                    e
-                );
             }
+        });
+
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!(
+                "Failed to publish agent expression after profile update: {}",
+                e
+            );
         }
     }
 
-    // Return updated agent
     let agent = AgentService::with_global_instance(|agent_service| {
         agent_service
             .agent
             .clone()
             .ok_or_else(|| WsRpcError::not_found("Agent not found"))
     })?;
+    publish_agent_updated(&agent).await;
+    Ok(serde_json::to_value(agent)?)
+}
 
+/// Applies an `agent.updateProfile` request to a user's own profile: one load, one store,
+/// one publish. Fields the request leaves out keep their stored values. The DID always
+/// comes from the user's key, never from the stored profile.
+async fn update_user_profile(
+    user_email: String,
+    body: UpdateProfileRequest,
+) -> Result<Agent, WsRpcError> {
+    let did = AgentService::get_user_did_by_email(&user_email)
+        .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
+    let stored = AgentService::with_global_instance(|agent_service| {
+        agent_service.load_user_agent_profile(&user_email)
+    })
+    .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
+    .unwrap_or_default();
+
+    let agent = Agent {
+        did,
+        direct_message_language: body.dm_language.or(stored.direct_message_language),
+        perspective: match body.public_perspective {
+            Some(perspective) => Some(DomainPerspective {
+                links: perspective
+                    .links
+                    .iter()
+                    .map(link_expression_input_to_decorated)
+                    .collect(),
+            }),
+            None => stored.perspective,
+        },
+    };
+    AgentService::with_global_instance(|agent_service| {
+        agent_service.store_user_agent_profile(&user_email, &agent)
+    })
+    .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
+
+    if let Err(e) =
+        AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email)).await
+    {
+        log::warn!(
+            "Failed to publish updated user profile to agent language: {}",
+            e
+        );
+    }
+    Ok(agent)
+}
+
+/// Announces a changed profile on `agent-updated`. The event stream filters the event by
+/// the DID in the payload.
+async fn publish_agent_updated(agent: &Agent) {
     get_global_pubsub()
         .await
         .publish(
             &AGENT_UPDATED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
+            &serde_json::to_string(agent).unwrap_or_else(|e| {
                 log::error!("Failed to serialize agent for pubsub: {e}");
                 String::new()
             }),
         )
         .await;
-
-    Ok(serde_json::to_value(agent)?)
 }
 
 /// Publishes the main agent to the agent language without holding up the caller.
@@ -311,6 +327,7 @@ fn spawn_main_agent_publish() {
 async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.generate")?;
 
     let body: GenerateAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -381,6 +398,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.lock")?;
 
     let body: LockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -408,10 +426,23 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.unlock")?;
 
     let body: UnlockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let agent = unlock_main_agent(body.passphrase).await?;
+    Ok(serde_json::to_value(agent)?)
+}
+
+/// Unlocks the main agent's wallet with `passphrase`, then starts what an
+/// unlocked agent needs (system languages, the Holochain conductor, the
+/// agent's profile publish) and announces the new status. Shared by
+/// `agent.unlock` and the executor's own unlock at startup
+/// ([`crate::unlock_agent_at_startup`]). Errs when the wallet rejects the
+/// passphrase; the returned status carries `error` when the wallet stayed
+/// locked or a service failed to start.
+pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus, WsRpcError> {
     let agent_instance = AgentService::global_instance();
     {
         let mut agent_service = agent_instance
@@ -421,7 +452,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             .as_mut()
             .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref
-            .unlock(body.passphrase.clone())
+            .unlock(passphrase.clone())
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
     }
 
@@ -439,7 +470,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         let language_language_only = config.language_language_only.unwrap_or(false);
 
         if config.run_holochain.unwrap_or(true) {
-            let startup = spawn_conductor_startup(body.passphrase.clone());
+            let startup = spawn_conductor_startup(passphrase);
             if let Err(e) = startup.load_core_languages(language_language_only).await {
                 log::error!("Error loading system languages: {:?}", e);
                 init_errors.push(format!("Failed to load system languages: {}", e));
@@ -491,7 +522,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         )
         .await;
 
-    Ok(serde_json::to_value(agent)?)
+    Ok(agent)
 }
 
 /// agent.sign — sign a message
@@ -502,8 +533,12 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let body: SignMessageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let sig = InternalAgentSignature::from_message(body.message)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    // A user session signs as the user, never as the node's main agent.
+    let sig = InternalAgentSignature::from_message_for_context(
+        body.message,
+        &session_agent_context(&ctx),
+    )
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let out: AgentSignature = sig.into();
     Ok(serde_json::to_value(out)?)
@@ -513,10 +548,22 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_app_management_by_users(&ctx)?;
 
     let request_id = params.require_str("id")?;
     apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
+}
+
+/// Approved apps belong to the node's operator. The default user capabilities include
+/// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
+fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
+    if ctx.user_email.is_some() {
+        return Err(WsRpcError::forbidden(
+            "Apps belong to the node's operator; a user session may not remove or revoke them",
+        ));
+    }
+    Ok(())
 }
 
 // ── Auth ──
@@ -610,10 +657,16 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_app_management_by_users(&ctx)?;
 
+    // The SDK sends the app's request id here; the field name promises the JWT. Both work,
+    // and a value that names no app answers 404 instead of a silent success (#1060).
     let token = params.require_str("token")?;
-    apps_map::revoke_app(&token).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    apps_map::revoke_app(&token).map_err(|e| match e {
+        apps_map::RevokeError::NotFound => WsRpcError::not_found(e.to_string()),
+        apps_map::RevokeError::Store(_) => WsRpcError::internal(e.to_string()),
+    })?;
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 // ── Status ──
@@ -681,6 +734,8 @@ async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<
 async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node's trust list decides whose languages this node installs and runs.
+    refuse_user_session(&ctx, "agent.addTrustedAgents")?;
 
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -702,6 +757,7 @@ async fn delete_trusted_agents(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.deleteTrustedAgents")?;
 
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -722,6 +778,8 @@ async fn delete_trusted_agents(
 async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The proofs belong to the node's main agent.
+    refuse_user_session(&ctx, "agent.getEntanglementProofs")?;
 
     let proofs = get_entanglement_proofs();
     Ok(serde_json::to_value(
@@ -736,17 +794,12 @@ async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.addEntanglementProofs")?;
 
-    let body: EntanglementProofsWrapper = serde_json::from_value(params.clone())
+    let body: AgentAddEntanglementProofsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // Check for preflight mode
-    let preflight = params
-        .get("preflight")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if preflight {
+    if body.preflight.unwrap_or(false) {
         let signed = sign_device_key(
             body.proofs
                 .first()
@@ -791,6 +844,7 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.deleteEntanglementProofs")?;
 
     let body: EntanglementProofsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -838,6 +892,7 @@ async fn entanglement_proof_preflight(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.entanglementProofPreflight")?;
 
     let body: EntanglementProofPreflightRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -852,32 +907,88 @@ async fn entanglement_proof_preflight(
 ///
 /// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("agent.get", get_agent);
-    map.register("agent.getApps", get_apps);
-    map.register("agent.byDid", get_agent_by_did);
-    map.register("agent.updateProfile", update_profile);
-    map.register("agent.generate", generate_agent);
-    map.register("agent.import", import_agent);
-    map.register("agent.lock", lock_agent);
-    map.register("agent.unlock", unlock_agent);
-    map.register("agent.sign", sign_message);
-    map.register("agent.removeApp", remove_app);
-    map.register("agent.requestCapability", request_capability);
-    map.register("agent.permitCapability", permit_capability_handler);
-    map.register("agent.generateJwt", generate_jwt);
-    map.register("agent.revokeToken", revoke_token);
-    map.register("agent.status", get_agent_status);
-    map.register("agent.isLocked", is_locked);
-    map.register("agent.getTrustedAgents", get_trusted_agents);
-    map.register("agent.addTrustedAgents", add_trusted_agents);
-    map.register("agent.deleteTrustedAgents", delete_trusted_agents);
-    map.register("agent.getEntanglementProofs", get_entanglement);
-    map.register("agent.addEntanglementProofs", add_entanglement);
-    map.register("agent.deleteEntanglementProofs", delete_entanglement);
-    map.register(
+    map.method::<NoParams, Agent>("agent.get", get_agent).read();
+    map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
+        .read();
+    map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
+        .read();
+    map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
+    map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
+        .long();
+    // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
+    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent);
+    map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent);
+    map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
+        .long();
+    map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message);
+    map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app);
+    map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability);
+    map.method::<PermitCapabilityRequest, String>(
+        "agent.permitCapability",
+        permit_capability_handler,
+    );
+    map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt);
+    map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token);
+    map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
+        .read();
+    map.method::<NoParams, bool>("agent.isLocked", is_locked)
+        .read();
+    map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
+        .read();
+    map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents);
+    map.method::<TrustedAgentsWrapper, Vec<String>>(
+        "agent.deleteTrustedAgents",
+        delete_trusted_agents,
+    );
+    map.method::<NoParams, Vec<EntanglementProof>>("agent.getEntanglementProofs", get_entanglement)
+        .read();
+    map.method::<AgentAddEntanglementProofsParams, Vec<EntanglementProof>>(
+        "agent.addEntanglementProofs",
+        add_entanglement,
+    );
+    map.method::<EntanglementProofsWrapper, Vec<EntanglementProof>>(
+        "agent.deleteEntanglementProofs",
+        delete_entanglement,
+    );
+    map.method::<EntanglementProofPreflightRequest, EntanglementProof>(
         "agent.entanglementProofPreflight",
         entanglement_proof_preflight,
-    );
+    )
+    .read();
+}
+
+// ── Contracts ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentByDidParams {
+    pub did: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRemoveAppParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRevokeTokenParams {
+    pub token: String,
+}
+
+/// `{ proofs }`, plus `preflight: true` to sign the first proof's device key
+/// instead of storing the proofs.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentAddEntanglementProofsParams {
+    pub proofs: Vec<EntanglementProofInput>,
+    #[ts(optional)]
+    pub preflight: Option<bool>,
 }
 
 #[cfg(test)]
@@ -990,5 +1101,145 @@ mod tests {
             link_expression_input_to_decorated(&input).status,
             Some(LinkStatus::Shared)
         );
+    }
+}
+
+#[cfg(test)]
+mod app_management_tests {
+    use crate::agent::capabilities::get_user_default_capabilities;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    // The default user capabilities include AGENT_UPDATE, which these calls check, so a user
+    // session could remove or revoke the operator's apps.
+    #[tokio::test]
+    async fn user_sessions_cannot_remove_or_revoke_apps() {
+        let user = Arc::new(RequestContext {
+            capabilities: Ok(get_user_default_capabilities()),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: false,
+            user_email: Some("apps.user@example.org".to_string()),
+            user_did: None,
+            cancel_token: None,
+            connection_id: None,
+        });
+        for (op, params) in [
+            ("agent.removeApp", json!({ "id": "some-request-id" })),
+            ("agent.revokeToken", json!({ "token": "some-request-id" })),
+        ] {
+            let err = build_handler_map()
+                .dispatch(op, params, user.clone())
+                .await
+                .expect_err(op);
+            assert_eq!(err.code, 403, "{op}: {}", err.message);
+        }
+    }
+}
+
+#[cfg(test)]
+mod revoke_token_tests {
+    use crate::agent::capabilities::*;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn operator() -> Arc<RequestContext> {
+        Arc::new(RequestContext {
+            capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: true,
+            user_email: None,
+            user_did: None,
+            cancel_token: None,
+            connection_id: None,
+        })
+    }
+
+    /// An approved app, as `agent.generateJwt` leaves it: its request id and its token.
+    fn approved_app() -> (String, String) {
+        crate::test_utils::use_test_apps_file();
+        let request_id = format!("revoke-test-{}", uuid::Uuid::new_v4());
+        let token = format!("app-token-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+        (request_id, token)
+    }
+
+    async fn revoke(value: &str) -> Result<serde_json::Value, (u16, String)> {
+        build_handler_map()
+            .dispatch("agent.revokeToken", json!({ "token": value }), operator())
+            .await
+            .map_err(|e| (e.code, e.message))
+    }
+
+    // #1060: revoking by the JWT, as the field name says, reported success and revoked
+    // nothing.
+    #[tokio::test]
+    async fn revoking_by_the_jwt_revokes_the_app() {
+        let (request_id, token) = approved_app();
+        revoke(&token).await.expect("the JWT names the app");
+        assert!(check_token_revoked(&token).is_err());
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoking_by_the_request_id_still_works() {
+        let (request_id, token) = approved_app();
+        revoke(&request_id)
+            .await
+            .expect("the SDK sends the request id");
+        assert!(check_token_revoked(&token).is_err());
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_value_that_names_no_app_is_an_error() {
+        let err = revoke("names-no-app").await.unwrap_err();
+        assert_eq!(err.0, 404, "{}", err.1);
+    }
+
+    // A failed write must not read as "no such app": the operator would stop looking, and a
+    // restart would bring the app back.
+    #[tokio::test]
+    async fn a_revoke_that_cannot_be_saved_is_a_server_error() {
+        let (request_id, token) = approved_app();
+        apps_map::set_data_file_path("/nonexistent-dir-for-revoke-test/apps.json".to_string());
+        let result = revoke(&request_id).await;
+        crate::test_utils::use_test_apps_file();
+
+        let err = result.unwrap_err();
+        assert_eq!(err.0, 500, "{}", err.1);
+        assert!(
+            check_token_revoked(&token).is_err(),
+            "the app stays revoked in memory"
+        );
+        apps_map::remove_app(&request_id).unwrap();
+    }
+
+    // The reply lists every app; with tokens in it, the caller could act as any of them.
+    #[tokio::test]
+    async fn the_revoke_reply_carries_no_token() {
+        let (request_id, _token) = approved_app();
+        let reply = revoke(&request_id)
+            .await
+            .expect("the request id names the app");
+        let apps = reply.as_array().expect("the reply lists the apps");
+        assert!(apps
+            .iter()
+            .any(|app| app["requestId"] == request_id.as_str()));
+        assert!(
+            apps.iter()
+                .all(|app| app["token"].as_str().unwrap_or_default().is_empty()),
+            "{reply}"
+        );
+        apps_map::remove_app(&request_id).unwrap();
     }
 }

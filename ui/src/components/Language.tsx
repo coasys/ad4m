@@ -91,10 +91,10 @@ const Language = (props: Props) => {
     for (const lang of langs) {
       const found = perspectives.find((p) => {
         if (p.neighbourhood) {
-          if (p.neighbourhood.linkLanguage === lang.address) {
+          if (p.neighbourhood.data.linkLanguage === lang.address) {
             return true;
           } else {
-            return p.neighbourhood.meta.links
+            return p.neighbourhood.data.meta.links
               .filter((l) => l.data.predicate === "language")
               .find((l) => l.data.target === lang.address);
           }

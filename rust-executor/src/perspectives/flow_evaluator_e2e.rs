@@ -122,6 +122,10 @@ pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str)
     .await
     .expect("mint_flow_instance");
 
+    // Writing the definition queued a sweep; let it run now rather than in
+    // the middle of whatever the test does next.
+    perspective.settle_flow_passes().await;
+
     Fixture {
         perspective,
         task_shape: shapes.remove(0),

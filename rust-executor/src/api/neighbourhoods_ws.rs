@@ -1,7 +1,9 @@
 //! Neighbourhood WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::{create_signed_expression, AgentContext};
@@ -20,7 +22,7 @@ async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let handle = install_neighbourhood_with_context(body.url, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -38,7 +40,7 @@ async fn publish_neighbourhood(
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
         &body.perspective_uuid,
         body.link_language,
@@ -94,7 +96,7 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: BroadcastRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -117,7 +119,7 @@ async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     let body: SignalRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -140,7 +142,7 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let body: SetOnlineStatusRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -187,7 +189,7 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
     let current_user_did = crate::agent::did_for_context(&agent_context)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -218,12 +220,90 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("neighbourhood.join", join_neighbourhood);
-    map.register("neighbourhood.publish", publish_neighbourhood);
-    map.register("neighbourhood.sendBroadcast", send_broadcast);
-    map.register("neighbourhood.sendSignal", send_signal);
-    map.register("neighbourhood.setOnlineStatus", set_online_status);
-    map.register("neighbourhood.hasTelepresence", has_telepresence);
-    map.register("neighbourhood.onlineAgents", online_agents);
-    map.register("neighbourhood.otherAgents", other_agents);
+    map.method::<JoinNeighbourhoodRequest, PerspectiveHandle>(
+        "neighbourhood.join",
+        join_neighbourhood,
+    )
+    .long();
+    map.method::<PublishNeighbourhoodRequest, String>(
+        "neighbourhood.publish",
+        publish_neighbourhood,
+    )
+    .long();
+    map.method::<NeighbourhoodBroadcastParams, bool>("neighbourhood.sendBroadcast", send_broadcast);
+    map.method::<NeighbourhoodSignalParams, bool>("neighbourhood.sendSignal", send_signal);
+    map.method::<NeighbourhoodOnlineStatusParams, bool>(
+        "neighbourhood.setOnlineStatus",
+        set_online_status,
+    );
+    map.method::<NeighbourhoodUuidParams, bool>("neighbourhood.hasTelepresence", has_telepresence)
+        .read();
+    map.method::<NeighbourhoodUuidParams, Vec<OnlineAgent>>(
+        "neighbourhood.onlineAgents",
+        online_agents,
+    )
+    .read();
+    map.method::<NeighbourhoodUuidParams, Vec<String>>("neighbourhood.otherAgents", other_agents)
+        .read();
+}
+
+// ── Contracts ──
+
+/// A perspective to sign and send: signed links when `signed` is true or
+/// absent, bare links when `signed` is false.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum NeighbourhoodPerspectivePayload {
+    Signed(NeighbourhoodSignedPerspective),
+    Unsigned(PerspectiveUnsignedInput),
+}
+
+/// Wire shape of `crate::types::PerspectiveInput`, named apart from the
+/// api `PerspectiveInput` so the two TypeScript files do not collide.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodSignedPerspective {
+    pub links: Vec<LinkExpressionInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodUuidParams {
+    pub uuid: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodBroadcastParams {
+    pub uuid: String,
+    pub payload: NeighbourhoodPerspectivePayload,
+    #[ts(optional)]
+    pub signed: Option<bool>,
+    #[ts(optional)]
+    pub loopback: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodSignalParams {
+    pub uuid: String,
+    pub remote_agent_did: String,
+    pub payload: NeighbourhoodPerspectivePayload,
+    #[ts(optional)]
+    pub signed: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodOnlineStatusParams {
+    pub uuid: String,
+    pub status: NeighbourhoodPerspectivePayload,
+    #[ts(optional)]
+    pub signed: Option<bool>,
 }

@@ -184,6 +184,12 @@ export interface TraverseOptions {
    * happened to return first. A global `limit`/`offset` is applied to the
    * sliced union afterwards, not before it.
    *
+   * A `where` the store cannot evaluate (a bare `author` condition, for one)
+   * is applied after hydration, so after the slice: a row it removes has
+   * still taken one of its anchor's places, and that anchor comes back with
+   * fewer than N even when more matching rows exist. Filtering first would
+   * mean fetching every anchor's rows whole, which is what the limit avoids.
+   *
    * Refused alongside `levels`, which applies its own per-anchor limit at
    * every depth.
    */
@@ -211,6 +217,10 @@ export interface TraverseOptions {
    *
    * A global `limit`/`offset` applies to that flat union once, after every level has been cut to
    * its own breadth — not to each level.
+   *
+   * As with `limitPerAnchor`, each level is cut before any `where` the store cannot evaluate, so a
+   * row that filter removes still took a place at its level. The walk has already descended below
+   * that row by then, so its own replies can come back without it.
    *
    * Combining this with `transitive` or `limitPerAnchor` is an **error**, not a preference the
    * executor resolves: `transitive` is the unbounded form of the same walk, and `limitPerAnchor`
@@ -325,6 +335,13 @@ export type Query = {
    * Individual relations can still be overridden via `include` (explicit entries take precedence).
    */
   includeAll?: boolean;
+  /**
+   * For a query over several classes (`Ad4mModel.findAllOf` / `queryOf`):
+   * the class names a record that conforms to several of them is read as,
+   * most wanted first. Without it the most specific requested class wins.
+   * Ranks, never excludes. Ignored by a single-class query.
+   */
+  preferClasses?: string[];
   where?: Where;
   order?: Order;
   offset?: number;
@@ -753,6 +770,8 @@ export interface RelationMetadata {
   predicate: string;
   /** Custom getter code */
   getter?: string;
+  /** No writer for this relation: `save()` and `create()` skip it */
+  readOnly?: boolean;
   /** Whether stored locally only */
   local?: boolean;
   /** Link direction: 'forward' for HasMany/HasOne, 'reverse' for BelongsToMany/BelongsToOne */

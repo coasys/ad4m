@@ -1,4 +1,5 @@
 import { Perspective } from "../perspectives/Perspective";
+import type { Agent as WireAgent } from "../generated/api/Agent";
 import { ExpressionGeneric } from "../expression/Expression";
 
 /**  AD4M's representation of an Agent
@@ -41,6 +42,13 @@ export class Agent {
     } else {
       this.perspective = new Perspective();
     }
+  }
+
+  /** Build an Agent (with its perspective's query helpers) from the executor's wire shape. */
+  static fromWire(wire: WireAgent): Agent {
+    const agent = new Agent(wire.did, Perspective.fromWire(wire.perspective));
+    agent.directMessageLanguage = wire.directMessageLanguage;
+    return agent;
   }
 }
 export class AgentExpression extends ExpressionGeneric(Agent) {}

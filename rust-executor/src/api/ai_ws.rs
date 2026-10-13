@@ -1,17 +1,23 @@
 //! AI WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
-use crate::types::{AITask, AITaskInput, ModelInput, ModelType, RequestContext};
+use crate::types::{
+    AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, RequestContext,
+    VoiceActivityParamsInput,
+};
 use base64::Engine;
 
+use super::guards::refuse_user_session;
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
     let global_free =
@@ -43,9 +49,23 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let models: Vec<Model> = Ad4mDb::with_global_instance(|db| db.get_models())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .into_iter()
+        .map(|model| model_for_session(model, &ctx))
+        .collect();
     Ok(serde_json::to_value(models)?)
+}
+
+/// A model as a session may see it. A user session sees the model but not its provider
+/// key: the key belongs to the node's operator, and anyone holding it can spend on it.
+fn model_for_session(mut model: Model, ctx: &RequestContext) -> Model {
+    if ctx.user_email.is_some() {
+        if let Some(api) = model.api.as_mut() {
+            api.api_key = String::new();
+        }
+    }
+    model
 }
 
 /// `ai.discoverModels` — what does this endpoint serve, and does this key work?
@@ -66,12 +86,14 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// credentials, so this widens reach and not authority; and the body is the
 /// reason the endpoint is worth having, because a status alone does not
 /// separate a bad key from a bad model name from a host that is not an LLM.
-/// Revisit it if AI_CREATE is ever granted more widely than to the operator of
-/// the node — the reach is a cleaner read primitive than `addModel` plus a
+/// The default user capabilities include AI_CREATE, so the call also refuses
+/// user sessions: the reach is a cleaner read primitive than `addModel` plus a
 /// prompt, needing no model and no completion.
 async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node sends a request to a URL the caller chooses.
+    refuse_user_session(&ctx, "ai.discoverModels")?;
 
     let base_url = params.require_str("baseUrl")?;
     let base_url = url::Url::parse(&base_url)
@@ -135,6 +157,8 @@ pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRp
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Node-wide settings: every user's prompts go to the models and keys set here.
+    refuse_user_session(&ctx, "ai.addModel")?;
 
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
@@ -156,6 +180,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.updateModel")?;
 
     let id = params.require_str("id")?;
     let model: ModelInput =
@@ -178,6 +203,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.removeModel")?;
 
     let id = params.require_str("id")?;
 
@@ -196,6 +222,7 @@ async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "ai.setDefaultModel")?;
 
     let id = params.require_str("id")?;
     let body: SetDefaultModelRequest = serde_json::from_value(params.clone())
@@ -208,7 +235,13 @@ async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     service
         .set_default_model(body.model_type, id)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| {
+            if e.downcast_ref::<crate::db::InvalidDefaultModel>().is_some() {
+                WsRpcError::bad_request(e.to_string())
+            } else {
+                WsRpcError::internal(e.to_string())
+            }
+        })?;
 
     Ok(Value::Bool(true))
 }
@@ -232,7 +265,9 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         None
     };
 
-    Ok(serde_json::to_value(model)?)
+    Ok(serde_json::to_value(
+        model.map(|model| model_for_session(model, &ctx)),
+    )?)
 }
 
 async fn get_model_loading_status(
@@ -378,7 +413,7 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(&ctx.auth_token)?;
 
-    let body: OpenTranscriptionRequest = serde_json::from_value(params)
+    let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
@@ -390,6 +425,7 @@ async fn open_transcription_stream(
             body.model_id,
             body.params.map(|p| p.into()),
             ctx.auth_token.clone(),
+            ctx.is_admin_credential,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -404,7 +440,7 @@ async fn close_transcription_stream(
     check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: CloseTranscriptionRequest = serde_json::from_value(params)
+    let body: AiTranscriptionCloseParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
@@ -420,22 +456,45 @@ async fn close_transcription_stream(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("ai.models", list_models);
-    map.register("ai.discoverModels", discover_models);
-    map.register("ai.addModel", add_model);
-    map.register("ai.updateModel", update_model);
-    map.register("ai.removeModel", remove_model);
-    map.register("ai.setDefaultModel", set_default_model);
-    map.register("ai.getDefaultModel", get_default_model);
-    map.register("ai.modelLoadingStatus", get_model_loading_status);
-    map.register("ai.tasks", list_tasks);
-    map.register("ai.addTask", add_task);
-    map.register("ai.updateTask", update_task);
-    map.register("ai.removeTask", remove_task);
-    map.register("ai.prompt", ai_prompt);
-    map.register("ai.embed", ai_embed);
-    map.register("ai.transcriptionOpen", open_transcription_stream);
-    map.register("ai.transcriptionClose", close_transcription_stream);
+    map.method::<NoParams, Vec<Model>>("ai.models", list_models)
+        .read();
+    // The provider's own model ids.
+    map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
+        .read();
+    // The new model's id.
+    map.method::<AiAddModelParams, String>("ai.addModel", add_model)
+        .long();
+    map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model);
+    map.method::<AiIdParams, bool>("ai.removeModel", remove_model);
+    map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model);
+    map.method::<AiGetDefaultModelParams, Option<Model>>("ai.getDefaultModel", get_default_model)
+        .read();
+    map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
+        "ai.modelLoadingStatus",
+        get_model_loading_status,
+    )
+    .read();
+    map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
+        .read();
+    map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task);
+    map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task);
+    map.method::<AiIdParams, bool>("ai.removeTask", remove_task);
+    // The completion text.
+    map.method::<PromptRequest, String>("ai.prompt", ai_prompt)
+        .long();
+    // The embedding vector as JSON, zlib-deflated, base64-encoded.
+    map.method::<EmbedRequest, String>("ai.embed", ai_embed)
+        .long();
+    // The new stream's id.
+    map.method::<AiTranscriptionOpenParams, String>(
+        "ai.transcriptionOpen",
+        open_transcription_stream,
+    );
+    // Always the string `"true"`.
+    map.method::<AiTranscriptionCloseParams, String>(
+        "ai.transcriptionClose",
+        close_transcription_stream,
+    );
 }
 
 // ── HTTP-only: binary transcription feed ────────────────────────────────────
@@ -517,12 +576,209 @@ pub async fn feed_transcription_stream(
         }
     }
 
-    if errors.len() == stream_ids.len() {
+    feed_outcome(&errors, stream_ids.len())?;
+    Ok(Json("true".to_string()))
+}
+
+/// Whether a feed to `stream_count` streams succeeded, given the streams that failed.
+///
+/// Any failure fails the request. When only some streams failed, the audio has already reached
+/// the others, so the message says so and names the failures: a caller retrying the whole feed
+/// would give the streams that took it the same audio twice.
+pub(crate) fn feed_outcome(errors: &[String], stream_count: usize) -> Result<(), ApiError> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    if errors.len() == stream_count {
         return Err(ApiError::Internal(format!(
             "All streams failed: {}",
             errors.join("; ")
         )));
     }
+    Err(ApiError::Internal(format!(
+        "{} of {} streams failed; the others were fed: {}",
+        errors.len(),
+        stream_count,
+        errors.join("; ")
+    )))
+}
 
-    Ok(Json("true".to_string()))
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiIdParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiDiscoverModelsParams {
+    pub base_url: String,
+    /// Parsed leniently (`openai`, `OpenAi`, `OPEN_AI`, ...); defaults to OpenAI.
+    #[ts(optional)]
+    pub api_type: Option<String>,
+    #[ts(optional)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiAddModelParams {
+    pub model: ModelInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpdateModelParams {
+    pub id: String,
+    pub model: ModelInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiSetDefaultModelParams {
+    pub id: String,
+    pub model_type: ModelType,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiGetDefaultModelParams {
+    pub model_type: ModelType,
+}
+
+/// One of `model` or `modelId` is required; `model` wins when both are set.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiModelLoadingStatusParams {
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[ts(optional)]
+    pub model_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiAddTaskParams {
+    pub task: AITaskInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpdateTaskParams {
+    pub task: AITask,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiTranscriptionOpenParams {
+    pub model_id: String,
+    #[ts(optional)]
+    pub params: Option<VoiceActivityParamsInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiTranscriptionCloseParams {
+    pub stream_id: String,
+}
+
+#[cfg(test)]
+mod model_key_tests {
+    use super::*;
+    use crate::types::{ModelApi, ModelApiType};
+
+    fn remote_model() -> Model {
+        Model {
+            id: "m1".to_string(),
+            name: "Remote".to_string(),
+            api: Some(ModelApi {
+                base_url: url::Url::parse("https://api.example.org/v1").unwrap(),
+                api_key: "sk-provider-secret".to_string(),
+                model: "gpt".to_string(),
+                api_type: ModelApiType::OpenAi,
+                max_num_ctx: None,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        }
+    }
+
+    fn ctx(user_email: Option<&str>) -> RequestContext {
+        RequestContext {
+            capabilities: Ok(vec![]),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: false,
+            user_email: user_email.map(String::from),
+            user_did: None,
+            cancel_token: None,
+            connection_id: None,
+        }
+    }
+
+    #[test]
+    fn user_sessions_see_models_without_provider_keys() {
+        let model = model_for_session(remote_model(), &ctx(Some("a@example.org")));
+        assert_eq!(model.api.as_ref().unwrap().api_key, "");
+        assert_eq!(model.api.as_ref().unwrap().model, "gpt");
+    }
+
+    // Goes through the `ai.getDefaultModel` handler, which returned the stored model
+    // unfiltered.
+    #[tokio::test]
+    async fn user_sessions_get_the_default_model_without_its_provider_key() {
+        use crate::types::ModelApiInput;
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: "Remote".to_string(),
+                api: Some(ModelApiInput {
+                    base_url: "https://api.example.org/v1".to_string(),
+                    api_key: "sk-provider-secret".to_string(),
+                    model: "gpt".to_string(),
+                    api_type: "OPEN_AI".to_string(),
+                    max_num_ctx: None,
+                }),
+                local: None,
+                model_type: ModelType::Llm,
+            })
+        })
+        .unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
+        let session = |user_email: Option<&str>| {
+            Arc::new(RequestContext {
+                capabilities: Ok(vec![AI_READ_CAPABILITY.clone()]),
+                ..ctx(user_email)
+            })
+        };
+        let params = serde_json::json!({ "modelType": "LLM" });
+
+        let user = get_default_model(params.clone(), session(Some("a@example.org")))
+            .await
+            .unwrap();
+        assert_eq!(user["id"], id.as_str());
+        assert_eq!(user["api"]["apiKey"], "");
+
+        let operator = get_default_model(params, session(None)).await.unwrap();
+        assert_eq!(operator["api"]["apiKey"], "sk-provider-secret");
+    }
+
+    #[test]
+    fn operator_sessions_see_the_keys() {
+        let model = model_for_session(remote_model(), &ctx(None));
+        assert_eq!(model.api.as_ref().unwrap().api_key, "sk-provider-secret");
+    }
 }

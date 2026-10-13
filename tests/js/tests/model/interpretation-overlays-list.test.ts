@@ -81,6 +81,14 @@ describe("PerspectiveProxy.interpretationOverlays()", function () {
     ]);
   });
 
+  it("lists `kind` decoded when it is stored literal-encoded, as the engine writes it", async () => {
+    // The interpretation engine writes `kind` through the class setter, which stores a
+    // non-URI string as `literal:string:create`. The listing used to pass that through (#1136).
+    await p.addLinks([new Link({ source: "test://task/d", predicate: KIND, target: "literal:string:create" })]);
+    const overlays = await p.interpretationOverlays();
+    expect(overlays.find((o) => o.base === "test://task/d")?.kind).to.equal("create");
+  });
+
   it("concurrent callers get the same list, each in its own array", async () => {
     const results = await Promise.all([1, 2, 3, 4, 5].map(() => p.interpretationOverlays()));
     for (const r of results) expect(r).to.deep.equal(results[0]);

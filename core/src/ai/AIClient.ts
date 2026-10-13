@@ -1,9 +1,9 @@
-import { ApiClient, CallOptions, longCall } from "../apiClient";
+import {ApiClient, CallOptions } from '../apiClient';
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import { ModelInput, Model, ModelType } from "./AITypes"
-import type { PromptRequest, EmbedRequest, SetDefaultModelRequest } from "../generated/api";
+import type { ModelInput as ModelInputData } from "../generated/api/ModelInput";
 
 export class AIClient {
     #apiClient: ApiClient;
@@ -13,17 +13,13 @@ export class AIClient {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
-    private serializeModelInput(model: ModelInput): Record<string, unknown> {
-        const payload: Record<string, unknown> = { ...model };
-        if ('modelType' in payload) {
-            payload.type = payload.modelType;
-            delete payload.modelType;
-        }
-        return payload;
+    /** The executor names the model type `type`. */
+    private serializeModelInput({ modelType, ...model }: ModelInput): ModelInputData {
+        return { ...model, type: modelType };
     }
 
     async getModels(): Promise<Model[]> {
-        return this.#apiClient.call<Model[]>('ai.models');
+        return this.#apiClient.call('ai.models', {});
     }
 
     /**
@@ -39,64 +35,67 @@ export class AIClient {
      * that is not Anthropic speaks.
      */
     async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
-        return this.#apiClient.call<string[]>('ai.discoverModels', { baseUrl, apiKey, apiType });
+        return this.#apiClient.call('ai.discoverModels', { baseUrl, apiKey, apiType });
     }
 
     async addModel(model: ModelInput, options?: CallOptions): Promise<string> {
-        return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) }, longCall(options));
+        return this.#apiClient.call('ai.addModel', { model: this.serializeModelInput(model) }, options);
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        return this.#apiClient.call<boolean>('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
+        return this.#apiClient.call('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
     }
 
     async removeModel(modelId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>('ai.removeModel', { id: modelId });
+        return this.#apiClient.call('ai.removeModel', { id: modelId });
     }
 
     async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>('ai.setDefaultModel', { id: modelId, modelType });
+        return this.#apiClient.call('ai.setDefaultModel', { id: modelId, modelType });
     }
 
     async getDefaultModel(modelType: ModelType): Promise<Model> {
-        return this.#apiClient.call<Model>('ai.getDefaultModel', { modelType });
+        return this.#apiClient.call('ai.getDefaultModel', { modelType });
     }
 
     async tasks(): Promise<AITask[]> {
-        return this.#apiClient.call<AITask[]>('ai.tasks');
+        return this.#apiClient.call('ai.tasks', {});
     }
 
     async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData?: string): Promise<AITask> {
         const task = new AITaskInput(name, modelId, systemPrompt, promptExamples, metaData);
-        return this.#apiClient.call<AITask>('ai.addTask', { task });
+        return this.#apiClient.call('ai.addTask', { task });
     }
 
-    async removeTask(taskId: string): Promise<AITask> {
-        return this.#apiClient.call<AITask>('ai.removeTask', { id: taskId });
+    async removeTask(taskId: string): Promise<boolean> {
+        return this.#apiClient.call('ai.removeTask', { id: taskId });
     }
 
     async updateTask(taskId: string, task: AITask): Promise<AITask> {
-        return this.#apiClient.call<AITask>('ai.updateTask', {
-            id: taskId,
+        return this.#apiClient.call('ai.updateTask', {
             task: {
+                taskId,
                 name: task.name,
                 modelId: task.modelId,
                 systemPrompt: task.systemPrompt,
-                promptExamples: task.promptExamples
+                promptExamples: task.promptExamples,
+                metaData: task.metaData,
+                createdAt: task.createdAt,
+                updatedAt: task.updatedAt,
             }
         });
     }
 
     async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
-        return this.#apiClient.call<AIModelLoadingStatus>('ai.modelLoadingStatus', { model });
+        return this.#apiClient.call('ai.modelLoadingStatus', { model });
     }
 
     async prompt(taskId: string, prompt: string, options?: CallOptions): Promise<string> {
-        return this.#apiClient.call<string>('ai.prompt', { taskId, prompt }, longCall(options));
+        return this.#apiClient.call('ai.prompt', { taskId, prompt }, options);
     }
 
     async embed(modelId: string, text: string, options?: CallOptions): Promise<Array<number>> {
-        const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text }, longCall(options));
+        const aiEmbed = await this.#apiClient.call('ai.embed', { modelId, text }, options);
 
         const compressed = base64js.toByteArray(aiEmbed);
         // NB: pako v1 accepts `{ to: 'string' }`, pako v2 wants `{ toText: true }`,
@@ -120,15 +119,11 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        const streamId = await this.#apiClient.call<string>('ai.transcriptionOpen', { modelId, params });
+        const streamId = await this.#apiClient.call('ai.transcriptionOpen', { modelId, params });
 
-        const unsub = this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
-                    streamCallback(data.text as string);
-                }
-            }
-        );
+        const unsub = this.#apiClient.on('transcription-text', (event) => {
+            if (event.streamId === streamId && event.text) streamCallback(event.text);
+        });
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
@@ -138,7 +133,7 @@ export class AIClient {
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
         try {
-            await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
+            await this.#apiClient.call('ai.transcriptionClose', { streamId });
         } finally {
             this.#transcriptionUnsubscribers.get(streamId)?.();
             this.#transcriptionUnsubscribers.delete(streamId);
@@ -153,6 +148,9 @@ export class AIClient {
      * NOTE: This method still uses HTTP fetch because binary audio data
      * cannot be efficiently sent over the JSON-based WebSocket RPC protocol.
      * Transcription results are delivered via the WS event channel.
+     *
+     * Rejects if any stream did not take the audio. When only some failed, the message names them
+     * and the others were fed, so retry only the failed ids.
      */
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array | number[]): Promise<void> {
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];

@@ -114,6 +114,9 @@ async fn set_consensus_rule(f: &mut Fixture, state_uri: &str, rule: &str) {
         LinkStatus::Local,
     )
     .await;
+    // A rule is part of the definition, so this queued a sweep. Wait it out,
+    // or it can record an edge before the test's own pass does.
+    f.perspective.settle_flow_passes().await;
 }
 
 async fn consensus_pass(f: &mut Fixture) -> Vec<FireOutcome> {

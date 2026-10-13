@@ -346,6 +346,29 @@ export default function aiTests(testContext: TestContext) {
                 await ad4mClient.ai.removeModel(id)
             })
 
+            it('keeps a default for a model type other than LLM', async () => {
+                // Setting a default used to persist only for LLM: for every other type
+                // the call answered true and wrote nothing, so the default read back null.
+                const ad4mClient = testContext.ad4mClient!
+
+                const id = await ad4mClient.ai.addModel({
+                    name: "TestDefaultEmbeddingModel",
+                    api: {
+                        baseUrl: "https://api.example.com/",
+                        apiKey: "test-api-key",
+                        model: "embedder",
+                        apiType: "OPEN_AI"
+                    },
+                    modelType: "EMBEDDING"
+                })
+
+                expect(await ad4mClient.ai.setDefaultModel("EMBEDDING", id)).to.be.true
+                const defaultModel = await ad4mClient.ai.getDefaultModel("EMBEDDING")
+                expect(defaultModel?.id).to.equal(id)
+
+                await ad4mClient.ai.removeModel(id)
+            })
+
             it.skip('can use "default" as model_id in tasks and prompting works', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 await ad4mClient.ai.setDefaultModel("LLM", testModelId)
@@ -430,8 +453,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(updatedTask.promptExamples).to.deep.equal([{ input: "Updated input", output: "Updated output" }]);
 
                 // Remove a task
-                const removedTask = await ad4mClient.ai.removeTask(newTask.taskId);
-                expect(removedTask).to.deep.equal(updatedTask);
+                expect(await ad4mClient.ai.removeTask(newTask.taskId)).to.equal(true);
 
                 // Verify task is removed
                 const tasksAfterRemoval = await ad4mClient.ai.tasks();

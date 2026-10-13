@@ -9,11 +9,12 @@
     "build": "patch-package && tsc && pnpm run bundle",
     "bundle": "rollup -c rollup.config.js",
     "test": "jest --forceExit",
-    "generate:api-types": "cd ../rust-executor && TS_RS_EXPORT_DIR=../core/src/generated/api/ cargo test --lib 2>/dev/null && echo \"API types generated to core/src/generated/api/\""
+    "generate:api-types": "cd ../rust-executor && TS_RS_EXPORT_DIR=../core/src/generated/api/ cargo test --lib -- export_ 2>/dev/null && echo \"API types generated to core/src/generated/api/\""
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/coasys/ad4m.git"
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "core"
   },
   "author": {
     "name": "Nicolas Luck",
@@ -65,5 +66,5 @@
       "pako": "2.1.0"
     }
   },
-  "version": "0.13.0-test-interpretation-2"
+  "version": "0.13.1-staging.1"
 }

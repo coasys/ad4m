@@ -94,6 +94,22 @@ fn target_to_storage_term(target: &str) -> Term {
     Term::NamedNode(NamedNode::new_unchecked(target))
 }
 
+/// The spelling a link target reads back with after a store round trip. A
+/// `literal:` target is stored as an RDF literal and re-encoded on the way
+/// out, so `literal:string:a b` reads back as `literal:string:a%20b`. For
+/// comparing a written target with one read from the store.
+pub(crate) fn canonical_target(target: &str) -> String {
+    storage_term_to_target_string(&target_to_storage_term(target))
+}
+
+/// Whether a link target is stored as an RDF literal (`literal:string:`,
+/// `:number:`, `:boolean:`, `:json:`), not as a node. A link source is always
+/// stored as a node, so a triple whose object is such a literal never links
+/// into a record: it is a value on its source.
+pub(crate) fn stored_as_literal(target: &str) -> bool {
+    matches!(target_to_storage_term(target), Term::Literal(_))
+}
+
 /// Inverse of [`target_to_storage_term`]: render a stored [`Term`] back into
 /// the wire-format URL string the SDK / hydration layer expect.
 ///
@@ -1188,6 +1204,79 @@ impl SparqlStore {
     /// Get all links with the given target.
     pub fn get_links_by_target(&self, target: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
         self.query_links(None, None, Some(target), None, None, None)
+    }
+
+    /// Whether the link triple `source predicate target` is stored, whoever
+    /// wrote it. One index lookup on the direct triple, without reading the
+    /// link's annotations.
+    pub(crate) fn has_triple(
+        &self,
+        source: &str,
+        predicate: &str,
+        target: &str,
+    ) -> Result<bool, Error> {
+        let target = target_to_storage_term(target);
+        Ok(self.store.contains(QuadRef::new(
+            NamedNodeRef::new_unchecked(source),
+            NamedNodeRef::new_unchecked(predicate),
+            target.as_ref(),
+            GraphNameRef::DefaultGraph,
+        ))?)
+    }
+
+    /// `(predicate, other end)` of every link triple with `node` at either
+    /// end, and with `predicate` when one is given, other ends in wire
+    /// spelling. `None` when there are more than `limit`: the caller asked to
+    /// stop there.
+    pub(crate) fn neighbours(
+        &self,
+        node: &str,
+        predicate: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<Vec<(String, String)>>, Error> {
+        let mut out = Vec::new();
+        let as_subject = NamedNodeRef::new_unchecked(node);
+        let predicate = predicate.map(NamedNodeRef::new_unchecked);
+        for quad in self.store.quads_for_pattern(
+            Some(as_subject.into()),
+            predicate,
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            let quad = quad?;
+            out.push((
+                quad.predicate.as_str().to_string(),
+                storage_term_to_target_string(&quad.object),
+            ));
+            if out.len() > limit {
+                return Ok(None);
+            }
+        }
+        let as_object = target_to_storage_term(node);
+        for quad in self.store.quads_for_pattern(
+            None,
+            predicate,
+            Some(as_object.as_ref()),
+            Some(GraphNameRef::DefaultGraph),
+        ) {
+            let quad = quad?;
+            let NamedOrBlankNode::NamedNode(source) = &quad.subject else {
+                continue;
+            };
+            // A reifier's annotations can carry the same literal; they are
+            // not links.
+            if source.as_str().starts_with("link:") {
+                continue;
+            }
+            out.push((
+                quad.predicate.as_str().to_string(),
+                source.as_str().to_string(),
+            ));
+            if out.len() > limit {
+                return Ok(None);
+            }
+        }
+        Ok(Some(out))
     }
 
     /// Get all links with the given predicate.
@@ -3344,8 +3433,13 @@ mod tests {
         let signer = TestSigner::generate();
         let mut link = signed_link_without_verdict(&signer, "ad4m://derive-bad");
         // Same length, still valid hex, wrong bytes: this reaches the crypto
-        // and fails there, rather than erroring out of `hex::decode`.
-        link.proof.signature = link.proof.signature.replace('a', "b");
+        // and fails there, rather than erroring out of `hex::decode`. Flip
+        // the first byte with XOR: it always changes. A character replace
+        // such as 'a' -> 'b' is a no-op when the random signature happens
+        // to contain no 'a' (about 1 run in 3870).
+        let mut sig = hex::decode(&link.proof.signature).unwrap();
+        sig[0] ^= 0xff;
+        link.proof.signature = hex::encode(sig);
         svc.add_link(&link).unwrap();
 
         let links = svc.get_all_links().unwrap();
@@ -4918,6 +5012,35 @@ mod tests {
         // Caller-supplied SPARQL gets the stored value, not the wire form
         // `query_with_graphs` would re-encode `?target` into.
         assert_eq!(rows[0]["target"], "hello");
+    }
+
+    // ── Source literal round-trip (no normalization) ─────────────────────
+
+    #[test]
+    fn test_literal_string_source_remove_round_trip() {
+        let signer = TestSigner::generate();
+        let store = new_service();
+        let link = make_link(&signer, "literal:string:hello", "test://pred", "test://obj");
+        store.add_link(&link).expect("add");
+
+        // Verify it was added
+        let all = store.get_all_links().expect("get_all");
+        assert!(
+            all.iter().any(|l| l.data.source == "literal:string:hello"),
+            "link should appear in get_all_links"
+        );
+
+        // Remove it
+        store.remove_link(&link).expect("remove");
+
+        // Verify removal
+        let all_after = store.get_all_links().expect("get_all_after");
+        assert!(
+            !all_after
+                .iter()
+                .any(|l| l.data.source == "literal:string:hello"),
+            "link should no longer appear after removal"
+        );
     }
 }
 
