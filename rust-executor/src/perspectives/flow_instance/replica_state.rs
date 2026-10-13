@@ -92,6 +92,16 @@ impl From<Option<FlowReplicaStateRow>> for PriorRow {
     }
 }
 
+/// What [`FlowReplicaState::record_pass`] did: the row it found, and the
+/// marks it inserted. Two passes for one agent can overlap (a vote's own
+/// pass and a sync-triggered one); the transaction that inserts a mark is
+/// the one that reports its edge, so each edge is reported once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassRecord {
+    pub prior: PriorRow,
+    pub newly_marked: Vec<String>,
+}
+
 /// Thin service over [`Ad4mDb`]'s two flow tables. Stateless: every call
 /// names the perspective and the agent.
 pub struct FlowReplicaState;
@@ -162,18 +172,19 @@ impl FlowReplicaState {
         state: &str,
     ) -> anyhow::Result<bool> {
         let before = Self::record_pass(perspective, agent_did, instance, Some(state), &[])?;
-        Ok(before != PriorRow::Derived(state.to_string()))
+        Ok(before.prior != PriorRow::Derived(state.to_string()))
     }
 
     /// One pass's write: the state (when `Some`) and the new fired marks,
-    /// in one transaction. Returns what the row held before.
+    /// in one transaction. Returns what the row held before and which of
+    /// `fired` this call was the first to mark.
     pub fn record_pass(
         perspective: &str,
         agent_did: &str,
         instance: &str,
         state: Option<&str>,
         fired: &[String],
-    ) -> anyhow::Result<PriorRow> {
+    ) -> anyhow::Result<PassRecord> {
         if state == Some("") {
             return Err(anyhow::anyhow!(
                 "an empty state would read as `not yet derived`; refusing to record it for {instance}"
@@ -183,7 +194,10 @@ impl FlowReplicaState {
         Ad4mDb::with_global_instance(|db| {
             db.record_flow_replica_pass(perspective, agent_did, instance, state, fired, &at)
         })
-        .map(PriorRow::from)
+        .map(|(before, newly_marked)| PassRecord {
+            prior: PriorRow::from(before),
+            newly_marked,
+        })
         .map_err(|e| anyhow::anyhow!("recording the flow pass over {instance}: {e}"))
     }
 
@@ -360,9 +374,27 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            FlowReplicaState::record_pass(&p, ALICE, "i", Some("open"), &[]).unwrap(),
+            FlowReplicaState::record_pass(&p, ALICE, "i", Some("open"), &[])
+                .unwrap()
+                .prior,
             PriorRow::Minted
         );
+    }
+
+    /// Two passes that both found an edge unmarked: only the first to record
+    /// it gets the mark back as new, so only that one reports the edge.
+    #[test]
+    fn a_mark_is_new_to_exactly_one_pass() {
+        let p = fresh();
+        let marks = ["p1".to_string(), "p2".to_string()];
+        let first = FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &marks).unwrap();
+        let second = FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &marks).unwrap();
+        assert_eq!(first.newly_marked, marks.to_vec());
+        assert!(second.newly_marked.is_empty());
+        assert_eq!(second.prior, PriorRow::Derived("done".into()));
+        // Per agent: Bob's first record of the same marks is new to him.
+        let bob = FlowReplicaState::record_pass(&p, BOB, "i", Some("done"), &marks).unwrap();
+        assert_eq!(bob.newly_marked, marks.to_vec());
     }
 
     /// Seeding never clobbers a derived state.
@@ -382,7 +414,7 @@ mod tests {
     #[test]
     fn record_pass_writes_state_and_marks_and_returns_the_prior_row() {
         let p = fresh();
-        let prior = FlowReplicaState::record_pass(
+        let first = FlowReplicaState::record_pass(
             &p,
             ALICE,
             "i",
@@ -390,10 +422,12 @@ mod tests {
             &["p1".into(), "p2".into()],
         )
         .unwrap();
-        assert_eq!(prior, PriorRow::Absent);
-        let prior =
+        assert_eq!(first.prior, PriorRow::Absent);
+        assert_eq!(first.newly_marked, vec!["p1".to_string(), "p2".into()]);
+        let second =
             FlowReplicaState::record_pass(&p, ALICE, "i", Some("done"), &["p3".into()]).unwrap();
-        assert_eq!(prior, PriorRow::Derived("scoped".into()));
+        assert_eq!(second.prior, PriorRow::Derived("scoped".into()));
+        assert_eq!(second.newly_marked, vec!["p3".to_string()]);
         assert_eq!(
             FlowReplicaState::fired_for_instance(&p, ALICE, "i").unwrap(),
             vec!["p1".to_string(), "p2".into(), "p3".into()]

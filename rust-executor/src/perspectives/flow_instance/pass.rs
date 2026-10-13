@@ -115,6 +115,51 @@ pub(crate) async fn catch_up_before_own_vote(
     }
 }
 
+/// After `writer`'s own pass: the same pass for every other agent this
+/// node keeps bookkeeping for on the perspective — its owners here, as a
+/// sync-triggered pass sweeps them (`flow_pass_contexts`).
+///
+/// A write made on this node never syncs back to it, so nothing else would
+/// run their pass: a co-owner's rows would lag a vote cast here until
+/// something else touched the instance, and that co-owner's next vote would
+/// report this one's settle as its own. Before #1424 this did not arise,
+/// because every agent on the node shared the one `Local` cache.
+///
+/// Their outcomes reach them as their own `flow-state-changed` events; the
+/// caller still returns the writer's.
+pub(crate) async fn run_flow_pass_for_co_owners(
+    perspective: &mut PerspectiveInstance,
+    writer: &AgentContext,
+    flow_filter: Option<&[String]>,
+    instance_filter: Option<&[String]>,
+) {
+    for context in perspective.flow_pass_contexts().await {
+        if same_agent(&context, writer) {
+            continue;
+        }
+        let outcomes =
+            run_flow_consensus_pass(perspective, None, &context, flow_filter, instance_filter)
+                .await;
+        for outcome in &outcomes {
+            log::debug!(
+                "flow settled for co-owner {:?}: {} {} → {}",
+                context.user_email,
+                outcome.instance_uri,
+                outcome.from_state,
+                outcome.to_state
+            );
+        }
+    }
+}
+
+fn same_agent(a: &AgentContext, b: &AgentContext) -> bool {
+    if a.is_main_agent || b.is_main_agent {
+        a.is_main_agent == b.is_main_agent
+    } else {
+        a.user_email == b.user_email
+    }
+}
+
 /// One sweep over the `FlowInstance`s in scope, as `context`'s agent: derive
 /// each, and where that agent's recorded state or marks lag the fold, record
 /// them in one transaction and report what is new.
@@ -272,14 +317,14 @@ pub async fn run_flow_consensus_pass(
                 derived.state
             );
         }
-        let prior = match FlowReplicaState::record_pass(
+        let recorded = match FlowReplicaState::record_pass(
             &uuid,
             &agent_did,
             &record.instance_uri,
             stale_state.then_some(derived.state.as_str()),
             &to_mark,
         ) {
-            Ok(prior) => prior,
+            Ok(recorded) => recorded,
             Err(e) => {
                 log::warn!(
                     "run_flow_consensus_pass: recording {} failed (re-runs next pass): {e:#}",
@@ -288,6 +333,17 @@ pub async fn run_flow_consensus_pass(
                 continue;
             }
         };
+        // The reads above ran outside the transaction, so another pass for
+        // this agent may have recorded in between. The transaction's own
+        // answers decide: a row it found means this was no first pass, and
+        // an edge is this pass's to report only if it inserted a mark of it.
+        let first_pass_here = first_pass_here && recorded.prior == PriorRow::Absent;
+        fresh.retain(|outcome| {
+            outcome
+                .contributing_proposal_uris
+                .iter()
+                .any(|uri| recorded.newly_marked.contains(uri))
+        });
         if first_pass_here {
             log::info!(
                 "run_flow_consensus_pass: first derivation of {} for {agent_did} on this replica — caught up silently at `{}` ({} settled edge(s) marked, none reported)",
@@ -299,18 +355,18 @@ pub async fn run_flow_consensus_pass(
         }
         // `from` is what this agent last recorded; a row seeded at mint has
         // none yet, and a minted instance stands at its flow's first state.
-        let from = match prior {
+        let from = match recorded.prior {
             PriorRow::Derived(s) => s,
             PriorRow::Minted | PriorRow::Absent => read_set.genesis.clone(),
         };
-        if from != derived.state || !to_mark.is_empty() {
+        if from != derived.state || !recorded.newly_marked.is_empty() {
             FlowReplicaState::publish_state_changed(&FlowStateChangedEvent {
                 perspective_uuid: uuid.clone(),
                 agent_did: agent_did.clone(),
                 instance: record.instance_uri.clone(),
                 from,
                 to: derived.state.clone(),
-                fired_proposals: to_mark.clone(),
+                fired_proposals: recorded.newly_marked,
             })
             .await;
         }

@@ -128,8 +128,9 @@ impl FlowTouch {
 
     /// Only the definition part of [`of_diff`](Self::of_diff), for a local
     /// write. This replica's own votes and mints already run the pass after
-    /// themselves; a definition change is the one local write nothing else
-    /// re-derives for.
+    /// themselves, for the voter and for the perspective's other owners here
+    /// (`pass::run_flow_pass_for_co_owners`); a definition change is the one
+    /// local write nothing else re-derives for.
     pub fn of_local_diff(diff: &DecoratedPerspectiveDiff) -> Self {
         FlowTouch {
             definition: Self::of_diff(diff).definition,
@@ -402,7 +403,7 @@ impl PerspectiveInstance {
     /// round-trip per user per pass. Note also that nothing here calls
     /// `ensure_user_key`: a missing key must never be answered by minting a
     /// fresh DID underneath an existing user.
-    async fn flow_pass_contexts(&self) -> Vec<AgentContext> {
+    pub(crate) async fn flow_pass_contexts(&self) -> Vec<AgentContext> {
         let owners = self.persisted.lock().await.get_owners();
         if owners.is_empty() {
             return flow_pass_agents(&[], None, &[]);

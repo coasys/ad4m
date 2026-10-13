@@ -1407,7 +1407,9 @@ impl Ad4mDb {
 
     /// Record one pass over one instance in a single transaction: set the
     /// state (when `state` is `Some`) and add the fired marks. Returns the
-    /// row as it was before — `None` when there was no row at all.
+    /// row as it was before — `None` when there was no row at all — and the
+    /// marks this call inserted, in `fired` order. A mark already present is
+    /// not in that list: another pass recorded it first.
     ///
     /// One transaction, so a crash can never leave marks recorded with the
     /// state not advanced: the next pass would see the marks, find nothing
@@ -1420,7 +1422,7 @@ impl Ad4mDb {
         state: Option<&str>,
         fired: &[String],
         at: &str,
-    ) -> Ad4mDbResult<Option<FlowReplicaStateRow>> {
+    ) -> Ad4mDbResult<(Option<FlowReplicaStateRow>, Vec<String>)> {
         let tx = self.conn.unchecked_transaction()?;
         let before = tx
             .query_row(
@@ -1445,15 +1447,19 @@ impl Ad4mDb {
                 params![perspective, agent_did, instance, state, at],
             )?;
         }
+        let mut inserted = Vec::new();
         for proposal in fired {
-            tx.execute(
+            let added = tx.execute(
                 "INSERT OR IGNORE INTO flow_fired_mark (perspective, agent_did, proposal, instance, marked_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![perspective, agent_did, proposal, instance, at],
             )?;
+            if added > 0 {
+                inserted.push(proposal.clone());
+            }
         }
         tx.commit()?;
-        Ok(before)
+        Ok((before, inserted))
     }
 
     /// The subset of `proposals` that `agent_did` has marked fired on

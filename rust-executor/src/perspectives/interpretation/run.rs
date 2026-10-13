@@ -985,6 +985,13 @@ async fn run_flow_post_pass(
             outcome.voters
         );
     }
+    crate::perspectives::flow_instance::pass::run_flow_pass_for_co_owners(
+        perspective,
+        context,
+        flow_filter,
+        None,
+    )
+    .await;
 
     minted
 }

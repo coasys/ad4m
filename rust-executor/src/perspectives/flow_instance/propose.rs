@@ -69,7 +69,9 @@ use super::atom::{
     check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
     TransitionAtom,
 };
-use super::pass::{catch_up_before_own_vote, run_flow_consensus_pass, FireOutcome};
+use super::pass::{
+    catch_up_before_own_vote, run_flow_consensus_pass, run_flow_pass_for_co_owners, FireOutcome,
+};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -399,7 +401,9 @@ async fn sweep(
     context: &AgentContext,
 ) -> Vec<FireOutcome> {
     let only = [instance_uri.to_string()];
-    run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await
+    let outcomes = run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+    run_flow_pass_for_co_owners(perspective, context, None, Some(&only)).await;
+    outcomes
 }
 
 /// What an already-open proposal carrying our dedup key means for this call.

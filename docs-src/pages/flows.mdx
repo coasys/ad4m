@@ -75,6 +75,8 @@ The state cache and the record of which proposals fired are your executor's
 bookkeeping, kept per agent and outside the perspective. Two agents on the
 same executor — co-owners of one neighbourhood, say — each have their own, and
 neither can see the other's. A link query or a model query never returns them.
+A vote cast on that executor updates both before the call returns, so each
+co-owner reads the new state and gets its own event.
 
 - `FlowInstance.findAll` and `FlowInstance.start` fill `currentStateName` from
   one batched read. An instance your executor has not derived yet — one you
