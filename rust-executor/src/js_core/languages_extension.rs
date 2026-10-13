@@ -24,8 +24,13 @@ lazy_static::lazy_static! {
 /// `LANGUAGE_CONTROLLER` ops take the address from language code, and a language could name
 /// another neighbourhood's link language (its address is public in the neighbourhood URL):
 /// inject link diffs into that perspective, forge its sync state, address signals for it or
-/// route its Holochain signals to itself. Each op acts for its own isolate's language only,
-/// so a call that names another one is refused, like `PUBSUB.publish`.
+/// route its Holochain signals to itself. Each `LANGUAGE_CONTROLLER` op in this file acts for
+/// its own isolate's language only, so a call that names another one is refused, like
+/// `PUBSUB.publish`.
+///
+/// Not covered (follow-up): the `HOLOCHAIN_SERVICE` ops
+/// (`holochain_service/holochain_service_extension.rs`) still take an app id from language
+/// code, so a language can name another language's Holochain app.
 fn own_language(claimed: &str) -> Result<String, AnyhowWrapperError> {
     let own = try_with_isolate_state(|state| state.language_address.clone())
         .flatten()
