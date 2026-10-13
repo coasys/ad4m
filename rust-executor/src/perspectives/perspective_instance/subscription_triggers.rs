@@ -932,3 +932,6 @@ pub(super) mod reruns {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod local_scope_tests;

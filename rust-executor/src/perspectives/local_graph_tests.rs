@@ -26,7 +26,7 @@ fn init() {
     AgentService::init_global_test_instance();
 }
 
-async fn setup(owners: Option<Vec<String>>) -> PerspectiveInstance {
+pub(crate) async fn setup(owners: Option<Vec<String>>) -> PerspectiveInstance {
     init();
     Ad4mDb::init_global_instance(":memory:").unwrap();
     init_prolog_service().await;
