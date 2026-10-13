@@ -36,11 +36,12 @@ pub enum Topic {
     PerspectiveQuerySubscription,
     AutoProcessorEvent,
     AutoProcessorNeighbourhoodState,
+    FlowStateChanged,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 19] = [
+    pub const ALL: [Topic; 20] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -60,6 +61,7 @@ impl Topic {
         Topic::PerspectiveQuerySubscription,
         Topic::AutoProcessorEvent,
         Topic::AutoProcessorNeighbourhoodState,
+        Topic::FlowStateChanged,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -85,6 +87,7 @@ impl Topic {
             Topic::PerspectiveQuerySubscription => "query-subscription-update",
             Topic::AutoProcessorEvent => "auto-processor-event",
             Topic::AutoProcessorNeighbourhoodState => "auto-processor-neighbourhood-state",
+            Topic::FlowStateChanged => "flow-state-changed",
         }
     }
 
@@ -119,6 +122,8 @@ impl Topic {
             | Topic::PerspectiveQuerySubscription
             | Topic::AutoProcessorEvent
             | Topic::AutoProcessorNeighbourhoodState
+            // `perspective.flowStates` reads the same per-agent bookkeeping.
+            | Topic::FlowStateChanged
             // `runtime.notifications` checks AGENT_UPDATE, but a triggered notification carries
             // `triggerMatch`: query results from its perspective.
             | Topic::RuntimeNotificationTriggered => {

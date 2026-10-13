@@ -255,10 +255,30 @@ impl Fixture {
             .expect("derive_state")
     }
 
-    /// The on-graph `currentState` CACHE — what the pass writes through, not
-    /// the authority.
+    /// This agent's RECORDED state (`FlowReplicaState`) — what the pass
+    /// writes, not the authority. Empty when there is none.
     pub(super) async fn cached_state(&self) -> String {
-        self.instances().await[0].current_state.clone()
+        let did = crate::agent::did_for_context(&self.ctx).expect("did_for_context");
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+            &self.perspective.uuid,
+            &did,
+            &self.instance_uri,
+        )
+        .expect("read the recorded state")
+        .unwrap_or_default()
+    }
+
+    /// The proposals of this instance this agent has marked fired.
+    pub(super) async fn marked(&self) -> std::collections::HashSet<String> {
+        let did = crate::agent::did_for_context(&self.ctx).expect("did_for_context");
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
+            &self.perspective.uuid,
+            &did,
+            &self.instance_uri,
+        )
+        .expect("read the fired marks")
+        .into_iter()
+        .collect()
     }
 
     /// One proposal pass that must mint exactly one proposal; its URI.
@@ -268,11 +288,19 @@ impl Fixture {
         minted.into_iter().next().unwrap()
     }
 
+    /// What `run_engine_proposal_pass` would evaluate: the instances at their
+    /// DERIVED state, as the pass reads them — a loaded row carries none.
     async fn satisfied(&self) -> Vec<SatisfiedTransition> {
         let records = self.instances().await;
         let flows = load_shacl_flows(&self.perspective)
             .await
             .expect("load_shacl_flows");
+        let records: Vec<FlowInstanceRecord> =
+            crate::perspectives::flow_instance::derive_states(&self.perspective, &records, &flows)
+                .await
+                .into_iter()
+                .map(|derived| derived.record)
+                .collect();
         evaluate_flow_transitions(&self.perspective, &records, &flows, "did:key:acting").await
     }
 
@@ -541,7 +569,7 @@ async fn run_engine_proposal_pass_e2e() {
     assert_has_target(&by_pred, "ad4m://flow/from_state", &literal("identified"));
     assert_has_target(&by_pred, "ad4m://flow/to_state", &literal("scoped"));
 
-    // Idempotency: minting does not advance currentState, so a re-run sees
+    // Idempotency: minting does not advance the state, so a re-run sees
     // the same satisfied transition — it must skip, not mint a duplicate.
     let rerun = f.run_pass(&[], None).await;
     assert!(
@@ -747,7 +775,7 @@ async fn harness_propose_transition_tool_call_routes_rationale_to_graph_e2e() {
 
     let mut f = seed_satisfied_fixture(None).await;
     let active_flows =
-        gather_active_flow_contexts(&f.perspective, &[BASE_URI.to_string()], None).await;
+        gather_active_flow_contexts(&f.perspective, &f.ctx, &[BASE_URI.to_string()], None).await;
     assert_eq!(active_flows.len(), 1, "got {active_flows:?}");
     assert_eq!(active_flows[0].instance_uri, f.instance_uri);
 
