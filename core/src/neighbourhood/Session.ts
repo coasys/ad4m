@@ -136,6 +136,10 @@ export function createSession(config: SessionImplConfig): Session {
     let sfuManager: SfuManager | null = null
     let meshManager: MeshManager | null = null
     let rosterInterval: ReturnType<typeof setInterval> | null = null
+    /** A roster poll is running. Each poll waits on one remote call per
+     *  online agent, so it can outlast the interval; the next tick is then
+     *  skipped instead of stacking a second poll on the first. */
+    let polling = false
     const callbacks = new Map<SessionEvent, SessionEventCallback[]>()
     const trackListeners: ((stream: MediaStream, track: MediaStreamTrack) => void)[] = []
     const dataListeners: ((message: SfuDataMessage) => void)[] = []
@@ -243,9 +247,13 @@ export function createSession(config: SessionImplConfig): Session {
      * connections to departed peers.
      */
     async function pollRoster(): Promise<void> {
-        if (!meshManager || !onlineAgents) return
+        const mesh = meshManager
+        if (!mesh || !onlineAgents || polling) return
+        polling = true
         try {
             const agents = await onlineAgents()
+            // The session left while the poll was in flight.
+            if (meshManager !== mesh) return
             const inCall: string[] = []
             for (const agent of agents) {
                 if (agent.did === agentDid) continue
@@ -260,9 +268,11 @@ export function createSession(config: SessionImplConfig): Session {
                     }
                 }
             }
-            meshManager.setRoster(inCall)
+            mesh.setRoster(inCall)
         } catch (err) {
             console.warn("session: roster poll failed:", err)
+        } finally {
+            polling = false
         }
     }
 
