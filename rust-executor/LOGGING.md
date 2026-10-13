@@ -101,14 +101,9 @@ most-specific tag on the left.
 
 ## Subscription branch naming
 
-The subscription subsystem in
-`perspectives/perspective_instance.rs` used to log every branch as "Prolog
-subscription", but the dispatch has three branches:
+Live queries in `perspectives/perspective_instance.rs` have two branches:
 
 1. `execute_model_query` — model-based subscription — 🧠 🔗
 2. `sparql_query` — SPARQL subscription — 🔎 🔗
-3. `prolog_query_subscription_with_context` — Prolog subscription — 📜 🔗
 
-Log messages should distinguish these. Field / type identifiers
-(`PrologSubscription`, `trigger_prolog_subscription_check`) are unchanged
-in this pass to keep the diff scoped.
+Log messages should distinguish these.

@@ -86,8 +86,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /** Open a live model query for `params` as the current subscription.
-   *  Resolves with the raw initial result; `onResult` gets every later one. */
-  private async live(params: Query, onResult: (raw: any) => void): Promise<any> {
+   *  Resolves with it and the raw initial result; `onResult` gets every later one.
+   *  A failed open ends only its own query: a later call may already own
+   *  `currentSubscription`. */
+  private async live(params: Query, onResult: (raw: any) => void): Promise<{ live: LiveQuery; initial: any }> {
     const { className, queryJson } = this.prepare(params);
     const live = new LiveQuery(
       this.perspective.client, this.perspective.uuid,
@@ -96,9 +98,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     );
     this.currentSubscription = live;
     try {
-      return await live.start();
+      return { live, initial: await live.start() };
     } catch (e) {
-      this.dispose();
+      live.dispose();
+      if (this.currentSubscription === live) this.currentSubscription = undefined;
       throw e;
     }
   }
@@ -468,7 +471,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       JSON.stringify(results, (_, v) => (typeof v === 'function' ? undefined : v));
     let lastFingerprint: string | null = null;
 
-    const initialResults = parseResults(await this.live(this.queryParams, (raw) => {
+    const { initial } = await this.live(this.queryParams, (raw) => {
       try {
         const results = parseResults(raw);
         const fp = fingerprint(results);
@@ -478,7 +481,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       } catch (e) {
         console.error('Model subscription update parse error:', e);
       }
-    }));
+    });
+    const initialResults = parseResults(initial);
     lastFingerprint = fingerprint(initialResults);
 
     // Take snapshots for dirty tracking
@@ -552,7 +556,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const initial = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
+    const { initial } = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
     return initial.totalCount ?? 0;
   }
 
@@ -678,16 +682,20 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       }
     };
 
-    await this.live(subscriptionParams, () => {
+    const { live } = await this.live(subscriptionParams, () => {
       processResults().catch(e => console.error('Paginate subscription error:', e));
     });
-    const live = this.currentSubscription!;
-    this.currentSubscription = {
-      dispose: () => {
-        disposed = true;
-        live.dispose();
-      },
-    };
+    if (this.currentSubscription === live) {
+      this.currentSubscription = {
+        dispose: () => {
+          disposed = true;
+          live.dispose();
+        },
+      };
+    } else {
+      // Disposed, or overtaken by a later subscribe, while opening: deliver nothing.
+      disposed = true;
+    }
 
     // Initial fetch (single call with count: true)
     const { results, totalCount } = await this.execute(paginatedQuery);

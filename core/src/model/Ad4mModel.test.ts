@@ -3715,6 +3715,43 @@ describe("ModelQueryBuilder subscription ownership", () => {
     name: string = "";
   }
 
+  it("a failed open does not end a later call's subscription", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    let rejectFirst!: (e: Error) => void;
+    mockClient.modelSubscribe
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject; }))
+      .mockImplementationOnce(async () => ({ subscriptionId: "sub-b", revision: 0, result: { instances: [], totalCount: 0 } }));
+    const builder = OwnershipTest.query(mockPerspective);
+
+    const first = builder.subscribe(() => {});
+    await Promise.resolve();
+    await builder.subscribe(() => {});
+    rejectFirst(new Error("refused"));
+    await expect(first).rejects.toThrow("refused");
+
+    expect(mockClient.disposeQuerySubscription).not.toHaveBeenCalledWith("test-uuid", "sub-b");
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-b");
+  });
+
+  it("paginateSubscribe() disposed while opening leaves the builder usable", async () => {
+    const { mockPerspective, mockClient } = makePerspective();
+    let resolveOpen!: (v: any) => void;
+    mockClient.modelSubscribe.mockImplementationOnce(() => new Promise(resolve => { resolveOpen = resolve; }));
+    const callback = jest.fn();
+    const builder = OwnershipTest.query(mockPerspective);
+
+    const page = builder.paginateSubscribe(10, 1, callback);
+    await Promise.resolve();
+    builder.dispose();
+    resolveOpen({ subscriptionId: "sub-p", revision: 0, result: { instances: [], totalCount: 0 } });
+    await page;
+
+    expect(() => builder.dispose()).not.toThrow();
+    await expect(builder.subscribe(() => {})).resolves.toBeDefined();
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it("overlapping subscribe() calls leave exactly one live subscription", async () => {
     const { mockPerspective, mockClient } = makePerspective();
     const builder = OwnershipTest.query(mockPerspective);
