@@ -423,9 +423,10 @@ covered without a new test; a method whose params need more than `uuid` adds an 
      icon over 1 KiB is 400. The request is a `PendingRequest` in memory only: never on disk,
      1024 at most and 64 per target (all `NoAgent` requests are one target). Past a limit a
      new request evicts an unapproved one, oldest first: for no agent, then for its own
-     target; never another agent's or an approved one, so when none may go it is refused.
-     A request lives 10 minutes for the main agent and 24 hours for a managed agent,
-     restarted at approval. Its approval request goes to the target agent's DID
+     target, then (for an agent below its share) the target holding the most; never an
+     approved one, so when none may go it is refused (429; MCP's `request_capability` answers
+     `success: false`). A request lives 10 minutes for the main agent and 24 hours for a
+     managed agent, restarted at approval. Its approval request goes to the target agent's DID
      (`Event::approval_request`). Every request waits for that owner: the declared app name
      and domain are the caller's claim and approve nothing. `AuthInfo.user_email` on the
      request and the grant is only a display hint (the owner's email, from `email_for_did`).

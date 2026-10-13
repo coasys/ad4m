@@ -38,7 +38,7 @@ pub const MAX_PENDING_REQUESTS: usize = 1024;
 pub const MAX_PENDING_REQUESTS_PER_TARGET: usize = 64;
 
 /// The agent a capability request is for (D16: an agent is its DID).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RequestTarget {
     /// An agent on this executor: the main agent, or a managed agent by its DID.
     Agent(AgentContext),
@@ -162,8 +162,10 @@ impl PendingRequests {
     /// Records a new request of the app `auth` for the agent `target`. When the target already
     /// has [`MAX_PENDING_REQUESTS_PER_TARGET`] requests, or all targets together
     /// [`MAX_PENDING_REQUESTS`], an unapproved one goes, oldest first: one for the same target,
-    /// or, when all are full, one for no agent before one for the same target. Requests for
-    /// other agents and approved ones stay, so `Err` when nothing may go.
+    /// or, when all are full, one for no agent, then one for the same target, then (for an
+    /// agent below its share) one of the target holding the most unapproved requests, so that
+    /// filling the store for a few agents does not refuse every other one. Approved requests
+    /// stay, so `Err` when nothing may go.
     pub fn request(
         &self,
         request_id: String,
@@ -189,8 +191,26 @@ impl PendingRequests {
             }
         }
         if pending.len() >= MAX_PENDING_REQUESTS {
+            let below_share = for_target < MAX_PENDING_REQUESTS_PER_TARGET;
+            let fullest = || {
+                if target == RequestTarget::NoAgent || !below_share {
+                    return None;
+                }
+                let mut unapproved: HashMap<&RequestTarget, usize> = HashMap::new();
+                for request in pending.values().filter(|r| r.code.is_none()) {
+                    *unapproved.entry(&request.target).or_default() += 1;
+                }
+                let own = unapproved.get(&target).copied().unwrap_or(0);
+                let most = unapproved
+                    .values()
+                    .copied()
+                    .max()
+                    .filter(|most| *most > own)?;
+                oldest_unapproved(&pending, &|t| unapproved.get(t) == Some(&most))
+            };
             let evicted = oldest_unapproved(&pending, &|t| *t == RequestTarget::NoAgent)
-                .or_else(|| oldest_unapproved(&pending, &same_target));
+                .or_else(|| oldest_unapproved(&pending, &same_target))
+                .or_else(fullest);
             match evicted {
                 Some(id) => {
                     pending.remove(&id);
@@ -341,6 +361,43 @@ impl PendingRequests {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.lock().len()
+    }
+
+    /// Sets the requests aside and fills the store with [`MAX_PENDING_REQUESTS`] approved
+    /// requests for no agent, which nothing evicts, so the next request is refused. The
+    /// requests set aside return when the guard drops. Requests other tests make meanwhile
+    /// are refused too, so a test holds the guard only around its own call.
+    #[cfg(test)]
+    pub fn fill_for_test(&'static self) -> FullStoreGuard {
+        let filled = (0..MAX_PENDING_REQUESTS)
+            .map(|i| {
+                let request = PendingRequest {
+                    auth: AuthInfo::default(),
+                    target: RequestTarget::NoAgent,
+                    code: Some(Secret::new("123456")),
+                    attempts: 0,
+                    seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
+                    expires_at: u64::MAX,
+                };
+                (format!("filled-{i}"), request)
+            })
+            .collect();
+        let aside = std::mem::replace(&mut *self.lock(), filled);
+        FullStoreGuard { store: self, aside }
+    }
+}
+
+/// See [`PendingRequests::fill_for_test`].
+#[cfg(test)]
+pub struct FullStoreGuard {
+    store: &'static PendingRequests,
+    aside: HashMap<String, PendingRequest>,
+}
+
+#[cfg(test)]
+impl Drop for FullStoreGuard {
+    fn drop(&mut self) {
+        *self.store.lock() = std::mem::take(&mut self.aside);
     }
 }
 
@@ -601,6 +658,53 @@ mod tests {
         assert!(pending.contains(&format!("f{}", MAX_PENDING_REQUESTS - 1)));
     }
 
+    // A full store of requests for 16 agents (64 each, the per-target share) does not refuse a
+    // 17th agent: its request takes one from the agents that hold the most, so a flood aimed at
+    // a few known agents cannot block every other user's approvals for a day.
+    #[test]
+    fn a_full_store_does_not_lock_out_an_agent_below_its_share() {
+        let pending = PendingRequests::default();
+        let agent = |a: usize| AgentContext::managed(format!("did:key:z6MkFlooded{a}"));
+        for a in 0..MAX_PENDING_REQUESTS / MAX_PENDING_REQUESTS_PER_TARGET {
+            for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+                pending
+                    .request(format!("f{a}-{i}"), AuthInfo::default(), agent(a), 1)
+                    .unwrap();
+            }
+        }
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+        let bob = AgentContext::managed("did:key:z6MkBob".into());
+        pending
+            .request("bob".into(), AuthInfo::default(), bob.clone(), 2)
+            .expect("an agent with no request waiting is not refused");
+        assert!(pending.contains("bob"));
+        assert!(
+            !pending.contains("f0-0"),
+            "the oldest of the fullest target goes"
+        );
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+
+        // The next agent takes from a target that now holds the most (f0 holds 63, the others
+        // 64), never Bob's single request.
+        let carol = AgentContext::managed("did:key:z6MkCarol".into());
+        pending
+            .request("carol".into(), AuthInfo::default(), carol, 2)
+            .unwrap();
+        assert!(pending.contains("bob"));
+        assert!(pending.contains("f0-1"));
+        assert!(!pending.contains("f1-0"));
+
+        // A request for no agent still takes nothing from an agent.
+        assert!(pending
+            .request(
+                "none".into(),
+                AuthInfo::default(),
+                RequestTarget::NoAgent,
+                2
+            )
+            .is_err());
+    }
+
     // When every target is full, a new request evicts one for no agent first, then the oldest
     // unapproved one for its own agent; never another agent's or an approved one.
     #[test]
@@ -632,11 +736,14 @@ mod tests {
         assert!(!pending.contains("a0-0"));
         assert!(pending.contains("a1-0"));
 
-        // A new agent, or no agent: nothing it may evict.
+        // A new agent takes the oldest unapproved request of the target holding the most
+        // (all hold 64; a0-1 is the oldest of them). No agent: nothing it may evict.
         let new_agent = AgentContext::managed("did:key:z6MkNew".into());
-        assert!(pending
+        pending
             .request("new".into(), AuthInfo::default(), new_agent, 2)
-            .is_err());
+            .unwrap();
+        assert!(!pending.contains("a0-1"));
+        assert!(pending.contains("a1-0"));
         assert!(pending
             .request(
                 "none".into(),

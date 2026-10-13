@@ -510,14 +510,15 @@ async fn request_capability(params: Value, _ctx: Arc<RequestContext>) -> Result<
         .auth_info
         .try_into()
         .map_err(|e: String| WsRpcError::bad_request(e))?;
-    crate::agent::capabilities::check_auth_info_bounds(&auth_info)
-        .map_err(WsRpcError::bad_request)?;
     // Dev-mode auto-permit speaks for the operator, who owns only the main agent: a request
     // on a managed agent always waits for that agent's owner (#1399).
     let operator_owns_target = target.is_main_agent();
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone(), target)
         .await
-        .map_err(WsRpcError::internal)?;
+        .map_err(|e| match e {
+            RequestCapabilityError::Invalid(e) => WsRpcError::bad_request(e),
+            RequestCapabilityError::Busy(e) => WsRpcError::too_many_requests(e),
+        })?;
 
     if operator_owns_target && crate::config::auto_permit_cap_requests() {
         log::debug!(
@@ -1799,7 +1800,7 @@ mod capability_request_tests {
     async fn a_request_with_an_overlong_app_field_is_refused() {
         setup();
         let long = "x".repeat(crate::agent::capabilities::MAX_AUTH_INFO_FIELD_BYTES + 1);
-        for field in ["appName", "appDesc", "appDomain", "appUrl"] {
+        for field in ["appName", "appDesc", "appDomain", "appUrl", "appIconPath"] {
             let mut auth = auth_info(&[AGENT_READ_CAPABILITY.clone()]);
             auth[field] = json!(long);
             let err = call(
@@ -1821,6 +1822,69 @@ mod capability_request_tests {
         )
         .await
         .expect("a field of the limit's length is taken");
+    }
+
+    // `capabilities` is caller-chosen like the app fields and is kept in memory and shown in
+    // the approval prompt, so it is bounded too: by its size as JSON.
+    #[tokio::test]
+    async fn a_request_with_an_oversized_capability_list_is_refused() {
+        setup();
+        let many: Vec<_> = (0..10_000)
+            .map(|i| {
+                crate::agent::capabilities::perspective_query_capability(vec![format!("p{i}")])
+            })
+            .collect();
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&many) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+        assert!(err.1.contains("capabilities"), "{}", err.1);
+
+        let one_pointer_too_long = [crate::agent::capabilities::perspective_query_capability(
+            vec!["x".repeat(70_000)],
+        )];
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&one_pointer_too_long) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+
+        // What apps ask for today stays well inside it.
+        let defaults = crate::agent::capabilities::get_user_default_capabilities();
+        call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&defaults) }),
+            anonymous(),
+        )
+        .await
+        .expect("the user default capabilities are taken");
+    }
+
+    // A store with no request that may go refuses a new one: the app may try again later, so
+    // the answer is 429, not a 500 that reads as the executor's fault.
+    #[tokio::test]
+    async fn a_request_to_a_full_store_is_429() {
+        setup();
+        let refused = {
+            let _full =
+                crate::agent::capabilities::pending::PendingRequests::global().fill_for_test();
+            call(
+                "agent.requestCapability",
+                json!({ "authInfo": auth_info(&[AGENT_READ_CAPABILITY.clone()]) }),
+                anonymous(),
+            )
+            .await
+        };
+        let err = refused.unwrap_err();
+        assert_eq!(err.0, 429, "{}", err.1);
+        assert!(err.1.contains("Too many capability requests"), "{}", err.1);
     }
 
     // D16: an email resolves to its user's DID at the edge. An email no user has is taken

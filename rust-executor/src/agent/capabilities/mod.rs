@@ -381,8 +381,14 @@ fn display_email(agent: &AgentContext) -> Option<String> {
 /// approval prompts.
 pub const MAX_AUTH_INFO_FIELD_BYTES: usize = 1024;
 
+/// Bytes the capabilities of a capability request may have as JSON. The caller chooses them
+/// like the app fields, and they are kept in memory and shown in approval prompts. Far above
+/// what an app asks for: the user default capabilities are a few kilobytes.
+pub const MAX_AUTH_INFO_CAPABILITIES_BYTES: usize = 64 * 1024;
+
 /// `Err` naming the first of the app's declared fields in `auth` that is longer than
-/// [`MAX_AUTH_INFO_FIELD_BYTES`].
+/// [`MAX_AUTH_INFO_FIELD_BYTES`], or `capabilities` when they are larger than
+/// [`MAX_AUTH_INFO_CAPABILITIES_BYTES`] as JSON.
 pub fn check_auth_info_bounds(auth: &AuthInfo) -> Result<(), String> {
     let fields = [
         ("appName", Some(&auth.app_name)),
@@ -398,7 +404,35 @@ pub fn check_auth_info_bounds(auth: &AuthInfo) -> Result<(), String> {
         Some((name, _)) => Err(format!(
             "{name} is longer than {MAX_AUTH_INFO_FIELD_BYTES} bytes"
         )),
-        None => Ok(()),
+        None => {
+            let capabilities =
+                serde_json::to_vec(&auth.capabilities).map_or(usize::MAX, |v| v.len());
+            if capabilities > MAX_AUTH_INFO_CAPABILITIES_BYTES {
+                return Err(format!(
+                    "capabilities are larger than {MAX_AUTH_INFO_CAPABILITIES_BYTES} bytes as JSON"
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Why [`request_capability`] recorded no request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestCapabilityError {
+    /// The request is malformed: a declared field or the capability list is too large
+    /// ([`check_auth_info_bounds`]). The WS RPC answers 400.
+    Invalid(String),
+    /// The store is full and no waiting request may go ([`PendingRequests::request`]); the
+    /// app may try again later. The WS RPC answers 429.
+    Busy(String),
+}
+
+impl std::fmt::Display for RequestCapabilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestCapabilityError::Invalid(e) | RequestCapabilityError::Busy(e) => f.write_str(e),
+        }
     }
 }
 
@@ -407,13 +441,14 @@ pub fn check_auth_info_bounds(auth: &AuthInfo) -> Result<(), String> {
 /// request event goes to `target`'s sessions (by DID) that hold AGENT_PERMIT. A request for
 /// [`RequestTarget::NoAgent`] publishes nothing. No request is ever approved here: the app
 /// name and domain are whatever the (possibly anonymous) caller declares, so they never
-/// grant anything. `Err` when a declared field is too long ([`check_auth_info_bounds`]) or too
-/// many requests wait ([`pending::MAX_PENDING_REQUESTS`]).
+/// grant anything. This is the one entry point of every surface (the WS RPC and MCP), so the
+/// bounds are checked here: `Err` when a declared field is too long
+/// ([`check_auth_info_bounds`]) or too many requests wait ([`pending::MAX_PENDING_REQUESTS`]).
 pub async fn request_capability(
     auth_info: AuthInfo,
     target: impl Into<RequestTarget>,
-) -> Result<String, String> {
-    check_auth_info_bounds(&auth_info)?;
+) -> Result<String, RequestCapabilityError> {
+    check_auth_info_bounds(&auth_info).map_err(RequestCapabilityError::Invalid)?;
     let target = target.into();
     let request_id = uuid::Uuid::new_v4().to_string();
     // The request names its agent's user in the auth info, so the approver sees whose it is.
@@ -422,7 +457,9 @@ pub async fn request_capability(
         ..auth_info
     };
     let pending = PendingRequests::global();
-    pending.request(request_id.clone(), auth.clone(), target.clone(), now())?;
+    pending
+        .request(request_id.clone(), auth.clone(), target.clone(), now())
+        .map_err(RequestCapabilityError::Busy)?;
 
     let Some(agent) = target.agent() else {
         return Ok(request_id);
@@ -853,6 +890,47 @@ mod app_token_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
+    }
+
+    // `request_capability` is the one path of the WS RPC and MCP: it refuses an overlong
+    // field or capability list as `Invalid`, and a full store as `Busy`, recording nothing.
+    #[tokio::test]
+    async fn request_capability_refuses_an_overlong_request_and_a_full_store() {
+        setup();
+        let long = "x".repeat(MAX_AUTH_INFO_FIELD_BYTES + 1);
+        let overlong = AuthInfo {
+            app_name: long.clone(),
+            ..test_auth_info()
+        };
+        let err = request_capability(overlong, AgentContext::main_agent())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, RequestCapabilityError::Invalid(e) if e.contains("appName")),
+            "{err:?}"
+        );
+        let many_caps = AuthInfo {
+            capabilities: Some(vec![perspective_query_capability(vec![
+                "x".repeat(MAX_AUTH_INFO_CAPABILITIES_BYTES)
+            ])]),
+            ..test_auth_info()
+        };
+        let err = request_capability(many_caps, AgentContext::main_agent())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, RequestCapabilityError::Invalid(e) if e.contains("capabilities")),
+            "{err:?}"
+        );
+
+        let full = {
+            let _full = PendingRequests::global().fill_for_test();
+            request_capability(test_auth_info(), AgentContext::main_agent()).await
+        };
+        assert!(
+            matches!(&full, Err(RequestCapabilityError::Busy(_))),
+            "{full:?}"
+        );
     }
 
     async fn permitted_request() -> (String, String) {

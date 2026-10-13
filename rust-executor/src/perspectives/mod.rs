@@ -577,14 +577,25 @@ pub(crate) fn signal_event(
 /// Publishes a telepresence signal from the link language: to `recipient_did`, or else once
 /// to each of the perspective's [`event_recipients`] (its owners, or the main agent for an
 /// unowned perspective), each copy naming that DID as `recipient`. Never to every session.
+/// A `recipient_did` that is not one of those recipients gets nothing: a link language or a
+/// peer may not address a local DID that does not own the perspective.
 pub(crate) fn publish_telepresence_signal(
     handle: PerspectiveHandle,
     signal: PerspectiveExpression,
     recipient_did: Option<String>,
 ) {
+    let audience = event_recipients(&handle);
     let recipients = match recipient_did {
-        Some(recipient) => vec![recipient],
-        None => event_recipients(&handle),
+        Some(recipient) if audience.contains(&recipient) => vec![recipient],
+        Some(recipient) => {
+            log::debug!(
+                "Dropping telepresence signal for {} on perspective {}: not one of its recipients",
+                recipient,
+                handle.uuid
+            );
+            return;
+        }
+        None => audience,
     };
     let pubsub = get_global_pubsub_sync();
     for recipient in recipients {
