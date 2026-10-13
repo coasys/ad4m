@@ -91,21 +91,21 @@ pub enum PriorRow {
 }
 
 /// Who receives a `flow-state-changed`: the agent whose bookkeeping moved
-/// (`agent_did`), when it is one of the perspective's `owners`
-/// (`perspectives::event_recipients`); else nobody. Bookkeeping is per agent,
-/// so a co-owner, or another user of the same executor, never gets it.
-pub(crate) fn state_changed_audience(owners: &[String], agent_did: &str) -> Audience {
-    let owner = owners.iter().find(|o| *o == agent_did).cloned();
-    Audience::Dids(owner.into_iter().collect())
+/// (`agent_did`), and nobody else. Bookkeeping is per agent, so a co-owner, or
+/// another user of the same executor, never gets it. The agent need not own
+/// the perspective: a non-owner that may query it (the operator, a member)
+/// keeps bookkeeping once it votes, and is told about its own.
+pub(crate) fn state_changed_audience(agent_did: &str) -> Audience {
+    Audience::Dids(vec![agent_did.to_string()])
 }
 
 /// The `flow-state-changed` event for `event`: to [`state_changed_audience`],
 /// needing the query capability on the perspective (`perspective.flowStates`
 /// reads the same rows).
-pub(crate) fn state_changed_event(owners: &[String], event: &FlowStateChangedEvent) -> Event {
+pub(crate) fn state_changed_event(event: &FlowStateChangedEvent) -> Event {
     Event::new(
         Topic::FlowStateChanged,
-        state_changed_audience(owners, &event.agent_did),
+        state_changed_audience(&event.agent_did),
         event,
     )
 }
@@ -338,15 +338,11 @@ impl FlowReplicaState {
     }
 
     /// Publish `event` as `flow-state-changed` to [`state_changed_audience`]: the agent
-    /// whose bookkeeping moved, if it is one of the perspective's owners, read now.
-    pub async fn publish_state_changed(
-        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
-        event: &FlowStateChangedEvent,
-    ) {
-        let owners = crate::perspectives::event_recipients(&*perspective.persisted.lock().await);
+    /// whose bookkeeping moved.
+    pub async fn publish_state_changed(event: &FlowStateChangedEvent) {
         get_global_pubsub()
             .await
-            .publish_event(state_changed_event(&owners, event));
+            .publish_event(state_changed_event(event));
     }
 
     fn rows(
