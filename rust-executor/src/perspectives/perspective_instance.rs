@@ -4,7 +4,7 @@ use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective;
-use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
+use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::{AgentContext, AgentService};
 use crate::languages::language::Language;
@@ -126,7 +126,12 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
     false
 }
 
-fn is_sparql_query(query: &str) -> bool {
+/// The error a live query that is not SPARQL gets. Live queries are SPARQL or
+/// model queries; Prolog live queries were removed (a one-shot Prolog query
+/// still runs through `perspective.queryProlog`).
+pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
+
+pub(crate) fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
     // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
     // false-positives on Prolog atoms like `base(X).`
@@ -394,8 +399,7 @@ pub struct Parameter {
 struct SubscribedQuery {
     query: String,
     last_result: String,
-    user_email: Option<String>,
-    /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
+    /// Predicate IRIs extracted from the SPARQL query at registration time.
     /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
     predicates: HashSet<String>,
     /// When set, this subscription was registered via `model_subscribe_and_query`.
@@ -412,17 +416,12 @@ struct SubscribedQuery {
 }
 
 impl SubscribedQuery {
-    /// A SPARQL/Prolog subscription for `connection`, before its first result.
-    fn new(query: String, user_email: Option<String>, connection: String) -> Self {
-        let predicates = if is_sparql_query(&query) {
-            extract_predicates_from_sparql(&query)
-        } else {
-            HashSet::new() // Prolog queries: always re-check
-        };
+    /// A SPARQL subscription for `connection`, before its first result.
+    fn new(query: String, connection: String) -> Self {
+        let predicates = extract_predicates_from_sparql(&query);
         SubscribedQuery {
             query,
             last_result: String::new(),
-            user_email,
             predicates,
             model_query_params: None,
             revision: 0,
@@ -524,7 +523,7 @@ pub struct PerspectiveInstance {
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<AtomicBool>,
-    trigger_prolog_subscription_check: Arc<AtomicBool>,
+    trigger_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -608,7 +607,7 @@ impl PerspectiveInstance {
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
-            trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
+            trigger_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
@@ -1681,7 +1680,7 @@ impl PerspectiveInstance {
             self.shape_cache.write().unwrap().clear();
         }
 
-        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_diff.clone()).await;
 
         // A peer's proposal, vote or flow-instance row changes what this
@@ -1794,7 +1793,7 @@ impl PerspectiveInstance {
                 // Remove from SPARQL store (primary storage)
                 self.persist_link_diff(&diff).await?;
 
-                // Update both Prolog engines: subscription (immediate) + query (lazy)
+                // Queue the Prolog fact update and the notification + live-query checks
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
@@ -1949,7 +1948,7 @@ impl PerspectiveInstance {
         // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&diff).await?;
 
-        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_perspective_diff.clone())
             .await;
 
@@ -2218,7 +2217,7 @@ impl PerspectiveInstance {
             // Write to SPARQL store (primary storage for links)
             self.persist_link_diff(&diff).await?;
 
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
 
             // An update publishes its own topic rather than going through
@@ -2343,7 +2342,7 @@ impl PerspectiveInstance {
             // Remove from SPARQL store (primary storage)
             self.persist_link_diff(&persist_diff).await?;
 
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
             self.pubsub_publish_diff(decorated_diff).await;
 
@@ -3159,7 +3158,8 @@ impl PerspectiveInstance {
     /// Combined helper: spawns Prolog facts update AND marks query engine as dirty
     /// This is the common pattern throughout the codebase
     async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
-        // Update subscription engine (immediate via spawned task)
+        // Pooled-mode facts update, then notification and live-query checks
+        // (spawned task)
         self.spawn_prolog_facts_update(diff, None);
 
         // Mark query engine dirty for lazy update on next query
@@ -3171,7 +3171,6 @@ impl PerspectiveInstance {
     async fn execute_simple_mode_query(
         &self,
         query: String,
-        use_subscription_engine: bool,
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         let service = get_prolog_service().await;
@@ -3222,28 +3221,15 @@ impl PerspectiveInstance {
                     && link.data.predicate.as_ref().map(|p| p.as_str()) != Some("ad4m://sdna"))
         });
 
-        // Execute the query using the appropriate engine
-        let result = if use_subscription_engine {
-            service
-                .run_query_subscription_simple(
-                    &perspective_uuid,
-                    query,
-                    &links,
-                    neighbourhood_author,
-                    Some(user_did),
-                )
-                .await
-        } else {
-            service
-                .run_query_simple(
-                    &perspective_uuid,
-                    query,
-                    &links,
-                    neighbourhood_author,
-                    Some(user_did),
-                )
-                .await
-        };
+        let result = service
+            .run_query_simple(
+                &perspective_uuid,
+                query,
+                &links,
+                neighbourhood_author,
+                Some(user_did),
+            )
+            .await;
 
         result.map_err(|e| anyhow!("{}", e))
     }
@@ -3258,7 +3244,7 @@ impl PerspectiveInstance {
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, false, context).await
+                self.execute_simple_mode_query(query, context).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -3278,75 +3264,6 @@ impl PerspectiveInstance {
             PrologMode::Disabled => {
                 // Return empty matches instead of False/Error to allow SHACL-based SDNA to work
                 Ok(QueryResolution::Matches(vec![]))
-            }
-        }
-    }
-
-    /// Executes a Prolog subscription query against the perspective's main pool
-    /// locks the prolog_update_mutex
-    /// uses run_query_subscription
-    pub async fn prolog_query_subscription(
-        &self,
-        query: String,
-    ) -> Result<QueryResolution, AnyError> {
-        match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, true, &AgentContext::main_agent())
-                    .await
-            }
-            PrologMode::Pooled => {
-                // Pooled mode: Use the old pool-based approach
-                self.prolog_query_helper(
-                    query,
-                    true,
-                    |uuid| uuid.clone(),
-                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-                )
-                .await
-            }
-            PrologMode::Disabled => {
-                log::debug!(
-                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
-                    query
-                );
-                // Return empty result instead of error to allow SHACL-based SDNA to work
-                Ok(QueryResolution::False)
-            }
-        }
-    }
-
-    /// Executes a Prolog subscription query with user context - uses context-specific pool
-    /// locks the prolog_update_mutex
-    /// uses run_query_subscription
-    pub async fn prolog_query_subscription_with_context(
-        &self,
-        query: String,
-        context: &AgentContext,
-    ) -> Result<QueryResolution, AnyError> {
-        match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                // Context is now properly used for SDNA filtering per-user
-                self.execute_simple_mode_query(query, true, context).await
-            }
-            PrologMode::Pooled => {
-                // Pooled mode: Use the old pool-based approach with context
-                let perspective_uuid = self.uuid.clone();
-
-                self.prolog_query_helper(
-                    query,
-                    true,
-                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-                )
-                .await
-            }
-            PrologMode::Disabled => {
-                log::debug!(
-                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
-                    query
-                );
-                // Return empty result instead of error to allow SHACL-based SDNA to work
-                Ok(QueryResolution::False)
             }
         }
     }
@@ -4199,13 +4116,13 @@ impl PerspectiveInstance {
                 || PROLOG_MODE == PrologMode::Simple
                 || PROLOG_MODE == PrologMode::SdnaOnly
             {
-                // Trigger notification, prolog subscription
+                // Trigger notification and subscription checks
                 self_clone
                     .trigger_notification_check
                     .store(true, Ordering::Release);
                 self_clone.record_changed_predicates(&diff).await;
                 self_clone
-                    .trigger_prolog_subscription_check
+                    .trigger_subscription_check
                     .store(true, Ordering::Release);
 
                 // NOTE: pubsub_publish_diff is NOT called here.
@@ -4216,7 +4133,7 @@ impl PerspectiveInstance {
                 // WS subscriber (confirmed 2.0× delivery ratio in wind-tunnel
                 // S9) which doubled broadcast cost and was a UI/subscription
                 // re-evaluation footgun. Subscription re-evaluation is already
-                // gated by `trigger_prolog_subscription_check` + changed_predicates.
+                // gated by `trigger_subscription_check` + changed_predicates.
 
                 if let Some(sender) = completion_sender {
                     let _ = sender.send(());
@@ -4341,7 +4258,7 @@ impl PerspectiveInstance {
                     .trigger_notification_check
                     .store(true, Ordering::Release);
                 self_clone
-                    .trigger_prolog_subscription_check
+                    .trigger_subscription_check
                     .store(true, Ordering::Release);
             }
 
@@ -5850,33 +5767,22 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    /// Subscribe to a SPARQL/Prolog query. Returns the subscription id and
-    /// the revision and result the reply carries (see `open_subscription`);
+    /// Subscribe to a SPARQL query. Returns the subscription id and the
+    /// revision and result the reply carries (see `open_subscription`);
     /// every change after that is published as a delta update
     /// (`send_delta_update`). Each call makes a new subscription, so every
-    /// subscriber counts revisions from 0.
+    /// subscriber counts revisions from 0. A query that is not SPARQL fails
+    /// with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
     pub async fn subscribe_and_query(
         &self,
         query: String,
-        user_email: Option<String>,
         connection_id: String,
     ) -> Result<(String, u64, String), AnyError> {
-        let agent_context = if let Some(email) = user_email.as_ref() {
-            crate::agent::AgentContext::for_user_email(email.clone())
-        } else {
-            crate::agent::AgentContext::main_agent()
-        };
-        let subscribed_query = SubscribedQuery::new(query.clone(), user_email, connection_id);
-        let first_result = async {
-            if is_sparql_query(&query) {
-                self.sparql_query(query.clone())
-            } else {
-                let resolution = self
-                    .prolog_query_subscription_with_context(query.clone(), &agent_context)
-                    .await?;
-                Ok(prolog_resolution_to_string(resolution))
-            }
-        };
+        if !is_sparql_query(&query) {
+            return Err(anyhow!(PROLOG_LIVE_QUERY_UNSUPPORTED));
+        }
+        let subscribed_query = SubscribedQuery::new(query.clone(), connection_id);
+        let first_result = async { self.sparql_query(query) };
         self.open_subscription(subscribed_query, first_result).await
     }
 
@@ -5892,7 +5798,6 @@ impl PerspectiveInstance {
         &self,
         classes: super::model_query::QueryClasses,
         query_json: String,
-        user_email: Option<String>,
         connection_id: String,
     ) -> Result<(String, u64, String), AnyError> {
         // Build trigger SPARQL from shape predicates resolved through the cache.
@@ -5935,7 +5840,6 @@ impl PerspectiveInstance {
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
             last_result: String::new(),
-            user_email,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
                 classes: classes.clone(),
@@ -5994,7 +5898,7 @@ impl PerspectiveInstance {
             std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
         > = Vec::new();
 
-        // Collect only the minimal data needed: ID, query string, user_email, predicates,
+        // Collect only the minimal data needed: ID, query string, predicates,
         // and model_query_params (if this is a model subscription).
         // DON'T clone the potentially huge last_result string
         let queries = {
@@ -6005,7 +5909,6 @@ impl PerspectiveInstance {
                     (
                         id.clone(),
                         query.query.clone(),
-                        query.user_email.clone(),
                         query.predicates.clone(),
                         query.model_query_params.clone(),
                     )
@@ -6017,7 +5920,7 @@ impl PerspectiveInstance {
         let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
 
         // Create futures for each query check
-        for (id, query_string, user_email, sub_predicates, model_params) in queries {
+        for (id, query_string, sub_predicates, model_params) in queries {
             // Model subscriptions match each written link against their
             // trigger (see `subscription_triggers`), not the predicate alone.
             if let (Some(params), ChangedPredicates::Specific(ref writes)) =
@@ -6059,12 +5962,6 @@ impl PerspectiveInstance {
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
-                let _agent_context = if let Some(email) = user_email {
-                    crate::agent::AgentContext::for_user_email(email)
-                } else {
-                    crate::agent::AgentContext::main_agent()
-                };
-
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
                 // re-checked under one `join_all` below, so a wait here for one
@@ -6086,22 +5983,11 @@ impl PerspectiveInstance {
                             return None;
                         }
                     }
-                } else if is_sparql_query(&query_string) {
+                } else {
                     match self_clone.sparql_query(query_string) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
-                            return None;
-                        }
-                    }
-                } else {
-                    match self_clone
-                        .prolog_query_subscription_with_context(query_string, &_agent_context)
-                        .await
-                    {
-                        Ok(result) => prolog_resolution_to_string(result),
-                        Err(e) => {
-                            log::error!("❌ 🔗 📜 Prolog subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -6165,8 +6051,8 @@ impl PerspectiveInstance {
     }
 
     async fn subscribed_queries_loop(&self) {
-        // Note: the subscription loop must run even when Prolog is disabled,
-        // because SPARQL subscriptions don't use Prolog at all.
+        // Live queries are SPARQL or model queries: the loop runs whatever
+        // the Prolog mode, since none of them use a Prolog engine.
 
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
@@ -6186,9 +6072,7 @@ impl PerspectiveInstance {
 
         while !self.is_teardown.load(Ordering::Acquire) {
             // Check trigger without holding lock during the operation
-            let should_check = self
-                .trigger_prolog_subscription_check
-                .load(Ordering::Acquire);
+            let should_check = self.trigger_subscription_check.load(Ordering::Acquire);
 
             if should_check {
                 // Batch debounce: wait a short window for more changes to accumulate
@@ -6196,7 +6080,7 @@ impl PerspectiveInstance {
 
                 // Atomically reset trigger AFTER the sleep, so we catch any
                 // triggers that arrived during the debounce window.
-                self.trigger_prolog_subscription_check
+                self.trigger_subscription_check
                     .swap(false, Ordering::AcqRel);
                 let changed_preds = std::mem::replace(
                     &mut *self.changed_predicates.lock().await,
@@ -6752,7 +6636,7 @@ impl PerspectiveInstance {
 
             self.persist_link_diff(&persist_diff).await?;
 
-            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(combined_diff.clone()).await;
 
             // Publish PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED to WS subscribers.
@@ -8849,18 +8733,12 @@ mod tests {
 
         // No board has tasks yet, so hydration does not need `Task`.
         let (board_sub, _, _) = perspective
-            .model_subscribe_and_query(
-                "Board".into(),
-                NESTED_INCLUDE_QUERY.into(),
-                None,
-                "c".into(),
-            )
+            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), "c".into())
             .await
             .expect("subscribe to Board");
         let (other_sub, _, _) = perspective
             .subscribe_and_query(
                 "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(),
-                None,
                 "c".into(),
             )
             .await

@@ -131,7 +131,7 @@ async fn record(p: &mut PerspectiveInstance, id: &str, class: &str, props: &[(&s
 /// batch window.
 async fn take_writes(p: &PerspectiveInstance) -> ChangedPredicates {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !p.trigger_prolog_subscription_check.load(Ordering::Acquire) {
+    while !p.trigger_subscription_check.load(Ordering::Acquire) {
         assert!(
             tokio::time::Instant::now() < deadline,
             "no write was recorded"
@@ -140,8 +140,7 @@ async fn take_writes(p: &PerspectiveInstance) -> ChangedPredicates {
     }
     // Every write's recorder runs on its own task; let the rest land.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    p.trigger_prolog_subscription_check
-        .store(false, Ordering::Release);
+    p.trigger_subscription_check.store(false, Ordering::Release);
     std::mem::replace(
         &mut *p.changed_predicates.lock().await,
         ChangedPredicates::NoneRecorded,
@@ -158,7 +157,7 @@ async fn subscribe(p: &PerspectiveInstance, class: &str, query: Value) -> (Strin
     let mut query = query;
     query["includeUnverified"] = json!(true);
     let (id, _revision, result) = p
-        .model_subscribe_and_query(class.into(), query.to_string(), None, "c".into())
+        .model_subscribe_and_query(class.into(), query.to_string(), "c".into())
         .await
         .expect("model subscribe");
     (id, serde_json::from_str(&result).expect("result JSON"))

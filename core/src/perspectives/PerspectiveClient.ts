@@ -106,7 +106,7 @@ export class PerspectiveClient {
         return JSON.parse(result) as T
     }
 
-    /** Open a live SPARQL/Prolog query. Updates arrive through {@link onQueryUpdate}. */
+    /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
     async subscribeQuery(uuid: string, query: string): Promise<Subscribed> {
         return this.#apiClient.call('perspective.subscribeQuery', { uuid, query })
     }

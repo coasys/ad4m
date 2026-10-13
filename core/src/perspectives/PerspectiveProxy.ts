@@ -41,7 +41,7 @@ function extractNamespaceFromUri(uri: string): string {
 }
 
 
-/** A live SPARQL or Prolog query with its latest result.
+/** A live SPARQL query with its latest result.
  *
  * `subscribe()` opens the query and resolves once the first result is in;
  * `onResult()` callbacks then get every later result. The executor sends
@@ -67,6 +67,9 @@ export class QuerySubscriptionProxy {
             this.#initResolve = resolve;
             this.#initReject = reject;
         });
+        // `subscribe()` throws the same error, so a caller who never reads
+        // `initialized` must not get an unhandled rejection from it.
+        this.#initialized.catch(() => {});
     }
 
     /** Open the query; resolves with the first result delivered. */
@@ -2190,22 +2193,9 @@ export class PerspectiveProxy {
         return this.#client.aiClient
     }
 
-    /**
-     * Live Prolog query: resolves once the first result is in.
-     *
-     * ```typescript
-     * const subscription = await perspective.subscribeInfer(`instance(Todo, "Todo")`);
-     * console.log(subscription.result);
-     * subscription.onResult(todos => console.log(todos));
-     * subscription.dispose();
-     * ```
-     */
-    async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
-        return this.subscribeQuery(query);
-    }
-
-    /** Live SPARQL (or Prolog) query: resolves once the first result is in.
-     *  Call `dispose()` on the returned proxy when done. */
+    /** Live SPARQL query: resolves once the first result is in.
+     *  Call `dispose()` on the returned proxy when done. The executor
+     *  refuses a Prolog query (400): Prolog live queries are not supported. */
     async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
         const subscription = new QuerySubscriptionProxy(this.uuid, query, this.#client);
         await subscription.subscribe();

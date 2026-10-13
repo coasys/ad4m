@@ -39,6 +39,21 @@ describe('QuerySubscriptionProxy', () => {
     await expect(subscription.subscribe()).rejects.toThrow('locked');
     await expect(initialized).rejects.toThrow('locked');
   });
+
+  it('leaves no unhandled rejection when the caller never reads initialized', async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', record);
+    try {
+      const { client } = liveClient(jest.fn().mockRejectedValue(new Error('refused')));
+      const subscription = new QuerySubscriptionProxy('p', 'not sparql', client);
+      await expect(subscription.subscribe()).rejects.toThrow('refused');
+      await new Promise(resolve => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', record);
+    }
+  });
 });
 
 describe('PerspectiveProxy.subjectClassTargetClasses', () => {

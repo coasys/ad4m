@@ -229,6 +229,22 @@ async fn closing_the_socket_ends_its_subscriptions_only() {
     );
 }
 
+#[tokio::test]
+async fn a_prolog_live_query_gets_400() {
+    let p = registered_perspective(&[]).await;
+    let mut socket = Socket::open().await;
+    socket.send(
+        json!({ "id": "prolog", "type": "perspective.subscribeQuery",
+        "params": { "uuid": p.0, "query": "triple(X, _, \"todo-ontology://is-todo\")." } }),
+    );
+    let reply = socket.reply("prolog").await;
+    assert_eq!(reply["error"]["code"], 400, "{reply}");
+    assert_eq!(
+        reply["error"]["message"],
+        crate::perspectives::perspective_instance::PROLOG_LIVE_QUERY_UNSUPPORTED
+    );
+}
+
 /// Poll until `subscription` of `connection` is gone, for up to 2 s.
 async fn ended(perspective: &str, subscription: &str, connection: &str) -> bool {
     let perspective = crate::perspectives::get_perspective(perspective).unwrap();
@@ -271,7 +287,7 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
                 l.notified().await;
                 let (id, _, _) = crate::perspectives::get_perspective(&uuid)
                     .unwrap()
-                    .subscribe_and_query(QUERY.into(), None, ctx.connection_id.clone().unwrap())
+                    .subscribe_and_query(QUERY.into(), ctx.connection_id.clone().unwrap())
                     .await
                     .unwrap();
                 *slot.lock().unwrap() = Some(id);

@@ -11,7 +11,9 @@ use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
 use crate::perspectives::model_query::QueryClasses;
-use crate::perspectives::perspective_instance::result_json;
+use crate::perspectives::perspective_instance::{
+    is_sparql_query, result_json, PROLOG_LIVE_QUERY_UNSUPPORTED,
+};
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
@@ -929,12 +931,16 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    // Live queries are SPARQL; Prolog live queries were removed.
+    if !is_sparql_query(&body.query) {
+        return Err(WsRpcError::bad_request(PROLOG_LIVE_QUERY_UNSUPPORTED));
+    }
     let connection_id = connection_id(&ctx)?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let reply = perspective
-        .subscribe_and_query(body.query, ctx.user_email.clone(), connection_id)
+        .subscribe_and_query(body.query, connection_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     subscribed(reply)
@@ -1287,7 +1293,7 @@ async fn model_subscribe_handler(
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let reply = perspective
-        .model_subscribe_and_query(classes, query_json, ctx.user_email.clone(), connection_id)
+        .model_subscribe_and_query(classes, query_json, connection_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     subscribed(reply)

@@ -9,7 +9,6 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 use super::{PerspectiveInstance, SubscribedQuery};
-use crate::prolog_service::get_prolog_service;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 
 impl PerspectiveInstance {
@@ -121,32 +120,16 @@ impl PerspectiveInstance {
     }
 
     async fn dispose_where(&self, matches: impl Fn(&str, &SubscribedQuery) -> bool) -> usize {
-        let removed: Vec<SubscribedQuery> = {
+        let removed = {
             let mut queries = self.subscribed_queries.lock().await;
-            let ids: Vec<String> = queries
-                .iter()
-                .filter(|(id, q)| matches(id, q))
-                .map(|(id, _)| id.clone())
-                .collect();
-            ids.iter().filter_map(|id| queries.remove(id)).collect()
+            let before = queries.len();
+            queries.retain(|id, q| !matches(id, q));
+            before - queries.len()
         };
-        for query in &removed {
-            if let Err(e) = get_prolog_service()
-                .await
-                .subscription_ended(self.uuid.clone(), query.query.clone())
-                .await
-            {
-                log::warn!("Failed to notify prolog service of subscription end: {}", e);
-            }
+        if removed > 0 {
+            log::info!("🔗 {} subscription(s) dropped [{}]", removed, self.uuid);
         }
-        if !removed.is_empty() {
-            log::info!(
-                "🔗 {} subscription(s) dropped [{}]",
-                removed.len(),
-                self.uuid
-            );
-        }
-        removed.len()
+        removed
     }
 }
 
@@ -361,7 +344,7 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, _, initial) = p
-            .model_subscribe_and_query("Todo".into(), query.clone(), None, "c".into())
+            .model_subscribe_and_query("Todo".into(), query.clone(), "c".into())
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -402,10 +385,7 @@ mod tests {
     async fn resync_state_matches_the_last_update() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (id, _, _) = p
-            .subscribe_and_query(q.clone(), None, "c".into())
-            .await
-            .unwrap();
+        let (id, _, _) = p.subscribe_and_query(q.clone(), "c".into()).await.unwrap();
         let (revision, result) = p.subscription_state(&id, "c").await.unwrap();
         assert_eq!((revision, super::result_json(&result)), (0, json!([])));
 
@@ -427,7 +407,7 @@ mod tests {
     async fn a_write_while_the_first_result_is_computed_is_reported() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let query = super::SubscribedQuery::new(q.clone(), None, "c".into());
+        let query = super::SubscribedQuery::new(q.clone(), "c".into());
         // The first result is read, then a write and its check land before
         // the subscribe completes.
         let stale = p.sparql_query(q).unwrap();
@@ -449,18 +429,26 @@ mod tests {
     async fn each_subscriber_gets_its_own_subscription_from_revision_zero() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (first, _, _) = p
-            .subscribe_and_query(q.clone(), None, "c".into())
-            .await
-            .unwrap();
+        let (first, _, _) = p.subscribe_and_query(q.clone(), "c".into()).await.unwrap();
         add(&mut p, "test://a", "test://p", "test://b").await;
         assert_eq!(
             updates_after_check(&p, &first).await[0]["revision"],
             json!(1)
         );
 
-        let (second, _, _) = p.subscribe_and_query(q, None, "c".into()).await.unwrap();
+        let (second, _, _) = p.subscribe_and_query(q, "c".into()).await.unwrap();
         assert_ne!(first, second, "not shared");
         assert_eq!(p.subscription_state(&second, "c").await.unwrap().0, 0);
+    }
+
+    #[tokio::test]
+    async fn a_prolog_live_query_is_refused_and_not_registered() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let err = p
+            .subscribe_and_query(r#"triple(X, _, "test://b")."#.into(), "c".into())
+            .await
+            .expect_err("a Prolog live query is refused");
+        assert_eq!(err.to_string(), super::super::PROLOG_LIVE_QUERY_UNSUPPORTED);
+        assert!(p.subscribed_queries.lock().await.is_empty());
     }
 }

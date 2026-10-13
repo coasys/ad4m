@@ -61,10 +61,9 @@ most-specific tag on the left.
 | 🤖 | AI (prompt/embed/model calls) |
 | 🧠 | Interpretation engine |
 | ⚙️ | Auto-processor |
-| 🔗 | Subscriptions (renamed from "Prolog subscription") |
+| 🔗 | Subscriptions (live queries) |
 | 🧠 🔗 | Model-based subscription branch |
 | 🔎 🔗 | SPARQL subscription branch |
-| 📜 🔗 | Prolog subscription branch |
 | 🐝 | Holochain |
 | 📚 | Languages |
 | 👤 | Agent |
