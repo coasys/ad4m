@@ -145,6 +145,10 @@ lazy_static::lazy_static! {
     /// subscribe to `link-added` and filter for `has_claim`.
     pub static ref AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC: String =
         "auto-processor-neighbourhood-state-topic".to_owned();
+    /// A flow instance's derived state moved on one agent's replica
+    /// (`FlowStateChangedEvent`). Per-agent bookkeeping (#1424), so the event
+    /// stream delivers it to that agent's sockets only.
+    pub static ref FLOW_STATE_CHANGED_TOPIC: String = "flow-state-changed-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.
