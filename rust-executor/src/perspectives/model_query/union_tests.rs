@@ -267,9 +267,15 @@ async fn union_refuses_per_anchor_slicing_and_relation_order_keys() {
         serde_json::json!({"parent": {"ids": ["app://p"], "predicate": "app://has", "limitPerAnchor": 2}}),
         serde_json::json!({"order": {"owner.name": "ASC"}}),
     ] {
-        let err = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver, None)
-            .await
-            .unwrap_err();
+        let err = execute_union_query(
+            &store,
+            &classes(&["Task", "Note"]),
+            &query(q),
+            &resolver,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("classNames"), "{err}");
     }
     let err = execute_union_query(&store, &[], &query(serde_json::json!({})), &resolver, None)
@@ -292,9 +298,15 @@ async fn union_where_keeps_a_two_class_record_that_passes_as_one_of_them() {
         serde_json::json!({"where": {"status": "open"}}),
         serde_json::json!({"where": {"status": "open"}, "preferClasses": ["Note"]}),
     ] {
-        let result = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver, None)
-            .await
-            .unwrap();
+        let result = execute_union_query(
+            &store,
+            &classes(&["Task", "Note"]),
+            &query(q),
+            &resolver,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(ids(&result), vec!["app://both"]);
         assert_eq!(result.instances[0]["__subjectClass"], "Task");
     }
@@ -341,9 +353,15 @@ async fn union_reads_a_class_named_twice_once() {
     task(&store, "app://t1", Some(1), "open", "10");
     note(&store, "app://n2", Some(2), "11");
     let q = query(serde_json::json!({}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note", "Task"]), &q, &resolver, None)
-        .await
-        .unwrap();
+    let result = execute_union_query(
+        &store,
+        &classes(&["Task", "Note", "Task"]),
+        &q,
+        &resolver,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(ids(&result), vec!["app://t1", "app://n2"]);
     assert_eq!(result.total_count, 2);
 }

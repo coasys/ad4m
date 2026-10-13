@@ -11,7 +11,9 @@ use super::reruns;
 use crate::agent::AgentContext;
 use crate::perspectives::local_graph_tests::{setup, user};
 use crate::perspectives::model_query::QueryClasses;
-use crate::perspectives::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
+use crate::perspectives::perspective_instance::{
+    PerspectiveInstance, SdnaType, SubjectClassOption,
+};
 use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
 use crate::types::{Link, LinkStatus};
 use serde_json::{json, Value};
@@ -45,13 +47,20 @@ fn shacl(name: &str, props: &[(&str, &str)]) -> String {
 
 /// Alice and Bob co-own a perspective with a `Note` (text, status) and a
 /// `Task` (title) class.
-async fn notes() -> (PerspectiveInstance, (AgentContext, String), (AgentContext, String)) {
+async fn notes() -> (
+    PerspectiveInstance,
+    (AgentContext, String),
+    (AgentContext, String),
+) {
     let alice = user("alice");
     let bob = user("bob");
     let mut p = setup(Some(vec![alice.1.clone(), bob.1.clone()])).await;
     let main = AgentContext::main_agent();
     for (name, props) in [
-        ("Note", &[("text", "ns://text"), ("status", "ns://status")][..]),
+        (
+            "Note",
+            &[("text", "ns://text"), ("status", "ns://status")][..],
+        ),
         ("Task", &[("title", "ns://title")][..]),
     ] {
         p.add_sdna(
@@ -127,10 +136,15 @@ async fn check(p: &PerspectiveInstance) {
 }
 
 async fn subscribe(p: &PerspectiveInstance, who: &AgentContext, query: Value) -> String {
-    p.model_subscribe_and_query("Note".into(), query.to_string(), who.user_email.clone(), None)
-        .await
-        .unwrap()
-        .0
+    p.model_subscribe_and_query(
+        "Note".into(),
+        query.to_string(),
+        who.user_email.clone(),
+        None,
+    )
+    .await
+    .unwrap()
+    .0
 }
 
 async fn last_result(p: &PerspectiveInstance, id: &str) -> String {
@@ -165,10 +179,21 @@ async fn another_agents_local_write_does_not_rerun_my_subscription() {
     let mine = subscribe(&p, &alice, json!({})).await;
     let bobs = subscribe(&p, &bob, json!({})).await;
 
-    note(&mut p, "ns://note/alice", "mine", &alice, Some(LOCAL_GRAPH_ALIAS)).await;
+    note(
+        &mut p,
+        "ns://note/alice",
+        "mine",
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS),
+    )
+    .await;
     check(&p).await;
 
-    assert_eq!(reruns::count(&mine), 1, "Alice's write re-runs her subscription");
+    assert_eq!(
+        reruns::count(&mine),
+        1,
+        "Alice's write re-runs her subscription"
+    );
     assert_eq!(ids(&last_result(&p, &mine).await), vec!["ns://note/alice"]);
     assert_eq!(
         reruns::count(&bobs),
@@ -186,8 +211,22 @@ async fn another_agents_local_write_does_not_rerun_my_subscription() {
 async fn a_record_in_a_named_graph_entering_the_filter_reruns() {
     let (mut p, _, (bob, _)) = notes().await;
     let main = AgentContext::main_agent();
-    note(&mut p, "ns://note/bob", "draft", &bob, Some(LOCAL_GRAPH_ALIAS)).await;
-    note(&mut p, "ns://note/shared", "draft", &main, Some(SHARED_GRAPH)).await;
+    note(
+        &mut p,
+        "ns://note/bob",
+        "draft",
+        &bob,
+        Some(LOCAL_GRAPH_ALIAS),
+    )
+    .await;
+    note(
+        &mut p,
+        "ns://note/shared",
+        "draft",
+        &main,
+        Some(SHARED_GRAPH),
+    )
+    .await;
     check(&p).await;
     let bobs = subscribe(&p, &bob, json!({ "where": { "status": "done" } })).await;
     assert!(ids(&last_result(&p, &bobs).await).is_empty());

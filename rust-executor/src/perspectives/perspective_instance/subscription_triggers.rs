@@ -183,7 +183,11 @@ impl Writes {
             links: self.links.as_ref().map(|links| {
                 links
                     .iter()
-                    .filter(|l| l.graph.as_deref().is_none_or(|g| graph_visible_to(g, viewer)))
+                    .filter(|l| {
+                        l.graph
+                            .as_deref()
+                            .is_none_or(|g| graph_visible_to(g, viewer))
+                    })
                     .cloned()
                     .collect()
             }),

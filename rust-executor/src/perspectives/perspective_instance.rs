@@ -4640,9 +4640,8 @@ impl PerspectiveInstance {
         // If already CheckAll, it's sticky — nothing to do
         if !matches!(changed, ChangedPredicates::CheckAll) {
             // Collect the diff's links; a predicate-less one means check everything.
-            let writes = subscription_triggers::writes_of(
-                diff.additions.iter().chain(diff.removals.iter()),
-            );
+            let writes =
+                subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
             match (writes, &mut *changed) {
                 (None, _) => *changed = ChangedPredicates::CheckAll,
                 (Some(writes), ChangedPredicates::NoneRecorded) => {
@@ -6812,8 +6811,10 @@ impl PerspectiveInstance {
         // reads are made as that subscriber. Another agent's Local link
         // never re-runs it, or decides that it does. Both are worked out once
         // per subscriber and shared by that subscriber's subscriptions.
-        let mut visible_writes: HashMap<String, std::borrow::Cow<'_, subscription_triggers::Writes>> =
-            HashMap::new();
+        let mut visible_writes: HashMap<
+            String,
+            std::borrow::Cow<'_, subscription_triggers::Writes>,
+        > = HashMap::new();
         let mut trigger_lookups: HashMap<String, subscription_triggers::StoreLookups<'_>> =
             HashMap::new();
 

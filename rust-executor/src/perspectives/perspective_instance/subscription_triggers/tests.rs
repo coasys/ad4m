@@ -370,7 +370,8 @@ async fn deleting_a_record_outside_the_page_reruns() {
     assert_eq!(shown.len(), 1, "{first}");
     let hidden = if shown[0] == "ns://p1" { f2 } else { f1 };
 
-    as_main(&p).remove_link(hidden.into(), None)
+    as_main(&p)
+        .remove_link(hidden.into(), None)
         .await
         .expect("remove_link");
     check(&p).await;
@@ -480,7 +481,8 @@ async fn an_edit_moving_a_record_in_a_relation_property_order_reruns() {
     .await;
     assert_eq!(ids(&first), vec!["ns://p2", "ns://p1"], "k < m: {first}");
 
-    as_main(&p).remove_link(old_text.into(), None)
+    as_main(&p)
+        .remove_link(old_text.into(), None)
         .await
         .expect("remove_link");
     add(&mut p, "ns://c1", "ns://text", "literal:string:a").await;
@@ -782,9 +784,7 @@ async fn a_trigger_over_two_classes_matches_a_create_of_either() {
     let (comment, _) = take_writes(&p).await;
 
     let matches = |trigger: &ModelTrigger, writes: &ChangedPredicates| match writes {
-        ChangedPredicates::Specific(writes) => {
-            trigger.matches(writes, &mut main_lookups(&p))
-        }
+        ChangedPredicates::Specific(writes) => trigger.matches(writes, &mut main_lookups(&p)),
         _ => panic!("expected recorded links"),
     };
 

@@ -269,10 +269,9 @@ pub async fn execute_union_query(
     //    is kept whenever one of its readings passes — the answer a per-class
     //    query gives — and a reading the read cannot see (a Local or
     //    unverified flag under a shared read) can never be the one chosen.
-    let classified =
-        crate::perspectives::subject_classes_of::subject_classes_of(
-            store, resolver, &all_ids, graph_iris,
-        )?;
+    let classified = crate::perspectives::subject_classes_of::subject_classes_of(
+        store, resolver, &all_ids, graph_iris,
+    )?;
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut union: Vec<Value> = Vec::new();
     let mut chosen_by_id: HashMap<String, String> = HashMap::new();

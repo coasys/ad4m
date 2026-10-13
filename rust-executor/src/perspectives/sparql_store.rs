@@ -1393,12 +1393,10 @@ impl SparqlStore {
         let mut out = Vec::new();
         let as_subject = NamedNodeRef::new_unchecked(node);
         let predicate = predicate.map(NamedNodeRef::new_unchecked);
-        for quad in self.store.quads_for_pattern(
-            Some(as_subject.into()),
-            predicate,
-            None,
-            None,
-        ) {
+        for quad in self
+            .store
+            .quads_for_pattern(Some(as_subject.into()), predicate, None, None)
+        {
             let quad = quad?;
             if !stored_graph_readable_by(quad.graph_name.as_ref(), viewer) {
                 continue;
@@ -1412,12 +1410,10 @@ impl SparqlStore {
             }
         }
         let as_object = target_to_storage_term(node);
-        for quad in self.store.quads_for_pattern(
-            None,
-            predicate,
-            Some(as_object.as_ref()),
-            None,
-        ) {
+        for quad in self
+            .store
+            .quads_for_pattern(None, predicate, Some(as_object.as_ref()), None)
+        {
             let quad = quad?;
             if !stored_graph_readable_by(quad.graph_name.as_ref(), viewer) {
                 continue;

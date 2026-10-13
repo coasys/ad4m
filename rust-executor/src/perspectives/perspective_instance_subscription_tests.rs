@@ -257,7 +257,10 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         let mut writes = subscription_triggers::Writes::new();
         writes.record(base, changed, "literal://string:edited");
         perspective
-            .check_subscribed_queries(ChangedPredicates::Specific(writes), ChangedGraphs::NoneRecorded)
+            .check_subscribed_queries(
+                ChangedPredicates::Specific(writes),
+                ChangedGraphs::NoneRecorded,
+            )
             .await;
         let push = next_push_for(&mut rx, &perspective.uuid, &id).await;
         assert!(
@@ -304,15 +307,18 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         .await
         .expect("create_subject(Task)");
     perspective
-        .check_subscribed_queries(ChangedPredicates::Specific({
-            let mut writes = subscription_triggers::Writes::new();
-            writes.record(
-                "ad4m://task/unrelated-diff",
-                "ns://unrelated",
-                "literal://string:x",
-            );
-            writes
-        }), ChangedGraphs::NoneRecorded)
+        .check_subscribed_queries(
+            ChangedPredicates::Specific({
+                let mut writes = subscription_triggers::Writes::new();
+                writes.record(
+                    "ad4m://task/unrelated-diff",
+                    "ns://unrelated",
+                    "literal://string:x",
+                );
+                writes
+            }),
+            ChangedGraphs::NoneRecorded,
+        )
         .await;
 
     let quiet = tokio::time::timeout(Duration::from_millis(1500), async {
