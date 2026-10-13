@@ -37,6 +37,8 @@
 //! - [`collections`] — `instance_add_to_collection` + `instance_remove_from_collection`
 //! - [`children`] — class-agnostic `add_child` / `get_children` on the
 //!   `ad4m://has_child` tree
+//! - [`replies`] — `get_replies`, what answers an item, through the reply
+//!   roles rather than containment
 //! - [`transcript`] — `instance_transcript`, a compact chronological reading
 //!   of one class's children under a node
 //! - [`commands`] — `execute_commands`, raw SDNA actions on an instance
@@ -50,6 +52,7 @@ pub mod commands;
 pub mod create;
 pub mod describe;
 pub mod query;
+pub mod replies;
 pub mod transcript;
 pub mod update;
 pub(crate) mod validate;
@@ -63,6 +66,7 @@ pub use commands::ExecuteCommandsParams;
 pub use create::InstanceCreateParams;
 pub use describe::DescribePerspectiveParams;
 pub use query::{InstanceGetParams, InstanceQueryParams};
+pub use replies::GetRepliesParams;
 pub use transcript::InstanceTranscriptParams;
 pub use update::{InstanceRemoveParams, InstanceUpdateParams};
 pub(crate) use validate::{

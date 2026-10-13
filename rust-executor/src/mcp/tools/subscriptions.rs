@@ -291,6 +291,12 @@ impl Ad4mMcpHandler {
             Some(ref p) => p.containment_predicates().await.as_ref().clone(),
             None => vec![crate::perspectives::containment::HAS_CHILD.to_string()],
         };
+        // And which links are replies, so a mention inside a reply is woken
+        // with what the reply answers, and what that is in.
+        let replies = match perspective {
+            Some(ref p) => p.reply_predicates().await.as_ref().clone(),
+            None => vec![crate::perspectives::replies::HAS_REPLY.to_string()],
+        };
 
         json!({
             "did": did,
@@ -298,6 +304,7 @@ impl Ad4mMcpHandler {
             "perspective_id": perspective_id,
             "query": query,
             "containment_predicates": containment,
+            "reply_predicates": replies,
             "mention_relations": relations,
             "subscription": subscription,
             "message": if !relations.is_empty() {

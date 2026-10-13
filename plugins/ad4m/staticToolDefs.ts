@@ -710,6 +710,42 @@ export const STATIC_TOOL_DEFS: McpTool[] =
     }
   },
   {
+    "name": "get_replies",
+    "description": "List what was said in reply to an item: id, timestamp and author of each reply, oldest first. Follows ad4m://has_reply and any predicate the perspective declares as one, regardless of class \u2014 replies an app keeps apart from containment, which get_children does not list. thread=false (default) gives the direct replies; thread=true gives every reply under the item at any depth, each with in_reply_to, through ad4m://has_thread_member (or a declared thread index) when there is one, else by walking the replies. limit keeps the most recent N (default 100, max 500); total_count is the full number. Read a reply's content with instance_get.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "GetRepliesParams",
+      "description": "Parameters for listing the replies to an item",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "item": {
+          "description": "The item whose replies to list. A bare string is wrapped as a literal\nURI.",
+          "type": "string"
+        },
+        "thread": {
+          "description": "false (default): the direct replies only. true: every reply under the\nitem at any depth, each with the id it answers (`in_reply_to`), so the\ntree can be rebuilt.",
+          "type": "boolean",
+          "nullable": true
+        },
+        "limit": {
+          "description": "Maximum number of replies to return \u2014 the most recent ones, in\nchronological order (default 100, max 500). total_count reports how\nmany there are in all.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "nullable": true
+        }
+      },
+      "required": [
+        "perspective_id",
+        "item"
+      ]
+    }
+  },
+  {
     "name": "get_documentation",
     "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, and the common traps. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks, channel recipes), worth reading only for a space Flux created — for any other app, describe_perspective is the authority on its classes. topic='models' is authoring your own subject classes with add_model. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. Older executors serve only overview/usage/architecture; overview always lists what that node actually has. No authentication needed.",
     "inputSchema": {

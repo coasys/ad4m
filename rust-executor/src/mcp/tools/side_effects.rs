@@ -87,6 +87,7 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // Raw ad4m://has_child tree ops, class-agnostic.
     ("add_child", SideEffect::Write),
     ("get_children", SideEffect::Read),
+    ("get_replies", SideEffect::Read),
     // `execute_commands` runs SDNA-declared actions on an instance —
     // always a mutation.
     ("execute_commands", SideEffect::Write),

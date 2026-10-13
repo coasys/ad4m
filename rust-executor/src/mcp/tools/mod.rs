@@ -342,6 +342,7 @@ impl Ad4mMcpHandler {
             ))
             .with_route((Self::add_child_tool_attr(), Self::add_child))
             .with_route((Self::get_children_tool_attr(), Self::get_children))
+            .with_route((Self::get_replies_tool_attr(), Self::get_replies))
             .with_route((Self::execute_commands_tool_attr(), Self::execute_commands))
             // docs.rs
             .with_route((Self::get_documentation_tool_attr(), Self::get_documentation))

@@ -1823,6 +1823,7 @@ describe("ad4mPlugin", () => {
       "ad4m_instance_transcript",
       "ad4m_add_child",
       "ad4m_get_children",
+      "ad4m_get_replies",
     ]) {
       expect(toolNames).toContain(name);
     }

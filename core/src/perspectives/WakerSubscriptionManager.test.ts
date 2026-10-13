@@ -303,4 +303,14 @@ describe('WakerSubscriptionManager', () => {
     // Nothing declared is has_child alone.
     expect(parentQuery(undefined, 'test://message')).toContain('<ad4m://has_child> <test://message>');
   });
+
+  it('takes what a reply answers as its parent, through every reply predicate', () => {
+    // A reply is in nothing: without the reply predicates a mention inside one has no parents.
+    const query = parentQuery(['ad4m://has_child'], 'test://reply', ['ad4m://has_reply', 'app://response', 'bad iri']);
+    expect(query).toBe(
+      'SELECT ?source WHERE { { ?source <ad4m://has_child> <test://reply> . } UNION { ?source <ad4m://has_reply> <test://reply> . } UNION { ?source <app://response> <test://reply> . } }',
+    );
+    // An older executor sends none, and the walk is containment alone.
+    expect(parentQuery(['ad4m://has_child'], 'test://reply')).not.toContain('has_reply');
+  });
 });

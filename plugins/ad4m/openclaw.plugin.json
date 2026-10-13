@@ -33,6 +33,7 @@
       "ad4m_instance_transcript",
       "ad4m_add_child",
       "ad4m_get_children",
+      "ad4m_get_replies",
       "ad4m_subscribe_to_mentions",
       "ad4m_unsubscribe_from_mentions",
       "ad4m_subscribe_to_children",
