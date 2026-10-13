@@ -150,7 +150,7 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         build_signed_perspective(&body.status, body.signed.unwrap_or(true), &agent_context)?;
 
     perspective_instance
-        .set_online_status(signed_perspective)
+        .set_online_status(signed_perspective, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
