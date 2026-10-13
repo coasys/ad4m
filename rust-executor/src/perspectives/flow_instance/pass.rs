@@ -111,7 +111,16 @@ pub(crate) async fn catch_up_before_own_vote(
             let only = [instance_uri.to_string()];
             let reported =
                 run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+            // Release builds drop the assert. A non-empty catch-up is not this
+            // vote's fire; log it instead of swallowing those outcomes silently.
             debug_assert!(reported.is_empty(), "a first pass reports nothing");
+            if !reported.is_empty() {
+                log::warn!(
+                    "catch_up_before_own_vote: {instance_uri} had no replica-state row but the \
+                     catch-up pass reported {} event(s); those are not this vote's",
+                    reported.len()
+                );
+            }
         }
         Err(e) => log::warn!(
             "catch_up_before_own_vote: reading the bookkeeping of {instance_uri} failed; \
