@@ -327,8 +327,11 @@ mod tests {
             .await
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await;
-        p.check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::DefaultGraphChanged)
-            .await;
+        p.check_subscribed_queries(
+            ChangedPredicates::CheckAll,
+            ChangedGraphs::DefaultGraphChanged,
+        )
+        .await;
         let mut out = vec![];
         let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
         while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -386,7 +389,10 @@ mod tests {
     async fn resync_state_matches_the_last_update() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (id, _, _) = p.subscribe_and_query(q.clone(), None, "c".into()).await.unwrap();
+        let (id, _, _) = p
+            .subscribe_and_query(q.clone(), None, "c".into())
+            .await
+            .unwrap();
         let (revision, result) = p.subscription_state(&id, "c").await.unwrap();
         assert_eq!((revision, super::result_json(&result)), (0, json!([])));
 
@@ -416,7 +422,10 @@ mod tests {
         let first_result = async move {
             add(&mut writer, "test://a", "test://p", "test://b").await;
             writer
-                .check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::DefaultGraphChanged)
+                .check_subscribed_queries(
+                    ChangedPredicates::CheckAll,
+                    ChangedGraphs::DefaultGraphChanged,
+                )
                 .await;
             Ok(stale)
         };
@@ -430,7 +439,10 @@ mod tests {
     async fn each_subscriber_gets_its_own_subscription_from_revision_zero() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (first, _, _) = p.subscribe_and_query(q.clone(), None, "c".into()).await.unwrap();
+        let (first, _, _) = p
+            .subscribe_and_query(q.clone(), None, "c".into())
+            .await
+            .unwrap();
         add(&mut p, "test://a", "test://p", "test://b").await;
         assert_eq!(
             updates_after_check(&p, &first).await[0]["revision"],

@@ -6766,8 +6766,7 @@ impl PerspectiveInstance {
     /// before calling [`Self::check_subscriptions_now`].
     #[cfg(test)]
     pub(crate) fn subscription_check_pending(&self) -> bool {
-        self.trigger_subscription_check
-            .load(Ordering::Acquire)
+        self.trigger_subscription_check.load(Ordering::Acquire)
     }
 
     /// One subscription check over the changes recorded since the last one.

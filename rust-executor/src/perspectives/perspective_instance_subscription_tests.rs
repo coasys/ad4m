@@ -187,7 +187,13 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
     let classes =
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, _, initial) = perspective
-        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None, None, "c".into())
+        .model_subscribe_and_query(
+            classes,
+            r#"{"includeUnverified":true}"#.into(),
+            None,
+            None,
+            "c".into(),
+        )
         .await
         .expect("union model subscribe");
     assert!(initial.contains("\"totalCount\":0"), "{initial}");
@@ -259,7 +265,13 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
     let classes =
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, _, _) = perspective
-        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None, None, "c".into())
+        .model_subscribe_and_query(
+            classes,
+            r#"{"includeUnverified":true}"#.into(),
+            None,
+            None,
+            "c".into(),
+        )
         .await
         .expect("union model subscribe");
 

@@ -671,11 +671,7 @@ async fn a_subscription_update_reaches_only_its_subscriber() {
     let query = "SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string();
 
     let (alice_sub, _, initial) = p
-        .subscribe_and_query(
-            query.clone(),
-            alice.user_email.clone(),
-            "alice-conn".into(),
-        )
+        .subscribe_and_query(query.clone(), alice.user_email.clone(), "alice-conn".into())
         .await
         .unwrap();
     assert!(!initial.contains("ad4m://s/secret"));
