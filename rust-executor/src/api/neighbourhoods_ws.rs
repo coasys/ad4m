@@ -52,12 +52,14 @@ async fn publish_neighbourhood(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
+    // The perspective the guard checked.
+    let perspective_uuid = PUBLISHED_PERSPECTIVE.require(&params)?;
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = ctx.acts_as();
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
-        &body.perspective_uuid,
+        &perspective_uuid,
         body.link_language,
         body.meta,
         &agent_context,

@@ -296,8 +296,11 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 }
 
 async fn update_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let task: AITask = serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
-        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    let mut task: AITask =
+        serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    // The task the guard checked.
+    task.task_id = UPDATED_TASK_ID.require(&params)?;
 
     let service = AIService::global_instance()
         .await
@@ -312,7 +315,7 @@ async fn update_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let id = params.require_str("id")?;
+    let id = REMOVED_TASK_ID.require(&params)?;
 
     let service = AIService::global_instance()
         .await
@@ -331,6 +334,8 @@ async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_compute_credits_ws(ctx.user_did())?;
 
+    // The task the guard checked.
+    let task_id = PROMPT_TASK_ID.require(&params)?;
     let body: PromptRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -339,11 +344,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .prompt(
-            body.task_id,
-            body.prompt,
-            ctx.user_did().map(str::to_string),
-        )
+        .prompt(task_id, body.prompt, ctx.user_did().map(str::to_string))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 

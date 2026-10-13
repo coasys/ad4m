@@ -190,6 +190,77 @@ async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
     );
 }
 
+/// A re-run's update goes to its subscriber only. Two managed agents owning one perspective
+/// subscribe the same query: each gets its own subscription id, and the re-run after a
+/// matching link sends each id to its own subscriber (`Audience::Dids([subscriber])`), not
+/// to the main agent (who does not own the perspective) or the other owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_update_reaches_only_its_subscriber() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let u = "did:key:subscriber-u".to_string();
+    let v = "did:key:subscriber-v".to_string();
+    perspective.persisted.lock().await.owners = Some(vec![u.clone(), v.clone()]);
+    let query = "SELECT ?s ?o WHERE { ?s <ns://audience-title> ?o . }".to_string();
+
+    let (id_u, _) = perspective
+        .subscribe_and_query(query.clone(), Some(u.clone()))
+        .await
+        .expect("U subscribes");
+    let (id_v, _) = perspective
+        .subscribe_and_query(query.clone(), Some(v.clone()))
+        .await
+        .expect("V subscribes");
+    assert_ne!(id_u, id_v, "two agents' subscriptions are not shared");
+
+    let mut rx = get_global_pubsub().await.subscribe_events();
+    perspective
+        .add_link(
+            Link {
+                source: "ns://thing/audience".into(),
+                predicate: Some("ns://audience-title".into()),
+                target: "literal://string:hello".into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("add_link");
+    perspective
+        .check_subscribed_queries(ChangedPredicates::Specific(
+            HashSet::from(["ns://audience-title".to_string()]).into(),
+        ))
+        .await;
+
+    let mut got = std::collections::BTreeMap::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while got.len() < 2 {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("pubsub receiver closed: {e}"),
+            };
+            if event.topic != Topic::PerspectiveQuerySubscription {
+                continue;
+            }
+            let filter: PerspectiveQuerySubscriptionFilter =
+                serde_json::from_value(event.payload.clone()).expect("subscription push JSON");
+            if filter.uuid == perspective.uuid {
+                assert!(
+                    filter.result.contains("ns://thing/audience"),
+                    "{}",
+                    filter.result
+                );
+                got.insert(filter.subscription_id, event.audience.clone());
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("both updates expected, got {got:?}"));
+    assert_eq!(got.get(&id_u), Some(&Audience::Dids(vec![u])), "U's update");
+    assert_eq!(got.get(&id_v), Some(&Audience::Dids(vec![v])), "V's update");
+}
+
 /// A class sharing `Task`'s flag predicate (with its own value) and declaring
 /// a predicate `Task` does not: `ns://body`.
 const NOTE_SDNA: &str = r#"{

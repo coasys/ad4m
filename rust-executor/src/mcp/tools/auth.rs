@@ -220,6 +220,9 @@ impl Ad4mMcpHandler {
         {
             Ok(Value::String(request_id)) => request_id,
             Ok(other) => return unexpected_result("agent.requestCapability", &other),
+            // The method's handler bounds the AuthInfo (`capabilities::request_capability`:
+            // 400 for an overlong field, 429 when the pending table is full); any refusal is
+            // `success: false`.
             Err(e) => {
                 return json!({
                     "success": false,
@@ -815,6 +818,31 @@ mod capability_mint_tests {
             v["message"].as_str().unwrap_or_default().contains("admin"),
             "message should point at admin approval: {resp}"
         );
+    }
+
+    /// MCP builds its request from the tool's parameters and calls `agent.requestCapability`,
+    /// whose handler runs the same `request_capability` as any WS caller, so the same bounds
+    /// hold: an overlong app name is refused (`success: false`) and nothing is requested or
+    /// permitted, even for a caller that may approve (the operator).
+    #[tokio::test]
+    async fn an_overlong_app_name_is_refused() {
+        let handler = handler_with_admin_credential();
+        let params = RequestCapabilityParams {
+            app_name: "x".repeat(crate::agent::capabilities::MAX_AUTH_INFO_FIELD_BYTES + 1),
+            ..mint_params()
+        };
+        let operator = Session::for_test(Principal::Operator);
+        let resp = handler
+            .handle_capability_request(params, Some(Arc::new(operator)))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert_eq!(v["success"], false, "{resp}");
+        assert!(
+            v["error"].as_str().unwrap_or_default().contains("appName"),
+            "{resp}"
+        );
+        assert!(v.get("request_id").is_none(), "{resp}");
+        assert!(v.get("code").is_none(), "{resp}");
     }
 
     #[tokio::test]

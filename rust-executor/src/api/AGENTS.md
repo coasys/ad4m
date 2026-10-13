@@ -66,7 +66,7 @@ map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>("perspective.get"
 map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
     .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
 map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
-    .guard(Guard::Owns { cap: |_| AI_CREATE_CAPABILITY.clone(), id: removed_task_id, owner: Owner::Task });
+    .guard(Guard::Owns { cap: |_| AI_CREATE_CAPABILITY.clone(), id: REMOVED_TASK_ID, owner: Owner::Task });
 ```
 
 `Guard::perspective(cap)` builds `Guard::Owns { owner: Perspective }` on the `uuid` param.
@@ -135,8 +135,10 @@ Which guard each method has, generated from the handler map
 (`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
 fails when it is stale; `pnpm run generate:api-types` in `core/` rewrites it with the SDK
 contracts. An `Owns` row names the resource, the param the guard reads its id from (an
-`IdParam`: a field path, `a|b` for aliases, `auth(JSON).requestId` for a field inside a JSON
-string param) and the capability:
+`IdParam`: a field path, `a or b` for aliases, `auth(JSON).requestId` for a field inside a
+JSON string param) and the capability. A handler reads the id through the same `IdParam`
+(`guards::UUID_PARAM.require(&params)`, `guarded_perspective`), so it acts on the resource
+the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
@@ -206,7 +208,7 @@ string param) and the capability:
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
 | `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
-| `neighbourhood.publish` | `Owns(Perspective perspectiveUuid|perspectiveUUID, neighbourhood:CREATE)` |
+| `neighbourhood.publish` | `Owns(Perspective perspectiveUuid or perspectiveUUID, neighbourhood:CREATE)` |
 | `neighbourhood.sendBroadcast` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.sendSignal` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.setOnlineStatus` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
@@ -432,9 +434,10 @@ them against those two guards.
      icon over 1 KiB is 400. The request is a `PendingRequest` in memory only: never on disk,
      1024 at most and 64 per target (all `NoAgent` requests are one target). Past a limit a
      new request evicts an unapproved one, oldest first: for no agent, then for its own
-     target; never another agent's or an approved one, so when none may go it is refused.
-     A request lives 10 minutes for the main agent and 24 hours for a managed agent,
-     restarted at approval. Its approval request goes to the target agent's DID
+     target, then (for an agent below its share) the target holding the most; never an
+     approved one, so when none may go it is refused (429; MCP's `request_capability` answers
+     `success: false`). A request lives 10 minutes for the main agent and 24 hours for a
+     managed agent, restarted at approval. Its approval request goes to the target agent's DID
      (`Event::approval_request`). Every request waits for that owner: the declared app name
      and domain are the caller's claim and approve nothing. `AuthInfo.user_email` on the
      request and the grant is only a display hint (the owner's email, from `email_for_did`).

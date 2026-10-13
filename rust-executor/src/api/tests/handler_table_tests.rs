@@ -338,11 +338,21 @@ fn the_guard_table_names_the_param_an_owner_guard_reads() {
         ("agent.permitCapability", "Request auth(JSON).requestId"),
         (
             "neighbourhood.publish",
-            "Perspective perspectiveUuid|perspectiveUUID",
+            "Perspective perspectiveUuid or perspectiveUUID",
         ),
     ] {
         let row = row(method);
         assert!(row.contains(&format!("`Owns({param}, ")), "{row}");
+    }
+}
+
+/// A `|` inside a cell, code span or not, splits a GFM table row: every row of the guard
+/// table has its two cells and no more.
+#[test]
+fn every_guard_table_row_has_two_cells() {
+    let table = render_guard_table(&build_handler_map());
+    for line in table.lines().filter(|line| line.starts_with('|')) {
+        assert_eq!(line.matches('|').count(), 3, "{line}");
     }
 }
 

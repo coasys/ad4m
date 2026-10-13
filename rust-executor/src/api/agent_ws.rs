@@ -486,11 +486,17 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(out)?)
 }
 
+/// The grant `agent.removeApp` removes: its `id` param, a token or a request id.
+const REMOVED_GRANT: IdParam = IdParam::Field(&["id"]);
+
+/// The grant `agent.revokeToken` revokes: its `token` param, a token or a request id.
+const REVOKED_GRANT: IdParam = IdParam::Field(&["token"]);
+
 /// agent.removeApp — deletes an app's grant: its token stops working at once (a missing grant
 /// refuses as a revoked one does, #396) and leaves the app list. The guard (`Owns { Grant }`)
 /// checked that the caller's agent owns it, or that the caller is the operator.
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let request_id = params.require_str("id")?;
+    let request_id = REMOVED_GRANT.require(&params)?;
     Grants::global()
         .remove(&Grants::global().find(&request_id))
         .map_err(grant_error)?;
@@ -510,14 +516,15 @@ async fn request_capability(params: Value, _ctx: Arc<RequestContext>) -> Result<
         .auth_info
         .try_into()
         .map_err(|e: String| WsRpcError::bad_request(e))?;
-    crate::agent::capabilities::check_auth_info_bounds(&auth_info)
-        .map_err(WsRpcError::bad_request)?;
     // Dev-mode auto-permit speaks for the operator, who owns only the main agent: a request
     // on a managed agent always waits for that agent's owner (#1399).
     let operator_owns_target = target.is_main_agent();
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone(), target)
         .await
-        .map_err(WsRpcError::internal)?;
+        .map_err(|e| match e {
+            RequestCapabilityError::Invalid(e) => WsRpcError::bad_request(e),
+            RequestCapabilityError::Busy(e) => WsRpcError::too_many_requests(e),
+        })?;
 
     if operator_owns_target && crate::config::auto_permit_cap_requests() {
         log::debug!(
@@ -567,11 +574,14 @@ async fn permit_capability_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
+    // The request the guard checked.
+    let request_id = PERMITTED_REQUEST_ID.require(&params)?;
     let body: PermitCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
+    let mut auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
+    auth.request_id = request_id;
     let missing = || {
         WsRpcError::not_found(
             "No pending request has this id; it may have expired. The app must request access \
@@ -617,7 +627,7 @@ async fn generate_jwt(params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
     // for an app's grant and a login's.
-    let token = params.require_str("token")?;
+    let token = REVOKED_GRANT.require(&params)?;
     Grants::global()
         .revoke(&Grants::global().find(&token))
         .map_err(grant_error)?;
@@ -870,7 +880,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: IdParam::Field(&["id"]),
+            id: REMOVED_GRANT,
             owner: Owner::Grant,
         });
     // An app without a token asks for one.
@@ -893,7 +903,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: IdParam::Field(&["token"]),
+            id: REVOKED_GRANT,
             owner: Owner::Grant,
         });
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
@@ -1509,6 +1519,40 @@ mod capability_request_tests {
         text
     }
 
+    // An `auth` that names `requestId` twice is 400 and approves nothing, in either order: the
+    // guard would read the last id (a `Value` keeps it) while the handler's struct refuses a
+    // repeated field, so the guard could check another request than the one approved.
+    #[tokio::test]
+    async fn a_repeated_request_id_is_400_and_approves_nothing() {
+        setup();
+        let (alice_email, alice) = user("repeated-id-alice");
+        let (bob_email, _bob) = user("repeated-id-bob");
+        let caps = [AGENT_READ_CAPABILITY.clone()];
+        let mine = request(Some(&alice_email), &caps).await;
+        let victim = request(Some(&bob_email), &caps).await;
+        let auth = serde_json::to_string(&AuthInfo {
+            app_name: "Consent test app".into(),
+            capabilities: Some(caps.to_vec()),
+            ..AuthInfo::default()
+        })
+        .unwrap();
+        for (first, last) in [(&mine, &victim), (&victim, &mine)] {
+            let repeated =
+                format!(r#"{{"requestId":"{first}","requestId":"{last}","auth":{auth}}}"#);
+            let err = call(
+                "agent.permitCapability",
+                json!({ "auth": repeated }),
+                alice.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, 400, "{first} then {last}: {}", err.1);
+        }
+        let pending = crate::agent::capabilities::pending::PendingRequests::global();
+        assert!(!pending.is_approved(&mine));
+        assert!(!pending.is_approved(&victim));
+    }
+
     // The end-to-end flow of #1399 on the executor: the user (a session acting as the managed
     // agent) receives the request, approves part of it, and the app's token acts as that
     // user with only that part.
@@ -1799,7 +1843,7 @@ mod capability_request_tests {
     async fn a_request_with_an_overlong_app_field_is_refused() {
         setup();
         let long = "x".repeat(crate::agent::capabilities::MAX_AUTH_INFO_FIELD_BYTES + 1);
-        for field in ["appName", "appDesc", "appDomain", "appUrl"] {
+        for field in ["appName", "appDesc", "appDomain", "appUrl", "appIconPath"] {
             let mut auth = auth_info(&[AGENT_READ_CAPABILITY.clone()]);
             auth[field] = json!(long);
             let err = call(
@@ -1821,6 +1865,69 @@ mod capability_request_tests {
         )
         .await
         .expect("a field of the limit's length is taken");
+    }
+
+    // `capabilities` is caller-chosen like the app fields and is kept in memory and shown in
+    // the approval prompt, so it is bounded too: by its size as JSON.
+    #[tokio::test]
+    async fn a_request_with_an_oversized_capability_list_is_refused() {
+        setup();
+        let many: Vec<_> = (0..10_000)
+            .map(|i| {
+                crate::agent::capabilities::perspective_query_capability(vec![format!("p{i}")])
+            })
+            .collect();
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&many) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+        assert!(err.1.contains("capabilities"), "{}", err.1);
+
+        let one_pointer_too_long = [crate::agent::capabilities::perspective_query_capability(
+            vec!["x".repeat(70_000)],
+        )];
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&one_pointer_too_long) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+
+        // What apps ask for today stays well inside it.
+        let defaults = crate::agent::capabilities::get_user_default_capabilities();
+        call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&defaults) }),
+            anonymous(),
+        )
+        .await
+        .expect("the user default capabilities are taken");
+    }
+
+    // A store with no request that may go refuses a new one: the app may try again later, so
+    // the answer is 429, not a 500 that reads as the executor's fault.
+    #[tokio::test]
+    async fn a_request_to_a_full_store_is_429() {
+        setup();
+        let refused = {
+            let _full =
+                crate::agent::capabilities::pending::PendingRequests::global().fill_for_test();
+            call(
+                "agent.requestCapability",
+                json!({ "authInfo": auth_info(&[AGENT_READ_CAPABILITY.clone()]) }),
+                anonymous(),
+            )
+            .await
+        };
+        let err = refused.unwrap_err();
+        assert_eq!(err.0, 429, "{}", err.1);
+        assert!(err.1.contains("Too many capability requests"), "{}", err.1);
     }
 
     // D16: an email resolves to its user's DID at the edge. An email no user has is taken
