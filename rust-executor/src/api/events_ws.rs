@@ -1261,6 +1261,49 @@ mod audience_matrix_tests {
         }
     }
 
+    // A signal the link language (or a peer) addresses to a local DID that is not one of the
+    // perspective's `event_recipients` is dropped: it used to reach that DID's sessions
+    // whatever perspective it came in on.
+    #[tokio::test]
+    async fn a_telepresence_signal_to_a_non_recipient_is_dropped() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = crate::agent::did();
+        let mut published = get_global_pubsub().await.subscribe_events();
+        let run = uuid::Uuid::new_v4().to_string();
+        let handle = |name: &str, owners: Option<Vec<String>>| crate::types::PerspectiveHandle {
+            uuid: format!("{run}-{name}"),
+            owners,
+            ..Default::default()
+        };
+        let owned_by_a = handle("owned-by-a", Some(vec![A.into()]));
+        let unowned = handle("unowned", None);
+        let publish = crate::perspectives::publish_telepresence_signal;
+        publish(owned_by_a.clone(), Default::default(), Some(B.into()));
+        publish(unowned.clone(), Default::default(), Some(A.into()));
+        publish(owned_by_a.clone(), Default::default(), Some(A.into()));
+        publish(unowned.clone(), Default::default(), Some(main.clone()));
+
+        // The publisher is synchronous: every event is in the channel already.
+        let mut got = Vec::new();
+        while let Ok(event) = published.try_recv() {
+            let Some(uuid) = event.perspective.clone() else {
+                continue;
+            };
+            if uuid.starts_with(&run) {
+                got.push((uuid, event.audience.clone()));
+            }
+        }
+        assert_eq!(
+            got,
+            vec![
+                (owned_by_a.uuid.clone(), Audience::Dids(vec![A.into()])),
+                (unowned.uuid.clone(), Audience::Dids(vec![main])),
+            ],
+            "only signals to one of the perspective's recipients are published"
+        );
+    }
+
     // `send_signal` and `send_broadcast` deliver to this executor's own agents in a
     // neighbourhood through `event_recipients`: a signal to an owner is published here (once,
     // naming it), a signal to anyone else goes to the link language; a broadcast reaches every
