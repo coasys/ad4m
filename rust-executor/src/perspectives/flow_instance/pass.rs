@@ -110,7 +110,8 @@ pub(crate) async fn catch_up_before_own_vote(
             debug_assert!(reported.is_empty(), "a first pass reports nothing");
         }
         Err(e) => log::warn!(
-            "catch_up_before_own_vote: reading the bookkeeping of {instance_uri} failed;              the vote's own pass may catch up silently: {e:#}"
+            "catch_up_before_own_vote: reading the bookkeeping of {instance_uri} failed; \
+             the vote's own pass may catch up silently: {e:#}"
         ),
     }
 }
@@ -345,7 +346,7 @@ pub async fn run_flow_consensus_pass(
                 .any(|uri| recorded.newly_marked.contains(uri))
         });
         if first_pass_here {
-            log::info!(
+            log::debug!(
                 "run_flow_consensus_pass: first derivation of {} for {agent_did} on this replica — caught up silently at `{}` ({} settled edge(s) marked, none reported)",
                 record.instance_uri,
                 derived.state,
