@@ -153,11 +153,11 @@ pub struct FlowInstanceRecord {
     /// synthetic-field collision that broke `baseExpression` in the
     /// reserved-field rename fix (commit `e6362e5ca`).
     pub subject: String,
-    /// The state name this replica's consensus pass last cached for the
-    /// instance (a `Local` link, #987) — or **empty** when no pass has run
-    /// here yet. Never the authority: the fold over the signed proposals is
-    /// (`flow_instance::derive_states` replaces this field with its
-    /// verdict). Readers that need the live state derive; readers that only
+    /// The instance's state — **empty** as the loader returns it, since the
+    /// row carries no state (#1424). A reader fills it: with the fold's
+    /// verdict (`flow_instance::derive_states`), or with the calling agent's
+    /// recorded state (`FlowReplicaState`) on a cache-first path. Never the
+    /// authority: the fold over the signed proposals is. Readers that only
     /// need the row (spawn dedup, lookups) must tolerate the empty value.
     pub current_state: String,
     /// ISO-8601 timestamp the instance was minted at. Sourced from

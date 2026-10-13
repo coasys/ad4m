@@ -4,7 +4,7 @@ use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
 use super::update_perspective;
-use super::utils::{prolog_get_all_string_bindings, prolog_resolution_to_string};
+use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::{AgentContext, AgentService};
 use crate::languages::language::Language;
@@ -20,15 +20,13 @@ use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
-    RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
-    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
-    PerspectiveStateFilter,
+    PerspectiveLinkWithOwner, PerspectiveState, PerspectiveStateFilter,
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
@@ -57,11 +55,18 @@ enum ChangedPredicates {
     NoneRecorded,
     /// A predicate-less diff was seen — must check ALL subscriptions
     CheckAll,
-    /// Only specific predicates changed
-    Specific(HashSet<String>),
+    /// Only these links changed
+    Specific(subscription_triggers::Writes),
 }
 use uuid;
 use uuid::Uuid;
+
+// Live query subscriptions, split out per the planned
+// `perspective_instance/` layout (see perspectives/AGENTS.md).
+mod subscriptions;
+pub(crate) use subscriptions::result_json;
+// Which writes re-run a model subscription (#1237).
+mod subscription_triggers;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -71,7 +76,6 @@ static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
-static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// How long `model_query` will poll a shared perspective for a
 /// class's SHACL to arrive over p-diff-sync before erroring — see
@@ -122,7 +126,12 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
     false
 }
 
-fn is_sparql_query(query: &str) -> bool {
+/// The error a live query that is not SPARQL gets. Live queries are SPARQL or
+/// model queries; Prolog live queries were removed (a one-shot Prolog query
+/// still runs through `perspective.queryProlog`).
+pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
+
+pub(crate) fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
     // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
     // false-positives on Prolog atoms like `base(X).`
@@ -390,21 +399,35 @@ pub struct Parameter {
 struct SubscribedQuery {
     query: String,
     last_result: String,
-    last_keepalive: Instant,
-    user_email: Option<String>,
-    /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
+    /// Predicate IRIs extracted from the SPARQL query at registration time.
     /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
     predicates: HashSet<String>,
     /// When set, this subscription was registered via `model_subscribe_and_query`.
     /// On trigger, `execute_model_query` is called instead of re-running raw SPARQL.
     model_query_params: Option<ModelSubscriptionParams>,
-    /// Number of subscribers currently holding this entry. `subscribe_and_query`
-    /// and `model_subscribe_and_query` hand the same id to every caller that
-    /// registers the same (query, user) pair, so one re-evaluation and one push
-    /// serve all of them. `dispose_query_subscription` releases one hold and
-    /// removes the entry only when the last holder is gone. Keepalive eviction
-    /// ignores this count: an entry nobody keeps alive is removed regardless.
-    holders: usize,
+    /// Number of updates sent so far; 0 = the subscribe reply. Each update
+    /// carries the change from the previous result (see
+    /// `perspective_instance/subscriptions.rs`).
+    revision: u64,
+    /// The RPC connection (`RequestContext::connection_id`) that opened it.
+    /// Only that connection receives its updates, and the subscription ends
+    /// when that socket closes.
+    connection: String,
+}
+
+impl SubscribedQuery {
+    /// A SPARQL subscription for `connection`, before its first result.
+    fn new(query: String, connection: String) -> Self {
+        let predicates = extract_predicates_from_sparql(&query);
+        SubscribedQuery {
+            query,
+            last_result: String::new(),
+            predicates,
+            model_query_params: None,
+            revision: 0,
+            connection,
+        }
+    }
 }
 
 /// A batch with its creation timestamp, for timeout-based cleanup.
@@ -433,8 +456,10 @@ pub struct PerspectiveMemoryStats {
 /// no JSON metadata is held here.
 #[derive(Clone)]
 struct ModelSubscriptionParams {
-    class_name: String,
+    classes: super::model_query::QueryClasses,
     query_json: String,
+    /// Which writes re-run it; holds the nodes of `last_result`.
+    trigger: subscription_triggers::ModelTrigger,
 }
 
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
@@ -498,7 +523,7 @@ pub struct PerspectiveInstance {
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<AtomicBool>,
-    trigger_prolog_subscription_check: Arc<AtomicBool>,
+    trigger_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -523,6 +548,13 @@ pub struct PerspectiveInstance {
     /// across an await.
     pub(crate) flow_pass_queue:
         Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
+    /// Serializes this perspective's flow passes with its flow votes. A vote
+    /// holds it from its catch-up through its own pass, so no background
+    /// pass can record the vote's settle in between and leave the voter's
+    /// call returning no outcome. Taken at the entry points (`accept`,
+    /// `propose`, the engine's mint-and-sweep, the sync-triggered sweep),
+    /// never inside `run_flow_consensus_pass`, which those nest.
+    pub(crate) flow_pass_lock: Arc<Mutex<()>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -534,6 +566,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
+    /// batch as a real failure does. Compiled out in non-test builds — see
+    /// [`Self::fail_next_commit_batch`].
+    #[cfg(test)]
+    fail_next_commit: Arc<AtomicBool>,
     /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
     /// joined to a neighbourhood, so a test can exercise the cross-peer wait
     /// without a running link language. Compiled out in non-test builds.
@@ -586,7 +623,7 @@ impl PerspectiveInstance {
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
-            trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
+            trigger_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
@@ -601,8 +638,11 @@ impl PerspectiveInstance {
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             containment_cache: Arc::new(std::sync::RwLock::new(None)),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
+            flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
         }
@@ -621,6 +661,14 @@ impl PerspectiveInstance {
     pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
         self.fail_add_link_after
             .store(after_n_calls, Ordering::SeqCst);
+    }
+
+    /// Test seam: make the next [`Self::commit_batch`] fail after removing
+    /// the batch, as its contract says a failed commit does, so a test can
+    /// prove that nothing a caller defers to a successful commit happens.
+    #[cfg(test)]
+    pub(crate) fn fail_next_commit_batch(&self) {
+        self.fail_next_commit.store(true, Ordering::SeqCst);
     }
 
     /// Look up a cached `ModelShape` for the given class name, loading it
@@ -712,6 +760,7 @@ impl PerspectiveInstance {
             self.subscribed_queries_loop(),
             self.fallback_sync_loop(),
             self.auto_processor_supervisor(),
+            self.flow_pass_at_load(),
         );
     }
 
@@ -1661,7 +1710,7 @@ impl PerspectiveInstance {
             self.shape_cache.write().unwrap().clear();
         }
 
-        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_diff.clone()).await;
 
         // A peer's proposal, vote or flow-instance row changes what this
@@ -1774,7 +1823,7 @@ impl PerspectiveInstance {
                 // Remove from SPARQL store (primary storage)
                 self.persist_link_diff(&diff).await?;
 
-                // Update both Prolog engines: subscription (immediate) + query (lazy)
+                // Queue the Prolog fact update and the notification + live-query checks
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
@@ -1795,6 +1844,11 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        // A `FlowInstance` minted by an agent this node acts for gets its
+        // bookkeeping row now, before any pass can treat it as a catch-up
+        // (#1424). Awaited, not spawned: a client's `start` is followed at
+        // once by a propose whose pass must see the row.
+        self.seed_minted_flow_instances(&decorated_diff).await;
 
         // Get handle without holding lock during pubsub operations
         let handle = {
@@ -1929,7 +1983,7 @@ impl PerspectiveInstance {
         // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&diff).await?;
 
-        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_perspective_diff.clone())
             .await;
 
@@ -2198,7 +2252,7 @@ impl PerspectiveInstance {
             // Write to SPARQL store (primary storage for links)
             self.persist_link_diff(&diff).await?;
 
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
 
             // An update publishes its own topic rather than going through
@@ -2323,7 +2377,7 @@ impl PerspectiveInstance {
             // Remove from SPARQL store (primary storage)
             self.persist_link_diff(&persist_diff).await?;
 
-            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
             self.pubsub_publish_diff(decorated_diff).await;
 
@@ -3139,7 +3193,8 @@ impl PerspectiveInstance {
     /// Combined helper: spawns Prolog facts update AND marks query engine as dirty
     /// This is the common pattern throughout the codebase
     async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
-        // Update subscription engine (immediate via spawned task)
+        // Pooled-mode facts update, then notification and live-query checks
+        // (spawned task)
         self.spawn_prolog_facts_update(diff, None);
 
         // Mark query engine dirty for lazy update on next query
@@ -3151,7 +3206,6 @@ impl PerspectiveInstance {
     async fn execute_simple_mode_query(
         &self,
         query: String,
-        use_subscription_engine: bool,
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         let service = get_prolog_service().await;
@@ -3202,28 +3256,15 @@ impl PerspectiveInstance {
                     && link.data.predicate.as_ref().map(|p| p.as_str()) != Some("ad4m://sdna"))
         });
 
-        // Execute the query using the appropriate engine
-        let result = if use_subscription_engine {
-            service
-                .run_query_subscription_simple(
-                    &perspective_uuid,
-                    query,
-                    &links,
-                    neighbourhood_author,
-                    Some(user_did),
-                )
-                .await
-        } else {
-            service
-                .run_query_simple(
-                    &perspective_uuid,
-                    query,
-                    &links,
-                    neighbourhood_author,
-                    Some(user_did),
-                )
-                .await
-        };
+        let result = service
+            .run_query_simple(
+                &perspective_uuid,
+                query,
+                &links,
+                neighbourhood_author,
+                Some(user_did),
+            )
+            .await;
 
         result.map_err(|e| anyhow!("{}", e))
     }
@@ -3238,7 +3279,7 @@ impl PerspectiveInstance {
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, false, context).await
+                self.execute_simple_mode_query(query, context).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -3258,75 +3299,6 @@ impl PerspectiveInstance {
             PrologMode::Disabled => {
                 // Return empty matches instead of False/Error to allow SHACL-based SDNA to work
                 Ok(QueryResolution::Matches(vec![]))
-            }
-        }
-    }
-
-    /// Executes a Prolog subscription query against the perspective's main pool
-    /// locks the prolog_update_mutex
-    /// uses run_query_subscription
-    pub async fn prolog_query_subscription(
-        &self,
-        query: String,
-    ) -> Result<QueryResolution, AnyError> {
-        match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, true, &AgentContext::main_agent())
-                    .await
-            }
-            PrologMode::Pooled => {
-                // Pooled mode: Use the old pool-based approach
-                self.prolog_query_helper(
-                    query,
-                    true,
-                    |uuid| uuid.clone(),
-                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-                )
-                .await
-            }
-            PrologMode::Disabled => {
-                log::debug!(
-                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
-                    query
-                );
-                // Return empty result instead of error to allow SHACL-based SDNA to work
-                Ok(QueryResolution::False)
-            }
-        }
-    }
-
-    /// Executes a Prolog subscription query with user context - uses context-specific pool
-    /// locks the prolog_update_mutex
-    /// uses run_query_subscription
-    pub async fn prolog_query_subscription_with_context(
-        &self,
-        query: String,
-        context: &AgentContext,
-    ) -> Result<QueryResolution, AnyError> {
-        match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                // Context is now properly used for SDNA filtering per-user
-                self.execute_simple_mode_query(query, true, context).await
-            }
-            PrologMode::Pooled => {
-                // Pooled mode: Use the old pool-based approach with context
-                let perspective_uuid = self.uuid.clone();
-
-                self.prolog_query_helper(
-                    query,
-                    true,
-                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-                )
-                .await
-            }
-            PrologMode::Disabled => {
-                log::debug!(
-                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
-                    query
-                );
-                // Return empty result instead of error to allow SHACL-based SDNA to work
-                Ok(QueryResolution::False)
             }
         }
     }
@@ -3920,6 +3892,16 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// [`Self::model_query`] over one class or a union of classes (#1238).
+    pub async fn model_query_classes(
+        &self,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT, None)
+            .await
+    }
+
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
     ///
@@ -3928,6 +3910,21 @@ impl PerspectiveInstance {
     pub(super) async fn model_query_within(
         &self,
         class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+        parent: Option<super::model_query::Scope>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_classes_within(&classes, query_json, shape_wait, parent)
+            .await
+    }
+
+    /// [`Self::model_query_within`] over one class or a union of classes
+    /// (#1238, [`super::model_query::execute_union_query`]). Every class the
+    /// union names is waited for under the one budget, as an included class is.
+    pub(super) async fn model_query_classes_within(
+        &self,
+        classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
         parent: Option<super::model_query::Scope>,
@@ -3954,9 +3951,15 @@ impl PerspectiveInstance {
         // its includes reach get whatever this wait leaves (see the retry
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
-        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
+        let mut shapes = Vec::new();
+        for class_name in classes.names() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            shapes.push((
+                class_name.clone(),
+                self.get_shape_or_wait(class_name, remaining).await?,
+            ));
+        }
         let resolver = self.shape_resolver();
-        let shape = resolver.get_shape(class_name)?;
 
         if let Some(filter) = produced_by_flow {
             let valid = super::flow_instance::produced::flow_valid_outputs(
@@ -3965,16 +3968,18 @@ impl PerspectiveInstance {
                 filter.state.as_deref(),
             )
             .await?;
-            // Only outputs committed as the queried class pass; see
+            // Only outputs committed as a queried class pass; see
             // `output_matches_class` for why conformance alone is not enough.
             let allowed: std::collections::BTreeSet<String> = valid
                 .into_iter()
                 .filter(|v| {
-                    super::flow_instance::produced::output_matches_class(
-                        &v.output,
-                        class_name,
-                        &shape.target_class,
-                    )
+                    shapes.iter().any(|(class_name, shape)| {
+                        super::flow_instance::produced::output_matches_class(
+                            &v.output,
+                            class_name,
+                            &shape.target_class,
+                        )
+                    })
                 })
                 .map(|v| v.output.id)
                 .collect();
@@ -4009,14 +4014,27 @@ impl PerspectiveInstance {
         // `get_shape_or_wait` does not wait there.
         let mut waited_for: HashSet<String> = HashSet::new();
         let result = loop {
-            let err = match super::model_query::execute_model_query(
-                &self.sparql_store,
-                shape.as_ref(),
-                &query_input,
-                &resolver,
-            )
-            .await
-            {
+            let run = match classes {
+                super::model_query::QueryClasses::One(_) => {
+                    super::model_query::execute_model_query(
+                        &self.sparql_store,
+                        shapes[0].1.as_ref(),
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+                super::model_query::QueryClasses::Union(names) => {
+                    super::model_query::execute_union_query(
+                        &self.sparql_store,
+                        names,
+                        &query_input,
+                        &resolver,
+                    )
+                    .await
+                }
+            };
+            let err = match run {
                 Ok(result) => break result,
                 Err(err) => err,
             };
@@ -4103,8 +4121,8 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Record the predicates from a diff into `changed_predicates`.
-    /// `None` means "all predicates changed" (check everything).
+    /// Record the links of a diff into `changed_predicates`. A link without a
+    /// predicate makes it `CheckAll` (check everything).
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
         let mut changed = self.changed_predicates.lock().await;
 
@@ -4113,30 +4131,20 @@ impl PerspectiveInstance {
             return;
         }
 
-        // Collect predicates from the diff
-        let mut new_preds = HashSet::new();
-        let mut has_predicate_less = false;
-        for link in diff.additions.iter().chain(diff.removals.iter()) {
-            if let Some(ref pred) = link.data.predicate {
-                new_preds.insert(pred.clone());
-            } else {
-                has_predicate_less = true;
-                break;
-            }
-        }
+        // Collect the diff's links; a predicate-less one means check everything.
+        let writes =
+            subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
 
-        if has_predicate_less {
+        let Some(writes) = writes else {
             *changed = ChangedPredicates::CheckAll;
-        } else {
-            match &mut *changed {
-                ChangedPredicates::NoneRecorded => {
-                    *changed = ChangedPredicates::Specific(new_preds);
-                }
-                ChangedPredicates::Specific(existing) => {
-                    existing.extend(new_preds);
-                }
-                ChangedPredicates::CheckAll => unreachable!(),
+            return;
+        };
+        match &mut *changed {
+            ChangedPredicates::NoneRecorded => {
+                *changed = ChangedPredicates::Specific(writes);
             }
+            ChangedPredicates::Specific(existing) => existing.extend(writes),
+            ChangedPredicates::CheckAll => unreachable!(),
         }
     }
 
@@ -4154,13 +4162,13 @@ impl PerspectiveInstance {
                 || PROLOG_MODE == PrologMode::Simple
                 || PROLOG_MODE == PrologMode::SdnaOnly
             {
-                // Trigger notification, prolog subscription
+                // Trigger notification and subscription checks
                 self_clone
                     .trigger_notification_check
                     .store(true, Ordering::Release);
                 self_clone.record_changed_predicates(&diff).await;
                 self_clone
-                    .trigger_prolog_subscription_check
+                    .trigger_subscription_check
                     .store(true, Ordering::Release);
 
                 // NOTE: pubsub_publish_diff is NOT called here.
@@ -4171,7 +4179,7 @@ impl PerspectiveInstance {
                 // WS subscriber (confirmed 2.0× delivery ratio in wind-tunnel
                 // S9) which doubled broadcast cost and was a UI/subscription
                 // re-evaluation footgun. Subscription re-evaluation is already
-                // gated by `trigger_prolog_subscription_check` + changed_predicates.
+                // gated by `trigger_subscription_check` + changed_predicates.
 
                 if let Some(sender) = completion_sender {
                     let _ = sender.send(());
@@ -4296,7 +4304,7 @@ impl PerspectiveInstance {
                     .trigger_notification_check
                     .store(true, Ordering::Release);
                 self_clone
-                    .trigger_prolog_subscription_check
+                    .trigger_subscription_check
                     .store(true, Ordering::Release);
             }
 
@@ -5805,122 +5813,51 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    async fn send_subscription_update(
-        &self,
-        subscription_id: String,
-        result: String,
-        delay: Option<Duration>,
-    ) {
-        let uuid = self.uuid.clone();
-        tokio::spawn(async move {
-            if let Some(delay) = delay {
-                sleep(delay).await;
-            }
-            let filter = PerspectiveQuerySubscriptionFilter {
-                perspective_uuid: uuid.clone(),
-                uuid,
-                subscription_id,
-                result,
-            };
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-                    &serde_json::to_string(&filter).unwrap(),
-                )
-                .await;
-        });
-    }
-
+    /// Subscribe to a SPARQL query. Returns the subscription id and the
+    /// revision and result the reply carries (see `open_subscription`);
+    /// every change after that is published as a delta update
+    /// (`send_delta_update`). Each call makes a new subscription, so every
+    /// subscriber counts revisions from 0. A query that is not SPARQL fails
+    /// with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
     pub async fn subscribe_and_query(
         &self,
         query: String,
-        user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query and user
-        let existing_subscription = {
-            let queries = self.subscribed_queries.lock().await;
-            queries
-                .iter()
-                .find(|(_, q)| q.query == query && q.user_email == user_email)
-                .map(|(id, _)| id.clone())
-        };
-
-        // Return existing subscription if found. The caller becomes one more
-        // holder of the shared entry; see `SubscribedQuery::holders`.
-        if let Some(existing_id) = existing_subscription {
-            let existing_result = {
-                let mut queries = self.subscribed_queries.lock().await;
-                queries.get_mut(&existing_id).map(|q| {
-                    q.holders += 1;
-                    q.last_keepalive = Instant::now();
-                    q.last_result.clone()
-                })
-            };
-
-            if let Some(last_result) = existing_result {
-                return Ok((existing_id, last_result));
-            }
+        connection_id: String,
+    ) -> Result<(String, u64, String), AnyError> {
+        if !is_sparql_query(&query) {
+            return Err(anyhow!(PROLOG_LIVE_QUERY_UNSUPPORTED));
         }
-
-        let subscription_id = uuid::Uuid::new_v4().to_string();
-
-        // Execute prolog query with user context
-        let agent_context = if let Some(email) = user_email.as_ref() {
-            crate::agent::AgentContext::for_user_email(email.clone())
-        } else {
-            crate::agent::AgentContext::main_agent()
-        };
-        let result_string = if is_sparql_query(&query) {
-            self.sparql_query(query.clone())?
-        } else {
-            let initial_result = self
-                .prolog_query_subscription_with_context(query.clone(), &agent_context)
-                .await?;
-            prolog_resolution_to_string(initial_result)
-        };
-
-        let predicates = if is_sparql_query(&query) {
-            extract_predicates_from_sparql(&query)
-        } else {
-            HashSet::new() // Prolog queries: always re-check
-        };
-
-        let subscribed_query = SubscribedQuery {
-            query,
-            last_result: result_string.clone(),
-            last_keepalive: Instant::now(),
-            user_email,
-            predicates,
-            model_query_params: None,
-            holders: 1,
-        };
-
-        // Now insert the subscription
-        self.subscribed_queries
-            .lock()
-            .await
-            .insert(subscription_id.clone(), subscribed_query);
-
-        Ok((subscription_id, result_string))
+        let subscribed_query = SubscribedQuery::new(query.clone(), connection_id);
+        let first_result = async { self.sparql_query(query) };
+        self.open_subscription(subscribed_query, first_result).await
     }
 
     /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
     /// registers a subscription, and runs the initial model query — all in one call.
     /// When link changes match the trigger predicates, `execute_model_query` is
-    /// re-run in Rust and the updated results are pushed to the client.
+    /// re-run in Rust and the change is pushed to the client as a delta
+    /// update. Each call makes a new subscription (see `open_subscription`).
+    ///
+    /// `classes` is one class or a union (#1238). A union is one subscription:
+    /// it re-runs when a diff touches the trigger set of any class it names.
     pub async fn model_subscribe_and_query(
         &self,
-        class_name: String,
+        classes: super::model_query::QueryClasses,
         query_json: String,
-        user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json).await?;
-
-        // 2. Build trigger SPARQL from shape predicates resolved through the cache.
-        let trigger_predicates =
-            self.build_model_trigger_predicates(&class_name, Some(&query_json));
+        connection_id: String,
+    ) -> Result<(String, u64, String), AnyError> {
+        // Build trigger SPARQL from shape predicates resolved through the cache.
+        // Each class contributes its own trigger set; the matcher below is
+        // predicate-only, so the sets meet as their union.
+        let mut trigger_predicates: Vec<String> = classes
+            .names()
+            .iter()
+            .flat_map(|class_name| {
+                self.build_model_trigger_predicates(class_name, Some(&query_json))
+            })
+            .collect();
+        trigger_predicates.sort();
+        trigger_predicates.dedup();
 
         let trigger_sparql = if trigger_predicates.is_empty() {
             // Fallback: match any triple (always re-check)
@@ -5938,62 +5875,29 @@ impl PerspectiveInstance {
         };
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
+        let trigger = self.build_model_trigger(
+            classes.names().iter().map(String::as_str),
+            &query_json,
+            // No result yet: `open_subscription` points the trigger at the
+            // nodes of the first result when it stores it.
+            "",
+        );
 
-        // 3. Check for existing subscription with same params
-        let existing_subscription = {
-            let queries = self.subscribed_queries.lock().await;
-            queries
-                .iter()
-                .find(|(_, q)| {
-                    if let Some(ref params) = q.model_query_params {
-                        params.class_name == class_name
-                            && params.query_json == query_json
-                            && q.user_email == user_email
-                    } else {
-                        false
-                    }
-                })
-                .map(|(id, _)| id.clone())
-        };
-
-        if let Some(existing_id) = existing_subscription {
-            // Update last_result and trigger metadata with fresh data. The
-            // caller becomes one more holder of the shared entry; see
-            // `SubscribedQuery::holders`.
-            {
-                let mut queries = self.subscribed_queries.lock().await;
-                if let Some(q) = queries.get_mut(&existing_id) {
-                    q.query = trigger_sparql.clone();
-                    q.predicates = predicate_set.clone();
-                    q.last_result = initial_result.clone();
-                    q.last_keepalive = Instant::now();
-                    q.holders += 1;
-                }
-            }
-            return Ok((existing_id, initial_result));
-        }
-
-        // 4. Register new subscription
-        let subscription_id = uuid::Uuid::new_v4().to_string();
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
-            last_result: initial_result.clone(),
-            last_keepalive: Instant::now(),
-            user_email,
+            last_result: String::new(),
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
-                class_name,
-                query_json,
+                classes: classes.clone(),
+                query_json: query_json.clone(),
+                trigger,
             }),
-            holders: 1,
+            revision: 0,
+            connection: connection_id,
         };
-
-        self.subscribed_queries
-            .lock()
-            .await
-            .insert(subscription_id.clone(), subscribed_query);
-
-        Ok((subscription_id, initial_result))
+        let first_result =
+            self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT, None);
+        self.open_subscription(subscribed_query, first_result).await
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
@@ -6011,16 +5915,8 @@ impl PerspectiveInstance {
             predicates.extend(shape.predicates());
         }
 
-        // `links` reaches predicates the shape does not declare (a revocation
-        // tombstone); a subscription asking for one must re-run when it lands.
-        if let (Some(shape), Some(qj)) = (&shape, query_json) {
-            if let Ok(query) = serde_json::from_str::<super::model_query::ModelQueryInput>(qj) {
-                predicates.extend(super::model_query::links_trigger_predicates(
-                    shape,
-                    &query,
-                    &self.shape_resolver(),
-                ));
-            }
+        if let Some(qj) = query_json {
+            predicates.extend(self.model_query_side_predicates(shape.as_deref(), qj));
         }
 
         // Extract parent predicate from query JSON (parent-scoped subscriptions
@@ -6034,22 +5930,6 @@ impl PerspectiveInstance {
                 {
                     predicates.push(pred.to_string());
                 }
-                // `producedByFlow` resolves through the flow's receipts and
-                // the flow catalogue, not the shape: re-run when a receipt's
-                // index entry or body lands (sync may deliver them apart) —
-                // the reads `load_flow_receipts` makes — or a flow is
-                // registered, whose definition is written with its
-                // `rdf://type ad4m://Flow` link.
-                if query
-                    .get("where")
-                    .and_then(|w| w.get("producedByFlow"))
-                    .is_some()
-                {
-                    use super::flow_instance::{produced, receipt};
-                    predicates.push(produced::FLOW_RECEIPT_INDEX_PREDICATE.to_string());
-                    predicates.push(receipt::FLOW_RECEIPT_CONTENT_PREDICATE.to_string());
-                    predicates.push("rdf://type".to_string());
-                }
             }
         }
 
@@ -6059,64 +5939,12 @@ impl PerspectiveInstance {
         predicates
     }
 
-    pub async fn keepalive_query(&self, subscription_id: String) -> Result<(), AnyError> {
-        let mut queries = self.subscribed_queries.lock().await;
-        if let Some(query) = queries.get_mut(&subscription_id) {
-            query.last_keepalive = Instant::now();
-            Ok(())
-        } else {
-            Err(anyhow!("Subscription not found"))
-        }
-    }
-
-    /// Release one subscriber's hold on `subscription_id`. The entry is removed
-    /// (and the prolog service notified) only when no holder remains, so a
-    /// subscription shared by several subscribers keeps pushing updates to the
-    /// others. Returns `Ok(true)` when the id was registered, `Ok(false)` when
-    /// it was unknown (already removed or evicted).
-    pub async fn dispose_query_subscription(
-        &self,
-        subscription_id: String,
-    ) -> Result<bool, AnyError> {
-        let (found, removed_query) = {
-            let mut queries = self.subscribed_queries.lock().await;
-            match queries.get_mut(&subscription_id) {
-                None => (false, None),
-                Some(q) if q.holders > 1 => {
-                    q.holders -= 1;
-                    log::debug!(
-                        "🔗 subscription {} released by one holder, {} remaining",
-                        subscription_id,
-                        q.holders
-                    );
-                    (true, None)
-                }
-                Some(_) => (true, queries.remove(&subscription_id)),
-            }
-        };
-
-        if let Some(query) = removed_query {
-            // Notify prolog service that subscription ended
-            let uuid = self.uuid.clone();
-            if let Err(e) = get_prolog_service()
-                .await
-                .subscription_ended(uuid, query.query)
-                .await
-            {
-                log::warn!("Failed to notify prolog service of subscription end: {}", e);
-            }
-        }
-        Ok(found)
-    }
-
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
-        let mut queries_to_remove = Vec::new();
         let mut query_futures: Vec<
             std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
         > = Vec::new();
-        let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
+        // Collect only the minimal data needed: ID, query string, predicates,
         // and model_query_params (if this is a model subscription).
         // DON'T clone the potentially huge last_result string
         let queries = {
@@ -6127,8 +5955,6 @@ impl PerspectiveInstance {
                     (
                         id.clone(),
                         query.query.clone(),
-                        query.user_email.clone(),
-                        query.last_keepalive,
                         query.predicates.clone(),
                         query.model_query_params.clone(),
                     )
@@ -6136,21 +5962,31 @@ impl PerspectiveInstance {
                 .collect::<Vec<_>>()
         };
 
-        // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries
-        {
-            // Check for timeout
-            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
-                queries_to_remove.push(id);
-                continue;
-            }
+        // Store reads the model triggers make, shared by every subscription.
+        let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
 
+        // Create futures for each query check
+        for (id, query_string, sub_predicates, model_params) in queries {
+            // Model subscriptions match each written link against their
+            // trigger (see `subscription_triggers`), not the predicate alone.
+            if let (Some(params), ChangedPredicates::Specific(ref writes)) =
+                (&model_params, &changed_predicates)
+            {
+                if !params.trigger.matches(writes, &mut trigger_lookups) {
+                    log::debug!(
+                        "⏭️ Skipping model subscription {} — no write matches it",
+                        id
+                    );
+                    continue;
+                }
+            }
             // Skip subscription if its predicates don't overlap with changed predicates
             // sub_predicates empty => always check (variable predicate in query)
             // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
             // ChangedPredicates::NoneRecorded => should not happen here, but skip if it does
-            if !sub_predicates.is_empty() {
-                if let ChangedPredicates::Specific(ref changed) = changed_predicates {
+            else if !sub_predicates.is_empty() {
+                if let ChangedPredicates::Specific(ref writes) = changed_predicates {
+                    let changed = &writes.predicates;
                     if sub_predicates.is_disjoint(changed) {
                         log::debug!(
                             "⏭️ Skipping subscription {} — predicates {:?} disjoint from changed {:?}",
@@ -6165,16 +6001,13 @@ impl PerspectiveInstance {
                 continue;
             }
 
+            #[cfg(test)]
+            subscription_triggers::reruns::note(&id);
+
             // Each future returns Option<(id, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
-                let _agent_context = if let Some(email) = user_email {
-                    crate::agent::AgentContext::for_user_email(email)
-                } else {
-                    crate::agent::AgentContext::main_agent()
-                };
-
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
                 // re-checked under one `join_all` below, so a wait here for one
@@ -6183,8 +6016,8 @@ impl PerspectiveInstance {
                 // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
-                        .model_query_within(
-                            &params.class_name,
+                        .model_query_classes_within(
+                            &params.classes,
                             &params.query_json,
                             Duration::ZERO,
                             None,
@@ -6197,22 +6030,11 @@ impl PerspectiveInstance {
                             return None;
                         }
                     }
-                } else if is_sparql_query(&query_string) {
+                } else {
                     match self_clone.sparql_query(query_string) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
-                            return None;
-                        }
-                    }
-                } else {
-                    match self_clone
-                        .prolog_query_subscription_with_context(query_string, &_agent_context)
-                        .await
-                    {
-                        Ok(result) => prolog_resolution_to_string(result),
-                        Err(e) => {
-                            log::error!("❌ 🔗 📜 Prolog subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -6226,24 +6048,37 @@ impl PerspectiveInstance {
         let results = future::join_all(query_futures).await;
 
         // Single lock acquisition to compare and update all results
-        let mut updates_to_send = Vec::new();
+        let mut delta_updates = Vec::new();
         {
             let mut queries = self.subscribed_queries.lock().await;
             for result in results.into_iter().flatten() {
                 let (id, result_string) = result;
                 if let Some(stored_query) = queries.get_mut(&id) {
-                    let changed = result_string != stored_query.last_result;
-                    if changed {
-                        let old_len = stored_query.last_result.len();
-                        let new_len = result_string.len();
+                    if result_string != stored_query.last_result {
                         log::debug!(
                             "📤 🔗 subscription {} result changed (old_len={}, new_len={})",
                             id,
-                            old_len,
-                            new_len
+                            stored_query.last_result.len(),
+                            result_string.len()
                         );
-                        stored_query.last_result = result_string.clone();
-                        updates_to_send.push((id, result_string));
+                        stored_query.revision += 1;
+                        // Watch the nodes of the new result (#1237).
+                        if let Some(params) = stored_query.model_query_params.as_mut() {
+                            params.trigger = params.trigger.with_result(&result_string);
+                        }
+                        let old =
+                            std::mem::replace(&mut stored_query.last_result, result_string.clone());
+                        let delta = subscriptions::result_delta(
+                            &old,
+                            &result_string,
+                            stored_query.model_query_params.is_some(),
+                        );
+                        delta_updates.push((
+                            id,
+                            stored_query.connection.clone(),
+                            stored_query.revision,
+                            delta,
+                        ));
                     } else {
                         log::trace!(
                             "📭 🔗 subscription {} result unchanged (len={})",
@@ -6256,40 +6091,15 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, result_string) in updates_to_send {
-            self.send_subscription_update(id, result_string, None).await;
-        }
-
-        // Remove timed out queries and notify prolog service
-        if !queries_to_remove.is_empty() {
-            let removed_queries = {
-                let mut queries = self.subscribed_queries.lock().await;
-                queries_to_remove
-                    .iter()
-                    .filter_map(|id| queries.remove(id).map(|q| (id.clone(), q.query)))
-                    .collect::<Vec<_>>()
-            };
-
-            // Notify prolog service for each timed out subscription
-            let uuid = self.uuid.clone();
-            for (_id, query) in removed_queries {
-                if let Err(e) = get_prolog_service()
-                    .await
-                    .subscription_ended(uuid.clone(), query)
-                    .await
-                {
-                    log::warn!(
-                        "Failed to notify prolog service of subscription timeout: {}",
-                        e
-                    );
-                }
-            }
+        for (id, connection, revision, delta) in delta_updates {
+            self.send_delta_update(id, connection, revision, delta)
+                .await;
         }
     }
 
     async fn subscribed_queries_loop(&self) {
-        // Note: the subscription loop must run even when Prolog is disabled,
-        // because SPARQL subscriptions don't use Prolog at all.
+        // Live queries are SPARQL or model queries: the loop runs whatever
+        // the Prolog mode, since none of them use a Prolog engine.
 
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
@@ -6309,9 +6119,7 @@ impl PerspectiveInstance {
 
         while !self.is_teardown.load(Ordering::Acquire) {
             // Check trigger without holding lock during the operation
-            let should_check = self
-                .trigger_prolog_subscription_check
-                .load(Ordering::Acquire);
+            let should_check = self.trigger_subscription_check.load(Ordering::Acquire);
 
             if should_check {
                 // Batch debounce: wait a short window for more changes to accumulate
@@ -6319,7 +6127,7 @@ impl PerspectiveInstance {
 
                 // Atomically reset trigger AFTER the sleep, so we catch any
                 // triggers that arrived during the debounce window.
-                self.trigger_prolog_subscription_check
+                self.trigger_subscription_check
                     .swap(false, Ordering::AcqRel);
                 let changed_preds = std::mem::replace(
                     &mut *self.changed_predicates.lock().await,
@@ -6334,54 +6142,10 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries(changed_preds).await;
             }
 
-            // Periodic subscription logging and proactive timeout cleanup
+            // Periodic subscription logging
             log_counter += 1;
             if log_counter >= LOG_INTERVAL {
                 log_counter = 0;
-                // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
-                let perspective_uuid = self.uuid.clone();
-                let mut queries = self.subscribed_queries.lock().await;
-
-                // Proactively remove timed-out subscriptions even when no
-                // trigger has fired. Without this, expired subscriptions sit
-                // in the map forever, holding their last_result strings in
-                // memory, when no new links are being added.
-                let now = Instant::now();
-                let mut removed_queries: Vec<String> = Vec::new();
-                queries.retain(|_id, q| {
-                    let keep = now.duration_since(q.last_keepalive).as_secs()
-                        <= QUERY_SUBSCRIPTION_TIMEOUT;
-                    if !keep {
-                        removed_queries.push(q.query.clone());
-                    }
-                    keep
-                });
-                // Drop the lock before async prolog calls
-                drop(queries);
-
-                if !removed_queries.is_empty() {
-                    log::info!(
-                        "🧹 🔗 cleaned up {} timed-out subscription(s) for perspective {}",
-                        removed_queries.len(),
-                        perspective_uuid
-                    );
-                    // Notify prolog service for each removed subscription,
-                    // mirroring the flow in check_subscribed_queries().
-                    for query in &removed_queries {
-                        if let Err(e) = get_prolog_service()
-                            .await
-                            .subscription_ended(perspective_uuid.clone(), query.clone())
-                            .await
-                        {
-                            log::warn!(
-                                "Failed to notify prolog service of subscription timeout: {}",
-                                e
-                            );
-                        }
-                    }
-                }
-
-                // Re-acquire for the logging section below
                 let queries = self.subscribed_queries.lock().await;
 
                 if !queries.is_empty() {
@@ -6390,7 +6154,7 @@ impl PerspectiveInstance {
                     // register/dispose event is emitted at info instead.
                     log::debug!(
                         "📊 🔗 subscriptions [{}]: {} active",
-                        perspective_uuid,
+                        self.uuid,
                         queries.len()
                     );
                     for (id, query) in queries.iter() {
@@ -6828,6 +6592,11 @@ impl PerspectiveInstance {
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
+        #[cfg(test)]
+        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
+            drop(diff);
+            return Err(anyhow!("injected fault (test seam): commit_batch failed"));
+        }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
         //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
@@ -6919,7 +6688,7 @@ impl PerspectiveInstance {
 
             self.persist_link_diff(&persist_diff).await?;
 
-            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(combined_diff.clone()).await;
 
             // Publish PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED to WS subscribers.
@@ -8523,19 +8292,21 @@ mod tests {
         // NoneRecorded + specific → Specific
         state = match state {
             ChangedPredicates::NoneRecorded => {
-                ChangedPredicates::Specific(["p1".to_string()].into())
+                let mut writes = subscription_triggers::Writes::new();
+                writes.record("s", "p1", "t");
+                ChangedPredicates::Specific(writes)
             }
             other => other,
         };
         assert!(matches!(state, ChangedPredicates::Specific(_)));
 
         // Specific + more specific → Specific (union)
-        if let ChangedPredicates::Specific(ref mut set) = state {
-            set.insert("p2".to_string());
+        if let ChangedPredicates::Specific(ref mut writes) = state {
+            writes.record("s", "p2", "t");
         }
-        if let ChangedPredicates::Specific(ref set) = state {
-            assert!(set.contains("p1"));
-            assert!(set.contains("p2"));
+        if let ChangedPredicates::Specific(ref writes) = state {
+            assert!(writes.predicates.contains("p1"));
+            assert!(writes.predicates.contains("p2"));
         }
 
         // Specific + predicate-less → CheckAll
@@ -9018,12 +8789,15 @@ mod tests {
             .store(true, Ordering::SeqCst);
 
         // No board has tasks yet, so hydration does not need `Task`.
-        let (board_sub, _) = perspective
-            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None)
+        let (board_sub, _, _) = perspective
+            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), "c".into())
             .await
             .expect("subscribe to Board");
-        let (other_sub, _) = perspective
-            .subscribe_and_query("SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(), None)
+        let (other_sub, _, _) = perspective
+            .subscribe_and_query(
+                "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(),
+                "c".into(),
+            )
             .await
             .expect("subscribe to titles");
 
