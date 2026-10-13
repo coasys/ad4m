@@ -161,6 +161,183 @@ describe('SHACLFlow', () => {
       expect(reconstructed.states[2].name).toBe('Done');
       expect(reconstructed.states[0].value).toBe(0);
     });
+
+    // #1202 — two states tied on the lowest `value` must yield the same
+    // initial state no matter which `hasState` link the graph hands back
+    // first. A stable sort on `value` alone keeps discovery order for ties,
+    // so two replicas could mint instances in different genesis states.
+    // The tie-break key is the state name (ascending, code-point order) —
+    // the same key `parse_flow_from_links` uses in rust-executor, so the
+    // concrete winner is pinned, not just "some fixed state".
+    it('breaks a lowest-value tie by state name regardless of hasState link order (#1202)', () => {
+      const fromLinksWithStatesInOrder = (order: Array<[string, number]>) => {
+        const flow = new SHACLFlow('Tie', 'tie://');
+        for (const [name, value] of order) flow.addState({ name, value });
+        // `toLinks` emits `hasState` links in `addState` order, and
+        // `fromLinks` discovers states in `hasState` link order.
+        return SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+      };
+
+      // `review` and `draft` tie at the lowest value; `done` is above both.
+      const reviewFirst = fromLinksWithStatesInOrder([['review', 0], ['draft', 0], ['done', 1]]);
+      const draftFirst = fromLinksWithStatesInOrder([['draft', 0], ['review', 0], ['done', 1]]);
+
+      expect(reviewFirst.states[0].name).toBe(draftFirst.states[0].name);
+      expect(reviewFirst.states[0].name).toBe('draft');
+      expect(reviewFirst.states.map(s => s.name)).toEqual(['draft', 'review', 'done']);
+      expect(draftFirst.states.map(s => s.name)).toEqual(['draft', 'review', 'done']);
+    });
+
+    // Mirrors `parse_flow_from_links_sorts_nan_state_values_last` in
+    // rust-executor. `toLinks` writes a NaN value as `number:NaN`, which
+    // `decodeStateValue` reads back as NaN (it is outside the grammar).
+    // `a.value - b.value` is NaN for such a pair, which
+    // `Array.prototype.sort` treats as engine-defined rather than "last",
+    // so the finite states could land in any relative order too — and
+    // `states[0]` is the initial state.
+    it('sorts a NaN-valued state last so it never becomes the initial state', () => {
+      const flow = new SHACLFlow('Nan', 'nan://');
+      flow.addState({ name: 'done', value: 1 });
+      flow.addState({ name: 'broken', value: NaN });
+      flow.addState({ name: 'identified', value: 0 });
+
+      const reconstructed = SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+
+      expect(reconstructed.states.some(s => Number.isNaN(s.value))).toBe(true);
+      expect(reconstructed.states.map(s => s.name)).toEqual(['identified', 'done', 'broken']);
+    });
+
+    // Builds a flow's links by hand so the `stateValue` target can be any
+    // string (`Literal.from(-0).toUrl()` writes `0`, and `toLinks` cannot
+    // write `-inf` or `abc` at all). `target === undefined` is a state with
+    // no `stateValue` link.
+    const flowLinksWithStates = (
+      flowUri: string,
+      states: Array<[string, string | undefined]>,
+      reverse: boolean,
+    ) => {
+      const links: Array<{ source: string; predicate: string; target: string }> = [
+        { source: flowUri, predicate: 'rdf://type', target: 'ad4m://Flow' },
+        { source: flowUri, predicate: 'ad4m://flowName', target: Literal.from('X').toUrl() },
+        { source: flowUri, predicate: 'ad4m://namespace', target: Literal.from('xrt://').toUrl() },
+      ];
+      const ordered = states.map((s, i) => [i, s] as const);
+      if (reverse) ordered.reverse();
+      for (const [i, [name, target]] of ordered) {
+        const stateUri = `xrt://X.s${i}`;
+        links.push({ source: flowUri, predicate: 'ad4m://hasState', target: stateUri });
+        links.push({ source: stateUri, predicate: 'ad4m://stateName', target: Literal.from(name).toUrl() });
+        if (target !== undefined) {
+          links.push({ source: stateUri, predicate: 'ad4m://stateValue', target });
+        }
+      }
+      return links;
+    };
+
+    // The `stateValue` decoder, payload by payload. **Same rows, same
+    // expectations as `state_value_decoder_matches_ts` in
+    // `rust-executor/src/perspectives/shacl_parser.rs`**; a row added here
+    // is added there. `parseFloat` (the old decoder) would answer 1 on
+    // `1abc` and `1e%2B21`, and NaN on `inf`; Rust's `str::parse` the
+    // reverse — the grammar is explicit so neither parser's quirks leak
+    // into the initial-state choice. Observed through `fromLinks` on a
+    // one-state flow because the decoder is module-private.
+    it('state value decoder matches rust', () => {
+      const rows: Array<[string, number]> = [
+        // plain decimals, both parsers agree on the value
+        ['literal:number:0', 0],
+        ['literal:number:-0', -0],
+        ['literal:number:1', 1],
+        ['literal:number:1.0', 1],
+        ['literal:number:01', 1],
+        ['literal:number:1.', 1],
+        ['literal:number:.5', 0.5],
+        ['literal:number:+1', 1],
+        ['literal:number:-2.5', -2.5],
+        ['literal:number:1e5', 100000],
+        ['literal:number:1E5', 100000],
+        ['literal:number:1e-7', 1e-7],
+        ['literal:number:1e21', 1e21],
+        // what `Literal.toUrl` writes for 1e21, and what Rust writes
+        ['literal:number:1e%2B21', 1e21],
+        ['literal:number:1000000000000000000000', 1e21],
+        // infinities: TS spelling, Rust spelling, any ASCII case
+        ['literal:number:Infinity', Infinity],
+        ['literal:number:-Infinity', -Infinity],
+        ['literal:number:inf', Infinity],
+        ['literal:number:-inf', -Infinity],
+        ['literal:number:INF', Infinity],
+        ['literal:number:+infinity', Infinity],
+        // outside the grammar: NaN, never 0
+        ['literal:number:NaN', NaN],
+        ['literal:number:nan', NaN],
+        ['literal:number:', NaN],
+        ['literal:number:abc', NaN],
+        ['literal:number:1abc', NaN],
+        ['literal:number:%201', NaN],
+        ['literal:number:1%20', NaN],
+        ['literal:number:0x10', NaN],
+        ['literal:number:1_000', NaN],
+        ['literal:number:1e', NaN],
+        ['literal:number:.', NaN],
+        ['literal:number:\u0661', NaN], // ARABIC-INDIC DIGIT ONE
+        ['literal:number:%zz', NaN],
+        ['literal:number:%E2%82', NaN], // truncated UTF-8 sequence
+        // not a number literal at all, including the legacy `literal://` form
+        ['literal:string:1', NaN],
+        ['literal://number:2', NaN],
+        ['ad4m://x', NaN],
+      ];
+      for (const [target, want] of rows) {
+        const flow = SHACLFlow.fromLinks(flowLinksWithStates('xrt://XFlow', [['s', target]], false), 'xrt://XFlow');
+        const got = flow.states[0].value;
+        // `Object.is` separates -0 from 0 and NaN from NaN-as-equal, which
+        // `toBe` (also `Object.is`) does too; the message names the row.
+        expect([target, got]).toEqual([target, want]);
+        expect(Object.is(got, want)).toBe(true);
+      }
+    });
+
+    // Cross-runtime initial-state table (lifted from Marvin's #1204 review
+    // scratch and extended). **Same rows, same winners as
+    // `initial_state_table_matches_ts` in
+    // `rust-executor/src/perspectives/shacl_parser.rs`**; a row added here
+    // is added there. Each row is parsed with the `hasState` links in both
+    // orders and must give the same initial state either way. Rows that
+    // exist to kill a specific comparator mutation say so.
+    it('initial state table matches rust', () => {
+      const n = (payload: string) => `literal:number:${payload}`;
+      const rows: Array<[string, Array<[string, string | undefined]>, string]> = [
+        ['tie', [['review', n('0')], ['draft', n('0')], ['done', n('1')]], 'draft'],
+        // A `<`/`>` value compare with `Object.is` semantics, or Rust
+        // `total_cmp`, orders -0 before 0 and would pick `b`.
+        ['negzero', [['b', n('-0')], ['a', n('0')]], 'a'],
+        ['nan_nan', [['z', n('NaN')], ['y', n('NaN')]], 'y'],
+        ['nan_finite', [['a', n('NaN')], ['b', n('5')]], 'b'],
+        ['neg_infinity_ts_spelling', [['b', n('0')], ['a', n('-Infinity')]], 'a'],
+        ['neg_infinity_rust_spelling', [['start', n('0')], ['sink', n('-inf')]], 'sink'],
+        ['pos_infinity', [['a', n('Infinity')], ['b', n('0')]], 'b'],
+        ['forms', [['x', n('1')], ['w', n('1.0')], ['v', n('01')]], 'v'],
+        // U+1F600 is above the BMP; U+FFFD is in it but above U+D800. Code
+        // point order (`compareCodePoints`, Rust bytes) puts U+FFFD first;
+        // UTF-16 code-unit order (plain `<`) would pick the emoji.
+        ['non_bmp', [['\u{1F600}', n('0')], ['\u{FFFD}', n('0')]], '\u{FFFD}'],
+        ['non_numeric', [['junk', n('abc')], ['start', n('1')]], 'start'],
+        ['trailing_garbage', [['start', n('0.5')], ['x', n('1abc')]], 'start'],
+        ['empty_payload', [['a', n('1')], ['b', n('')]], 'a'],
+        ['missing_link', [['b', n('1')], ['a', undefined]], 'a'],
+        // `1e%2B21` must decode to a finite 1e21 (not NaN) to beat NaN.
+        ['encoded_exponent', [['a', n('1e%2B21')], ['b', n('NaN')]], 'a'],
+        ['hex', [['a', n('0x10')], ['b', n('1')]], 'b'],
+        ['wrong_literal_type', [['a', 'literal:string:0'], ['b', n('1')]], 'b'],
+      ];
+      for (const [name, states, want] of rows) {
+        for (const reverse of [false, true]) {
+          const flow = SHACLFlow.fromLinks(flowLinksWithStates('xrt://XFlow', states, reverse), 'xrt://XFlow');
+          expect([name, reverse, flow.states[0].name]).toEqual([name, reverse, want]);
+        }
+      }
+    });
   });
 
   describe('JSON serialization', () => {

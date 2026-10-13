@@ -642,11 +642,13 @@ async fn role_grant_evidence_is_reachable_through_model_query() {
 ///   the test stops covering anything.
 /// * **`value` is DISTINCT on every state.** `value` does not enter the seal
 ///   — it is only the state ordering. But genesis is `states[0]`
-///   (`flow_spawn::initial_state_of`) and the parser's sort by `value` is
-///   *stable*, so equal values leave the tie to graph link-discovery order,
-///   which `shacl_parser` itself documents as arbitrary. `here` and
-///   `elsewhere` both at `0.0` therefore made the folded genesis undefined
-///   rather than `here`, and CI folded it to `elsewhere`.
+///   (`flow_spawn::initial_state_of`). Before #1202 the parser's sort by
+///   `value` was *stable*, so equal values left the tie to graph
+///   link-discovery order: `here` and `elsewhere` both at `0.0` made the
+///   folded genesis undefined rather than `here`, and CI folded it to
+///   `elsewhere`. Ties now break on state name, which would pick
+///   `elsewhere` (`e` < `h`) — still not `here`. Distinct values keep the
+///   fixture's intent explicit rather than leaning on name order.
 ///
 /// Note that `seed_flow`'s `initial_state` argument cannot rescue this: it
 /// writes the `currentState` **cache**, and the fold never reads the cache —
