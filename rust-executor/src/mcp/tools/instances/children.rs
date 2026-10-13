@@ -7,8 +7,7 @@
 //! ids some apps hand out), and listing children regardless of class.
 
 use super::{
-    error_json, link_target, pretty, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD,
-    MAX_QUERY_LIMIT,
+    error_json, link_target, pretty, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT,
 };
 use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -69,9 +68,10 @@ pub(super) async fn child_links(
 }
 
 impl Ad4mMcpHandler {
-    /// Link a child node under a parent via `ad4m://has_child`.
+    /// Link a child node under a parent via `ad4m://has_child`, or the
+    /// containment predicate the perspective declares.
     #[tool(
-        description = "Link a child node under a parent with ad4m://has_child — the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=…) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance."
+        description = "Link a child node under a parent with ad4m://has_child, or the containment predicate the perspective declares when it declares exactly one — the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=…) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance."
     )]
     pub async fn add_child(&self, params: Parameters<AddChildParams>) -> String {
         let p = &params.0;
@@ -87,7 +87,7 @@ impl Ad4mMcpHandler {
         }
         let link = Link {
             source: link_target(parent),
-            predicate: Some(HAS_CHILD.to_string()),
+            predicate: Some(perspective.containment_write_predicate().await),
             target: link_target(child),
         };
         match perspective

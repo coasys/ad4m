@@ -57,6 +57,20 @@ pub fn resolve_declared(
     declared
 }
 
+/// The predicate a write in `base`'s role uses: the one predicate declared to
+/// play it, when there is exactly one, else `base` itself.
+///
+/// Reads follow every declared predicate; a write has to pick one. With a
+/// single declaration the app has said which predicate the role is. With
+/// several it has said there are distinctions the executor cannot choose
+/// between, so a write falls back to the role itself rather than guess.
+pub fn write_predicate(base: &str, declared: &[String]) -> String {
+    match declared {
+        [only] => only.clone(),
+        _ => base.to_string(),
+    }
+}
+
 /// Whether a link declares (or withdraws) a role — the writes that make the
 /// cached sets stale.
 pub fn declares_role(predicate: Option<&str>) -> bool {
@@ -160,6 +174,20 @@ pub(crate) mod tests {
         assert_eq!(
             resolve_declared(&links, &trusted, role),
             vec!["app://a".to_string(), "app://b".to_string()]
+        );
+    }
+
+    #[test]
+    fn writes_use_the_single_declared_predicate_else_the_role() {
+        let role = "ad4m://some_role";
+        assert_eq!(write_predicate(role, &[]), role);
+        assert_eq!(
+            write_predicate(role, &["app://one".to_string()]),
+            "app://one"
+        );
+        assert_eq!(
+            write_predicate(role, &["app://a".to_string(), "app://b".to_string()]),
+            role
         );
     }
 

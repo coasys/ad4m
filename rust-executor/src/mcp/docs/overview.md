@@ -64,7 +64,7 @@ assume they are there; prefer the static tools below.
 
 | Tool | What it does |
 | --- | --- |
-| `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also links it as an `ad4m://has_child` child (e.g. a Message into a Channel). Returns its `base_uri` |
+| `instance_create(perspective_id, class_name, properties, base_uri?, parent?, reply_to?)` | Create an instance; `parent` also links it as a child (e.g. a Message into a Channel), `reply_to` as a reply to an item, each through the space's declared predicate. Returns its `base_uri` |
 | `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to one node's children |
 | `instance_get(perspective_id, class_name, base_uri)` | One instance, fully resolved |
 | `instance_update(perspective_id, class_name, base_uri, properties)` | Set single-valued properties |

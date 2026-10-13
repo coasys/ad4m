@@ -3,7 +3,7 @@
 use super::{
     check_setters, error_json, fetch_instance, generate_instance_uri, link_target, pretty,
     resolve_class, subject_class, validate_properties, validation_failure, Ad4mMcpHandler,
-    WriteMode, HAS_CHILD,
+    WriteMode,
 };
 use crate::mcp::shacl;
 use crate::types::{Link, LinkStatus};
@@ -26,15 +26,22 @@ pub struct InstanceCreateParams {
     pub properties: Option<Map<String, Value>>,
     /// Optional URI for the new instance. A random one is generated when omitted.
     pub base_uri: Option<String>,
-    /// Optional parent URI. The new instance is additionally linked as an
-    /// `ad4m://has_child` child of this node (e.g. a Message inside a Channel).
+    /// Optional parent URI. The new instance is additionally linked as a
+    /// child of this node (e.g. a Message inside a Channel), through
+    /// `ad4m://has_child` or the containment predicate the perspective
+    /// declares.
     pub parent: Option<String>,
+    /// Optional URI of what the new instance answers. It is linked as a reply
+    /// to that item, through `ad4m://has_reply` or the reply predicate the
+    /// perspective declares, and indexed under its thread's root where the
+    /// perspective declares a thread index.
+    pub reply_to: Option<String>,
 }
 
 impl Ad4mMcpHandler {
     /// Create an instance of any subject class.
     #[tool(
-        description = "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also link the instance as an ad4m://has_child child of another instance (e.g. a Message into a Channel). Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>')."
+        description = "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also link the instance as a child of another instance (e.g. a Message into a Channel), and reply_to to link it as a reply to an item (e.g. an answer to a comment) — each through the predicate the perspective declares for that role, else ad4m://has_child / ad4m://has_reply. Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>')."
     )]
     pub async fn instance_create(&self, params: Parameters<InstanceCreateParams>) -> String {
         let p = &params.0;
@@ -114,6 +121,35 @@ impl Ad4mMcpHandler {
             }
         }
 
+        // Which predicates the parent and reply links are written through, and
+        // the thread a reply joins — read before the batch, so a failure here
+        // creates nothing.
+        let parent = p.parent.as_deref().filter(|s| !s.trim().is_empty());
+        let reply_to = p
+            .reply_to
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| link_target(s.trim()));
+        let parent_predicate = perspective.containment_write_predicate().await;
+        let reply_links = match reply_to {
+            Some(ref answered) => {
+                let mut links = vec![Link {
+                    source: answered.clone(),
+                    predicate: Some(perspective.reply_write_predicate().await),
+                    target: base_uri.clone(),
+                }];
+                if let Some(thread) = perspective.thread_write_predicate().await {
+                    links.push(Link {
+                        source: perspective.thread_root_of(answered).await,
+                        predicate: Some(thread),
+                        target: base_uri.clone(),
+                    });
+                }
+                links
+            }
+            None => Vec::new(),
+        };
+
         let initial_values = if validated.scalars.is_empty() {
             None
         } else {
@@ -185,11 +221,10 @@ impl Ad4mMcpHandler {
             collections_set.insert(collection.clone(), Value::Array(added));
         }
 
-        let parent = p.parent.as_deref().filter(|s| !s.trim().is_empty());
         if let Some(parent) = parent {
             let link = Link {
                 source: link_target(parent.trim()),
-                predicate: Some(HAS_CHILD.to_string()),
+                predicate: Some(parent_predicate.clone()),
                 target: base_uri.clone(),
             };
             if let Err(e) = perspective
@@ -205,6 +240,25 @@ impl Ad4mMcpHandler {
                 return error_json(format!(
                     "Failed to link to parent '{parent}' — nothing was created (batch \
                      abandoned): {e:#}"
+                ));
+            }
+        }
+
+        for link in &reply_links {
+            if let Err(e) = perspective
+                .add_link(
+                    link.clone(),
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    &agent_context,
+                )
+                .await
+            {
+                perspective.discard_batch(&batch_id).await;
+                return error_json(format!(
+                    "Failed to link the reply to '{}' — nothing was created (batch \
+                     abandoned): {e:#}",
+                    link.source
                 ));
             }
         }
@@ -226,6 +280,14 @@ impl Ad4mMcpHandler {
         if let Some(parent) = parent {
             result["parent"] = json!(parent);
             result["added_to_parent"] = json!(true);
+            result["parent_predicate"] = json!(parent_predicate);
+        }
+        if let Some(answered) = reply_to {
+            result["reply_to"] = json!(answered);
+            result["reply_predicate"] = json!(reply_links[0].predicate);
+            if let Some(thread) = reply_links.get(1) {
+                result["thread_root"] = json!(thread.source);
+            }
         }
 
         pretty(&result)

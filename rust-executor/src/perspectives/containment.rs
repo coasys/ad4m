@@ -16,12 +16,16 @@
 //! own data keeps them distinct. Who may declare, and how the set is cached,
 //! is `declared_roles.rs`.
 //!
-//! ## Only containment, and only reads
+//! ## Only containment
 //!
 //! A declaration means containment and nothing else: it does not extend the
 //! flow default edge, the ORM's default relation, or the shared query scope
-//! (`Scope::Raw`), each of which reads `has_child` by name on purpose. Writes
-//! (`add_child`, `parent=` on create) still write `has_child`.
+//! (`Scope::Raw`), each of which reads `has_child` by name on purpose.
+//!
+//! The executor's own writes (`add_child`, `parent=` on create) use the
+//! declared predicate when exactly one is declared, so what a bot writes is
+//! what the app reads; with none, or several, they write `has_child`
+//! (`declared_roles::write_predicate`).
 
 use super::perspective_instance::PerspectiveInstance;
 use crate::types::DecoratedLinkExpression;
@@ -52,6 +56,12 @@ impl PerspectiveInstance {
     pub async fn containment_predicates(&self) -> Arc<Vec<String>> {
         let declared = self.declared_for(HAS_CHILD).await;
         Arc::new(with_has_child(declared.as_ref().clone()))
+    }
+
+    /// The predicate the executor's own containment writes use: the one
+    /// declared, when there is exactly one, else `has_child`.
+    pub async fn containment_write_predicate(&self) -> String {
+        super::declared_roles::write_predicate(HAS_CHILD, &self.declared_for(HAS_CHILD).await)
     }
 
     /// A model query over what one item contains, through every containment

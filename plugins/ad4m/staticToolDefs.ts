@@ -350,7 +350,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_create",
-    "description": "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also link the instance as an ad4m://has_child child of another instance (e.g. a Message into a Channel). Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>').",
+    "description": "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also link the instance as a child of another instance (e.g. a Message into a Channel), and reply_to to link it as a reply to an item (e.g. an answer to a comment) \u2014 each through the predicate the perspective declares for that role, else ad4m://has_child / ad4m://has_reply. Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>').",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceCreateParams",
@@ -377,7 +377,12 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "nullable": true
         },
         "parent": {
-          "description": "Optional parent URI. The new instance is additionally linked as an\n`ad4m://has_child` child of this node (e.g. a Message inside a Channel).",
+          "description": "Optional parent URI. The new instance is additionally linked as a\nchild of this node (e.g. a Message inside a Channel), through\n`ad4m://has_child` or the containment predicate the perspective\ndeclares.",
+          "type": "string",
+          "nullable": true
+        },
+        "reply_to": {
+          "description": "Optional URI of what the new instance answers. It is linked as a reply\nto that item, through `ad4m://has_reply` or the reply predicate the\nperspective declares, and indexed under its thread's root where the\nperspective declares a thread index.",
           "type": "string",
           "nullable": true
         }
@@ -651,7 +656,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "add_child",
-    "description": "Link a child node under a parent with ad4m://has_child \u2014 the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=\u2026) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance.",
+    "description": "Link a child node under a parent with ad4m://has_child, or the containment predicate the perspective declares when it declares exactly one \u2014 the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=\u2026) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "AddChildParams",
