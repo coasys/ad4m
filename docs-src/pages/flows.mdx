@@ -79,21 +79,23 @@ A vote cast on that executor updates both before the call returns, so each
 co-owner reads the new state and gets its own event.
 
 - `FlowInstance.findAll` and `FlowInstance.start` fill `currentStateName` from
-  one batched read. An instance your executor has not derived yet — one you
-  just started, or one that synced in a moment ago — reads as its flow's first
-  state.
+  one batched read. A run you just started reads as its flow's first state.
+  A run your executor has not derived yet — one that synced in a moment ago —
+  reads `undefined`: show it as pending, and wait for its event.
 - `perspective.flowStates(instances?)` returns
   `[{ instance, currentState, derivedAt }]` for the instances your executor
-  has derived.
+  keeps bookkeeping for. `currentState` is `null` for a run you started that
+  has not been derived yet; an instance with no entry is one your executor has
+  not derived.
 - `perspective.flowFired(instance)` returns the proposals whose votes settled
   an edge of that instance — its history, as your executor recorded it.
-- `perspective.onFlowStateChanged(({ instance, from, to, firedProposals }) => …)`
+- `perspective.onFlowStateChanged(({ instance, from, to, firedProposals, caughtUp }) => …)`
   is called when an instance's state moves on your executor or an edge
   settles. Only your own sockets receive it.
 
 ```typescript
 const release = perspective.onFlowStateChanged(({ instance, from, to }) => {
-  console.log(`${instance}: ${from} → ${to}`);
+  console.log(`${instance}: ${from ?? "(not derived)"} → ${to}`);
 });
 for (const { instance, currentState } of await perspective.flowStates()) {
   console.log(instance, currentState);
@@ -102,9 +104,12 @@ for (const { instance, currentState } of await perspective.flowStates()) {
 
 When your executor first sees an instance that already has history — you
 joined the neighbourhood late, or upgraded from an executor that kept this
-bookkeeping as links — it records that history silently: no event for
-transitions that settled before it was watching. Every transition that
-settles after that is reported once.
+bookkeeping as links — it records that history quietly: no outcomes and no
+fired proposals for transitions that settled before it was watching. It does
+send one event, with `caughtUp: true` and `from: null`, so a UI showing the
+run as pending learns its state. Every transition that settles after that is
+reported once. After a restart or an upgrade, the executor runs this pass over
+every run once its agent is known, so you do not have to touch each run first.
 
 On the wire these are `perspective.flowStates`, `perspective.flowFired` and
 the `flow-state-changed` event.
