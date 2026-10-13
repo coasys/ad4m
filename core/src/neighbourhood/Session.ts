@@ -21,6 +21,12 @@ export type SessionEvent =
     | "active-speaker"
     | "stream-added"
     | "stream-removed"
+    /** `(participant)` — a participant's stream object or track liveness changed. Mesh only. */
+    | "participant-updated"
+    /** `(did, RTCPeerConnectionState)` — one pair's connection state. Mesh only. */
+    | "peer-state"
+    /** `(did, { rung, attempts })` — the mesh attempted a repair on this pair. */
+    | "peer-recovery"
     | "state-changed"
     | "error"
 
@@ -56,6 +62,12 @@ export interface Session {
     on(event: SessionEvent, cb: SessionEventCallback): void
     /** Unsubscribe from session events. Omit cb to remove all listeners for the event. */
     off(event: SessionEvent, cb?: SessionEventCallback): void
+    /** Each mesh peer's connection state. Empty on the SFU path, which has one connection. */
+    peerStates(): Map<string, RTCPeerConnectionState>
+    /** Rebuild one mesh peer's connection, telling the peer to do the same. No-op on the SFU path. */
+    reconnect(did: string): void
+    /** How a mesh peer's media travels — `host`, `srflx` or `relay` — or `null`. */
+    transportOf(did: string): Promise<string | null>
     /** Release all resources. Calls leave() if still active. */
     destroy(): Promise<void>
 }
@@ -66,6 +78,8 @@ export interface SessionCreateOptions {
     /** The neighbourhood's call config. With `topology: "auto"`, its mode decides: any SFU mode
      *  runs through the SFU, `mesh` stays peer-to-peer. */
     sfuConfig?: SfuConfig
+    /** NAT traversal for the mesh path. Takes precedence over `sfuConfig.iceServers`. */
+    iceServers?: IceServer[]
 }
 
 interface SessionImplConfig {
@@ -255,7 +269,7 @@ export function createSession(config: SessionImplConfig): Session {
     // ── Mesh wiring helpers ─────────────────────────────────────────
 
     function wireMeshEvents(mesh: MeshManager): void {
-        for (const event of ["participant-joined", "participant-left", "error"] as const) {
+        for (const event of ["participant-joined", "participant-left", "participant-updated", "peer-state", "peer-recovery", "error"] as const) {
             mesh.on(event, (...args: any[]) => emit(event, ...args))
         }
         mesh.on("stream-added", (stream: MediaStream, track: MediaStreamTrack) => {
@@ -326,9 +340,7 @@ export function createSession(config: SessionImplConfig): Session {
                     channel,
                     callId: roomId,
                     selfId: agentDid,
-                    ...(meshIce.length > 0
-                        ? { createPeerConnection: () => new RTCPeerConnection({ iceServers: meshIce }) }
-                        : {}),
+                    ...(meshIce.length > 0 ? { iceServers: meshIce } : {}),
                 })
                 meshManager = mesh
                 wireMeshEvents(mesh)
@@ -451,6 +463,18 @@ export function createSession(config: SessionImplConfig): Session {
                 const idx = dataListeners.indexOf(cb)
                 if (idx !== -1) dataListeners.splice(idx, 1)
             }
+        },
+
+        peerStates() {
+            return meshManager ? meshManager.peerStates() : new Map()
+        },
+
+        reconnect(did) {
+            meshManager?.reconnect(did)
+        },
+
+        async transportOf(did) {
+            return meshManager ? meshManager.transportOf(did) : null
         },
 
         getState() { return state },

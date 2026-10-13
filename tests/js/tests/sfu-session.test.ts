@@ -4,6 +4,7 @@ import {
   t17SessionDataChannel,
   t18MeshSessionLifecycle,
   t19MeshDataChannel,
+  t20MeshManagerLossy,
 } from "../helpers/sfu/scenarios/index.js";
 
 describe("SFU: Session surface", function () {
@@ -13,4 +14,5 @@ describe("SFU: Session surface", function () {
   sfuScenario(t17SessionDataChannel);
   sfuScenario(t18MeshSessionLifecycle);
   sfuScenario(t19MeshDataChannel);
+  sfuScenario(t20MeshManagerLossy);
 });
