@@ -780,6 +780,49 @@ async fn a_regression_publishes_an_event_without_fired_proposals() {
     assert!(got[0].fired_proposals.is_empty());
 }
 
+/// A seeded row whose fold is still at genesis: the pass writes the genesis
+/// as the recorded state and publishes nothing. `from` — a seeded row's
+/// flow-first state — equals `to`, no edge settled, and the row exists, so
+/// it is no catch-up either. The client already shows the first state for
+/// a seeded row; there is no news (Marvin, #1425).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeded_row_at_genesis_records_the_genesis_and_publishes_nothing() {
+    let mut f = seed_satisfied_fixture(None).await;
+    f.perspective.settle_flow_passes().await;
+    forget_bookkeeping(&f);
+    let did = acting_did(&f);
+    assert!(FlowReplicaState::seed_minted(
+        &f.perspective.uuid,
+        &did,
+        &f.instance_uri,
+        &f.perspective.is_teardown,
+    )
+    .expect("seed"));
+    assert_eq!(
+        f.derived().await.state,
+        "identified",
+        "the fold is at genesis"
+    );
+
+    let mut events = get_global_pubsub()
+        .await
+        .subscribe(&FLOW_STATE_CHANGED_TOPIC)
+        .await;
+    let outcomes = consensus_pass(&mut f).await;
+    assert!(outcomes.is_empty(), "nothing settled: {outcomes:?}");
+    assert_eq!(
+        f.cached_state().await,
+        "identified",
+        "the genesis is written over the seeded row"
+    );
+    assert!(f.marked().await.is_empty(), "and no mark");
+    assert_eq!(
+        raw_flow_events(&mut events, &f.perspective.uuid),
+        Vec::<serde_json::Value>::new(),
+        "no event: from == to, no fired proposals, no catch-up"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The fired mark is an index
 // ---------------------------------------------------------------------------
