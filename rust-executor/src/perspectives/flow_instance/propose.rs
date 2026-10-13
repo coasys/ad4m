@@ -69,7 +69,7 @@ use super::atom::{
     check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
     TransitionAtom,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{run_pass_after_vote, FireOutcome, OwnVote};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -104,9 +104,11 @@ pub struct ProposeOutcome {
     /// proposer's own vote on a mint, an `acceptedBy` on a join. `false`
     /// means the acting DID had already voted: the call changed nothing.
     pub recorded_vote: bool,
-    /// Consensus events this call's pass recorded for the first time. Empty
-    /// while the edge is still short of quorum — read with `recorded_vote`
-    /// to tell "your vote landed, waiting for others" from "nothing to do".
+    /// Consensus events this call's pass recorded for the first time, and
+    /// the settle this call's vote counts in even when a concurrent pass on
+    /// this replica recorded it first (#1332). Empty while the edge is still
+    /// short of quorum — read with `recorded_vote` to tell "your vote landed,
+    /// waiting for others" from "nothing to do".
     pub outcomes: Vec<FireOutcome>,
     /// The instance's derived state after the call.
     pub derived_state: String,
@@ -306,15 +308,15 @@ pub async fn propose_flow_transition(
                 "propose_flow_transition: {instance_uri} → {to_state} already carries a \
                  vote by {acting_did} on {uri}; writing nothing, running consensus pass"
             );
-            let outcomes = sweep(perspective, instance_uri, context).await;
+            let outcomes = run_pass_after_vote(perspective, instance_uri, None, context).await;
             (uri, false, false, outcomes)
         }
         // The production accept path, so this vote is verified exactly as any
         // other co-sign is: it re-derives the seal on this replica and refuses
         // rather than signing what it cannot reproduce. It runs the consensus
-        // pass itself, and that pass is the one that can report a fire — a
-        // second sweep here would find every mark already written and return
-        // nothing.
+        // pass itself, and reports the settle this vote counts in even if a
+        // concurrent pass marked it first — a second sweep here would find
+        // every mark already written and return nothing.
         (None, Some(uri)) => {
             let outcomes = accept_flow_proposal(perspective, &uri, context).await?;
             (uri, false, true, outcomes)
@@ -379,17 +381,15 @@ async fn mint(
     context: &AgentContext,
 ) -> anyhow::Result<(String, bool, bool, Vec<FireOutcome>)> {
     let uri = write_proposal(perspective, transition, acting_did, rationale, context).await?;
-    let outcomes = sweep(perspective, &transition.instance_uri, context).await;
+    // A fresh proposal has settled nothing yet, so the proposer's vote on it
+    // is one that can complete a quorum: at `{n: 1}` it is the quorum.
+    let own = OwnVote {
+        proposal_uri: uri.clone(),
+        did: acting_did.to_string(),
+    };
+    let outcomes =
+        run_pass_after_vote(perspective, &transition.instance_uri, Some(&own), context).await;
     Ok((uri, true, true, outcomes))
-}
-
-async fn sweep(
-    perspective: &mut PerspectiveInstance,
-    instance_uri: &str,
-    context: &AgentContext,
-) -> Vec<FireOutcome> {
-    let only = [instance_uri.to_string()];
-    run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await
 }
 
 /// What an already-open proposal carrying our dedup key means for this call.

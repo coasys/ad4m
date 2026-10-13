@@ -502,6 +502,71 @@ async fn a_newcomer_with_no_history_reports_the_first_settle_after_its_first_pas
     assert_eq!(f.cached_state().await, "scoped");
 }
 
+/// A newcomer's first pass can be the pass after its own vote. That pass
+/// catches up silently and reports nothing, so before #1332 the vote that
+/// completed a quorum got `[]`. Now the call reports its own settle, and
+/// only that one: the history the catch-up marked stays unreported.
+///
+/// Red if the pass after a vote drops the own settle on a first derivation,
+/// or reports the caught-up history with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newcomers_first_pass_after_its_vote_reports_its_own_settle_and_no_history() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+
+    // Replica B: the flow instance as sync delivers it (no cache), and A's
+    // history without A's marks, which are A's own. The rule goes in first:
+    // a definition change sweeps, and that sweep would be B's first pass.
+    let mut b = seed_review_flow().await;
+    set_consensus_rule(&mut b, "review://Review.approved", r#"{"n":2}"#).await;
+    drop_local_cache(&mut b).await;
+    for uri in [&h1, &h2] {
+        for link in links_of(&a, uri).await {
+            if link.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE) {
+                continue;
+            }
+            b.perspective
+                .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
+                .await
+                .expect("replicate a proposal link");
+        }
+    }
+
+    // Carol proposes `review → approved` at `{n: 2}`; B's vote completes it.
+    let seal = seal_for(&b, "approved").await;
+    let carol = TestSigner::generate();
+    let carols = sync_proposal_from(&mut b, &carol, "approve-1", "review", "approved", &seal).await;
+    sync_vote_from(&mut b, &carol, &carols).await;
+    assert!(
+        b.read_set().await.marked_proposals().is_empty(),
+        "precondition: B has never derived the instance"
+    );
+    assert!(
+        current_state_links(&b).await.is_empty(),
+        "precondition: and has no cache, so the pass after B's vote is its first"
+    );
+
+    let reported = accept_flow_proposal(&mut b.perspective, &carols, &b.ctx)
+        .await
+        .expect("B's vote lands");
+    assert_eq!(reported.len(), 1, "the own settle only: {reported:?}");
+    assert_eq!(
+        (
+            reported[0].from_state.as_str(),
+            reported[0].to_state.as_str()
+        ),
+        ("review", "approved")
+    );
+    assert_eq!(reported[0].contributing_proposal_uris, vec![carols]);
+    assert_eq!(b.cached_state().await, "approved");
+    let marked = b.read_set().await.marked_proposals();
+    assert!(
+        marked.contains(&h1) && marked.contains(&h2),
+        "the history was caught up, marked and not reported: {marked:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The fired mark is an index
 // ---------------------------------------------------------------------------

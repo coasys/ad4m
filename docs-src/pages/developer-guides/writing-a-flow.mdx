@@ -173,6 +173,8 @@ async function advanceToInReview(
 
 With `{ n: 2 }` on Done, Alice's press records a vote and fires nothing. Bob presses the same button and co-signs her proposal; two distinct DIDs is quorum and the edge fires. Part 1 then shows that Bob withdrawing his vote moves the run back to `InReview`. The [Flows](/flows#proposing-and-voting) page covers that in full. What this guide needs from Part 1 is only the shape: **press, count, fire**.
 
+`outcomes` holds the settle your own vote counts in, even when another pass on the executor (a sync sweep, or another user's call) recorded it first, so the press that completes a quorum always sees the transition. A vote that does not count in the quorum, such as a late one or a second vote by the same agent on a twin proposal, gets `[]`. One settle can appear in the `outcomes` of more than one call.
+
 ## Step 2: gate Done on a role
 
 Part 2 replaces `{ n: 2 }` with a rule that counts one vote, but only from a DID that holds a `ReviewerRole` for the `frontend` domain:

@@ -1105,6 +1105,7 @@ mod tests {
             settled_at: "2026-01-01T00:00:00.000Z".to_string(),
             atom_uris: vec![],
             voters: vec![],
+            counted: vec![],
         };
         let mut contested_ctx = sample_delivery_context();
         contested_ctx.contested = ContentionStatus::Contested(Contention {

@@ -157,6 +157,13 @@ pub struct SettledEdge {
     pub atom_uris: Vec<String>,
     /// The distinct DIDs that made up the quorum, sorted.
     pub voters: Vec<String>,
+    /// The counted votes as `(did, atom_uri)` pairs, sorted: one per voter.
+    /// `voters` and `atom_uris` are projections of this, and they do not
+    /// determine it. With twin proposals on one edge, a DID can vote on both
+    /// atoms and only its earliest vote counts, so "the DID is a voter and
+    /// the atom contributed" does not mean "that DID's vote on that atom
+    /// counted". `run_pass_after_vote` needs the latter (#1332).
+    pub counted: Vec<(String, String)>,
 }
 
 /// Why a walk stopped without taking an edge it could have taken.
@@ -441,12 +448,14 @@ fn settle_pool(
 
     let mut voters: Vec<String> = Vec::new();
     let mut atom_uris: Vec<String> = Vec::new();
+    let mut counted: Vec<(String, String)> = Vec::new();
     let mut nth = None;
     for (instant, vote, uri) in pooled {
         if voters.contains(&vote.did) {
             continue;
         }
         voters.push(vote.did.clone());
+        counted.push((vote.did.clone(), uri.to_string()));
         if !atom_uris.iter().any(|u| u == uri) {
             atom_uris.push(uri.to_string());
         }
@@ -459,6 +468,7 @@ fn settle_pool(
 
     atom_uris.sort();
     voters.sort();
+    counted.sort();
     // The floor (`max(nth, after)`) compares instants too: `after` is either
     // the previous edge's settled_at (a parsed vote timestamp) or the ""
     // genesis sentinel, which parses as no instant and floors nothing.
@@ -472,6 +482,7 @@ fn settle_pool(
         settled_at,
         atom_uris,
         voters,
+        counted,
     })
 }
 

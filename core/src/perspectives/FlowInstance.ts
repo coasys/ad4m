@@ -111,8 +111,13 @@ export interface FlowProposeResult {
    *  vote on a mint, an `acceptedBy` on a join. `false` means the agent had
    *  already voted and nothing was written. */
   recordedVote: boolean;
-  /** Consensus events this call recorded for the first time. Empty while
-   *  the edge is short of quorum. */
+  /** Consensus events this call recorded for the first time, plus the
+   *  settle your vote counts in, even when another pass on this executor
+   *  (a sync sweep, or another user's call) recorded it first. A vote that
+   *  does not count in the quorum (a late one, or a second vote by the same
+   *  agent on a twin proposal) reports nothing. One settle can appear in
+   *  more than one call's `outcomes`. Empty while the edge is short of
+   *  quorum. */
   outcomes: FlowFireOutcome[];
   /** The instance's derived state after the call. */
   derivedState: string;
