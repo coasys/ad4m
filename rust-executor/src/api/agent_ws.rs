@@ -1746,7 +1746,7 @@ mod capability_request_tests {
     async fn a_request_with_an_overlong_app_field_is_refused() {
         setup();
         let long = "x".repeat(crate::agent::capabilities::MAX_AUTH_INFO_FIELD_BYTES + 1);
-        for field in ["appName", "appDesc", "appDomain", "appUrl"] {
+        for field in ["appName", "appDesc", "appDomain", "appUrl", "appIconPath"] {
             let mut auth = auth_info(&[AGENT_READ_CAPABILITY.clone()]);
             auth[field] = json!(long);
             let err = call(
@@ -1768,6 +1768,47 @@ mod capability_request_tests {
         )
         .await
         .expect("a field of the limit's length is taken");
+    }
+
+    // `capabilities` is caller-chosen like the app fields and is kept in memory and shown in
+    // the approval prompt, so it is bounded too: by its size as JSON.
+    #[tokio::test]
+    async fn a_request_with_an_oversized_capability_list_is_refused() {
+        setup();
+        let many: Vec<_> = (0..10_000)
+            .map(|i| crate::agent::capabilities::perspective_query_capability(vec![format!("p{i}")]))
+            .collect();
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&many) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+        assert!(err.1.contains("capabilities"), "{}", err.1);
+
+        let one_pointer_too_long = [crate::agent::capabilities::perspective_query_capability(
+            vec!["x".repeat(70_000)],
+        )];
+        let err = call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&one_pointer_too_long) }),
+            anonymous(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 400, "{}", err.1);
+
+        // What apps ask for today stays well inside it.
+        let defaults = crate::agent::capabilities::get_user_default_capabilities();
+        call(
+            "agent.requestCapability",
+            json!({ "authInfo": auth_info(&defaults) }),
+            anonymous(),
+        )
+        .await
+        .expect("the user default capabilities are taken");
     }
 
     // D16: an email resolves to its user's DID at the edge. An email no user has is taken
