@@ -31,8 +31,8 @@
  *     Seeded in the LOWEST-VALUED state.
  *
  *  3. RENDER THE CURRENT STATE AND ITS BUTTONS
- *       inst.currentStateName
- *       inst.currentState.interpretationHint
+ *       inst.currentStateName   // undefined = not derived by this agent yet
+ *       inst.currentState?.interpretationHint
  *       inst.availableTransitions   // one button each; empty = terminal
  *
  *  4. USER CLICKS A BUTTON

@@ -544,6 +544,13 @@ pub struct PerspectiveInstance {
     /// across an await.
     pub(crate) flow_pass_queue:
         Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
+    /// Serializes this perspective's flow passes with its flow votes. A vote
+    /// holds it from its catch-up through its own pass, so no background
+    /// pass can record the vote's settle in between and leave the voter's
+    /// call returning no outcome. Taken at the entry points (`accept`,
+    /// `propose`, the engine's mint-and-sweep, the sync-triggered sweep),
+    /// never inside `run_flow_consensus_pass`, which those nest.
+    pub(crate) flow_pass_lock: Arc<Mutex<()>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -555,6 +562,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
+    /// batch as a real failure does. Compiled out in non-test builds — see
+    /// [`Self::fail_next_commit_batch`].
+    #[cfg(test)]
+    fail_next_commit: Arc<AtomicBool>,
     /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
     /// joined to a neighbourhood, so a test can exercise the cross-peer wait
     /// without a running link language. Compiled out in non-test builds.
@@ -621,8 +633,11 @@ impl PerspectiveInstance {
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
+            flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
         }
@@ -641,6 +656,14 @@ impl PerspectiveInstance {
     pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
         self.fail_add_link_after
             .store(after_n_calls, Ordering::SeqCst);
+    }
+
+    /// Test seam: make the next [`Self::commit_batch`] fail after removing
+    /// the batch, as its contract says a failed commit does, so a test can
+    /// prove that nothing a caller defers to a successful commit happens.
+    #[cfg(test)]
+    pub(crate) fn fail_next_commit_batch(&self) {
+        self.fail_next_commit.store(true, Ordering::SeqCst);
     }
 
     /// Look up a cached `ModelShape` for the given class name, loading it
@@ -732,6 +755,7 @@ impl PerspectiveInstance {
             self.subscribed_queries_loop(),
             self.fallback_sync_loop(),
             self.auto_processor_supervisor(),
+            self.flow_pass_at_load(),
         );
     }
 
@@ -1815,6 +1839,11 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        // A `FlowInstance` minted by an agent this executor acts for gets its
+        // bookkeeping row now, before any pass can treat it as a catch-up
+        // (#1424). Awaited, not spawned: a client's `start` is followed at
+        // once by a propose whose pass must see the row.
+        self.seed_minted_flow_instances(&decorated_diff).await;
 
         // Get handle without holding lock during pubsub operations
         let handle = {
@@ -6540,6 +6569,11 @@ impl PerspectiveInstance {
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
+        #[cfg(test)]
+        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
+            drop(diff);
+            return Err(anyhow!("injected fault (test seam): commit_batch failed"));
+        }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
         //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());

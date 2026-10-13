@@ -31,6 +31,7 @@
 //! | `query-subscription-update`   | (inline)      | own connection         | Live query update (`/api/v1/ws` only)|
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
+//! | `flow-state-changed`          | (inline)      | agent DID, strict      | A flow instance's state moved on that agent's replica (#1424) |
 //!
 //! ## Client → Server messages
 //!
@@ -97,7 +98,7 @@ impl LazyDid {
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
-    AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC,
+    AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC, FLOW_STATE_CHANGED_TOPIC,
     HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
     PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
@@ -141,9 +142,10 @@ pub mod events {
     pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
     pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
     pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
+    pub const FLOW_STATE_CHANGED: &str = "flow-state-changed";
 
     /// Every name above, in stream-builder order.
-    pub const ALL: [&str; 20] = [
+    pub const ALL: [&str; 21] = [
         AGENT_STATUS_CHANGED,
         AGENT_UPDATED,
         APPS_CHANGED_EVENT,
@@ -164,6 +166,7 @@ pub mod events {
         QUERY_SUBSCRIPTION_UPDATE,
         AUTO_PROCESSOR_EVENT,
         AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
+        FLOW_STATE_CHANGED,
     ];
 }
 
@@ -215,6 +218,7 @@ pub fn event_specs() -> Vec<EventSpec> {
     use crate::perspectives::auto_processor::events::{
         AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     };
+    use crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent;
     use events::*;
     vec![
         EventSpec::of::<AgentStatusChangedEvent>(AGENT_STATUS_CHANGED, false),
@@ -237,6 +241,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<QuerySubscriptionUpdateEvent>(QUERY_SUBSCRIPTION_UPDATE, true),
         EventSpec::of::<AutoProcessorEvent>(AUTO_PROCESSOR_EVENT, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, true),
+        EventSpec::of::<FlowStateChangedEvent>(FLOW_STATE_CHANGED, true),
     ]
 }
 
@@ -357,6 +362,7 @@ pub(crate) async fn build_event_stream_for(
     let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
     let d_notif = d_auto_processor.clone();
+    let d_flow_state = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -679,6 +685,26 @@ pub(crate) async fn build_event_stream_for(
             })
     };
 
+    // ── Flow state changed (#1424) ──
+    // Per-agent bookkeeping: delivered to the sockets of the agent whose pass
+    // derived it, and to nobody else — not an admin credential either, which
+    // resolves to the main agent and so gets the main agent's events. An
+    // unresolved DID fails closed. See [`matches_flow_state_agent`].
+    let s_flow_state = {
+        let rx = pubsub.subscribe(&FLOW_STATE_CHANGED_TOPIC).await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = d_flow_state.clone();
+                async move {
+                    let current_did = did_cell.get();
+                    let msg = result.ok()?;
+                    matches_flow_state_agent(&msg, current_did.as_deref())
+                        .then(|| wrap_event(events::FLOW_STATE_CHANGED, &msg))
+                }
+            })
+    };
+
     // ── Merge all streams ──
     let agent = stream::select(
         stream::select(s_status, s_apps),
@@ -696,7 +722,10 @@ pub(crate) async fn build_event_stream_for(
             s_loading,
             stream::select(
                 s_query_sub,
-                stream::select(s_auto_processor, s_auto_processor_state),
+                stream::select(
+                    s_auto_processor,
+                    stream::select(s_auto_processor_state, s_flow_state),
+                ),
             ),
         ),
     );
@@ -1112,6 +1141,73 @@ fn matches_auto_processor_pass_owner_with(
         // No `agentDid` on the event → malformed or executor-side pass with
         // no attribution; fail closed rather than leak to every observer.
         _ => false,
+    }
+}
+
+/// `flow-state-changed`: only for the agent whose replica derived it. The
+/// payload names that agent (`agentDid`) and the perspective; a message
+/// missing either, or a socket whose DID has not resolved, gets nothing.
+///
+/// No ownership lookup: the pass runs only as an owner of the perspective,
+/// so `agentDid == did` already implies it, and the bookkeeping is that
+/// agent's own whatever the perspective's ownership becomes later.
+pub(crate) fn matches_flow_state_agent(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return false;
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(msg) else {
+        return false;
+    };
+    if !matches!(
+        map.get("perspectiveUuid"),
+        Some(serde_json::Value::String(_))
+    ) {
+        return false;
+    }
+    matches!(map.get("agentDid"), Some(serde_json::Value::String(agent)) if agent == did)
+}
+
+#[cfg(test)]
+mod flow_state_filter_tests {
+    use super::matches_flow_state_agent;
+
+    const ALICE: &str = "did:key:alice";
+    const BOB: &str = "did:key:bob";
+
+    fn event(agent: &str) -> String {
+        serde_json::json!({
+            "perspectiveUuid": "p",
+            "agentDid": agent,
+            "instance": "i",
+            "from": "a",
+            "to": "b",
+            "firedProposals": [],
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_deriving_agent_gets_it() {
+        assert!(matches_flow_state_agent(&event(ALICE), Some(ALICE)));
+    }
+
+    #[test]
+    fn another_agent_on_the_same_executor_does_not() {
+        assert!(!matches_flow_state_agent(&event(ALICE), Some(BOB)));
+    }
+
+    #[test]
+    fn an_unresolved_socket_gets_nothing() {
+        assert!(!matches_flow_state_agent(&event(ALICE), None));
+    }
+
+    #[test]
+    fn a_message_without_agent_or_perspective_is_dropped() {
+        let no_agent = serde_json::json!({ "perspectiveUuid": "p" }).to_string();
+        let no_perspective = serde_json::json!({ "agentDid": ALICE }).to_string();
+        assert!(!matches_flow_state_agent(&no_agent, Some(ALICE)));
+        assert!(!matches_flow_state_agent(&no_perspective, Some(ALICE)));
+        assert!(!matches_flow_state_agent("not json", Some(ALICE)));
     }
 }
 
@@ -2035,6 +2131,17 @@ mod event_spec_tests {
                 "k",
                 NeighbourhoodPhase::Claimed,
             )),
+            uuid_of(
+                crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent {
+                    perspective_uuid: p(),
+                    agent_did: "did:x".into(),
+                    instance: "i".into(),
+                    from: Some("a".into()),
+                    to: "b".into(),
+                    fired_proposals: vec![],
+                    caught_up: false,
+                },
+            ),
         ];
         assert!(scoped.iter().all(|u| u == "p"));
     }

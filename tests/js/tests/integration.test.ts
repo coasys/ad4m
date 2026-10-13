@@ -18,6 +18,7 @@ import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import autoProcessorNeighbourhoodTests from "./auto-processor-neighbourhood";
 import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
+import flowReplicaJoinTests from "./flow/flow-replica-join";
 import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
 import agentLanguageTests from "./agent-language";
@@ -147,5 +148,6 @@ describe("Integration tests", function () {
         describe('Neighbourhood [holochain]', neighbourhoodTests(testContext, () => holochainConfig))
         describe('Auto-processor (two executors)', autoProcessorNeighbourhoodTests(testContext))
         describe('Cross-peer SHACL shape sync', crossPeerShapeSyncTests(testContext))
+        describe('Flow replica state on join', flowReplicaJoinTests(testContext))
     })
 })
