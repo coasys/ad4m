@@ -3,6 +3,7 @@
 //! Tools for managing flows — finite state machines that track expression state transitions.
 
 use super::Ad4mMcpHandler;
+use crate::agent::AgentContext;
 use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, FlowInstanceRecord,
 };
@@ -146,8 +147,8 @@ impl Ad4mMcpHandler {
     /// was retired from `FlowState` when the model-level guard replaced it
     /// (design §4.1) — nothing emits that predicate any more, so this tool
     /// could only ever answer "not in any state" regardless of the actual
-    /// flow state. State now lives on `FlowInstance.currentState`, which is
-    /// what the engine's proposal and consensus passes read and write.
+    /// flow state. The state is the calling agent's recorded derivation
+    /// (`FlowReplicaState`, #1424), or a fresh fold where it has none.
     #[tool(
         description = "Get the current state of an expression within a flow (state machine). Returns the flow instance URI and its current state name."
     )]
@@ -164,7 +165,13 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow state: {:#}", e),
         };
 
-        match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
+        let context = match self.reading_agent().await {
+            Ok(context) => context,
+            Err(e) => return e,
+        };
+        match Self::flow_instance_for(&perspective, &context, &p.expression_address, &flow_uri)
+            .await
+        {
             Err(e) => format!("Error querying flow state: {:#}", e),
             Ok(None) => format!(
                 "Expression {} is not in any state of flow {}",
@@ -248,6 +255,17 @@ impl Ad4mMcpHandler {
             .collect()
     }
 
+    /// The agent a read tool answers for: the session's agent, or — with no
+    /// token on a node without an admin credential, the local-trust mode
+    /// `get_readable_perspective` allows — the main agent.
+    async fn reading_agent(&self) -> Result<AgentContext, String> {
+        match self.get_agent_context().await {
+            Ok(context) => Ok(context),
+            Err(_) if self.context.admin_credential.is_none() => Ok(AgentContext::main_agent()),
+            Err(e) => Err(json!({ "error": e }).to_string()),
+        }
+    }
+
     /// Find the live `FlowInstance` binding `expression` to `flow_uri`, if any.
     ///
     /// Shared by [`Self::flow_state`] and [`Self::flow_actions`] so both read
@@ -255,18 +273,19 @@ impl Ad4mMcpHandler {
     /// the loader pushes the filter down to `model_query` instead of sweeping
     /// every instance on the perspective (Model C scope discipline).
     ///
-    /// **Cache-first (#987)**: when this replica's `Local` `currentState` link
-    /// is present it is returned directly — no fold, no flow catalogue load.
-    /// The cache is `Local`-verified (peers cannot write it since #987's Local
-    /// switch), so it is exactly what *this* replica last derived.  On a cache
-    /// miss (`None`) the full derive path runs as before, which is the only
-    /// path on a never-derived instance.
+    /// **Cache-first**: when `context`'s agent has a recorded state for the
+    /// instance (`FlowReplicaState`, #1424) it is returned directly — no fold,
+    /// no flow catalogue load. The table is the executor's own, so no peer or
+    /// co-owner can write it: it is exactly what this agent's pass last
+    /// derived. Without one the full derive path runs, which is the only path
+    /// on a never-derived instance.
     ///
     /// Freshness note: the sync-triggered pass (`trigger.rs`) re-derives on
     /// every incoming flow link, so residual staleness is bounded by the
     /// debounce window plus the role-change gap documented there.
     async fn flow_instance_for(
         perspective: &PerspectiveInstance,
+        context: &AgentContext,
         expression: &str,
         flow_uri: &str,
     ) -> anyhow::Result<Option<FlowInstanceRecord>> {
@@ -277,11 +296,13 @@ impl Ad4mMcpHandler {
         else {
             return Ok(None);
         };
-        if let Some(cached) = crate::perspectives::flow_instance::local_cached_state(
-            perspective,
-            &record.instance_uri,
-        )
-        .await?
+        let agent_did = crate::agent::did_for_context(context)?;
+        if let Some(cached) =
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &agent_did,
+                &record.instance_uri,
+            )?
         {
             return Ok(Some(FlowInstanceRecord {
                 current_state: cached,
@@ -333,8 +354,14 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow actions: {:#}", e),
         };
 
+        let context = match self.reading_agent().await {
+            Ok(context) => context,
+            Err(e) => return e,
+        };
         let instance =
-            match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
+            match Self::flow_instance_for(&perspective, &context, &p.expression_address, &flow_uri)
+                .await
+            {
                 Err(e) => return format!("Error querying flow actions: {:#}", e),
                 Ok(None) => {
                     return format!(
@@ -626,17 +653,21 @@ mod tests {
         assert!(flow.is_none());
 
         // Instance lookup is keyed on (expression, flow URI).
-        let found =
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "delivery://DeliveryFlow")
-                .await
-                .expect("flow_instance_for");
+        let found = Ad4mMcpHandler::flow_instance_for(
+            &perspective,
+            &ctx,
+            base_uri,
+            "delivery://DeliveryFlow",
+        )
+        .await
+        .expect("flow_instance_for");
         let found = found.expect("the minted instance must be found");
         assert_eq!(found.instance_uri, inst_uri);
         assert_eq!(found.current_state, "identified");
         assert_eq!(found.subject, base_uri);
 
         assert!(
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "other://OtherFlow")
+            Ad4mMcpHandler::flow_instance_for(&perspective, &ctx, base_uri, "other://OtherFlow")
                 .await
                 .expect("flow_instance_for(other flow)")
                 .is_none(),
@@ -645,6 +676,7 @@ mod tests {
         assert!(
             Ad4mMcpHandler::flow_instance_for(
                 &perspective,
+                &ctx,
                 "ad4m://task/unrelated",
                 "delivery://DeliveryFlow"
             )
@@ -655,13 +687,13 @@ mod tests {
         );
     }
 
-    /// `flow_instance_for` must return the `Local` cache value without
-    /// running the fold.  Observable: advance the cache to "scoped" with no
-    /// proposals in the graph — the fold would return "identified" (genesis);
-    /// only a cache-first path produces "scoped".
+    /// `flow_instance_for` must return the recorded state without running
+    /// the fold. Observable: record "scoped" with no proposals in the graph —
+    /// the fold would return "identified" (genesis); only a cache-first path
+    /// produces "scoped".
     #[tokio::test(flavor = "multi_thread")]
-    async fn flow_instance_for_local_cache_hit_skips_derive() {
-        use crate::perspectives::flow_classes::advance_flow_instance_state;
+    async fn flow_instance_for_recorded_state_hit_skips_derive() {
+        use crate::perspectives::flow_instance::replica_state::FlowReplicaState;
 
         let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
@@ -687,20 +719,30 @@ mod tests {
         .await
         .expect("mint_flow_instance");
 
-        // Advance the Local cache to "scoped" WITHOUT any proposals.
+        // Record "scoped" WITHOUT any proposals.
         // Without cache-first, derive would return "identified" (no quorum).
-        advance_flow_instance_state(&mut perspective, &inst_uri, "scoped", None, &ctx)
-            .await
-            .expect("advance_flow_instance_state");
+        let did = crate::agent::did_for_context(&ctx).expect("did");
+        FlowReplicaState::set_current_state(
+            &perspective.uuid,
+            &did,
+            &inst_uri,
+            "scoped",
+            &perspective.is_teardown,
+        )
+        .expect("set_current_state");
 
-        let record =
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "delivery://DeliveryFlow")
-                .await
-                .expect("flow_instance_for")
-                .expect("instance must be found");
+        let record = Ad4mMcpHandler::flow_instance_for(
+            &perspective,
+            &ctx,
+            base_uri,
+            "delivery://DeliveryFlow",
+        )
+        .await
+        .expect("flow_instance_for")
+        .expect("instance must be found");
         assert_eq!(
             record.current_state, "scoped",
-            "Local cache 'scoped' must win over fold-derived 'identified' (no proposals in graph)"
+            "recorded 'scoped' must win over fold-derived 'identified' (no proposals in graph)"
         );
     }
 }

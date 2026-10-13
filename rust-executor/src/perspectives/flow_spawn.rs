@@ -115,7 +115,7 @@ pub fn spawn_candidates(
 /// `stateName` link hasn't synced yet parses as `""` at value `0.0` and sorts
 /// to (or ties for) the front — partially-observed revisions are a real
 /// phenomenon (see the 2026-08-20 flake notes in `interpretation/overlay`).
-/// An instance minted at `currentState: ""` would be permanently stuck: no
+/// An instance minted at state `""` would be permanently stuck: no
 /// transition leaves `""`, and dedup suppresses on `(flow_uri, subject)`
 /// regardless of state, so the correct instance could never be minted either.
 /// A half-synced definition must spawn nothing.
@@ -313,6 +313,26 @@ pub async fn run_flow_spawn_pass(
              {created_bases:?}, and spawn is not retried for these items: {e:#}"
         );
         return Vec::new();
+    }
+
+    // Only now are the instances on the graph, so only now do they get the
+    // minter's bookkeeping row (`mint_flow_instance` defers it for a batch).
+    // A failed write cannot undo the commit: that instance's first pass is
+    // then a catch-up — its state is still recorded, its first settle is not
+    // reported.
+    for outcome in &spawned {
+        if let Err(e) = super::flow_classes::record_minted_state(
+            perspective,
+            &outcome.instance_uri,
+            &outcome.initial_state,
+            context,
+        ) {
+            log::warn!(
+                "run_flow_spawn_pass: {} is spawned, but its minter row was not written; \
+                 its first pass will catch up: {e:#}",
+                outcome.instance_uri
+            );
+        }
     }
 
     spawned
@@ -563,7 +583,7 @@ mod tests {
     #[test]
     fn half_synced_flow_with_empty_state_name_yields_no_initial_state() {
         // A `hasState` edge whose `stateName` link hasn't synced parses as
-        // `""` at value 0.0 and sorts to the front. Minting `currentState: ""`
+        // `""` at value 0.0 and sorts to the front. Minting at state `""`
         // would wedge the instance forever (no transition leaves `""`) AND
         // suppress the correct mint via (flow_uri, subject) dedup — so the
         // accessor must answer "spawn nothing" instead.
@@ -715,8 +735,19 @@ mod tests {
             .expect("load_flow_instances");
         assert_eq!(live.len(), 1, "the mint must be readable back");
         assert_eq!(live[0].instance_uri, spawned[0].instance_uri);
-        assert_eq!(live[0].current_state, "identified");
         assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+        // The minter records the initial state for itself (#1424).
+        let did = crate::agent::did_for_context(&ctx).expect("did");
+        assert_eq!(
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &did,
+                &live[0].instance_uri,
+            )
+            .expect("recorded state")
+            .as_deref(),
+            Some("identified")
+        );
 
         // Running again must not double-spawn — the live instance suppresses
         // the candidate. This is what makes the pass safe to call on every
@@ -733,6 +764,135 @@ mod tests {
                 .len(),
             1,
             "still exactly one instance on the graph"
+        );
+    }
+
+    /// A perspective with a `Task` on it and two flows that both accept
+    /// `Task`, so one spawn pass mints two instances in one batch.
+    async fn two_flows_on_a_task() -> (PerspectiveInstance, AgentContext, String) {
+        use crate::perspectives::interpretation_test_support::{
+            setup_perspective_no_llm, TASK_SDNA,
+        };
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+        let review = delivery_flow_json_for("Task")
+            .replace("\"Delivery\"", "\"Review\"")
+            .replace("delivery://", "review://");
+        seed_flow(&mut perspective, &ctx, &review, "Review").await;
+        let base = format!("ad4m://task/{}", uuid::Uuid::new_v4());
+        perspective
+            .create_subject(
+                crate::perspectives::perspective_instance::SubjectClassOption {
+                    class_name: Some("Task".to_string()),
+                    query: None,
+                },
+                base.clone(),
+                Some(serde_json::json!({ "title": "spawn twice" })),
+                None,
+                &ctx,
+                None,
+            )
+            .await
+            .expect("create_subject(Task)");
+        (perspective, ctx, base)
+    }
+
+    /// The instances this agent has bookkeeping rows for on `perspective` —
+    /// what `perspective.flowStates` lists.
+    fn rows_of(perspective: &PerspectiveInstance, ctx: &AgentContext) -> Vec<String> {
+        let did = crate::agent::did_for_context(ctx).expect("did");
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::entries(
+            &perspective.uuid,
+            &did,
+            None,
+        )
+        .expect("entries")
+        .into_iter()
+        .map(|e| e.instance)
+        .collect()
+    }
+
+    /// A batch whose commit fails publishes nothing, so it must record no
+    /// minter row either: `flowStates` would list instances that never
+    /// existed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_spawn_commit_leaves_no_replica_rows() {
+        let (mut perspective, ctx, base) = two_flows_on_a_task().await;
+
+        perspective.fail_next_commit_batch();
+        let spawned = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx, None).await;
+
+        assert!(spawned.is_empty(), "a failed commit spawns nothing");
+        assert!(
+            load_flow_instances(&perspective, &[base])
+                .await
+                .expect("load_flow_instances")
+                .is_empty(),
+            "nothing reached the graph"
+        );
+        assert_eq!(
+            rows_of(&perspective, &ctx),
+            Vec::<String>::new(),
+            "and no row names an instance that never existed"
+        );
+    }
+
+    /// Two mints in one pass; the second fails, so the pass discards the
+    /// whole batch. The first mint succeeded before that — and must not have
+    /// left a row behind for its discarded instance.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_later_failed_mint_leaves_no_row_for_the_earlier_one() {
+        use crate::types::LinkQuery;
+        let (mut perspective, ctx, base) = two_flows_on_a_task().await;
+
+        // A standalone mint first: it registers the flow classes (so the
+        // pass's mints make no registration writes) and tells us how many
+        // link writes one mint makes. It writes its own row, as it should.
+        let warm_up = mint_flow_instance(
+            &mut perspective,
+            "delivery://DeliveryFlow",
+            "ad4m://task/warm-up",
+            "identified",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("standalone mint");
+        let per_mint = perspective
+            .get_links(&LinkQuery {
+                source: Some(warm_up.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links")
+            .len() as i64;
+        assert!(per_mint > 0, "a mint writes links");
+        assert_eq!(rows_of(&perspective, &ctx), vec![warm_up.clone()]);
+
+        // The pass's first mint goes through; the second's first write fails.
+        perspective.fail_next_add_link(per_mint);
+        let spawned = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx, None).await;
+
+        assert!(spawned.is_empty(), "a failed mint discards the pass");
+        assert!(
+            load_flow_instances(&perspective, &[base])
+                .await
+                .expect("load_flow_instances")
+                .is_empty(),
+            "neither instance reached the graph"
+        );
+        assert_eq!(
+            rows_of(&perspective, &ctx),
+            vec![warm_up],
+            "only the standalone mint has a row; the discarded one has none"
         );
     }
 

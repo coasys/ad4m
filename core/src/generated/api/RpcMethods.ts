@@ -41,6 +41,7 @@ import type { ExpressionManyRequest } from "./ExpressionManyRequest";
 import type { ExpressionRendered } from "./ExpressionRendered";
 import type { ExpressionUrlRequest } from "./ExpressionUrlRequest";
 import type { FireOutcome } from "./FireOutcome";
+import type { FlowStateEntry } from "./FlowStateEntry";
 import type { FriendsListRequest } from "./FriendsListRequest";
 import type { GenerateAgentRequest } from "./GenerateAgentRequest";
 import type { GenerateJwtRequest } from "./GenerateJwtRequest";
@@ -83,8 +84,10 @@ import type { PerspectiveCreateSubjectParams } from "./PerspectiveCreateSubjectP
 import type { PerspectiveEvaluateGettersParams } from "./PerspectiveEvaluateGettersParams";
 import type { PerspectiveExecuteCommandsParams } from "./PerspectiveExecuteCommandsParams";
 import type { PerspectiveExpression } from "./PerspectiveExpression";
+import type { PerspectiveFlowFiredParams } from "./PerspectiveFlowFiredParams";
 import type { PerspectiveFlowProposalParams } from "./PerspectiveFlowProposalParams";
 import type { PerspectiveFlowReceiptVerdict } from "./PerspectiveFlowReceiptVerdict";
+import type { PerspectiveFlowStatesParams } from "./PerspectiveFlowStatesParams";
 import type { PerspectiveFlowValidOutputsParams } from "./PerspectiveFlowValidOutputsParams";
 import type { PerspectiveGetSubjectDataParams } from "./PerspectiveGetSubjectDataParams";
 import type { PerspectiveHandle } from "./PerspectiveHandle";
@@ -244,6 +247,8 @@ export interface RpcMethods {
   "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
   "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
+  "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<string> };
+  "perspective.flowStates": { params: PerspectiveFlowStatesParams; result: Array<FlowStateEntry> };
   "perspective.flowValidOutputs": { params: PerspectiveFlowValidOutputsParams; result: Array<ValidOutput> };
   "perspective.get": { params: PerspectiveUuidParams; result: PerspectiveHandle | null };
   "perspective.getAllShacl": { params: PerspectiveUuidParams; result: Array<PerspectiveNamedShacl> };
@@ -365,6 +370,8 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "neighbourhood.otherAgents",
   "perspective.all",
   "perspective.evaluateGetters",
+  "perspective.flowFired",
+  "perspective.flowStates",
   "perspective.flowValidOutputs",
   "perspective.get",
   "perspective.getAllShacl",

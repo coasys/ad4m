@@ -72,14 +72,17 @@ async fn n2_second_signer_accept_settles_and_replays() {
 }
 
 /// The settling accept must return the fire even when this replica has never
-/// derived the instance: no `Local` cache, so the pass after the vote would
-/// otherwise be `first_pass_here` and return nothing. That is Bob's accept
-/// in CI job 43034 — the debounced sync pass had not written his cache yet,
-/// and Alice's later sync pass was the one that logged the settle.
+/// derived the instance: no `FlowReplicaState` row, so the pass after the vote
+/// would otherwise be a silent catch-up and return nothing. That is Bob's
+/// accept in CI job 43034 — the debounced sync pass had not written his row
+/// yet, and Alice's later sync pass was the one that logged the settle.
 ///
 /// Red without the catch-up before the vote: `fired` is empty. No sleep.
-/// The cache the mint wrote is removed, and dropping it does not queue a
-/// pass that could rewrite it before the accept.
+/// The minter's row the mint wrote is deleted. Deleting it does not queue a
+/// pass that could rewrite it before the accept. This is not
+/// `a_second_agents_first_vote_reports_what_it_settles`: that one uses a
+/// second agent who never had a row. Here the minter accepts, after that row
+/// is gone.
 #[tokio::test(flavor = "multi_thread")]
 async fn settling_accept_with_no_local_cache_returns_the_fire() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -88,31 +91,22 @@ async fn settling_accept_with_no_local_cache_returns_the_fire() {
     let bob = TestSigner::generate();
     let seal = seal_for(&f, "scoped").await;
     let proposal = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
-    // Let any definition sweep the rule change queued finish, then drop the
-    // cache it (or the mint) wrote. Accept is then this replica's first
-    // derivation of the instance.
+    // Let any definition sweep the rule change queued finish, then delete the
+    // minter's row it (or the mint) wrote. Accept is then this replica's first
+    // derivation of the instance. Do not remove Local links: on this tree
+    // "no state yet" is a missing FlowReplicaState row.
     f.perspective.settle_flow_passes().await;
-    let cached: Vec<_> = super::current_state_links(&f)
-        .await
-        .into_iter()
-        .filter(|l| l.status == Some(LinkStatus::Local))
-        .collect();
+    let did = acting_did(&f);
+    let uuid = f.perspective.uuid.clone();
+    let instance = f.instance_uri.clone();
     assert!(
-        !cached.is_empty(),
-        "precondition: the mint left a Local cache to drop"
+        FlowReplicaState::has_derived(&uuid, &did, &instance).expect("row"),
+        "precondition: the mint left a FlowReplicaState row to drop"
     );
-    for link in cached {
-        f.perspective
-            .remove_link(link.into(), None)
-            .await
-            .expect("drop local cache");
-    }
+    forget_bookkeeping(&f);
     assert!(
-        super::current_state_links(&f)
-            .await
-            .iter()
-            .all(|l| l.status != Some(LinkStatus::Local)),
-        "precondition: no Local cache"
+        !FlowReplicaState::has_derived(&uuid, &did, &instance).expect("row"),
+        "precondition: the minter has no FlowReplicaState row"
     );
 
     let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
@@ -227,8 +221,9 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
 /// so each of these is on the graph and must not show up twice or at all:
 /// a vote for Carol that Bob signed, a vote whose signature fails, Bob voting
 /// twice, the proposer accepting their own proposal, and a `proposer` link
-/// naming Bob that Mallory signed. `resolvedAs` reads
-/// only this replica's own mark, never a peer's Shared one.
+/// naming Bob that Mallory signed. The model carries no fired mark at all
+/// since #1424 — not a peer's legacy link, not this replica's own mark, which
+/// lives in its table.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -271,12 +266,12 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
             &mallory,
             None,
         ),
-        // A peer's Shared `resolved_as`: says nothing about what happened here.
+        // A peer's legacy `resolved_as`: says nothing about what happened here.
         sync_signed(
             Link {
                 source: minted.clone(),
-                predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
-                target: literal(FIRED_MARK),
+                predicate: Some(LEGACY_RESOLVED_AS_PREDICATE.to_string()),
+                target: literal("fired"),
             },
             &bob,
             None,
@@ -362,7 +357,7 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
     );
     assert!(
         p["resolvedAs"].is_null(),
-        "a peer's Shared mark is not this replica's"
+        "the model has no fired-mark property; a peer's legacy link does not surface"
     );
 
     for _ in 0..2 {
@@ -376,9 +371,12 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
             .await
             .expect("query proposals"),
     );
-    assert_eq!(
-        p["resolvedAs"].as_str(),
-        Some("fired"),
-        "the pass marked the edge it fired"
+    assert!(
+        p["resolvedAs"].is_null(),
+        "the mark is not on the model either"
+    );
+    assert!(
+        f.marked().await.contains(&minted),
+        "the pass marked the edge it fired — in this agent's table"
     );
 }

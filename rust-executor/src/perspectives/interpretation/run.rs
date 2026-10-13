@@ -667,6 +667,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         };
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
+            context,
             &flow_subjects,
             flow_filter,
         )
@@ -973,8 +974,7 @@ async fn run_flow_post_pass(
     // and this is what records it — the cache write and the fired marks.
     // Higher thresholds leave the proposal live for other agents' votes.
     // The sweep takes the flow lock; the mint above does not, so a vote is
-    // never held up behind the semantic check's LLM call. Lock then pass,
-    // same order as the sync-triggered sweep.
+    // never held up behind the semantic check's LLM call.
     let lock = perspective.flow_pass_lock.clone();
     let _passes = lock.lock().await;
     let recorded = crate::perspectives::flow_instance::pass::run_flow_consensus_pass(
@@ -994,6 +994,13 @@ async fn run_flow_post_pass(
             outcome.voters
         );
     }
+    crate::perspectives::flow_instance::pass::run_flow_pass_for_co_owners(
+        perspective,
+        context,
+        flow_filter,
+        None,
+    )
+    .await;
 
     minted
 }
@@ -1072,6 +1079,7 @@ pub async fn run_interpretation_with_harness_and_model(
     };
     let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
         perspective,
+        context,
         &flow_subjects,
         flow_filter,
     )
@@ -1997,8 +2005,16 @@ mod tests {
             "exactly one FlowInstance must spawn on the created Task"
         );
         assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+        let did = crate::agent::did_for_context(&ctx).expect("did");
         assert_eq!(
-            live[0].current_state, "identified",
+            crate::perspectives::flow_instance::replica_state::FlowReplicaState::current_state(
+                &perspective.uuid,
+                &did,
+                &live[0].instance_uri,
+            )
+            .expect("recorded state")
+            .as_deref(),
+            Some("identified"),
             "fresh instance starts in the flow's first state by value"
         );
     }
