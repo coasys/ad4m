@@ -366,18 +366,15 @@ pub async fn run_flow_consensus_pass(
             // No outcomes and no fired proposals: those settles are history.
             // But the state is news to this agent's clients — until now they
             // had nothing to show — so the event goes out, marked.
-            FlowReplicaState::publish_state_changed(
-                perspective,
-                &FlowStateChangedEvent {
-                    perspective_uuid: uuid.clone(),
-                    agent_did: agent_did.clone(),
-                    instance: record.instance_uri.clone(),
-                    from: None,
-                    to: derived.state.clone(),
-                    fired_proposals: Vec::new(),
-                    caught_up: true,
-                },
-            )
+            FlowReplicaState::publish_state_changed(&FlowStateChangedEvent {
+                perspective_uuid: uuid.clone(),
+                agent_did: agent_did.clone(),
+                instance: record.instance_uri.clone(),
+                from: None,
+                to: derived.state.clone(),
+                fired_proposals: Vec::new(),
+                caught_up: true,
+            })
             .await;
             continue;
         }
@@ -388,18 +385,15 @@ pub async fn run_flow_consensus_pass(
             PriorRow::Minted | PriorRow::Absent => read_set.genesis.clone(),
         };
         if from != derived.state || !recorded.newly_marked.is_empty() {
-            FlowReplicaState::publish_state_changed(
-                perspective,
-                &FlowStateChangedEvent {
-                    perspective_uuid: uuid.clone(),
-                    agent_did: agent_did.clone(),
-                    instance: record.instance_uri.clone(),
-                    from: Some(from),
-                    to: derived.state.clone(),
-                    fired_proposals: recorded.newly_marked,
-                    caught_up: false,
-                },
-            )
+            FlowReplicaState::publish_state_changed(&FlowStateChangedEvent {
+                perspective_uuid: uuid.clone(),
+                agent_did: agent_did.clone(),
+                instance: record.instance_uri.clone(),
+                from: Some(from),
+                to: derived.state.clone(),
+                fired_proposals: recorded.newly_marked,
+                caught_up: false,
+            })
             .await;
         }
         outcomes.extend(fresh);
