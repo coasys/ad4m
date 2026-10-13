@@ -6024,7 +6024,10 @@ mod tests {
 
     /// SQLite's plan for `sql`, one detail line per step.
     fn query_plan(db: &Ad4mDb, sql: &str, keys: &[&str]) -> Vec<String> {
-        let mut stmt = db.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let mut stmt = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
         stmt.query_map(rusqlite::params_from_iter(keys), |row| {
             row.get::<_, String>(3)
         })
@@ -6054,11 +6057,7 @@ mod tests {
             one.len() == 1 && one[0].starts_with("SEARCH") && one[0].contains(key),
             "the one-instance read is a primary-key lookup: {one:?}"
         );
-        let some = query_plan(
-            &db,
-            &flow_replica_rows_sql(Some(2)),
-            &["p", "a", "i", "j"],
-        );
+        let some = query_plan(&db, &flow_replica_rows_sql(Some(2)), &["p", "a", "i", "j"]);
         assert!(
             some.iter().any(|step| step.contains(key)),
             "the narrowed read looks each instance up: {some:?}"
