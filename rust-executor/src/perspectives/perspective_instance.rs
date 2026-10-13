@@ -6790,6 +6790,8 @@ impl PerspectiveInstance {
             let status = link.status.unwrap_or(LinkStatus::Shared);
             let signed_expr = create_signed_expression(link.data.normalize(), context)?;
             let mut stored = LinkExpression::from(signed_expr);
+            // Re-signing builds a fresh expression without a graph; keep the batched one.
+            stored.graph = link.graph;
             stored.status = Some(status.clone());
             persist_diff.additions.push(stored.clone());
             let decorated = DecoratedLinkExpression::from((stored, status.clone()));
@@ -7056,6 +7058,32 @@ mod tests {
             .unwrap();
         assert_eq!(updated.status, Some(LinkStatus::Local));
         assert_eq!(graphs_of(&p, "test://e"), vec![None]);
+    }
+
+    /// A batched write keeps its graph: commit_batch re-signs each link, and
+    /// the fresh expression must carry the graph it was staged with.
+    #[tokio::test]
+    async fn a_batched_link_is_committed_into_its_graph() {
+        let mut p = setup().await;
+        let g = "ad4m://graph/batched".to_string();
+        let batch = p.create_batch().await;
+        p.add_link(
+            Link {
+                source: "test://batched".to_string(),
+                predicate: Some("test://p".to_string()),
+                target: "test://o".to_string(),
+            },
+            LinkStatus::Shared,
+            Some(batch.clone()),
+            &AgentContext::main_agent(),
+            Some(g.clone()),
+        )
+        .await
+        .unwrap();
+        p.commit_batch(batch, &AgentContext::main_agent())
+            .await
+            .unwrap();
+        assert_eq!(graphs_of(&p, "test://batched"), vec![Some(g)]);
     }
 
     /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
