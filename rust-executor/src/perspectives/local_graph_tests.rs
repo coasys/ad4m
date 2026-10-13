@@ -1722,7 +1722,7 @@ async fn a_subscriptions_first_result_holds_its_subscribers_local_rows() {
 
     let (_, model) = p
         .model_subscribe_and_query(
-            "Note".to_string(),
+            "Note".into(),
             "{}".to_string(),
             alice.user_email.clone(),
             None,

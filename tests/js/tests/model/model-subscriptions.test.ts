@@ -3,7 +3,9 @@
  *
  * Covers: ModelQueryBuilder.subscribe() initial callback, SPARQL live-query
  * re-fire on link-added and link-removed, dispose() stopping callbacks,
- * countSubscribe(), and parent-scoped subscriptions.
+ * countSubscribe(), parent-scoped subscriptions, and the writes on related
+ * records that re-run a subscription (#1237: includes, `where` filters and
+ * quantifiers, dotted order keys, `producedByFlow`).
  *
  * Adapted from PR #694 subscription tests for our SPARQL-based subscription
  * system (ModelQueryBuilder.subscribe / countSubscribe / dispose).
@@ -13,11 +15,59 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
+import {
+  Ad4mClient,
+  Ad4mModel,
+  Flag,
+  FlowInstance,
+  Link,
+  Model,
+  PerspectiveProxy,
+  Property,
+  SHACLFlow,
+} from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
-import { TestComment, TestPost, TestTag, TestChannel } from "./models.js";
+import { TestComment, TestPost, TestReaction, TestTag, TestChannel } from "./models.js";
+
+// ── producedByFlow models (section 9) ────────────────────────────────────────
+
+@Model({ name: "SubProducedTask" })
+class SubProducedTask extends Ad4mModel {
+  @Flag({ through: "sub-produced://task_type", value: "sub-produced://task" })
+  type = "sub-produced://task";
+
+  @Property({ through: "sub-produced://title", required: true })
+  title: string = "";
+}
+
+@Model({ name: "SubProducedDeliverable" })
+class SubProducedDeliverable extends Ad4mModel {
+  @Flag({ through: "sub-produced://deliverable_type", value: "sub-produced://deliverable" })
+  type = "sub-produced://deliverable";
+
+  @Property({ through: "sub-produced://deliverable_title", required: true })
+  title: string = "";
+}
+
+/** Ready → Done, guard-free, n:1: the smallest flow that completes and
+ *  commits outputs (as in tests/flow/flow-produced-by.test.ts). */
+function producedFlow(): SHACLFlow {
+  const flow = new SHACLFlow("SubProducedDelivery", "sub-produced://");
+  flow.inputTypes = ["SubProducedTask"];
+  flow.consensusRule = { n: 1 };
+  flow.addState({ name: "Ready", value: 0 });
+  flow.addState({ name: "Done", value: 1 });
+  flow.addTransition({ actionName: "Finish", fromState: "Ready", toState: "Done", actions: [] });
+  return flow;
+}
+
+const PRODUCED_FLOW_URI = "sub-produced://SubProducedDeliveryFlow";
+
+/** Long enough for a write's subscription check (250 ms batch window plus
+ *  the 200 ms check interval) to have run before the next step. */
+const settle = () => new Promise((r) => setTimeout(r, 1000));
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -305,5 +355,302 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     builder.dispose();
 
     expect(all.length).to.equal(countAfterInitial);
+  });
+
+  // ── 8. writes on related records (#1237) ──────────────────────────────────
+  //
+  // A subscription re-runs on writes to the records its query reads beyond
+  // its own class: included records, and the targets a typed relation lists.
+
+  it("subscribe() with include re-fires when an included record is edited", async () => {
+    // `test://emoji` is TestReaction's alone. (`test://body` would not do:
+    // TestPost declares it too, so any body edit re-ran TestPost queries.)
+    await TestReaction.register(perspective);
+    const comment = await TestComment.create(perspective, { body: "c" });
+    const reaction = await TestReaction.create(perspective, { emoji: "👍" });
+    await comment.addReactions(reaction.id);
+    // Settle, so the edit is checked in a batch of its own (see the next test).
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const all: TestComment[][] = [];
+    const builder = TestComment.query(perspective).include({ reactions: true });
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial[0].reactions.map((r) => r.emoji)).to.deep.equal(["👍"]);
+    await new Promise((r) => setTimeout(r, 1000));
+
+    await TestReaction.update(perspective, reaction.id, { emoji: "🎉" });
+
+    await waitUntil(
+      () => all.at(-1)?.[0]?.reactions?.[0]?.emoji === "🎉",
+      8000,
+      "subscription re-fires with the included reaction's new emoji",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() without include re-fires when a related record starts to conform", async () => {
+    const post = await TestPost.create(perspective, { title: "Late comment", body: "" });
+    // Flagged as a TestComment, but without the `body` TestComment requires,
+    // so `post.comments` leaves it out.
+    const late = "test://late-comment";
+    await perspective.add(
+      new Link({ source: late, predicate: "test://comment_type", target: "test://comment" }),
+    );
+    await post.addComments(late);
+    // Let the relation link's subscription check pass before subscribing, and
+    // the subscription settle before the write under test. Batched with the
+    // `body` write, the relation link (on the post, which is in the result)
+    // would re-run the query on its own.
+    await new Promise((r) => setTimeout(r, 1000));
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective);
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial.find((p) => p.id === post.id)!.comments).to.deep.equal([]);
+    await new Promise((r) => setTimeout(r, 1000));
+
+    await perspective.add(
+      new Link({ source: late, predicate: "test://body", target: "literal:string:now" }),
+    );
+
+    await waitUntil(
+      () => ((all.at(-1)?.find((p) => p.id === post.id)?.comments ?? []) as unknown[]).includes(late),
+      8000,
+      "subscription re-fires once the comment conforms",
+    );
+    builder.dispose();
+  });
+
+  // ── 9. the other trigger rules (#1237) ────────────────────────────────────
+  //
+  // One test per way a write reaches a subscription in `subscription_triggers.rs`
+  // that section 8 does not exercise. Each sets up, settles, subscribes,
+  // settles again, then makes the one write under test, so the write is checked
+  // in a batch of its own and nothing else can re-run the query.
+  //
+  // These all assert a push arrives. The opposite ("this write does not re-run
+  // the query") cannot be seen from a client: the executor only pushes a
+  // re-run whose result changed, so an extra re-run of an unchanged result is
+  // silent. The Rust tests count re-runs for that.
+
+  it("subscribe() with where re-fires when an edit moves a record into the filter", async () => {
+    // `scan`: the post is in no result, so only its own flag says the write
+    // concerns this class.
+    const post = await TestPost.create(perspective, { title: "draft", body: "" });
+    await settle();
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective).where({ title: "published" });
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial).to.deep.equal([]);
+    await settle();
+
+    await TestPost.update(perspective, post.id, { title: "published" });
+
+    await waitUntil(
+      () => (all.at(-1) ?? []).some((p) => p.id === post.id),
+      8000,
+      "subscription re-fires once the post matches the filter",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() with a `some` relation filter re-fires when an edit to a related record makes it hold", async () => {
+    // A `where` quantifier reads the related class: its records are scanned
+    // like the subscribed class's. The post is not in the result, so neither
+    // it nor the comment is a result node.
+    const post = await TestPost.create(perspective, { title: "Quantified", body: "" });
+    const comment = await TestComment.create(perspective, { body: "maybe" });
+    await post.addComments(comment.id);
+    await settle();
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective).where({ comments: { some: { body: "yes" } } } as any);
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial).to.deep.equal([]);
+    await settle();
+
+    await TestComment.update(perspective, comment.id, { body: "yes" });
+
+    await waitUntil(
+      () => (all.at(-1) ?? []).some((p) => p.id === post.id),
+      8000,
+      "subscription re-fires once a comment satisfies `some`",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() with a filtered include re-fires when an edit moves a related record into it", async () => {
+    // `via`: the reaction is filtered out of the include, so it is in no
+    // result. It is linked to the comment, which is.
+    await TestReaction.register(perspective);
+    const comment = await TestComment.create(perspective, { body: "c" });
+    const reaction = await TestReaction.create(perspective, { emoji: "👍" });
+    await comment.addReactions(reaction.id);
+    await settle();
+
+    const all: TestComment[][] = [];
+    const builder = TestComment.query(perspective).include({ reactions: { where: { emoji: "🎉" } } });
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial.find((c) => c.id === comment.id)!.reactions).to.deep.equal([]);
+    await settle();
+
+    await TestReaction.update(perspective, reaction.id, { emoji: "🎉" });
+
+    await waitUntil(
+      () =>
+        (all.at(-1)?.find((c) => c.id === comment.id)?.reactions ?? []).some(
+          (r) => r.id === reaction.id && r.emoji === "🎉",
+        ),
+      8000,
+      "subscription re-fires with the reaction that now passes the include's filter",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() with a nested include re-fires when a record two includes deep is edited", async () => {
+    // Post → comments → reactions. The reaction is a result node, nested two
+    // levels below the post.
+    await TestReaction.register(perspective);
+    const post = await TestPost.create(perspective, { title: "Deep", body: "" });
+    const comment = await TestComment.create(perspective, { body: "c" });
+    const reaction = await TestReaction.create(perspective, { emoji: "👍" });
+    await comment.addReactions(reaction.id);
+    await post.addComments(comment.id);
+    await settle();
+
+    const emojiOf = (posts: TestPost[] | undefined) =>
+      (posts?.find((p) => p.id === post.id)?.comments?.[0] as TestComment | undefined)?.reactions?.[0]?.emoji;
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective).include({ comments: { include: { reactions: true } } });
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(emojiOf(initial)).to.equal("👍");
+    await settle();
+
+    await TestReaction.update(perspective, reaction.id, { emoji: "🎉" });
+
+    await waitUntil(
+      () => emojiOf(all.at(-1)) === "🎉",
+      8000,
+      "subscription re-fires with the nested reaction's new emoji",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() follows a has-one include to a newly linked record, and re-fires on an edit below it", async () => {
+    // Re-pointing `pinnedComment` re-runs the query (a relation edit on a
+    // result node). The new comment and its reaction were in no earlier
+    // result: the edit to the reaction is only seen if the re-run refreshed
+    // the nodes the trigger watches.
+    await TestReaction.register(perspective);
+    const post = await TestPost.create(perspective, { title: "Pinned", body: "" });
+    const first = await TestComment.create(perspective, { body: "first" });
+    const second = await TestComment.create(perspective, { body: "second" });
+    const reaction = await TestReaction.create(perspective, { emoji: "👍" });
+    await second.addReactions(reaction.id);
+    await post.addPinnedComment(first.id);
+    await settle();
+
+    const pinnedOf = (posts: TestPost[] | undefined) =>
+      posts?.find((p) => p.id === post.id)?.pinnedComment as TestComment | null | undefined;
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective).include({ pinnedComment: { include: { reactions: true } } });
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(pinnedOf(initial)?.id).to.equal(first.id);
+    await settle();
+
+    await post.setPinnedComment([second.id]);
+    await waitUntil(
+      () => pinnedOf(all.at(-1))?.id === second.id,
+      8000,
+      "subscription re-fires with the newly pinned comment",
+    );
+    expect(pinnedOf(all.at(-1))?.reactions?.[0]?.emoji).to.equal("👍");
+    await settle();
+
+    await TestReaction.update(perspective, reaction.id, { emoji: "🎉" });
+
+    await waitUntil(
+      () => pinnedOf(all.at(-1))?.reactions?.[0]?.emoji === "🎉",
+      8000,
+      "subscription re-fires with the new pinned comment's reaction edited",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() ordered by a related record's property re-fires when that property is edited", async () => {
+    // A dotted order key reads the pinned comments without including them:
+    // they are in no result. The `limit` is what makes the query sort by the
+    // key (as in model-query.test.ts); both posts stay on the page. A record
+    // off the page is #1389.
+    const p1 = await TestPost.create(perspective, { title: "One", body: "" });
+    const p2 = await TestPost.create(perspective, { title: "Two", body: "" });
+    const alpha = await TestComment.create(perspective, { body: "Alpha" });
+    const beta = await TestComment.create(perspective, { body: "Beta" });
+    await p1.addPinnedComment(alpha.id);
+    await p2.addPinnedComment(beta.id);
+    await settle();
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective)
+      .order({ "pinnedComment.body": "ASC" } as any)
+      .limit(10);
+    const initial = await builder.subscribe((r) => all.push(r));
+    expect(initial.map((p) => p.id)).to.deep.equal([p1.id, p2.id]);
+    await settle();
+
+    await TestComment.update(perspective, alpha.id, { body: "Zulu" });
+
+    await waitUntil(
+      () => JSON.stringify(all.at(-1)?.map((p) => p.id)) === JSON.stringify([p2.id, p1.id]),
+      8000,
+      "subscription re-fires in the new order",
+    );
+    builder.dispose();
+  });
+
+  it("subscribe() with where.producedByFlow re-fires when a run's receipt is minted", async () => {
+    // `producedByFlow` is decided by the flow's receipts, not by the
+    // deliverable's links: the mint writes nothing on the deliverable. The
+    // run has completed before subscribing, so the mint is the only write
+    // that can admit the deliverable. A perspective of its own keeps the
+    // flow out of the shared one.
+    const handle = await ad4m.perspective.add("model-subscriptions-produced-by-flow");
+    const p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    try {
+      await SubProducedTask.register(p);
+      await SubProducedDeliverable.register(p);
+      await p.addFlow("SubProducedDelivery", producedFlow());
+      const task = await SubProducedTask.create(p, { title: "Ship it" });
+      const deliverable = await SubProducedDeliverable.create(p, { title: "the thing" });
+      const run = await FlowInstance.start(p, "SubProducedDelivery", task.id);
+      const outcome = await run.proposeTransition("Done", undefined, [
+        { className: "SubProducedDeliverable", id: deliverable.id },
+      ]);
+      expect(outcome.derivedState).to.equal("Done");
+      await settle();
+
+      const all: SubProducedDeliverable[][] = [];
+      const builder = SubProducedDeliverable.query(p).where({
+        producedByFlow: { flow: PRODUCED_FLOW_URI },
+      });
+      const initial = await builder.subscribe((r) => all.push(r));
+      expect(initial, "no receipt yet, so no valid output").to.deep.equal([]);
+      await settle();
+
+      await p.mintFlowReceipt(outcome.outcomes[0].instanceUri);
+
+      await waitUntil(
+        () => (all.at(-1) ?? []).some((d) => d.id === deliverable.id),
+        8000,
+        "subscription re-fires with the minted run's output",
+      );
+      builder.dispose();
+      expect(all.at(-1)!.map((d) => d.id)).to.deep.equal([deliverable.id]);
+    } finally {
+      await ad4m.perspective.remove(handle.uuid);
+    }
   });
 });
