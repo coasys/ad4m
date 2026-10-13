@@ -594,6 +594,13 @@ pub struct PerspectiveInstance {
     /// across an await.
     pub(crate) flow_pass_queue:
         Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
+    /// Serializes this perspective's flow passes with its flow votes. A vote
+    /// holds it from its catch-up through its own pass, so no background
+    /// pass can record the vote's settle in between and leave the voter's
+    /// call returning no outcome. Taken at the entry points (`accept`,
+    /// `propose`, the engine's mint-and-sweep, the sync-triggered sweep),
+    /// never inside `run_flow_consensus_pass`, which those nest.
+    pub(crate) flow_pass_lock: Arc<Mutex<()>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -674,6 +681,7 @@ impl PerspectiveInstance {
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
+            flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]

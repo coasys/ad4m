@@ -972,6 +972,11 @@ async fn run_flow_post_pass(
     // satisfied transition has already settled by the time the mint returns,
     // and this is what records it — the cache write and the fired marks.
     // Higher thresholds leave the proposal live for other agents' votes.
+    // The sweep takes the flow lock; the mint above does not, so a vote is
+    // never held up behind the semantic check's LLM call. Lock then pass,
+    // same order as the sync-triggered sweep.
+    let lock = perspective.flow_pass_lock.clone();
+    let _passes = lock.lock().await;
     let recorded = crate::perspectives::flow_instance::pass::run_flow_consensus_pass(
         perspective,
         None,

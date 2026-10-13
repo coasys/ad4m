@@ -55,6 +55,14 @@
 //! catch-up.** The replica that mints an instance writes its cache at the
 //! mint, so its own first pass is not a catch-up and its first settle is
 //! reported. See `first_pass_here` in [`run_flow_consensus_pass`].
+//!
+//! A vote this replica casts can still be its first contact with an
+//! instance it did not mint — a co-sign, or a propose, on a run whose
+//! `Local` cache the debounced sync pass has not written yet. That pass
+//! would be a catch-up and would swallow the settle the caller is waiting
+//! on. [`catch_up_before_own_vote`] runs the silent pass *before* the vote
+//! is written, so the pass after the vote is not `first_pass_here` and
+//! reports what the vote settled.
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
@@ -82,6 +90,55 @@ pub struct FireOutcome {
     /// The distinct DIDs whose votes made up the quorum.
     pub voters: Vec<String>,
     pub contributing_proposal_uris: Vec<String>,
+}
+
+/// Catch this replica up on `instance_uri` — silently, as every first pass
+/// is — when it has no `Local` cache for that instance yet. Called right
+/// before the replica writes a vote of its own (`accept`, a minting
+/// `propose`).
+///
+/// Without it, an agent whose first contact with an instance is its own
+/// settling vote would be told nothing fired: the pass after the vote is
+/// `first_pass_here`, so it marks and writes the cache and returns nothing.
+/// Catching up first records the history quietly (and writes the cache),
+/// and the pass after the vote then reports exactly what the vote settled.
+/// Failures are logged and ignored: the worst case is the old behaviour, a
+/// silent first pass.
+///
+/// This is the `Local`-cache catch-up, not a per-agent replica-state row.
+/// On this tree every agent on the node shares that cache; the swallow is
+/// a replica that has not derived the instance yet.
+pub(crate) async fn catch_up_before_own_vote(
+    perspective: &mut PerspectiveInstance,
+    context: &AgentContext,
+    instance_uri: &str,
+) {
+    match has_local_cache(perspective, instance_uri).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let only = [instance_uri.to_string()];
+            let reported =
+                run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+            // A first pass reports nothing. Marks without a cache cannot
+            // happen on the one-batch write path; if they do, this pass is
+            // not a catch-up and dropping its outcomes would lose them.
+            debug_assert!(
+                reported.is_empty(),
+                "a first pass reports nothing, got {reported:?}"
+            );
+            if !reported.is_empty() {
+                log::warn!(
+                    "catch_up_before_own_vote: {instance_uri} had no Local cache but the \
+                     catch-up pass reported {} event(s); those are not this vote's",
+                    reported.len()
+                );
+            }
+        }
+        Err(e) => log::warn!(
+            "catch_up_before_own_vote: reading the cache of {instance_uri} failed; \
+             the vote's own pass may catch up silently: {e:#}"
+        ),
+    }
 }
 
 /// One sweep over the `FlowInstance`s in scope: derive each, and where the
