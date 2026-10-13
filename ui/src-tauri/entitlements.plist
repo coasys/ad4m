@@ -18,7 +18,16 @@
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
 	<true/>
 
-	<!-- The executor resolves its own dylibs and language runtimes at startup. -->
+	<!--
+	  These two are carried over from the notarized 0.12.0 release, which was
+	  signed with them. They are NOT yet shown to be required: the evidence is
+	  only that the shipped launcher had them, not that it needs them.
+
+	  To settle it, once notarization is unblocked: produce one signed build
+	  without these two, launch it, and see whether the executor still starts.
+	  If it does, drop them — the hardened runtime is worth more the narrower
+	  its exceptions are.
+	-->
 	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
 	<true/>
 	<key>com.apple.security.cs.disable-library-validation</key>
