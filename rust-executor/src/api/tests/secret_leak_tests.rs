@@ -297,8 +297,8 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     let operator = context(&admin_credential, &admin);
     let user = context(&user_token, &admin);
     let operator_events =
-        collect(build_event_stream(operator.session.clone(), watching_all()).await);
-    let user_events = collect(build_event_stream(user.session.clone(), watching_all()).await);
+        collect(build_event_stream(operator.session.clone(), watching_all(), None).await);
+    let user_events = collect(build_event_stream(user.session.clone(), watching_all(), None).await);
 
     // Seeded while the streams listen: seeding publishes the events that leaked before.
     let provider_key = format!("sk-leak-provider-key-{}", id());

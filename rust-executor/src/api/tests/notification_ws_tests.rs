@@ -802,7 +802,7 @@ async fn the_install_request_and_the_list_never_carry_the_webhook_credential() {
     let main = perspectives.add(None);
     let operator = Arc::new(Session::for_test(Principal::Operator));
     let all = crate::api::event_interest::watching_all;
-    let mut stream = build_event_stream(operator, all()).await;
+    let mut stream = build_event_stream(operator, all(), None).await;
 
     let id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
     let request = next_containing(&mut stream, "INSTALL_NOTIFICATION_REQUEST")
