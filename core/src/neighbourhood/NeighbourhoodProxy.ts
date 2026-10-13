@@ -134,6 +134,7 @@ export class NeighbourhoodProxy {
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
             topology: options?.topology ?? "auto",
             sfuConfig: options?.sfuConfig,
+            iceServers: options?.iceServers,
             localSfuStatus: this.#sfuStatusCache ?? undefined,
             availableSfuNodes: () => proxy.availableSfuNodes(),
             // Mesh needs a signalling channel and presence callbacks.
