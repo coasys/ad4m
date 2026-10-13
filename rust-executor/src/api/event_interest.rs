@@ -9,8 +9,8 @@
 //! - `null` takes every event of that type; a list takes only events about
 //!   those perspectives.
 //! - Live query updates (`query-subscription-update`) are not filtered: a
-//!   socket keeps getting the updates of its owner's live queries without a
-//!   watch.
+//!   connection gets the updates of the live queries it opened without a
+//!   watch, and no other connection gets them (`Event::connection`).
 //! - A list matches an event about a listed perspective (`Event::perspective`, the
 //!   payload's `perspectiveUuid`). Events about no perspective carry none, so a list
 //!   never takes them.
@@ -146,7 +146,7 @@ mod tests {
         for e in [link("A"), link("B"), updated_b(), agent()] {
             assert!(!wants(&i, &e), "{e:?}");
         }
-        let query = json!({ "perspectiveUuid": "A", "subscriptionId": "s", "result": "[]" });
+        let query = json!({ "perspectiveUuid": "A", "subscriptionId": "s", "revision": 1 });
         assert!(wants(
             &i,
             &event(Topic::PerspectiveQuerySubscription, query)
