@@ -142,7 +142,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-168 methods: Cap 55, Executor 33, Open 5, Operator 15, Owns 60.
+170 methods: Cap 55, Executor 33, Open 5, Operator 15, Owns 62.
 
 | Method | Guard |
 |---|---|
@@ -228,6 +228,8 @@ the guard checked:
 | `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.flowFired` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.flowStates` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.getAllShacl` | `Owns(Perspective uuid, perspective:READ)` |

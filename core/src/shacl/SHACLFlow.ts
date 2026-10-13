@@ -317,10 +317,13 @@ export interface FlowTransition {
  * - What states exist and their per-state guards (via `requires`)
  * - How to transition between states (via transitions + consensus rules)
  *
- * State lives on the on-graph `FlowInstanceRecord.currentState` and is
- * read/written through the `FlowInstance` wrapper class
- * ({@link FlowInstance.start} / {@link FlowInstance.findAll}) — see design
- * doc §4.3/§5.
+ * A running instance's state is not stored on the graph: the executor
+ * derives it from the signed transition proposals and keeps what it derived
+ * per agent, outside the perspective (#1424). Read it through the
+ * `FlowInstance` wrapper ({@link FlowInstance.start} /
+ * {@link FlowInstance.findAll}, `currentStateName`) or
+ * `PerspectiveProxy.flowStates`, and follow it with
+ * `PerspectiveProxy.onFlowStateChanged` — see design doc §4.3/§5.
  *
  * @example
  * ```typescript
