@@ -1014,7 +1014,7 @@ Each result is an instance of the class it was read as, and carries `__subjectCl
 | `order` on a property a class does not declare, or a record with no value | Those rows sort last in both directions. Ties are broken by id. |
 | `limit` / `offset` | Applied once, over the union, after `where` and `order`. `count()` and `totalCount` count the union after `where`. Without `order`, paging uses `createdAt` ascending, then id. |
 | `include` or a `$` projection over a relation a class does not declare | Skipped for that class's rows. |
-| `subscribe()` | One subscription. It re-runs when a write touches a predicate of any of the classes. The same classes in another order share one subscription. |
+| `subscribe()` | One subscription for the builder, over all the classes. It re-runs when a write could change the record of any of the classes, and sends the change as an update. The same classes in another order give the same result; each builder still holds its own subscription. |
 
 These are refused with an error rather than approximated: a `parent` scope with `limitPerAnchor` or `levels` (each class would slice its own rows per anchor), and an `order` key on a related record (`"author.name"`), which needs every class to declare the relation. A `parent` given as a model class must resolve to the same predicate for every class; otherwise pass the predicate itself. Likewise a `$` projection that two classes declare over relations to different target classes is refused; query those classes separately.
 
@@ -1165,25 +1165,22 @@ Comment)` lists only targets that carry `Comment`'s flag and required
 properties, so `post.comments` updates when one does, with or without
 `include`). It does not cover a record of another class: creating a `Note` does
 not re-run a `Post` subscription, even when both classes use the same flag
-predicate.
+predicate. A query over several classes (`Ad4mModel.queryOf`) is one
+subscription that re-runs on a write any of its classes would re-run on. When
+the result changes, the executor sends only the change (the records added,
+updated and removed, with the new `totalCount`), and the builder applies it to
+the result it holds before calling your callback.
 
-#### Subscription sharing and `dispose()`
+#### Subscriptions and `dispose()`
 
-The executor keeps one live subscription per distinct query and agent. Two
-builders that subscribe to the same query (two components showing the same
-list, for example) share that subscription: the executor re-evaluates the
-query once per change and pushes one update that both builders receive.
+Each builder holds its own executor subscription, tied to its connection. Two
+builders on the same query (two components showing the same list, for example)
+get two subscriptions, so disposing one never stops the other's updates.
 
-`dispose()` releases only the calling builder's hold. Other subscribers of the
-same query keep receiving updates, and the executor drops the subscription
-when the last holder disposes, or when no holder has sent a keepalive for a
-while (a page that was closed without disposing).
-
-The local cleanup, stopping the keepalive and the update listener, happens
-synchronously, so a plain `builder.dispose()` is sufficient. The method also
-returns a promise that resolves once the executor has acknowledged the release;
-await it when a following step depends on that, as `subscribe()` itself does
-before registering a replacement subscription.
+A builder holds one subscription at a time: `subscribe()`, `countSubscribe()`
+and `paginateSubscribe()` end the previous one first. `dispose()` ends it on the
+client at once and tells the executor. The executor also ends every subscription
+of a connection when the connection closes.
 
 ## Transactions
 

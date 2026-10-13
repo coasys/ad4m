@@ -154,8 +154,8 @@ impl std::fmt::Display for Topic {
 /// lookup at delivery. Each session in the audience also needs the event's capability
 /// ([`Event::capability`]).
 ///
-/// When live queries belong to a connection (#1207), `Connection(id)` joins these for
-/// `perspective-query-subscription`.
+/// A live query update also names the RPC connection that opened the query
+/// ([`Event::connection`]): the audience says who may get it, the connection which socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Audience {
     /// Every session: the payload names no agent.
@@ -201,6 +201,11 @@ pub struct Event {
     pub perspective: Option<String>,
     /// The socket message without `type`.
     pub payload: Value,
+    /// The RPC connection (`RequestContext::connection_id`) the event is for, or `None`
+    /// for every socket. Only a live query update sets it ([`Event::for_connection`]): it
+    /// goes to the socket of the connection that opened the query, and to no other, even a
+    /// socket of the same agent. The key is not part of the wire message.
+    pub connection: Option<String>,
 }
 
 impl Event {
@@ -224,6 +229,7 @@ impl Event {
             capability: topic.capability(perspective.as_deref()),
             perspective,
             payload,
+            connection: None,
         }
     }
 
@@ -297,6 +303,13 @@ impl Event {
             capability: caps::AGENT_PERMIT_CAPABILITY.clone(),
             ..Event::new(Topic::ExceptionOccurred, Audience::of(target), exception)
         }
+    }
+
+    /// The event goes only to the socket of the RPC connection `connection_id`, if its
+    /// session also may receive it.
+    pub fn for_connection(mut self, connection_id: impl Into<String>) -> Event {
+        self.connection = Some(connection_id.into());
+        self
     }
 
     /// The event is about perspective `uuid`, whatever the payload says, and needs the

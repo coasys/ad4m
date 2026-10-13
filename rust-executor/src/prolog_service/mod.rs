@@ -59,10 +59,8 @@ pub struct PrologService {
 
 /// Simple Prolog engine with lazy update tracking
 struct SimpleEngine {
-    /// Engine for regular queries
+    /// Engine for queries
     query_engine: PrologEngine,
-    /// Separate engine for subscriptions (to avoid interference)
-    subscription_engine: PrologEngine,
     /// Track if links have changed since last query
     dirty: bool,
     /// Current links loaded in the engines
@@ -227,18 +225,14 @@ impl PrologService {
             );
 
             // EXPENSIVE OPERATIONS OUTSIDE THE LOCK:
-            // Create and spawn engines if they don't exist (BEFORE acquiring write lock)
-            let (query_engine, subscription_engine) = if !engine_exists {
+            // Create and spawn the engine if it doesn't exist (BEFORE acquiring write lock)
+            let query_engine = if !engine_exists {
                 let mut qe = PrologEngine::new();
                 qe.spawn().await?; // Expensive async operation - no lock held
-
-                let mut se = PrologEngine::new();
-                se.spawn().await?; // Expensive async operation - no lock held
-
-                (qe, se)
+                qe
             } else {
-                // Engines exist, we'll update them - create placeholders for now
-                (PrologEngine::new(), PrologEngine::new())
+                // Engine exists, we'll update it - create a placeholder for now
+                PrologEngine::new()
             };
 
             // Prepare facts based on mode (no lock needed - just data preparation)
@@ -276,7 +270,6 @@ impl PrologService {
                     // Insert new engines
                     entry.insert(SimpleEngine {
                         query_engine,
-                        subscription_engine,
                         dirty: true,
                         current_links: Vec::new(),
                         current_sdna_links: None,
@@ -296,10 +289,6 @@ impl PrologService {
             let load_result = async {
                 simple_engine
                     .query_engine
-                    .load_module_string("facts", &processed_facts)
-                    .await?;
-                simple_engine
-                    .subscription_engine
                     .load_module_string("facts", &processed_facts)
                     .await?;
                 Ok::<_, Error>(())
@@ -328,10 +317,7 @@ impl PrologService {
                 simple_engine.current_links = links.to_vec();
             }
 
-            log::debug!(
-                "Prolog engines {} updated successfully (query + subscription)",
-                perspective_id
-            );
+            log::debug!("Prolog engine {} updated successfully", perspective_id);
 
             // Explicitly drop lock to make it clear when it's released
             drop(engines);
@@ -406,64 +392,6 @@ impl PrologService {
 
         // Convert QueryResult to QueryResolution
         result.map_err(|e| anyhow!("Prolog query failed: {}", e))
-    }
-
-    /// Run subscription query in Simple or SdnaOnly mode (uses separate engine)
-    pub async fn run_query_subscription_simple(
-        &self,
-        perspective_id: &str,
-        query: String,
-        links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-        owner_did: Option<String>,
-    ) -> Result<QueryResolution, Error> {
-        use deno_core::anyhow::anyhow;
-
-        // Check if Prolog is disabled - return empty matches but log warning
-        if PROLOG_MODE == PrologMode::Disabled {
-            log::debug!(
-                "📜 Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
-                perspective_id,
-                query
-            );
-            return Ok(QueryResolution::Matches(vec![]));
-        }
-
-        // Ensure engine is up to date
-        self.ensure_engine_updated(
-            perspective_id,
-            links,
-            neighbourhood_author.clone(),
-            owner_did.clone(),
-        )
-        .await?;
-
-        // Add "." at the end if missing
-        let query = if !query.ends_with('.') {
-            query + "."
-        } else {
-            query
-        };
-
-        // Use per-user engine key
-        let engine_key = Self::get_engine_key(perspective_id, owner_did.as_ref());
-
-        let engines = self.simple_engines.read().await;
-        let simple_engine = engines.get(&engine_key).ok_or_else(|| {
-            anyhow!(
-                "Prolog engine not found for perspective {} (key: {})",
-                perspective_id,
-                engine_key
-            )
-        })?;
-
-        // Run query through the subscription engine (separate from regular queries)
-        let result = simple_engine.subscription_engine.run_query(query).await?;
-
-        // Convert QueryResult to QueryResolution.
-        // Emoji lives in the caller's log! macro, not in error values
-        // (see rust-executor/LOGGING.md).
-        result.map_err(|e| anyhow!("Prolog subscription query failed: {}", e))
     }
 
     pub async fn ensure_perspective_pool(
@@ -583,63 +511,6 @@ impl PrologService {
             }
         }
         result
-    }
-
-    /// Run query with subscription optimization - uses filtered pools for subscription queries
-    pub async fn run_query_subscription(
-        &self,
-        perspective_id: String,
-        query: String,
-    ) -> Result<QueryResult, Error> {
-        Self::check_pooled_mode_required("run_query_subscription", &perspective_id)?;
-
-        let pool = self.get_pool(&perspective_id).await?;
-
-        // Increment reference count for filtered pools if this query would use one
-        if let Some(source_filter) =
-            crate::prolog_service::source_filtering::extract_source_filter(&query)
-        {
-            pool.increment_pool_reference(&source_filter).await;
-        }
-
-        // The smart routing and population is now handled entirely within the engine pool
-        // This eliminates circular dependencies and potential deadlocks
-        let result = pool.run_query_smart(query.clone(), true).await;
-        match &result {
-            Ok(Ok(_query_result)) => {
-                //log::info!("🔔 SUBSCRIPTION: Query succeeded with result: {:?}", query_result);
-                log::debug!("🔔 SUBSCRIPTION: Query succeeded [result omitted]");
-            }
-            Ok(Err(error)) => {
-                log::warn!("🔔 SUBSCRIPTION: Query failed with error: {}", error);
-            }
-            Err(error) => {
-                log::error!("🔔 SUBSCRIPTION: Query execution error: {}", error);
-            }
-        }
-        result
-    }
-
-    /// Called when a subscription ends - decrements reference count for any associated filtered pool
-    pub async fn subscription_ended(
-        &self,
-        perspective_id: String,
-        query: String,
-    ) -> Result<(), Error> {
-        let pool = self.get_pool(&perspective_id).await?;
-
-        // Decrement reference count for filtered pools if this query would use one
-        if let Some(source_filter) =
-            crate::prolog_service::source_filtering::extract_source_filter(&query)
-        {
-            pool.decrement_pool_reference(&source_filter).await;
-            log::debug!(
-                "📊 SUBSCRIPTION END: Decremented pool reference for source: '{}'",
-                source_filter
-            );
-        }
-
-        Ok(())
     }
 
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
