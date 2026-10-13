@@ -69,6 +69,58 @@ fn max_quality_preference<'a>(values: impl Iterator<Item = &'a String>) -> Strin
     .to_string()
 }
 
+/// The policy `sfu.setConfig` stores for `config`, or why it refuses it.
+///
+/// Only `mode` and `maxMeshParticipants` are stored (`fallback` is not:
+/// nothing reads it). The other fields describe a deployment (executor
+/// flags), and ICE credentials must not go into a link every member syncs,
+/// so a config that sets them is refused rather than stored in part.
+fn call_policy(config: SfuConfig) -> Result<config_store::CallPolicy, String> {
+    match config.mode.as_str() {
+        "gateway" | "designated" | "mesh" | "cascaded" => {}
+        other => {
+            return Err(format!(
+                "Invalid SFU mode: '{}'. Must be 'gateway', 'designated', 'mesh', or 'cascaded'",
+                other
+            ))
+        }
+    }
+
+    let executor_fields: Vec<&str> = [
+        ("designatedPeer", config.designated_peer.is_some()),
+        ("sfuPeers", !config.sfu_peers.is_empty()),
+        (
+            "maxParticipantsPerNode",
+            config.max_participants_per_node.is_some(),
+        ),
+        ("preferredSfuDid", config.preferred_sfu_did.is_some()),
+        ("iceServers", !config.ice_servers.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(name, set)| set.then_some(name))
+    .collect();
+    if !executor_fields.is_empty() {
+        return Err(format!(
+            "{} cannot be stored in the neighbourhood: SFU nodes and capacity are \
+             executor settings (--sfu-* flags), and ICE servers are passed to createSession",
+            executor_fields.join(", ")
+        ));
+    }
+
+    // A room's SFU capacity is four times this, so it bounds rooms too.
+    if !(2..=MAX_MESH_PARTICIPANTS).contains(&config.max_mesh_participants) {
+        return Err(format!(
+            "maxMeshParticipants must be between 2 and {}",
+            MAX_MESH_PARTICIPANTS
+        ));
+    }
+
+    Ok(config_store::CallPolicy {
+        mode: config.mode,
+        max_mesh_participants: config.max_mesh_participants,
+    })
+}
+
 /// The global SFU service, analogous to HolochainService.
 pub struct SfuService {
     server: SfuServer,
@@ -85,9 +137,15 @@ pub struct SfuService {
     /// gossiped to pipe peers so the sender node forwards the correct
     /// simulcast layer.
     local_quality_preferences: RwLock<HashMap<String, HashMap<String, String>>>,
-    /// Result of the startup reachability probe.  Determines whether
-    /// this executor advertises SFU capability into neighbourhoods.
+    /// Result of the startup reachability probe.  `sfu.status` reports it;
+    /// a call's `auto` topology uses this SFU only when it is public.
     reachability: SfuReachability,
+    /// DID of the cascade node that takes redirected joins first
+    /// (`--sfu-preferred-node`).
+    preferred_node: Option<String>,
+    /// DIDs of the cascade peers this node was configured with
+    /// (`--sfu-cascade-peers`).
+    cascade_peer_dids: Vec<String>,
 }
 
 impl SfuService {
@@ -106,6 +164,8 @@ impl SfuService {
         gossip: Arc<dyn CascadeGossip>,
     ) -> Result<Arc<Self>, String> {
         let stun_server = config.stun_server.clone();
+        let preferred_node = config.preferred_node.clone();
+        let cascade_peer_dids = config.cascade_peer_dids.clone();
         let server = SfuServer::start(config)
             .await
             .map_err(|e| format!("Failed to start SFU server: {}", e))?;
@@ -134,6 +194,8 @@ impl SfuService {
             gossip: Arc::clone(&gossip),
             local_quality_preferences: RwLock::new(HashMap::new()),
             reachability,
+            preferred_node,
+            cascade_peer_dids,
         });
 
         if let Some(rx) = gossip.take_inbound() {
@@ -797,7 +859,7 @@ impl SfuService {
         // Read before taking the rooms lock: it reads the neighbourhood's links.
         // SFU supports ~4x the mesh limit. A neighbourhood with no config gets
         // the most any config may set: bounded, never unlimited.
-        let max = config_store::stored_config(neighbourhood_url)
+        let max = config_store::stored_policy(neighbourhood_url)
             .await
             .map_or(MAX_MESH_PARTICIPANTS, |c| c.max_mesh_participants) as usize
             * 4;
@@ -883,11 +945,8 @@ impl SfuService {
         // Cascade redirect check — read-only lock, no room creation yet.
         // Room creation defers until after SDP parsing succeeds so a
         // malformed offer never leaves an empty room.
-        // Read before taking any lock: it reads the neighbourhood's links.
         let preferred = if accept_redirect {
-            config_store::stored_config(neighbourhood_url)
-                .await
-                .and_then(|c| c.preferred_sfu_did)
+            self.preferred_node.clone()
         } else {
             None
         };
@@ -1408,65 +1467,64 @@ impl SfuService {
         }
     }
 
-    // ---- SFU configuration (links in the neighbourhood) ----
+    // ---- SFU configuration ----
 
-    /// The neighbourhood's call config, from its links.
+    /// The neighbourhood's call config: its policy (`mode`,
+    /// `maxMeshParticipants`) from its links, the rest from this executor.
+    /// ICE servers stay empty: clients bring their own (`iceServers` on
+    /// `createSession`).
     pub async fn get_config(&self, neighbourhood_url: &str) -> SfuConfig {
-        config_store::read_config(neighbourhood_url).await
+        SfuConfig {
+            max_participants_per_node: Some(self.gossip.max_participants_per_node()),
+            sfu_peers: self.cascade_peer_dids.clone(),
+            preferred_sfu_did: self.preferred_node.clone(),
+            ..config_store::read_policy(neighbourhood_url)
+                .await
+                .into_config()
+        }
     }
 
-    /// Validate `config` and store it in the neighbourhood as a link signed
-    /// by `context`. The caller checks that `context` is the creator.
+    /// Validate `config` and store its policy in the neighbourhood as a link
+    /// signed by `context`, replacing the one `context` stored before. The
+    /// caller checks that `context` is the creator.
     pub async fn set_config(
         &self,
         neighbourhood_url: &str,
         config: SfuConfig,
         context: &crate::agent::AgentContext,
     ) -> Result<(), String> {
-        // Validate mode
-        match config.mode.as_str() {
-            "gateway" | "designated" | "mesh" | "cascaded" => {}
-            other => {
-                return Err(format!(
-                "Invalid SFU mode: '{}'. Must be 'gateway', 'designated', 'mesh', or 'cascaded'",
-                other
-            ))
-            }
-        }
-
-        // Validate designated peer has a DID
-        if config.mode == "designated" && config.designated_peer.is_none() {
-            return Err("Designated mode requires a designatedPeer DID".to_string());
-        }
-
-        // A room's SFU capacity is four times this, so it bounds rooms too.
-        if !(2..=MAX_MESH_PARTICIPANTS).contains(&config.max_mesh_participants) {
-            return Err(format!(
-                "maxMeshParticipants must be between 2 and {}",
-                MAX_MESH_PARTICIPANTS
-            ));
-        }
-
-        config_store::write_config(neighbourhood_url, &config, context).await
+        let policy = call_policy(config)?;
+        config_store::write_policy(neighbourhood_url, &policy, context).await
     }
 
-    /// Get the designated SFU peer DID for a neighbourhood.
+    /// The SFU node a client of this executor reaches under the
+    /// neighbourhood's mode: this node itself for `designated`, the
+    /// `"gateway"` sentinel for `gateway`, none otherwise.
     pub async fn sfu_peer_for_neighbourhood(&self, neighbourhood_url: &str) -> Option<String> {
-        config_store::stored_config(neighbourhood_url)
-            .await
-            .and_then(|c| match c.mode.as_str() {
-                "designated" => c.designated_peer,
-                "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
-                _ => None,
-            })
+        match config_store::stored_policy(neighbourhood_url)
+            .await?
+            .mode
+            .as_str()
+        {
+            "designated" => Some(self.gossip.local_did().to_string()),
+            "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
+            _ => None,
+        }
     }
 
-    /// Get the SFU peer DIDs for a neighbourhood (cascaded mode returns multiple).
+    /// The SFU nodes under the neighbourhood's mode: for `cascaded`, this
+    /// node and its configured cascade peers.
     pub async fn sfu_peers_for_neighbourhood(&self, neighbourhood_url: &str) -> Vec<String> {
-        match config_store::stored_config(neighbourhood_url).await {
-            Some(c) if c.mode == "cascaded" => c.sfu_peers,
-            Some(c) if c.mode == "designated" => c.designated_peer.into_iter().collect(),
-            Some(c) if c.mode == "gateway" => vec!["gateway".to_string()],
+        let Some(policy) = config_store::stored_policy(neighbourhood_url).await else {
+            return vec![];
+        };
+        let local = self.gossip.local_did().to_string();
+        match policy.mode.as_str() {
+            "cascaded" => std::iter::once(local)
+                .chain(self.cascade_peer_dids.iter().cloned())
+                .collect(),
+            "designated" => vec![local],
+            "gateway" => vec!["gateway".to_string()],
             _ => vec![],
         }
     }
@@ -1496,5 +1554,88 @@ impl SfuService {
                 .collect(),
             created_at_ms: room.created_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sfu::IceServer;
+
+    fn config(mode: &str) -> SfuConfig {
+        SfuConfig {
+            mode: mode.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn set_config_stores_only_the_call_policy() {
+        let policy = call_policy(SfuConfig {
+            max_mesh_participants: 6,
+            ..config("designated")
+        })
+        .unwrap();
+        assert_eq!(policy.mode, "designated");
+        assert_eq!(policy.max_mesh_participants, 6);
+    }
+
+    /// Node fields and ICE servers are refused, each by name, never stored
+    /// in part.
+    #[test]
+    fn set_config_refuses_executor_fields_and_ice_servers() {
+        let refused = |c: SfuConfig, field: &str| {
+            let err = call_policy(c).unwrap_err();
+            assert!(err.contains(field), "{err}");
+        };
+        refused(
+            SfuConfig {
+                designated_peer: Some("did:node".into()),
+                ..config("designated")
+            },
+            "designatedPeer",
+        );
+        refused(
+            SfuConfig {
+                sfu_peers: vec!["did:a".into()],
+                ..config("cascaded")
+            },
+            "sfuPeers",
+        );
+        refused(
+            SfuConfig {
+                max_participants_per_node: Some(9),
+                ..config("cascaded")
+            },
+            "maxParticipantsPerNode",
+        );
+        refused(
+            SfuConfig {
+                preferred_sfu_did: Some("did:a".into()),
+                ..config("cascaded")
+            },
+            "preferredSfuDid",
+        );
+        refused(
+            SfuConfig {
+                ice_servers: vec![IceServer {
+                    urls: vec!["turn:t".into()],
+                    username: Some("u".into()),
+                    credential: Some("c".into()),
+                }],
+                ..config("designated")
+            },
+            "iceServers",
+        );
+    }
+
+    #[test]
+    fn set_config_refuses_an_unknown_mode_or_a_mesh_limit_out_of_range() {
+        assert!(call_policy(config("p2p")).is_err());
+        assert!(call_policy(SfuConfig {
+            max_mesh_participants: 1,
+            ..config("mesh")
+        })
+        .is_err());
     }
 }

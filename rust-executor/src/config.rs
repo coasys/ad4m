@@ -147,6 +147,9 @@ pub struct Ad4mConfig {
     /// bind address reports reachability "unknown". Only a public bind
     /// address is ever probed.
     pub sfu_stun_server: Option<String>,
+    /// DID of the cascade node that takes redirected joins first. Unset:
+    /// the least-loaded node.
+    pub sfu_preferred_node: Option<String>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -477,6 +480,7 @@ impl Ad4mConfig {
             sfu_cascade_peers: None,
             sfu_bind_addr: None,
             sfu_stun_server: None,
+            sfu_preferred_node: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,
