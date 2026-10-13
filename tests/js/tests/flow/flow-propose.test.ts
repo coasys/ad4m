@@ -463,7 +463,8 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     expect(archivedProposals, "one proposal, co-signed — no twin").to.have.lengthOf(1);
   });
 
-  // ── Tests 6–8: only shared links count (#1420) ──────────────────────────
+  // ── Tests 6–8: only shared links count ────────────────────────────────
+  // (https://github.com/coasys/ad4m/pull/1420)
   // A vote or role grant written as a `local` link never syncs, so no peer
   // can count it. The executor must not count it either, not even on the
   // writer's own replica, and each user's `currentState` is their own cache

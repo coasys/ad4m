@@ -3,8 +3,10 @@ use crate::perspectives::flow_context::gather_active_flow_contexts;
 use crate::perspectives::flow_instance::local_cached_state;
 
 // ---------------------------------------------------------------------------
-// The fold counts only Shared consensus material (#812 review)
+// The fold counts only Shared consensus material ([#812] review)
 // ---------------------------------------------------------------------------
+//
+// [#812]: https://github.com/coasys/ad4m/pull/812
 
 /// A vote nobody else can see settles nothing. Bob's proposal syncs in Shared
 /// with one vote of the two Scoped needs; Alice adds hers as a Local link,
@@ -114,8 +116,11 @@ async fn a_local_self_granted_role_does_not_count_toward_a_gated_edge() {
         vec![
             (LinkStatus::Local, "identified".to_string(), 0),
             // Today's rule, not the intended one: a member may grant
-            // themselves a role. Who may grant one is #1063 / #1159, which
-            // will change this row.
+            // themselves a role. Who may grant one is [#1063] / [#1159],
+            // which will change this row.
+            //
+            // [#1063]: https://github.com/coasys/ad4m/issues/1063
+            // [#1159]: https://github.com/coasys/ad4m/pull/1159
             (LinkStatus::Shared, "scoped".to_string(), 1),
         ],
         "(grant status, derived state, edges fired)"
@@ -123,18 +128,23 @@ async fn a_local_self_granted_role_does_not_count_toward_a_gated_edge() {
 }
 
 // ---------------------------------------------------------------------------
-// Local links written before #1357 (#1420 review)
+// Local links in the default graph ([#1420] review)
 // ---------------------------------------------------------------------------
 //
-// Before #1357 a Local link went into the default graph with `status: Local`,
-// and it stays there until #1359 moves it. Every agent's view reads the
-// default graph, so a graph filter alone does not drop these links.
+// Executors before [#1357] stored every Local link in the default graph with
+// `status: Local`, and such links stay there until [#1359] moves them. Every
+// agent's view reads the default graph, so a graph filter alone does not drop
+// them.
+//
+// [#1357]: https://github.com/coasys/ad4m/issues/1357
+// [#1359]: https://github.com/coasys/ad4m/issues/1359
+// [#1420]: https://github.com/coasys/ad4m/pull/1420
 
-/// A vote written Local before #1357 settles nothing, and the acting calls do
+/// A Local vote in the default graph settles nothing, and the acting calls do
 /// not take it for the voter's own vote.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_pre_1357_local_vote_counts_for_nothing() {
-    async fn bobs_proposal_with_alices_pre_1357_vote() -> (Fixture, String) {
+async fn a_default_graph_local_vote_counts_for_nothing() {
+    async fn bobs_proposal_with_alices_default_graph_vote() -> (Fixture, String) {
         let mut f = seed_satisfied_fixture(None).await;
         set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
         let seal = seal_for(&f, "scoped").await;
@@ -144,7 +154,7 @@ async fn a_pre_1357_local_vote_counts_for_nothing() {
         let alice = acting_did(&f);
         let ctx = f.ctx.clone();
         f.perspective
-            .add_pre_1357_local_link(
+            .add_default_graph_local_link(
                 Link {
                     source: proposal.clone(),
                     predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
@@ -153,7 +163,7 @@ async fn a_pre_1357_local_vote_counts_for_nothing() {
                 &ctx,
             )
             .await
-            .expect("Alice's pre-#1357 vote");
+            .expect("Alice's default-graph vote");
         (f, proposal)
     }
     async fn alices_shared_votes(f: &Fixture, proposal: &str) -> usize {
@@ -171,9 +181,9 @@ async fn a_pre_1357_local_vote_counts_for_nothing() {
             .count()
     }
 
-    let (mut f, proposal) = bobs_proposal_with_alices_pre_1357_vote().await;
+    let (mut f, proposal) = bobs_proposal_with_alices_default_graph_vote().await;
     let fired = consensus_pass(&mut f).await;
-    assert!(fired.is_empty(), "a pre-#1357 Local vote fired: {fired:?}");
+    assert!(fired.is_empty(), "a default-graph Local vote fired: {fired:?}");
     assert_eq!(f.derived().await.state, "identified");
 
     let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
@@ -185,7 +195,7 @@ async fn a_pre_1357_local_vote_counts_for_nothing() {
         "accept: (Alice's shared votes, edges fired)"
     );
 
-    let (mut f, proposal) = bobs_proposal_with_alices_pre_1357_vote().await;
+    let (mut f, proposal) = bobs_proposal_with_alices_default_graph_vote().await;
     let instance = f.instance_uri.clone();
     let outcome =
         propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
@@ -202,17 +212,17 @@ async fn a_pre_1357_local_vote_counts_for_nothing() {
     );
 }
 
-/// A co-owner's `currentState` cache written before #1357 is no other
+/// A co-owner's `currentState` cache in the default graph is no other
 /// agent's cache. Carol has no cache of her own, so her auto-processor
 /// derives the state; before, it read Bob's legacy value as hers.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_pre_1357_cache_is_not_the_readers_own() {
+async fn a_default_graph_cache_is_not_the_readers_own() {
     use ad4m_client::literal::Literal;
     let mut f = seed_satisfied_fixture(None).await;
     let bob = second_agent("bob-legacy-cache@e2e.test");
     let instance = f.instance_uri.clone();
     f.perspective
-        .add_pre_1357_local_link(
+        .add_default_graph_local_link(
             Link {
                 source: instance,
                 predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
@@ -221,7 +231,7 @@ async fn a_pre_1357_cache_is_not_the_readers_own() {
             &bob,
         )
         .await
-        .expect("Bob's pre-#1357 cache");
+        .expect("Bob's default-graph cache");
     let carol = crate::agent::did_for_context(&second_agent("carol-legacy-cache@e2e.test"))
         .expect("Carol's DID");
     let subject = f.instances().await[0].subject.clone();
@@ -239,11 +249,11 @@ async fn a_pre_1357_cache_is_not_the_readers_own() {
     assert_eq!(contexts[0].current_state, "identified");
 }
 
-/// A fired mark written before #1357 is no other agent's mark. Alice has a
+/// A fired mark in the default graph is no other agent's mark. Alice has a
 /// cache, so her pass is not a catch-up, and the edge Bob's proposal settles
 /// is new to her. Before, Bob's legacy mark hid it as already recorded.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_pre_1357_fired_mark_is_not_the_readers_own() {
+async fn a_default_graph_fired_mark_is_not_the_readers_own() {
     let mut f = seed_satisfied_fixture(None).await;
     let seal = seal_for(&f, "scoped").await;
     let proposal = sync_proposal_from(
@@ -257,7 +267,7 @@ async fn a_pre_1357_fired_mark_is_not_the_readers_own() {
     .await;
     let bob = second_agent("bob-legacy-mark@e2e.test");
     f.perspective
-        .add_pre_1357_local_link(
+        .add_default_graph_local_link(
             Link {
                 source: proposal.clone(),
                 predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
@@ -266,7 +276,7 @@ async fn a_pre_1357_fired_mark_is_not_the_readers_own() {
             &bob,
         )
         .await
-        .expect("Bob's pre-#1357 mark");
+        .expect("Bob's default-graph mark");
 
     assert!(
         marked(&f).await.is_empty(),
@@ -278,8 +288,10 @@ async fn a_pre_1357_fired_mark_is_not_the_readers_own() {
 }
 
 // ---------------------------------------------------------------------------
-// The acting calls read guards and outputs on shared graphs (#1420 review)
+// The acting calls read guards and outputs on shared graphs ([#1420] review)
 // ---------------------------------------------------------------------------
+//
+// [#1420]: https://github.com/coasys/ad4m/pull/1420
 
 /// A `Task` in Alice's own Local graph: evidence no peer can see.
 async fn seed_local_task(f: &mut Fixture, uri: &str) {
@@ -363,12 +375,15 @@ async fn a_local_output_is_not_an_output() {
 }
 
 /// The auto-processor runs as one agent and reads that agent's own cache
-/// (#987's cache-first read), on the shared-reads view its tick builds
-/// (#1324). Two agents on one perspective with different caches: each gets
+/// ([#987]'s cache-first read), on the shared-reads view its tick builds
+/// ([#1324]). Two agents on one perspective with different caches: each gets
 /// their own, and neither sees the other's. No proposal exists, so the fold
 /// says `identified`, and only a cache read can answer `scoped` or `done`.
 /// Before, the shared-reads view read no Local graph at all, so every
 /// auto-processor pass re-derived and both got `identified`.
+///
+/// [#987]: https://github.com/coasys/ad4m/pull/987
+/// [#1324]: https://github.com/coasys/ad4m/pull/1324
 #[tokio::test(flavor = "multi_thread")]
 async fn each_agents_auto_processor_reads_its_own_cached_state() {
     let f = seed_flow(

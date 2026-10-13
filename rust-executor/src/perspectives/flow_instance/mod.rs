@@ -188,15 +188,19 @@ impl<'a> FlowInstance<'a> {
     /// vote or role grant in a Local graph is one no peer can see. Counted, it
     /// would settle an edge on this replica that no other replica settles, and
     /// every state derived here, the agent's cache included, would rest on
-    /// material that is private to them (#812 review). The filter is on this
+    /// material that is private to them ([#812] review). The filter is on this
     /// replica's load, so the locality on a carried read-set is still never
     /// read (`read_set::reverified_link`).
     ///
-    /// A Local link written before #1357 sits in the default graph, which a
-    /// shared read still reads. The proposal links drop it by its `status`
-    /// (`atom::retain_shared_status`). A role grant of that age still counts
-    /// until #1359 moves it: grants are read through `model_query`, whose
-    /// hydrated rows carry no status.
+    /// A shared read still reads the default graph, where executors before
+    /// [#1357] stored every Local link. The proposal links drop such a link by
+    /// its `status` (`atom::retain_shared_status`). A role grant stored that
+    /// way still counts until [#1359] moves it: grants are read through
+    /// `model_query`, whose hydrated rows carry no status.
+    ///
+    /// [#812]: https://github.com/coasys/ad4m/pull/812
+    /// [#1357]: https://github.com/coasys/ad4m/issues/1357
+    /// [#1359]: https://github.com/coasys/ad4m/issues/1359
     pub async fn read_set(&self, perspective: &PerspectiveInstance) -> anyhow::Result<ReadSet> {
         let shared = perspective.clone().for_shared_reads();
         let perspective = &shared;

@@ -34,7 +34,7 @@
 //!   already recorded this consensus event?" test (so [`FireOutcome`]s are
 //!   emitted once per event per replica). Never an input to the fold.
 //!
-//! Both are written **`Local`** (#987): every replica materialises only its
+//! Both are written **`Local`** ([#987]): every replica materialises only its
 //! own derivation. Shared, they were a claim a UI would display unverified,
 //! a value two replicas with different partial views would overwrite in each
 //! other, and — for marks — a way for a forged link to mute another
@@ -48,9 +48,13 @@
 //! and the read-set, comes from shared graphs only: a Local proposal, vote or
 //! role grant is no peer's to settle, so it settles nothing here either. The
 //! bookkeeping, the cache and the marks, is the agent's own Local graph
-//! (#1360), read and written there. So the cache is derived from shared
+//! ([#1360]), read and written there. So the cache is derived from shared
 //! graphs alone, and a reader that must not see Local material, such as the
-//! auto-processor (#1324), can read it.
+//! auto-processor ([#1324]), can read it.
+//!
+//! [#987]: https://github.com/coasys/ad4m/pull/987
+//! [#1360]: https://github.com/coasys/ad4m/issues/1360
+//! [#1324]: https://github.com/coasys/ad4m/pull/1324
 //!
 //! ## Catch-up
 //!
@@ -113,9 +117,11 @@ pub async fn run_flow_consensus_pass(
     // The pass reads as the agent it records for, through two views (module
     // doc). `own` is the agent's own Local graph, whatever view the caller
     // hands in (the auto-processor's reads shared graphs only): the cache and
-    // the fired marks live there (#1360), and only they are read from it.
+    // the fired marks live there ([#1360]), and only they are read from it.
     // `shared` is what the fold takes: no Local graph, the agent's own
     // included.
+    //
+    // [#1360]: https://github.com/coasys/ad4m/issues/1360
     let mut own = match crate::agent::did_for_context(context) {
         Ok(did) => perspective.clone().for_own_bookkeeping(did),
         Err(e) => {
@@ -293,26 +299,32 @@ pub async fn run_flow_consensus_pass(
 /// graph, if one is present.
 ///
 /// `None` means the cache is absent: no `currentState` link in that graph,
-/// or `perspective` has no viewer. A `Shared` link a peer wrote before #987
-/// is not a cache, and neither is a `Local` one written before #1357: that
-/// one sits in the default graph, where every co-owner's view reads it, and
-/// it may be another co-owner's. Read as absent, it costs one silent
-/// catch-up, and the rewrite removes it (`write_local_current_state`).
+/// or `perspective` has no viewer. A `Shared` link a peer wrote before [#987]
+/// is not a cache, and neither is a `Local` one in the default graph, where
+/// executors before [#1357] stored every Local write: every co-owner's view
+/// reads that graph, and the link may be another co-owner's. Read as absent,
+/// it costs one silent catch-up, and the rewrite removes it
+/// (`write_local_current_state`).
 ///
-/// This read is raw links because it predates #1028.  Since #1028 landed on
+/// This read is raw links because it predates [#1028].  Since [#1028] landed on
 /// `dev`, hydration enforces the class's `local: true` flag itself — it drops
 /// any `currentState` link not annotated `Local` — so the hydrated record can
 /// now answer this, and the two paths agree
 /// (`a_peer_written_shared_cache_is_overridden_not_deleted` pins that).  Two
 /// things still have no home on the hydrated path: the fall-back-to-derive on
 /// zero-or-multiple `Local` links, and the literal-parse fall-back below.
-/// Collapsing this to a field read is #1026's follow-up, with tests of its
+/// Collapsing this to a field read is [#1026]'s follow-up, with tests of its
 /// own — not a rename.
 ///
 /// `write_local_current_state` removes all `Local` links before adding one,
 /// so the normal write path never leaves more than one.  If somehow more
 /// than one `Local` link exists (a bug or test artefact), `None` is returned
 /// so the caller falls back to derive, which is always safe.
+///
+/// [#987]: https://github.com/coasys/ad4m/pull/987
+/// [#1357]: https://github.com/coasys/ad4m/issues/1357
+/// [#1028]: https://github.com/coasys/ad4m/pull/1028
+/// [#1026]: https://github.com/coasys/ad4m/issues/1026
 pub(crate) async fn local_cached_state(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
@@ -459,9 +471,12 @@ async fn has_local_cache(
 /// ([`PerspectiveInstance::for_own_bookkeeping`]): the read-set comes from
 /// shared graphs and carries no Local link, so the marks are read beside it.
 ///
-/// Only marks in the agent's own Local graph count. A mark written before
-/// #1357 sits in the default graph and may be another co-owner's, so it is
-/// read as absent, as [`local_cached_state`] reads a cache of that age.
+/// Only marks in the agent's own Local graph count. A mark in the default
+/// graph, where executors before [#1357] stored every Local write, may be
+/// another co-owner's, so it is read as absent, as [`local_cached_state`]
+/// reads such a cache.
+///
+/// [#1357]: https://github.com/coasys/ad4m/issues/1357
 pub(crate) async fn own_fired_marks(
     own: &PerspectiveInstance,
     read_set: &ReadSet,
@@ -487,7 +502,9 @@ pub(crate) async fn own_fired_marks(
 }
 
 /// The Local graph of `perspective`'s viewer, where their cache and marks
-/// live (#1360). `None` without a viewer.
+/// live ([#1360]). `None` without a viewer.
+///
+/// [#1360]: https://github.com/coasys/ad4m/issues/1360
 fn own_local_graph(perspective: &PerspectiveInstance) -> Option<String> {
     perspective
         .viewer()

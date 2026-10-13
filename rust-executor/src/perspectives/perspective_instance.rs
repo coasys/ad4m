@@ -2123,11 +2123,14 @@ impl PerspectiveInstance {
             .await
     }
 
-    /// Store `link` as an executor before #1357 stored a Local link: in the
-    /// default graph, with `status: Local`. Such links stay there until #1359
-    /// moves them, so tests need to write one.
+    /// Store `link` the way executors before [#1357] stored a Local link: in
+    /// the default graph, with `status: Local`. Such links stay there until
+    /// [#1359] moves them, so tests need to write one.
+    ///
+    /// [#1357]: https://github.com/coasys/ad4m/issues/1357
+    /// [#1359]: https://github.com/coasys/ad4m/issues/1359
     #[cfg(test)]
-    pub(crate) async fn add_pre_1357_local_link(
+    pub(crate) async fn add_default_graph_local_link(
         &mut self,
         link: Link,
         context: &AgentContext,

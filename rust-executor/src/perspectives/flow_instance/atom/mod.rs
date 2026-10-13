@@ -561,12 +561,16 @@ pub async fn load_proposal_links(
 
 /// Drop every link stored with `status: Local`, for a read that counts shared
 /// consensus material only. A shared-reads view already leaves out every
-/// Local graph. This catches a Local link written before #1357, which sits in
-/// the default graph until #1359 moves it, and which that view still reads.
-/// Same rule as `perspective_instance::shareable`.
+/// Local graph. This catches a Local link in the default graph, where
+/// executors before [#1357] stored every Local write: it stays there until
+/// [#1359] moves it, and that view still reads it. Same rule as
+/// `perspective_instance::shareable`.
 ///
 /// Only for links this replica loaded itself: a carried read-set's `status`
 /// is never read (`read_set::reverified_link`).
+///
+/// [#1357]: https://github.com/coasys/ad4m/issues/1357
+/// [#1359]: https://github.com/coasys/ad4m/issues/1359
 pub(crate) fn retain_shared_status(links: &mut Vec<DecoratedLinkExpression>) {
     links.retain(|l| l.status != Some(LinkStatus::Local));
 }

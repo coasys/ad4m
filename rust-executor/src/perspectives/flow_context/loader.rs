@@ -274,12 +274,15 @@ pub async fn gather_active_flow_contexts(
     // incoming flow link), but contention does not expire on its own — a
     // cached flow keeps `Unknown` until something re-folds it.
     //
-    // The cache is the viewer's own Local link (#1360), so it is read on their
-    // own bookkeeping view even when `perspective` reads shared graphs only, as
-    // the auto-processor's does (#1324). That is the one Local read here, and
-    // it carries nothing private: the pass folds shared graphs only
+    // The cache is the viewer's own Local link ([#1360]), so it is read on
+    // their own bookkeeping view even when `perspective` reads shared graphs
+    // only, as the auto-processor's does ([#1324]). That is the one Local read
+    // here, and it carries nothing private: the pass folds shared graphs only
     // (`FlowInstance::read_set`), so the cache is derived from them alone.
     // Everything else, the fallback derive included, stays on `perspective`.
+    //
+    // [#1360]: https://github.com/coasys/ad4m/issues/1360
+    // [#1324]: https://github.com/coasys/ad4m/pull/1324
     let cache_view = perspective
         .viewer()
         .map(|viewer| perspective.clone().for_own_bookkeeping(viewer.to_string()));
