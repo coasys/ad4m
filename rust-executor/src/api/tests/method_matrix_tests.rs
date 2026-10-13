@@ -557,6 +557,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.mintFlowReceipt",
         || json!({ "instanceUri": "i" }),
     ),
+    ("perspective.flowFired", || json!({ "instance": "i" })),
 ];
 
 fn link() -> Value {

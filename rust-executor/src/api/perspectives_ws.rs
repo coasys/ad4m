@@ -1957,6 +1957,43 @@ async fn flow_valid_outputs_handler(
     Ok(serde_json::to_value(outputs)?)
 }
 
+/// The calling agent's DID, for the per-agent flow bookkeeping reads. The
+/// session's agent, never one named in the params: these rows are private to
+/// the agent whose pass wrote them (#1424).
+fn flow_bookkeeping_agent(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    crate::agent::did_for_context(&ctx.acts_as())
+        .map_err(|e| WsRpcError::internal(format!("resolving the calling agent: {e}")))
+}
+
+async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let instances: Option<Vec<String>> = params
+        .opt_str_set("instances")?
+        .map(|set| set.into_iter().collect());
+    let perspective = guarded_perspective(&params).await?;
+    let agent_did = flow_bookkeeping_agent(&ctx)?;
+    let entries = crate::perspectives::flow_instance::replica_state::FlowReplicaState::entries(
+        &perspective.uuid,
+        &agent_did,
+        instances.as_deref(),
+    )
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(entries)?)
+}
+
+async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let instance = params.require_str("instance")?;
+    let perspective = guarded_perspective(&params).await?;
+    let agent_did = flow_bookkeeping_agent(&ctx)?;
+    let fired =
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
+            &perspective.uuid,
+            &agent_did,
+            &instance,
+        )
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(fired)?)
+}
+
 async fn mint_flow_receipt_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -2313,6 +2350,7 @@ async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     use crate::perspectives::flow_instance::{
         pass::FireOutcome, produced::ValidOutput, propose::ProposeOutcome,
+        replica_state::FlowStateEntry,
     };
     use crate::perspectives::interpretation::overlay::OverlayView;
     let query = || Guard::perspective(perspective_query_capability);
@@ -2536,6 +2574,18 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         mint_flow_receipt_handler,
     )
     .guard(update());
+    map.method::<PerspectiveFlowStatesParams, Vec<FlowStateEntry>>(
+        "perspective.flowStates",
+        flow_states_handler,
+    )
+    .read()
+    .guard(query());
+    map.method::<PerspectiveFlowFiredParams, Vec<String>>(
+        "perspective.flowFired",
+        flow_fired_handler,
+    )
+    .read()
+    .guard(query());
     map.method::<PerspectiveUuidParams, Vec<String>>("perspective.getShaclNames", get_shacl_names)
         .read()
         .guard(query());
@@ -2958,6 +3008,26 @@ pub struct PerspectiveFlowReceiptVerdict {
     pub outputs: Option<Vec<crate::perspectives::flow_instance::atom::OutputRef>>,
     #[ts(optional)]
     pub voters: Option<Vec<String>>,
+}
+
+/// `perspective.flowStates`: the calling agent's recorded state of each flow
+/// instance (#1424). Instances it has not derived yet are absent.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveFlowStatesParams {
+    pub uuid: String,
+    /// Narrow to these instance URIs; all of the agent's instances if absent.
+    #[ts(optional)]
+    pub instances: Option<Vec<String>>,
+}
+
+/// `perspective.flowFired`: the proposals of `instance` the calling agent's
+/// pass has recorded as fired, sorted.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveFlowFiredParams {
+    pub uuid: String,
+    pub instance: String,
 }
 
 #[derive(Deserialize, TS)]

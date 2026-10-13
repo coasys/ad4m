@@ -24,7 +24,7 @@ import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunIn
 // would otherwise be a cycle).
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
-    FlowReceiptVerdict, FlowValidOutput,
+    FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
 } from "./FlowInstance";
 
 
@@ -384,6 +384,22 @@ export class PerspectiveClient {
     async flowValidOutputs(uuid: string, flow: string, state?: string): Promise<FlowValidOutput[]> {
         return this.#apiClient.call(
             'perspective.flowValidOutputs', { uuid, flow, state },
+        )
+    }
+
+    /** The calling agent's recorded state of each flow instance it has
+     *  derived, optionally narrowed to `instances`. */
+    async flowStates(uuid: string, instances?: string[]): Promise<FlowStateEntry[]> {
+        return this.#apiClient.call(
+            'perspective.flowStates', { uuid, instances },
+        )
+    }
+
+    /** The proposals of `instance` the calling agent's replica recorded as
+     *  fired, sorted. */
+    async flowFired(uuid: string, instance: string): Promise<string[]> {
+        return this.#apiClient.call(
+            'perspective.flowFired', { uuid, instance },
         )
     }
 
