@@ -14,7 +14,15 @@ pub(crate) fn admin_ctx() -> Arc<RequestContext> {
         user_email: None,
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     })
+}
+
+/// `admin_ctx()` on the WS RPC connection `connection_id`.
+pub(crate) fn admin_conn_ctx(connection_id: &str) -> Arc<RequestContext> {
+    let mut ctx = (*admin_ctx()).clone();
+    ctx.connection_id = Some(connection_id.to_string());
+    Arc::new(ctx)
 }
 
 /// Unregisters the fixture perspective when the test ends (also on panic).
