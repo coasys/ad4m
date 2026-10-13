@@ -377,8 +377,14 @@ fn display_email(agent: &AgentContext) -> Option<String> {
 /// approval prompts.
 pub const MAX_AUTH_INFO_FIELD_BYTES: usize = 1024;
 
+/// Bytes the capabilities of a capability request may have as JSON. The caller chooses them
+/// like the app fields, and they are kept in memory and shown in approval prompts. Far above
+/// what an app asks for: the user default capabilities are a few kilobytes.
+pub const MAX_AUTH_INFO_CAPABILITIES_BYTES: usize = 64 * 1024;
+
 /// `Err` naming the first of the app's declared fields in `auth` that is longer than
-/// [`MAX_AUTH_INFO_FIELD_BYTES`].
+/// [`MAX_AUTH_INFO_FIELD_BYTES`], or `capabilities` when they are larger than
+/// [`MAX_AUTH_INFO_CAPABILITIES_BYTES`] as JSON.
 pub fn check_auth_info_bounds(auth: &AuthInfo) -> Result<(), String> {
     let fields = [
         ("appName", Some(&auth.app_name)),
@@ -394,7 +400,16 @@ pub fn check_auth_info_bounds(auth: &AuthInfo) -> Result<(), String> {
         Some((name, _)) => Err(format!(
             "{name} is longer than {MAX_AUTH_INFO_FIELD_BYTES} bytes"
         )),
-        None => Ok(()),
+        None => {
+            let capabilities =
+                serde_json::to_vec(&auth.capabilities).map_or(usize::MAX, |v| v.len());
+            if capabilities > MAX_AUTH_INFO_CAPABILITIES_BYTES {
+                return Err(format!(
+                    "capabilities are larger than {MAX_AUTH_INFO_CAPABILITIES_BYTES} bytes as JSON"
+                ));
+            }
+            Ok(())
+        }
     }
 }
 

@@ -1776,7 +1776,9 @@ mod capability_request_tests {
     async fn a_request_with_an_oversized_capability_list_is_refused() {
         setup();
         let many: Vec<_> = (0..10_000)
-            .map(|i| crate::agent::capabilities::perspective_query_capability(vec![format!("p{i}")]))
+            .map(|i| {
+                crate::agent::capabilities::perspective_query_capability(vec![format!("p{i}")])
+            })
             .collect();
         let err = call(
             "agent.requestCapability",

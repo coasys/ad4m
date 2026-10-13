@@ -38,7 +38,7 @@ pub const MAX_PENDING_REQUESTS: usize = 1024;
 pub const MAX_PENDING_REQUESTS_PER_TARGET: usize = 64;
 
 /// The agent a capability request is for (D16: an agent is its DID).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RequestTarget {
     /// An agent on this executor: the main agent, or a managed agent by its DID.
     Agent(AgentContext),
@@ -162,8 +162,10 @@ impl PendingRequests {
     /// Records a new request of the app `auth` for the agent `target`. When the target already
     /// has [`MAX_PENDING_REQUESTS_PER_TARGET`] requests, or all targets together
     /// [`MAX_PENDING_REQUESTS`], an unapproved one goes, oldest first: one for the same target,
-    /// or, when all are full, one for no agent before one for the same target. Requests for
-    /// other agents and approved ones stay, so `Err` when nothing may go.
+    /// or, when all are full, one for no agent, then one for the same target, then (for an
+    /// agent below its share) one of the target holding the most unapproved requests, so that
+    /// filling the store for a few agents does not refuse every other one. Approved requests
+    /// stay, so `Err` when nothing may go.
     pub fn request(
         &self,
         request_id: String,
@@ -189,8 +191,26 @@ impl PendingRequests {
             }
         }
         if pending.len() >= MAX_PENDING_REQUESTS {
+            let below_share = for_target < MAX_PENDING_REQUESTS_PER_TARGET;
+            let fullest = || {
+                if target == RequestTarget::NoAgent || !below_share {
+                    return None;
+                }
+                let mut unapproved: HashMap<&RequestTarget, usize> = HashMap::new();
+                for request in pending.values().filter(|r| r.code.is_none()) {
+                    *unapproved.entry(&request.target).or_default() += 1;
+                }
+                let own = unapproved.get(&target).copied().unwrap_or(0);
+                let most = unapproved
+                    .values()
+                    .copied()
+                    .max()
+                    .filter(|most| *most > own)?;
+                oldest_unapproved(&pending, &|t| unapproved.get(t) == Some(&most))
+            };
             let evicted = oldest_unapproved(&pending, &|t| *t == RequestTarget::NoAgent)
-                .or_else(|| oldest_unapproved(&pending, &same_target));
+                .or_else(|| oldest_unapproved(&pending, &same_target))
+                .or_else(fullest);
             match evicted {
                 Some(id) => {
                     pending.remove(&id);
@@ -621,7 +641,10 @@ mod tests {
             .request("bob".into(), AuthInfo::default(), bob.clone(), 2)
             .expect("an agent with no request waiting is not refused");
         assert!(pending.contains("bob"));
-        assert!(!pending.contains("f0-0"), "the oldest of the fullest target goes");
+        assert!(
+            !pending.contains("f0-0"),
+            "the oldest of the fullest target goes"
+        );
         assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
 
         // The next agent takes from a target that now holds the most (f0 holds 63, the others
