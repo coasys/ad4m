@@ -555,7 +555,7 @@ mod connection_context_tests {
     fn every_connection_gets_its_own_connection_id() {
         setup_wallet();
         setup_agent();
-        let admin = Some(Secret::from(ADMIN));
+        let admin = Some(crate::secret::Secret::from(ADMIN.to_string()));
         let a = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
         let b = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
         assert!(a.connection_id.is_some());
