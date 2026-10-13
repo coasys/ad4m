@@ -154,7 +154,9 @@ pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
 /// `batch_id` groups this instance write with any consumer's follow-on writes
 /// (e.g. the auto-processor bundling instance mint + first proposal in one
 /// atomic commit). Pass `None` for standalone mints — a single
-/// `create_subject` writes the whole record.
+/// `create_subject` writes the whole record. With a batch, the minter's
+/// bookkeeping row is NOT written here: call [`record_minted_state`] after
+/// `commit_batch` succeeds.
 ///
 /// Returns the freshly-minted `FlowInstance` URI (`ad4m://flow/instance/{id}`).
 ///
@@ -200,19 +202,39 @@ pub(crate) async fn mint_flow_instance(
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_flow_instance: create_subject failed: {e:#}"))?;
-    // Written now, even when the caller's batch commits later. If that batch
-    // is discarded the row names an instance that never existed: no pass ever
-    // loads it and the row is dropped with the perspective — harmless.
+    // A standalone mint is on the graph now, so its row is written now. A
+    // batched mint's links exist only once the caller's `commit_batch`
+    // succeeds, and `perspective.flowStates` lists every row: written before
+    // that, the row would name an instance that never exists if the batch is
+    // discarded or the commit fails. The caller records it after the commit.
+    if batch_id.is_none() {
+        record_minted_state(perspective, &uri, initial_state, context)
+            .map_err(|e| anyhow::anyhow!("mint_flow_instance: {e:#}"))?;
+    }
+    Ok(uri)
+}
+
+/// Record `initial_state` as the minting agent's state for `instance_uri`, so
+/// its first pass reports rather than catches up (#1424).
+///
+/// [`mint_flow_instance`] calls it for a standalone mint. A caller that
+/// minted inside a batch calls it for each instance once `commit_batch` has
+/// succeeded, and never when the batch is discarded or the commit fails.
+pub(crate) fn record_minted_state(
+    perspective: &PerspectiveInstance,
+    instance_uri: &str,
+    initial_state: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
     let agent_did = crate::agent::did_for_context(context)?;
     crate::perspectives::flow_instance::replica_state::FlowReplicaState::set_current_state(
         &perspective.uuid,
         &agent_did,
-        &uri,
+        instance_uri,
         initial_state,
         &perspective.is_teardown,
     )
-    .map_err(|e| anyhow::anyhow!("mint_flow_instance: {e:#}"))?;
-    Ok(uri)
+    .map(|_| ())
 }
 
 /// Mint one `FlowTransitionProposal` at its **content-addressed** URI:

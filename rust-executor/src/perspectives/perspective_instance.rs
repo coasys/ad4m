@@ -562,6 +562,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
+    /// batch as a real failure does. Compiled out in non-test builds — see
+    /// [`Self::fail_next_commit_batch`].
+    #[cfg(test)]
+    fail_next_commit: Arc<AtomicBool>,
     /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
     /// joined to a neighbourhood, so a test can exercise the cross-peer wait
     /// without a running link language. Compiled out in non-test builds.
@@ -632,6 +637,8 @@ impl PerspectiveInstance {
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]
+            fail_next_commit: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
             force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -649,6 +656,14 @@ impl PerspectiveInstance {
     pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
         self.fail_add_link_after
             .store(after_n_calls, Ordering::SeqCst);
+    }
+
+    /// Test seam: make the next [`Self::commit_batch`] fail after removing
+    /// the batch, as its contract says a failed commit does, so a test can
+    /// prove that nothing a caller defers to a successful commit happens.
+    #[cfg(test)]
+    pub(crate) fn fail_next_commit_batch(&self) {
+        self.fail_next_commit.store(true, Ordering::SeqCst);
     }
 
     /// Look up a cached `ModelShape` for the given class name, loading it
@@ -6559,6 +6574,11 @@ impl PerspectiveInstance {
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
+        #[cfg(test)]
+        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
+            drop(diff);
+            return Err(anyhow!("injected fault (test seam): commit_batch failed"));
+        }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
         //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
