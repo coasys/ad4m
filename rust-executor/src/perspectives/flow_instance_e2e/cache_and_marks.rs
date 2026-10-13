@@ -552,7 +552,11 @@ async fn after_an_upgrade_the_first_pass_is_a_silent_catch_up() {
 
     let h3 = settle(&mut f, "h3", "review", "approved").await;
     let reported = flow_events(&mut events, &f.perspective.uuid);
-    assert_eq!(reported.len(), 1, "the next settle is reported: {reported:?}");
+    assert_eq!(
+        reported.len(),
+        1,
+        "the next settle is reported: {reported:?}"
+    );
     assert_eq!(reported[0].fired_proposals, vec![h3]);
 }
 
@@ -666,8 +670,7 @@ async fn a_synced_instance_is_not_seeded() {
         "a peer's mint is not seeded here"
     );
     assert!(
-        !FlowReplicaState::has_derived(&f.perspective.uuid, &bob.did, theirs)
-            .expect("has_derived"),
+        !FlowReplicaState::has_derived(&f.perspective.uuid, &bob.did, theirs).expect("has_derived"),
         "nor for the peer, whose bookkeeping is on its own node"
     );
 }
@@ -744,7 +747,10 @@ async fn a_regression_publishes_an_event_without_fired_proposals() {
 
     let got = flow_events(&mut events, &f.perspective.uuid);
     assert_eq!(got.len(), 1, "got {got:?}");
-    assert_eq!((got[0].from.as_str(), got[0].to.as_str()), ("scoped", "identified"));
+    assert_eq!(
+        (got[0].from.as_str(), got[0].to.as_str()),
+        ("scoped", "identified")
+    );
     assert!(got[0].fired_proposals.is_empty());
 }
 

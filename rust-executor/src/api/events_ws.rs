@@ -1133,7 +1133,10 @@ pub(crate) fn matches_flow_state_agent(msg: &str, current_did: Option<&str>) -> 
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(msg) else {
         return false;
     };
-    if !matches!(map.get("perspectiveUuid"), Some(serde_json::Value::String(_))) {
+    if !matches!(
+        map.get("perspectiveUuid"),
+        Some(serde_json::Value::String(_))
+    ) {
         return false;
     }
     matches!(map.get("agentDid"), Some(serde_json::Value::String(agent)) if agent == did)

@@ -653,10 +653,14 @@ mod tests {
         assert!(flow.is_none());
 
         // Instance lookup is keyed on (expression, flow URI).
-        let found =
-            Ad4mMcpHandler::flow_instance_for(&perspective, &ctx, base_uri, "delivery://DeliveryFlow")
-                .await
-                .expect("flow_instance_for");
+        let found = Ad4mMcpHandler::flow_instance_for(
+            &perspective,
+            &ctx,
+            base_uri,
+            "delivery://DeliveryFlow",
+        )
+        .await
+        .expect("flow_instance_for");
         let found = found.expect("the minted instance must be found");
         assert_eq!(found.instance_uri, inst_uri);
         assert_eq!(found.current_state, "identified");

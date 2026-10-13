@@ -24,10 +24,10 @@ use super::flow_instance::atom::{
     outputs_hash, OutputRef, OutputsRefusal, TransitionAtom, ACCEPTED_BY_PREDICATE,
     LEGACY_RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
 };
-use super::flow_instance::replica_state::FlowReplicaState;
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
+use super::flow_instance::replica_state::FlowReplicaState;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};

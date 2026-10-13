@@ -137,7 +137,8 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    FlowInstance's subject (J#1, PR #929 James review — the fix
     //    replaced `Option<&Scope>` on the dedup axis with
     //    `subjects: &[String]` sourced from the batch cursor).
-    let contexts = gather_active_flow_contexts(&perspective, &ctx, &[base_uri.to_string()], None).await;
+    let contexts =
+        gather_active_flow_contexts(&perspective, &ctx, &[base_uri.to_string()], None).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -291,7 +292,8 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
     )
     .expect("record scoped");
 
-    let contexts = gather_active_flow_contexts(&perspective, &ctx, &[base_uri.to_string()], None).await;
+    let contexts =
+        gather_active_flow_contexts(&perspective, &ctx, &[base_uri.to_string()], None).await;
     assert_eq!(
         contexts.len(),
         1,

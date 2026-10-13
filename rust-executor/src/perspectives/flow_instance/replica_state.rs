@@ -134,8 +134,7 @@ impl FlowReplicaState {
         agent_did: &str,
         instance: &str,
     ) -> anyhow::Result<Option<String>> {
-        Ok(Self::states(perspective, agent_did, Some(&[instance.to_string()]))?
-            .remove(instance))
+        Ok(Self::states(perspective, agent_did, Some(&[instance.to_string()]))?.remove(instance))
     }
 
     /// Whether this agent has a row for the instance — derived here, or
@@ -149,8 +148,10 @@ impl FlowReplicaState {
     /// pass reports what settles rather than catching up silently. A no-op
     /// when a row exists. Returns whether one was inserted.
     pub fn seed_minted(perspective: &str, agent_did: &str, instance: &str) -> anyhow::Result<bool> {
-        Ad4mDb::with_global_instance(|db| db.seed_flow_replica_state(perspective, agent_did, instance))
-            .map_err(|e| anyhow::anyhow!("seeding flow state of {instance}: {e}"))
+        Ad4mDb::with_global_instance(|db| {
+            db.seed_flow_replica_state(perspective, agent_did, instance)
+        })
+        .map_err(|e| anyhow::anyhow!("seeding flow state of {instance}: {e}"))
     }
 
     /// Write `state` for the instance. Returns whether it changed.
@@ -196,8 +197,10 @@ impl FlowReplicaState {
         agent_did: &str,
         proposals: &[String],
     ) -> anyhow::Result<HashSet<String>> {
-        Ad4mDb::with_global_instance(|db| db.get_flow_fired_among(perspective, agent_did, proposals))
-            .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))
+        Ad4mDb::with_global_instance(|db| {
+            db.get_flow_fired_among(perspective, agent_did, proposals)
+        })
+        .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))
     }
 
     /// Mark `proposals` (all of `instance`) fired without touching the state.
@@ -253,8 +256,10 @@ impl FlowReplicaState {
         agent_did: &str,
         instances: Option<&[String]>,
     ) -> anyhow::Result<Vec<FlowReplicaStateRow>> {
-        Ad4mDb::with_global_instance(|db| db.get_flow_replica_states(perspective, agent_did, instances))
-            .map_err(|e| anyhow::anyhow!("reading flow states: {e}"))
+        Ad4mDb::with_global_instance(|db| {
+            db.get_flow_replica_states(perspective, agent_did, instances)
+        })
+        .map_err(|e| anyhow::anyhow!("reading flow states: {e}"))
     }
 }
 
@@ -275,8 +280,13 @@ mod tests {
     fn an_unknown_instance_has_no_row_and_no_state() {
         let p = fresh();
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
-        assert_eq!(FlowReplicaState::current_state(&p, ALICE, "i").unwrap(), None);
-        assert!(FlowReplicaState::states(&p, ALICE, None).unwrap().is_empty());
+        assert_eq!(
+            FlowReplicaState::current_state(&p, ALICE, "i").unwrap(),
+            None
+        );
+        assert!(FlowReplicaState::states(&p, ALICE, None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -286,7 +296,9 @@ mod tests {
         assert!(!FlowReplicaState::set_current_state(&p, ALICE, "i", "open").unwrap());
         assert!(FlowReplicaState::set_current_state(&p, ALICE, "i", "done").unwrap());
         assert_eq!(
-            FlowReplicaState::current_state(&p, ALICE, "i").unwrap().as_deref(),
+            FlowReplicaState::current_state(&p, ALICE, "i")
+                .unwrap()
+                .as_deref(),
             Some("done")
         );
     }
@@ -325,7 +337,9 @@ mod tests {
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
         assert!(!FlowReplicaState::is_fired(&p, ALICE, "p1").unwrap());
         assert_eq!(
-            FlowReplicaState::current_state(&q, ALICE, "i").unwrap().as_deref(),
+            FlowReplicaState::current_state(&q, ALICE, "i")
+                .unwrap()
+                .as_deref(),
             Some("open"),
             "another perspective's rows survive"
         );
@@ -338,8 +352,13 @@ mod tests {
         assert!(FlowReplicaState::seed_minted(&p, ALICE, "i").unwrap());
         assert!(!FlowReplicaState::seed_minted(&p, ALICE, "i").unwrap());
         assert!(FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
-        assert_eq!(FlowReplicaState::current_state(&p, ALICE, "i").unwrap(), None);
-        assert!(FlowReplicaState::entries(&p, ALICE, None).unwrap().is_empty());
+        assert_eq!(
+            FlowReplicaState::current_state(&p, ALICE, "i").unwrap(),
+            None
+        );
+        assert!(FlowReplicaState::entries(&p, ALICE, None)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             FlowReplicaState::record_pass(&p, ALICE, "i", Some("open"), &[]).unwrap(),
             PriorRow::Minted
@@ -353,7 +372,9 @@ mod tests {
         FlowReplicaState::set_current_state(&p, ALICE, "i", "done").unwrap();
         assert!(!FlowReplicaState::seed_minted(&p, ALICE, "i").unwrap());
         assert_eq!(
-            FlowReplicaState::current_state(&p, ALICE, "i").unwrap().as_deref(),
+            FlowReplicaState::current_state(&p, ALICE, "i")
+                .unwrap()
+                .as_deref(),
             Some("done")
         );
     }
@@ -398,7 +419,9 @@ mod tests {
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
         assert_eq!(
-            FlowReplicaState::current_state(&p, ALICE, "i").unwrap().as_deref(),
+            FlowReplicaState::current_state(&p, ALICE, "i")
+                .unwrap()
+                .as_deref(),
             Some("open")
         );
         assert_eq!(
@@ -413,8 +436,9 @@ mod tests {
         for (i, s) in [("a", "x"), ("b", "y"), ("c", "z")] {
             FlowReplicaState::set_current_state(&p, ALICE, i, s).unwrap();
         }
-        let only = FlowReplicaState::states(&p, ALICE, Some(&["a".into(), "c".into(), "zz".into()]))
-            .unwrap();
+        let only =
+            FlowReplicaState::states(&p, ALICE, Some(&["a".into(), "c".into(), "zz".into()]))
+                .unwrap();
         assert_eq!(
             only,
             HashMap::from([("a".to_string(), "x".to_string()), ("c".into(), "z".into())])

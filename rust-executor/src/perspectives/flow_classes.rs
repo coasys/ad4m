@@ -102,8 +102,15 @@ pub(crate) async fn ensure_flow_model_classes(
                 })?;
             continue;
         }
-        ensure_subject_class(perspective, class_name, target_class, sdna, required, context)
-            .await?;
+        ensure_subject_class(
+            perspective,
+            class_name,
+            target_class,
+            sdna,
+            required,
+            context,
+        )
+        .await?;
     }
     Ok(())
 }

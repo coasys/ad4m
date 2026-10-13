@@ -260,9 +260,9 @@ impl PerspectiveInstance {
             if !ours {
                 continue;
             }
-            if let Err(e) = super::replica_state::FlowReplicaState::seed_minted(
-                &self.uuid, author, instance,
-            ) {
+            if let Err(e) =
+                super::replica_state::FlowReplicaState::seed_minted(&self.uuid, author, instance)
+            {
                 // The instance's first pass becomes a silent catch-up: its
                 // first settle is recorded but not reported. Loud, not fatal.
                 log::warn!("seeding minted flow instance {instance}: {e:#}");

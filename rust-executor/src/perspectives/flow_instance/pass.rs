@@ -99,9 +99,8 @@ pub(crate) async fn catch_up_before_own_vote(
     context: &AgentContext,
     instance_uri: &str,
 ) {
-    let has_row = crate::agent::did_for_context(context).and_then(|did| {
-        FlowReplicaState::has_derived(&perspective.uuid, &did, instance_uri)
-    });
+    let has_row = crate::agent::did_for_context(context)
+        .and_then(|did| FlowReplicaState::has_derived(&perspective.uuid, &did, instance_uri));
     match has_row {
         Ok(true) => {}
         Ok(false) => {
@@ -210,7 +209,8 @@ pub async fn run_flow_consensus_pass(
             .collect();
         let bookkeeping = FlowReplicaState::fired_among(&uuid, &agent_did, &settled_atoms)
             .and_then(|marked| {
-                let state = FlowReplicaState::current_state(&uuid, &agent_did, &record.instance_uri)?;
+                let state =
+                    FlowReplicaState::current_state(&uuid, &agent_did, &record.instance_uri)?;
                 let has_row = state.is_some()
                     || FlowReplicaState::has_derived(&uuid, &agent_did, &record.instance_uri)?;
                 Ok((marked, state, has_row))

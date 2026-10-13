@@ -2228,10 +2228,7 @@ fn flow_bookkeeping_agent(ctx: &RequestContext) -> Result<String, WsRpcError> {
         .map_err(|e| WsRpcError::internal(format!("resolving the calling agent: {e}")))
 }
 
-async fn flow_states_handler(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     let instances: Option<Vec<String>> = params
         .opt_str_set("instances")?
