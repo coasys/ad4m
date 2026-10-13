@@ -272,11 +272,12 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     Ok(serde_json::to_value(filtered)?)
 }
 
-/// The perspective a guarded handler acts on, by its `uuid` param. The method's
+/// The perspective a guarded handler acts on, by its `uuid` param
+/// ([`crate::api::guards::UUID_PARAM`], read as the guard reads it). The method's
 /// `Guard::Owns` has already checked the caller's capability and access, so this only fetches
 /// it: 404 if it went away since (`null` for a method flagged `.or_null()`).
 pub(crate) async fn guarded_perspective(params: &Value) -> Result<PerspectiveInstance, WsRpcError> {
-    get_perspective_or_404(&params.require_str("uuid")?).await
+    get_perspective_or_404(&crate::api::guards::UUID_PARAM.require(&params)?).await
 }
 
 async fn get_perspective_handler(
@@ -375,7 +376,7 @@ async fn update_perspective_handler(
 }
 
 async fn delete_perspective(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
+    let uuid = crate::api::guards::UUID_PARAM.require(&params)?;
     remove_perspective(&uuid).await;
     Ok(Value::Bool(true))
 }
@@ -1071,7 +1072,7 @@ async fn run_interpretation_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
+    let uuid = crate::api::guards::UUID_PARAM.require(&params)?;
     check_credits(ctx.user_did())?;
 
     let body: RunInterpretationRequest = serde_json::from_value(params.clone())
@@ -1327,7 +1328,7 @@ async fn run_interpretation_with_harness_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
+    let uuid = crate::api::guards::UUID_PARAM.require(&params)?;
     check_credits(ctx.user_did())?;
 
     let body: RunInterpretationWithHarnessRequest = serde_json::from_value(params.clone())

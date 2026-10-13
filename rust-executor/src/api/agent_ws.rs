@@ -486,11 +486,17 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(out)?)
 }
 
+/// The grant `agent.removeApp` removes: its `id` param, a token or a request id.
+const REMOVED_GRANT: IdParam = IdParam::Field(&["id"]);
+
+/// The grant `agent.revokeToken` revokes: its `token` param, a token or a request id.
+const REVOKED_GRANT: IdParam = IdParam::Field(&["token"]);
+
 /// agent.removeApp — deletes an app's grant: its token stops working at once (a missing grant
 /// refuses as a revoked one does, #396) and leaves the app list. The guard (`Owns { Grant }`)
 /// checked that the caller's agent owns it, or that the caller is the operator.
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let request_id = params.require_str("id")?;
+    let request_id = REMOVED_GRANT.require(&params)?;
     Grants::global()
         .remove(&Grants::global().find(&request_id))
         .map_err(grant_error)?;
@@ -568,11 +574,14 @@ async fn permit_capability_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
+    // The request the guard checked.
+    let request_id = PERMITTED_REQUEST_ID.require(&params)?;
     let body: PermitCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
+    let mut auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
+    auth.request_id = request_id;
     let missing = || {
         WsRpcError::not_found(
             "No pending request has this id; it may have expired. The app must request access \
@@ -618,7 +627,7 @@ async fn generate_jwt(params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
     // for an app's grant and a login's.
-    let token = params.require_str("token")?;
+    let token = REVOKED_GRANT.require(&params)?;
     Grants::global()
         .revoke(&Grants::global().find(&token))
         .map_err(grant_error)?;
@@ -871,7 +880,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: IdParam::Field(&["id"]),
+            id: REMOVED_GRANT,
             owner: Owner::Grant,
         });
     // An app without a token asks for one.
@@ -894,7 +903,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
         .guard(Guard::Owns {
             cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
-            id: IdParam::Field(&["token"]),
+            id: REVOKED_GRANT,
             owner: Owner::Grant,
         });
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
@@ -1508,6 +1517,40 @@ mod capability_request_tests {
         let mut text: Vec<String> = caps.iter().map(|c| format!("{c:?}")).collect();
         text.sort();
         text
+    }
+
+    // An `auth` that names `requestId` twice is 400 and approves nothing, in either order: the
+    // guard would read the last id (a `Value` keeps it) while the handler's struct refuses a
+    // repeated field, so the guard could check another request than the one approved.
+    #[tokio::test]
+    async fn a_repeated_request_id_is_400_and_approves_nothing() {
+        setup();
+        let (alice_email, alice) = user("repeated-id-alice");
+        let (bob_email, _bob) = user("repeated-id-bob");
+        let caps = [AGENT_READ_CAPABILITY.clone()];
+        let mine = request(Some(&alice_email), &caps).await;
+        let victim = request(Some(&bob_email), &caps).await;
+        let auth = serde_json::to_string(&AuthInfo {
+            app_name: "Consent test app".into(),
+            capabilities: Some(caps.to_vec()),
+            ..AuthInfo::default()
+        })
+        .unwrap();
+        for (first, last) in [(&mine, &victim), (&victim, &mine)] {
+            let repeated =
+                format!(r#"{{"requestId":"{first}","requestId":"{last}","auth":{auth}}}"#);
+            let err = call(
+                "agent.permitCapability",
+                json!({ "auth": repeated }),
+                alice.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, 400, "{first} then {last}: {}", err.1);
+        }
+        let pending = crate::agent::capabilities::pending::PendingRequests::global();
+        assert!(!pending.is_approved(&mine));
+        assert!(!pending.is_approved(&victim));
     }
 
     // The end-to-end flow of #1399 on the executor: the user (a session acting as the managed

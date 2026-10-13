@@ -66,7 +66,7 @@ map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>("perspective.get"
 map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
     .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
 map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
-    .guard(Guard::Owns { cap: |_| AI_CREATE_CAPABILITY.clone(), id: removed_task_id, owner: Owner::Task });
+    .guard(Guard::Owns { cap: |_| AI_CREATE_CAPABILITY.clone(), id: REMOVED_TASK_ID, owner: Owner::Task });
 ```
 
 `Guard::perspective(cap)` builds `Guard::Owns { owner: Perspective }` on the `uuid` param.
@@ -135,8 +135,10 @@ Which guard each method has, generated from the handler map
 (`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
 fails when it is stale; `pnpm run generate:api-types` in `core/` rewrites it with the SDK
 contracts. An `Owns` row names the resource, the param the guard reads its id from (an
-`IdParam`: a field path, `a|b` for aliases, `auth(JSON).requestId` for a field inside a JSON
-string param) and the capability:
+`IdParam`: a field path, `a or b` for aliases, `auth(JSON).requestId` for a field inside a
+JSON string param) and the capability. A handler reads the id through the same `IdParam`
+(`guards::UUID_PARAM.require(&params)`, `guarded_perspective`), so it acts on the resource
+the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
@@ -206,7 +208,7 @@ string param) and the capability:
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
 | `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
-| `neighbourhood.publish` | `Owns(Perspective perspectiveUuid|perspectiveUUID, neighbourhood:CREATE)` |
+| `neighbourhood.publish` | `Owns(Perspective perspectiveUuid or perspectiveUUID, neighbourhood:CREATE)` |
 | `neighbourhood.sendBroadcast` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.sendSignal` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.setOnlineStatus` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |

@@ -88,20 +88,59 @@ impl IdParam {
                 .find_map(|name| params.get(*name))
                 .and_then(string),
             IdParam::InJson { param, field } => {
-                let inner: Value = serde_json::from_str(params.get(param)?.as_str()?).ok()?;
+                let inner = object_with_unique_keys(params.get(param)?.as_str()?)?;
                 string(inner.get(field)?)
             }
         }
     }
+
+    /// The id in `params` for a handler: the value its guard checked. Missing is 400.
+    pub fn require(self, params: &Value) -> Result<String, WsRpcError> {
+        self.read(params)
+            .ok_or_else(|| WsRpcError::bad_request(format!("Missing required parameter: '{self}'")))
+    }
 }
 
-/// How the guard table names the field: `uuid`, `task.taskId`, `perspectiveUuid|perspectiveUUID`,
-/// `auth(JSON).requestId`.
+/// The JSON object in `text`, `None` when it is not one or names a key twice. `serde_json`
+/// keeps the last of two equal keys in a `Value`, while the struct a handler reads refuses
+/// them, so a guard reading the `Value` could check another id than the handler acts on.
+fn object_with_unique_keys(text: &str) -> Option<serde_json::Map<String, Value>> {
+    struct Unique(serde_json::Map<String, Value>);
+    struct UniqueVisitor;
+    impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
+        type Value = Unique;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON object without repeated keys")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Unique, A::Error> {
+            let mut object = serde_json::Map::new();
+            while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                if object.contains_key(&key) {
+                    return Err(serde::de::Error::custom(format!("repeated key {key}")));
+                }
+                object.insert(key, value);
+            }
+            Ok(Unique(object))
+        }
+    }
+    impl<'de> serde::Deserialize<'de> for Unique {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            d.deserialize_map(UniqueVisitor)
+        }
+    }
+    serde_json::from_str::<Unique>(text)
+        .ok()
+        .map(|unique| unique.0)
+}
+
+/// How the guard table names the field: `uuid`, `task.taskId`, `perspectiveUuid or
+/// perspectiveUUID`, `auth(JSON).requestId`. No `|`: inside a code span it still splits a
+/// GFM table cell.
 impl std::fmt::Display for IdParam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IdParam::Field(path) => write!(f, "{}", path.join(".")),
-            IdParam::FirstOf(names) => write!(f, "{}", names.join("|")),
+            IdParam::FirstOf(names) => write!(f, "{}", names.join(" or ")),
             IdParam::InJson { param, field } => write!(f, "{param}(JSON).{field}"),
         }
     }
@@ -311,10 +350,14 @@ mod tests {
         let auth = json!({ "requestId": "r1", "auth": {} }).to_string();
         assert_eq!(in_json.read(&json!({ "auth": auth })), Some("r1".into()));
         assert_eq!(in_json.read(&json!({ "auth": "not json" })), None);
+        // A repeated key names no id: the handler's struct refuses it, and the last value,
+        // which a `Value` keeps, is not the one the handler would act on.
+        let repeated = r#"{"requestId":"mine","requestId":"victim"}"#;
+        assert_eq!(in_json.read(&json!({ "auth": repeated })), None);
 
         assert_eq!(UUID_PARAM.to_string(), "uuid");
         assert_eq!(nested.to_string(), "task.taskId");
-        assert_eq!(aliases.to_string(), "perspectiveUuid|perspectiveUUID");
+        assert_eq!(aliases.to_string(), "perspectiveUuid or perspectiveUUID");
         assert_eq!(in_json.to_string(), "auth(JSON).requestId");
     }
 }
