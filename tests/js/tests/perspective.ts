@@ -292,6 +292,26 @@ export default function perspectiveTests(testContext: TestContext) {
                 }
             })
 
+            it('a SPARQL live query follows a link that is added, then removed', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("live sparql rows")
+                const subscription = await p.subscribeQuery('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
+                const rows = () => subscription.result as unknown as any[]
+                try {
+                    expect(rows()).to.eql([])
+
+                    const link = await p.add(new Link({ source: 'test://live-source', predicate: 'test://live-predicate', target: 'test://live-target' }))
+                    await pollUntil(() => rows().length === 1, { label: 'live query row for the added link' })
+                    expect(JSON.stringify(rows()[0])).to.include('test://live-target')
+
+                    await p.remove(link)
+                    await pollUntil(() => rows().length === 0, { label: 'live query row removed with the link' })
+                } finally {
+                    subscription.dispose()
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            })
+
             it('subscriptions', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
 
@@ -341,49 +361,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 await pollUntil(() => linkRemoved.called, { timeoutMs: 5000, label: "linkRemoved callback fires" });
                 expect(linkRemoved.called).to.be.true;
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
-            })
-
-            // SdnaOnly doesn't load links into prolog engine
-            it.skip('shares subscription between identical prolog queries', async () => {
-                const ad4mClient: Ad4mClient = testContext.ad4mClient!
-                const p = await ad4mClient.perspective.add("Subscription test")
-
-                const query = 'triple(X, _, "test://target").'
-                
-                // Create first subscription
-                const sub1 = await p.subscribeInfer(query)
-                const sub1Id = sub1.id
-                const callback1 = sinon.fake()
-                sub1.onResult(callback1)
-
-                // Create second subscription with same query
-                const sub2 = await p.subscribeInfer(query) 
-                const sub2Id = sub2.id
-                const callback2 = sinon.fake()
-                sub2.onResult(callback2)
-
-                // Assert they got same subscription ID
-                expect(sub1Id).to.equal(sub2Id)
-
-                // Add a link that matches the query
-                await p.add(new Link({
-                    source: "test://source",
-                    target: "test://target"
-                }))
-
-                // Wait for subscription callbacks to fire (covers establishment + propagation)
-                await pollUntil(() => callback1.called && callback2.called, { timeoutMs: 5000, intervalMs: 100, label: "subscription callbacks fire" });
-
-                // Verify both callbacks were called
-                expect(callback1.called).to.be.true
-                expect(callback2.called).to.be.true
-
-                // Verify both got same result
-                const result1 = callback1.getCall(callback1.callCount - 1).args[0]
-                const result2 = callback2.getCall(callback2.callCount - 1).args[0]
-                console.log("result1", result1)
-                expect(result1).to.deep.equal(result2)
-                expect(result1[0].X).to.equal("test://source")
             })
 
             // SdnaOnly doesn't load links into prolog engine
@@ -896,55 +873,17 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('test://target2')
             })
 
-            // SdnaOnly doesn't load links into prolog engine
-            it.skip('can subscribe to Prolog query results', async () => {
-                // Add some test data
-                await proxy.add(new Link({
-                    source: "ad4m://root",
-                    target: "note-ipfs://Qm123"
-                }))
-                await proxy.add(new Link({
-                    source: "note-ipfs://Qm123",
-                    target: "todo-ontology://is-todo"
-                }))
-
-                // Create subscription
-                const subscription = await (proxy as any).subscribeInfer('triple(X, _, "todo-ontology://is-todo").')
-                
-                // Check initial result
-                const initialResult = subscription.result
-                expect(initialResult).to.be.an('array')
-                expect(initialResult.length).to.equal(1)
-                expect(initialResult[0].X).to.equal('note-ipfs://Qm123')
-
-                // Set up callback for updates
-                const updates: any[] = []
-                const unsubscribe = subscription.onResult((result: any) => {
-                    updates.push(result)
-                })
-
-                // Add another link that should trigger an update
-                await proxy.add(new Link({
-                    source: "note-ipfs://Qm456",
-                    target: "todo-ontology://is-todo"
-                }))
-
-                // Wait for subscription update
-                await pollUntil(() => updates.length > 0, { timeoutMs: 5000, intervalMs: 100, label: "subscription update received" });
-
-                // Verify we got an update
-                expect(updates.length).to.be.greaterThan(0)
-                const latestResult = updates[updates.length - 1]
-                expect(latestResult).to.be.an('array')
-                expect(latestResult.length).to.equal(2)
-                expect(latestResult.map((r: any) => r.X)).to.include('note-ipfs://Qm123')
-                expect(latestResult.map((r: any) => r.X)).to.include('note-ipfs://Qm456')
-
-                // Clean up subscription
-                unsubscribe()
-                subscription.dispose()
+            it('refuses a Prolog live query with 400', async () => {
+                let error: any
+                try {
+                    await ad4mClient.perspective.subscribeQuery(proxy.uuid, 'triple(X, _, "todo-ontology://is-todo").')
+                } catch (e) {
+                    error = e
+                }
+                expect(error, 'subscribeQuery rejects').to.exist
+                expect(error.status).to.equal(400)
+                expect(error.body).to.include('Prolog live queries are no longer supported')
             })
-
         })
     }
 }
