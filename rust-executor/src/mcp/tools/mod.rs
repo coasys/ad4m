@@ -210,27 +210,43 @@ impl ServerHandler for Ad4mMcpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let tool_name = request.name.to_string();
+        match self
+            .admit_tool_call(&tool_name, RequestAuth::of(&context))
+            .await
+        {
+            Ok(this) => this.dispatch_tool(request, context).await,
+            Err(refusal) => Ok(refusal),
+        }
+    }
+}
 
-        // Every call resolves its caller, so a header token opens (and the MCP session
-        // remembers) a session before any tool runs, auth tools included: `auth_status`
-        // then reports the session the other tools use. The auth tools run whatever the
-        // outcome; every other tool needs a working, authenticated session.
-        //
-        // The tool runs on a handler whose reach is this request's (`for_request`), so what
-        // the tool resolves again without the request (`session()`, the login tools' call
-        // without a token, `sign_in`) reads a proxied request as a network one too.
-        let auth = RequestAuth::of(&context);
+impl Ad4mMcpHandler {
+    /// `call_tool` before the tool runs, split out because tests cannot build an rmcp
+    /// `RequestContext`: the handler the tool `tool_name` runs on, or the refusal.
+    ///
+    /// Every call resolves its caller, so a header token opens (and the MCP session
+    /// remembers) a session before any tool runs, auth tools included: `auth_status`
+    /// then reports the session the other tools use. The auth tools run whatever the
+    /// outcome; every other tool needs a working, authenticated session.
+    ///
+    /// The tool runs on a handler whose reach is this request's (`for_request`), so what
+    /// the tool resolves again without the request (`session()`, the login tools' call
+    /// without a token, `sign_in`) reads a proxied request as a network one too.
+    pub(crate) async fn admit_tool_call(
+        &self,
+        tool_name: &str,
+        auth: RequestAuth,
+    ) -> Result<Self, CallToolResult> {
         let this = self.for_request(&auth);
         let caller = this.caller(auth).await;
-        if !AUTH_TOOLS.contains(&tool_name.as_str()) {
+        if !AUTH_TOOLS.contains(&tool_name) {
             if let Err(refusal) = authenticated(caller) {
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Err(CallToolResult::error(vec![Content::text(
                     json!({ "error": refusal }).to_string(),
                 )]));
             }
         }
-
-        this.dispatch_tool(request, context).await
+        Ok(this)
     }
 }
 
@@ -1117,6 +1133,40 @@ mod agent_context_tests {
             reach: Some(crate::api::auth::listener_reach(&parts)),
         };
         assert!(!handler.caller(auth).await.unwrap().is_authenticated());
+    }
+
+    /// `call_tool`'s own reach selection: one tokenless `tools/call` with `X-Forwarded-For`
+    /// on a loopback listener without a credential. An auth tool is admitted (it runs
+    /// whatever the outcome), but on a handler with the request's reach, so what it resolves
+    /// again without the request is anonymous, not the operator; any other tool is refused.
+    #[tokio::test]
+    async fn a_forwarded_tool_call_without_a_token_runs_as_anonymous() {
+        ensure_test_db();
+        let handler = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
+        let forwarded = || {
+            let (parts, _) = axum::http::Request::builder()
+                .header("x-forwarded-for", "203.0.113.9")
+                .extension(ListenerReach::Loopback)
+                .body(())
+                .unwrap()
+                .into_parts();
+            RequestAuth {
+                header: bearer_credential(&parts),
+                reach: Some(crate::api::auth::listener_reach(&parts)),
+            }
+        };
+
+        let Ok(this) = handler.admit_tool_call("auth_status", forwarded()).await else {
+            panic!("an auth tool is admitted without a session");
+        };
+        let err = this.session().await.unwrap_err();
+        assert!(err.starts_with("Authentication required."), "{err}");
+        assert!(!this.tokenless_session().unwrap().is_authenticated());
+
+        let Err(refusal) = handler.admit_tool_call("get_my_did", forwarded()).await else {
+            panic!("a proxied caller without a token reached get_my_did");
+        };
+        assert_eq!(refusal.is_error, Some(true));
     }
 
     #[test]

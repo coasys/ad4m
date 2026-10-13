@@ -496,11 +496,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     }
     // `check_admin_credential` refused `--enable-multi-user` without a credential; the mode
     // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
-    if config.admin_credential.is_none() && crate::user_management::is_multi_user_enabled() {
-        return failed_start(format!(
-            "Refusing to start: multi-user mode is on in this executor's database. {}",
-            crate::config::MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR
-        ));
+    if let Err(reason) = crate::config::refuse_multi_user_from_db(
+        &config.admin_credential,
+        crate::user_management::is_multi_user_enabled(),
+    ) {
+        return failed_start(reason);
     }
 
     info!("Initializing AI service...");

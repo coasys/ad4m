@@ -185,10 +185,10 @@ impl Ad4mMcpHandler {
     /// that user does (`grant_caps_for`).
     ///
     /// Scope: without an admin credential, a caller with no token on a loopback
-    /// listener is the operator, so it still gets the inline code. On a multi-user
-    /// executor that includes a user who drops their token or opens a new session
-    /// (#1059). Such a server binds loopback only (#1033); on a listener beyond
-    /// loopback (an explicit `MCP_HOST`) that caller is anonymous and gets no code.
+    /// listener is the operator, so it still gets the inline code; on a listener beyond
+    /// loopback (an explicit `MCP_HOST`), or through a proxy, that caller is anonymous
+    /// and gets no code. A multi-user executor always has a credential: see
+    /// [`crate::config::Ad4mConfig::check_admin_credential`].
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,

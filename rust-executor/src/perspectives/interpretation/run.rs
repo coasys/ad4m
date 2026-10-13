@@ -1269,8 +1269,9 @@ fn offered_class_tools(
     move |t: &ToolSchema| is_read_only(t) && names.contains(&t.name)
 }
 
-/// The MCP context of an interpretation pass on `perspective`. The pass runs in-process, so
-/// the reach is loopback. Its dynamic tool list names the classes of `perspective` only.
+/// The MCP context of an interpretation pass on `perspective`. The pass runs in-process but
+/// has no request headers, so its reach is `Network`: a tokenless fallback inside it is
+/// anonymous. Its dynamic tool list names the classes of `perspective` only.
 ///
 /// - A pass with a caller acts as the caller's session: the one its RPC request arrived on,
 ///   so the pass's tools reach what the caller reaches, and stop once that session's grant
@@ -1292,7 +1293,9 @@ pub(crate) async fn pass_mcp_context(
     crate::mcp::server::McpContext::new(
         // The pass holds its session; no token arrives that a credential would decide.
         None,
-        crate::agent::capabilities::ListenerReach::Loopback,
+        // A pass has no request headers, so nothing shows it local: any tokenless
+        // fallback inside a pass is anonymous, never the operator.
+        crate::agent::capabilities::ListenerReach::Network,
         // The harness reaches tools through `list_tool_schemas` /
         // `call_tool_by_name`, which always include the dynamic per-class
         // tools regardless of this flag (it only gates the MCP transport).
@@ -1562,6 +1565,21 @@ mod pass_session_tests {
             .session()
             .await
             .unwrap();
+        assert_eq!(session.managed_did(), Some(A_DID));
+    }
+
+    /// A pass has no request headers, so its reach is `Network`: any tokenless fallback
+    /// inside a pass is anonymous, never the operator, even without an admin credential.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tokenless_fallback_inside_a_pass_is_anonymous() {
+        managed_user(A_EMAIL, A_DID);
+        let a = fixture("Note", NOTE_SDNA, Some(A_DID)).await;
+        let handler = pass_handler(&a, &AgentContext::managed(A_DID.into())).await;
+        let tokenless = handler.tokenless_session().unwrap();
+        assert!(!tokenless.is_operator());
+        assert!(!tokenless.is_authenticated());
+        // The pass's own session is unchanged: the owner's.
+        let session = handler.session().await.unwrap();
         assert_eq!(session.managed_did(), Some(A_DID));
     }
 

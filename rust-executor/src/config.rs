@@ -342,6 +342,23 @@ impl std::fmt::Debug for SmtpConfig {
     }
 }
 
+/// The second startup gate, after [`Ad4mConfig::check_admin_credential`]: that one refuses
+/// `--enable-multi-user` without a credential, but the mode may also be on in the
+/// executor's database (`user.setMultiUserEnabled` on an earlier run). `run()` calls this
+/// once the database is open, with `multi_user_on` read from it.
+pub fn refuse_multi_user_from_db(
+    admin_credential: &Option<Secret>,
+    multi_user_on: bool,
+) -> Result<(), String> {
+    if admin_credential.is_none() && multi_user_on {
+        return Err(format!(
+            "Refusing to start: multi-user mode is on in this executor's database. {}",
+            MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR
+        ));
+    }
+    Ok(())
+}
+
 /// Why `run` refused to start; names both ways out.
 pub const NO_ADMIN_CREDENTIAL_ERROR: &str =
     "Refusing to start: no admin credential is set, and without one every caller \
@@ -593,6 +610,48 @@ mod tests {
         };
         assert!(single_user.check_admin_credential().is_ok());
         assert!(MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR.contains("--admin-credential"));
+    }
+
+    /// Both startup gates for multi-user mode, as `run()` applies them: the start flag
+    /// (`check_admin_credential`) and the mode left on in the database
+    /// (`refuse_multi_user_from_db`). Without a credential either refuses; with one, both pass.
+    #[test]
+    fn multi_user_gates_refuse_without_an_admin_credential() {
+        // (credential, --enable-multi-user, on in the database, starts)
+        let table = [
+            (None, Some(true), false, false),
+            (None, Some(false), true, false),
+            (None, None, true, false),
+            (Some("secret"), Some(true), false, true),
+            (Some("secret"), None, true, true),
+            (Some("secret"), Some(true), true, true),
+            (None, Some(false), false, true),
+        ];
+        for (credential, flag, db_on, starts) in table {
+            let config = Ad4mConfig {
+                enable_multi_user: flag,
+                ..with_credential(credential, Some(true))
+            };
+            let gates = config
+                .check_admin_credential()
+                .and_then(|()| refuse_multi_user_from_db(&config.admin_credential, db_on));
+            assert_eq!(
+                gates.is_ok(),
+                starts,
+                "credential {credential:?}, flag {flag:?}, db {db_on}: {gates:?}"
+            );
+            if let Err(reason) = gates {
+                assert!(
+                    reason.contains(MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR),
+                    "{reason}"
+                );
+            }
+        }
+        let from_db = refuse_multi_user_from_db(&None, true).unwrap_err();
+        assert!(
+            from_db.contains("on in this executor's database"),
+            "{from_db}"
+        );
     }
 
     #[test]

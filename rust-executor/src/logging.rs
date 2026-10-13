@@ -99,12 +99,12 @@ pub fn build_rust_log_from_config(
 /// rmcp logs through `tracing`, whose `log` feature forwards to this logger when no tracing
 /// subscriber is set (the CLI), and the launcher's tracing filter reads the same `RUST_LOG`.
 /// A global level (`RUST_LOG=info`) would otherwise log it. An operator who names rmcp
-/// (`rmcp=debug`) gets what they asked for.
+/// itself (`rmcp=debug`) gets what they asked for; a directive for one rmcp module
+/// (`rmcp::service=debug`) keeps its level and the rest of rmcp stays at `warn`.
 pub fn without_mcp_session_ids(rust_log: &str) -> String {
-    let names_rmcp = rust_log.split(',').any(|directive| {
-        let target = directive.split('=').next().unwrap_or_default().trim();
-        target == "rmcp" || target.starts_with("rmcp::")
-    });
+    let names_rmcp = rust_log
+        .split(',')
+        .any(|directive| directive.split('=').next().unwrap_or_default().trim() == "rmcp");
     if names_rmcp {
         rust_log.to_string()
     } else if rust_log.trim().is_empty() {
@@ -250,6 +250,19 @@ mod tests {
         ));
         assert!(!logs(&defaults, RMCP_SESSIONS, log::Level::Info));
         assert!(logs(&defaults, "rust_executor", log::Level::Info));
+    }
+
+    /// A directive for one rmcp module does not name rmcp: the rest of rmcp, the session
+    /// ids included, stays at warn, and the named module gets its level.
+    #[test]
+    fn naming_an_rmcp_module_still_holds_rmcp_at_warn() {
+        let quiet = without_mcp_session_ids("info,rmcp::service=debug");
+        assert_eq!(quiet, "info,rmcp::service=debug,rmcp=warn");
+        assert!(!logs(&quiet, RMCP_SESSIONS, log::Level::Info), "{quiet:?}");
+        assert!(
+            logs(&quiet, "rmcp::service", log::Level::Debug),
+            "{quiet:?}"
+        );
     }
 
     /// An operator who names rmcp gets what they asked for.
