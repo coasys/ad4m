@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  The launcher embeds a Deno/V8 runtime (the AD4M executor). Under Apple's
+	  hardened runtime, which notarization requires, V8 cannot allocate
+	  executable memory without these entitlements, and the app dies as soon as
+	  it starts the executor.
+
+	  The failure is quiet in exactly the wrong way: an app signed with the
+	  hardened runtime and no entitlements still notarizes, still passes
+	  `spctl -a -t exec`, and still passes `stapler validate`. Every check in a
+	  normal signing checklist goes green and the app crashes on first launch.
+	-->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!-- The executor resolves its own dylibs and language runtimes at startup. -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>
