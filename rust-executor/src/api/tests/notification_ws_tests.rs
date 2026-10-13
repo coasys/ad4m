@@ -775,9 +775,9 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     let all = crate::api::event_interest::watching_all;
     let operator = Arc::new(Session::for_test(Principal::Operator));
     let alice_session = user_session(&alice_did);
-    let mut alice = build_event_stream(alice_session, all()).await;
-    let mut bob = build_event_stream(user_session(&bob_did), all()).await;
-    let mut main = build_event_stream(operator, all()).await;
+    let mut alice = build_event_stream(alice_session, all(), None).await;
+    let mut bob = build_event_stream(user_session(&bob_did), all(), None).await;
+    let mut main = build_event_stream(operator, all(), None).await;
 
     fire(&alice_did).await;
     let a = next(&mut alice).await;
@@ -818,7 +818,7 @@ async fn the_install_request_and_the_list_never_carry_the_webhook_credential() {
     let main = perspectives.add(None);
     let operator = Arc::new(Session::for_test(Principal::Operator));
     let all = crate::api::event_interest::watching_all;
-    let mut stream = build_event_stream(operator, all()).await;
+    let mut stream = build_event_stream(operator, all(), None).await;
 
     let id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
     let request = next_containing(&mut stream, "INSTALL_NOTIFICATION_REQUEST")

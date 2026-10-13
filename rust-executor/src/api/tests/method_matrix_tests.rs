@@ -440,15 +440,11 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "query": "ASK {}" }),
     ),
     (
-        "perspective.keepAliveQuery",
+        "perspective.resyncSubscription",
         || json!({ "subscriptionId": "s" }),
     ),
     (
         "perspective.disposeQuery",
-        || json!({ "subscriptionId": "s" }),
-    ),
-    (
-        "perspective.keepAliveSparql",
         || json!({ "subscriptionId": "s" }),
     ),
     (

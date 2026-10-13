@@ -14,9 +14,9 @@ import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveEvent } from "./PerspectiveEvent";
 import type { PerspectiveLinkEvent } from "./PerspectiveLinkEvent";
 import type { PerspectiveLinkUpdatedEvent } from "./PerspectiveLinkUpdatedEvent";
-import type { PerspectiveQuerySubscriptionFilter } from "./PerspectiveQuerySubscriptionFilter";
 import type { PerspectiveRemovedEvent } from "./PerspectiveRemovedEvent";
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
+import type { QuerySubscriptionUpdateEvent } from "./QuerySubscriptionUpdateEvent";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -37,7 +37,7 @@ export interface EventMap {
   "exception-occurred": ExceptionOccurredEvent;
   "transcription-text": TranscriptionTextFilter;
   "model-loading-status": AIModelLoadingStatus;
-  "query-subscription-update": PerspectiveQuerySubscriptionFilter;
+  "query-subscription-update": QuerySubscriptionUpdateEvent;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;
 }

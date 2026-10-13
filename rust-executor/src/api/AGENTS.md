@@ -7,7 +7,7 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`); the only event socket |
+| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
 
@@ -142,7 +142,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-169 methods: Cap 55, Executor 33, Open 5, Operator 15, Owns 61.
+168 methods: Cap 55, Executor 33, Open 5, Operator 15, Owns 60.
 
 | Method | Guard |
 |---|---|
@@ -236,8 +236,6 @@ the guard checked:
 | `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.keepAliveQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.keepAliveSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
@@ -253,6 +251,7 @@ the guard checked:
 | `perspective.removeAutoProcessor` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.resyncSubscription` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
@@ -336,8 +335,13 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   inline on the RPC socket (per-connection state, like `request.cancel`). A list matches events
   whose `Event::perspective` (the payload's `perspectiveUuid`) it names; unscoped payloads carry
   none. There is no separate events socket (`/api/v1/ws/events` was removed).
-- Live query updates (`query-subscription-update`) pass `events.watch` untouched: every socket of
-  the perspective owner gets them, and the SDK routes them by `subscriptionId`.
+- Live query updates (`query-subscription-update`) pass `events.watch` untouched. A live query
+  belongs to the RPC connection that opened it (`RequestContext::connection_id`, #1207): its
+  update is an `Event` with `Event::connection` set (`Event::for_connection`), and a socket's
+  stream drops an event whose connection is not its own before `may_receive` runs, so the update
+  needs both its connection and its audience. The key is not on the wire. When a socket's stream
+  lags it sends `{ "type": "query-subscription-update", "lagged": true }` and `LiveQuery` resyncs.
+  Closing the socket disposes its subscriptions (`ws_rpc::serve`).
 - One event path. A publisher calls `pubsub.publish_event(Event::new(Topic, Audience, payload))`
   (`src/events.rs`); there is no default audience. Wire names live in `Topic::as_str` only;
   `events_ws::event_specs()` is keyed by `Topic`. A socket's stream
@@ -366,8 +370,8 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   goes to `Everyone`. Each goes out once, to all recipients (`perspectives::publish_to_owners`),
   and no payload names an `owner`: `perspective-added/-updated/-removed`, `sync-state-change`,
   `link-added/-removed/-updated`. `query-subscription-update`
-  (`PerspectiveInstance::send_subscription_update`, which reads the recipients before its task)
-  goes only to the subscriber (`SubscribedQuery::agent_did`, the main agent for `None`) when it
+  (`PerspectiveInstance::send_delta_update`, which reads the recipients when it publishes)
+  goes only to the subscriber (`SubscribedQuery::subscriber`, the main agent for `None`) when it
   is one of them: the query ran as the subscriber, so a co-owner must not get its results.
   `signal` goes to its `recipient` (`perspectives::signal_event`); one without a recipient goes
   once to each of `event_recipients`, each copy naming that DID as `recipient`
@@ -395,7 +399,8 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   `Session::check()` again on each request and each delivered event, so revocation and expiry end
   an open connection. Tests build sessions with `Session::for_test(principal)` plus
   `.with_caps(..)`, `.with_did(..)`, `.with_grant(..)`, `.expiring_at(..)`, and contexts with
-  `RequestContext::{operator,app,user}_for_test` / `for_session`.
+  `RequestContext::{operator,app,user}_for_test` / `for_session` (`.on_connection(id)` for a
+  context on an RPC connection).
 - Each socket's "session over" token is `ctx.session.ended()`: a child of the grant's `ended`
   token (a token that never fires for the operator and anonymous callers). Revoking or removing
   the grant cancels it, and the socket closes at once with `ws_rpc::token_ended_frame()` (1008),
@@ -448,6 +453,20 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   `capabilities::request_capability`, `permit_capability` and `generate_capability_token` are the
   same steps for MCP (`mcp/tools/auth.rs`, which auto-permits only when `caller_can_permit` says
   the caller may approve for the target) and the dev-mode auto-permit.
+- Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
+  (revision 0, or later if a write landed while the first result was computed: the subscription is
+  registered first);
+  each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
+  `removed` rows, or the whole `result` when the rows would lose their order; see
+  `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per update). On a gap,
+  `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`. When the
+  update topic lags, the socket gets one `{ type: 'query-subscription-update', lagged: true }` and
+  the client resyncs every live query.
+- A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`, set
+  by `ws_rpc::serve` next to the connection's `Session`): only that socket gets its updates (they
+  bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
+  call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
+  (REST) is a 400.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

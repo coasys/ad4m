@@ -17,6 +17,8 @@ pub mod flow_ws_tests;
 #[cfg(test)]
 pub mod handler_table_tests;
 #[cfg(test)]
+pub mod live_query_tests;
+#[cfg(test)]
 pub mod method_matrix_tests;
 #[cfg(test)]
 pub(crate) mod multi_user;
