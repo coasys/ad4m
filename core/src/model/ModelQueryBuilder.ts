@@ -484,12 +484,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     });
     const initialResults = parseResults(initial);
     lastFingerprint = fingerprint(initialResults);
-
-    // Take snapshots for dirty tracking
-    for (const inst of initialResults) {
-      (inst as any).takeSnapshot?.(this.queryParams.include);
-    }
-
     return initialResults;
   }
 

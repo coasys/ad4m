@@ -3888,3 +3888,91 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
     ).toThrow(/different predicates/);
   });
 });
+
+describe("save() on an instance pushed by a subscription", () => {
+  @Model({ name: "PushedTask" })
+  class PushedTask extends Ad4mModel {
+    @Flag({ through: "push://kind", value: "push://task" })
+    kind: string = "";
+    @Property({ through: "push://title" })
+    title: string = "";
+  }
+
+  @Model({ name: "PushedNote" })
+  class PushedNote extends Ad4mModel {
+    @Flag({ through: "push://kind", value: "push://note" })
+    kind: string = "";
+    @Property({ through: "push://body" })
+    body: string = "";
+  }
+
+  const makePerspective = (initial: any[]) => {
+    let push: (result: any) => void = () => {};
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "sub-push",
+        revision: 0,
+        result: { instances: initial, totalCount: initial.length },
+      }),
+      onQueryUpdate: jest.fn((cb: any) => {
+        push = updatesFor("sub-push", cb);
+        return () => {};
+      }),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    const perspective = {
+      uuid: "test-uuid",
+      client,
+      modelSubscribe: (className: any, queryJson: string) =>
+        client.modelSubscribe("test-uuid", className, queryJson),
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      createSubject: jest.fn().mockResolvedValue(undefined),
+      createBatch: jest.fn().mockResolvedValue("batch-1"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("PushedTask"),
+    } as any;
+    return { perspective, push: (instances: any[]) => push({ instances, totalCount: instances.length }) };
+  };
+
+  /** The value each executeAction call wrote. */
+  const written = (perspective: any) =>
+    perspective.executeAction.mock.calls.map((call: any[]) => call[2]?.[0]?.value);
+
+  it("updates the instance rather than creating a second one", async () => {
+    const { perspective, push } = makePerspective([{ id: "push://t1", kind: "push://task", title: "v1" }]);
+    let pushed: PushedTask[] = [];
+    await PushedTask.query(perspective).subscribe((results) => { pushed = results; });
+
+    // The record changes elsewhere; the subscription pushes the new state.
+    push([{ id: "push://t1", kind: "push://task", title: "v2" }]);
+    expect(pushed).toHaveLength(1);
+
+    const task = pushed[0];
+    expect(task.isDirty()).toBe(false);
+    task.title = "v3";
+    expect(task.changedFields()).toEqual(["title"]);
+    await task.save("batch-1");
+
+    expect(perspective.createSubject).not.toHaveBeenCalled();
+    expect(written(perspective)).toEqual(["literal:string:v3"]);
+  });
+
+  it("updates an instance pushed to a queryOf() subscription", async () => {
+    const { perspective, push } = makePerspective([]);
+    let pushed: Ad4mModel[] = [];
+    await Ad4mModel.queryOf(perspective, [PushedTask, PushedNote]).subscribe((results) => { pushed = results; });
+
+    push([
+      { id: "push://t1", kind: "push://task", title: "v2", __subjectClass: "PushedTask" },
+      { id: "push://n1", kind: "push://note", body: "b", __subjectClass: "PushedNote" },
+    ]);
+    const note = pushed[1] as PushedNote;
+    expect(note).toBeInstanceOf(PushedNote);
+    note.body = "b2";
+    await note.save("batch-1");
+
+    expect(perspective.createSubject).not.toHaveBeenCalled();
+    expect(written(perspective)).toEqual(["literal:string:b2"]);
+  });
+});

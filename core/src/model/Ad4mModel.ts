@@ -239,6 +239,15 @@ function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined)
   return out;
 }
 
+/** Snapshot each top-level instance for dirty tracking, so `save()` on any
+ *  hydrated instance (query, union or subscription push) takes the update
+ *  path. Only the included relations (not `$` projections) are recorded. */
+function snapshotHydrated(instances: any[], include?: IncludeMap): void {
+  const relations = include && Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')));
+  const recorded = relations && Object.keys(relations).length > 0 ? relations : undefined;
+  for (const inst of instances) inst?.takeSnapshot?.(recorded);
+}
+
 function jsonToModelInstance<T extends Ad4mModel>(
   ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
   perspective: PerspectiveProxy,
@@ -1178,7 +1187,9 @@ export class Ad4mModel {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+    const instances = arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+    snapshotHydrated(instances, include);
+    return instances;
   }
 
 
@@ -1279,10 +1290,12 @@ export class Ad4mModel {
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
     const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
-    return arr.map((json: any) => {
+    const instances = arr.map((json: any) => {
       const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
       return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
     });
+    snapshotHydrated(instances, include);
+    return instances;
   }
 
   /** @internal */
@@ -1295,14 +1308,6 @@ export class Ad4mModel {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of results) {
-      (inst as any).takeSnapshot?.(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
     return { results, totalCount: result.totalCount };
   }
 
@@ -1386,24 +1391,8 @@ export class Ad4mModel {
 
     const result = await perspective.modelQuery(className, queryJson, options);
 
-    // Convert JSON instances to model class instances, recursively constructing
-    // class instances for any included relations resolved by Rust.
-    const instances: T[] = result.instances.map((json: any) => {
-      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
-    });
-
-    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
-
     return {
-      results: instances,
+      results: this.parseModelResult(perspective, result, query.include, query.properties),
       totalCount: result.totalCount,
     };
   }
