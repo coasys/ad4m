@@ -7,8 +7,12 @@ export interface StoredEntry<V> {
 }
 
 export interface KeyedCacheOptions<V> {
-    /** Reads many keys in one call: one entry per key, in order, `null` when not found. */
-    loadMany(keys: string[]): Promise<Array<V | null>>;
+    /**
+     * Reads many keys in one call: one entry per key, in order, `null` when
+     * not found, an `Error` when that key's read failed (it rejects that key's
+     * readers only).
+     */
+    loadMany(keys: string[]): Promise<Array<V | null | Error>>;
     /**
      * Reads one key. When set, `get` misses use it; otherwise `get` misses
      * made in the same tick share one `loadMany` call, as `getMany` misses do.
@@ -42,7 +46,7 @@ export class KeyedCache<V> {
     #values = new Map<string, { value: V; ts: number; size: number }>();
     #bytes = 0;
     #pending = new Map<string, Promise<V | null>>();
-    #batch: { keys: string[]; done: Promise<Map<string, Loaded<V>>> } | null = null;
+    #batch: { keys: string[]; done: Promise<Map<string, Loaded<V | Error>>> } | null = null;
 
     constructor(opts: KeyedCacheOptions<V>) {
         this.#opts = opts;
@@ -116,11 +120,15 @@ export class KeyedCache<V> {
             this.#batch = { keys, done };
         }
         this.#batch.keys.push(key);
-        return this.#batch.done.then(loaded => loaded.get(key)!);
+        return this.#batch.done.then(loaded => {
+            const entry = loaded.get(key)!;
+            if (entry.value instanceof Error) throw entry.value;
+            return entry as Loaded<V>;
+        });
     }
 
-    async #loadBatch(keys: string[]): Promise<Map<string, Loaded<V>>> {
-        const loaded = new Map<string, Loaded<V>>();
+    async #loadBatch(keys: string[]): Promise<Map<string, Loaded<V | Error>>> {
+        const loaded = new Map<string, Loaded<V | Error>>();
         const stored = await Promise.all(keys.map(key => this.#stored(key)));
         const misses = keys.filter((key, i) => {
             if (stored[i]) loaded.set(key, stored[i]!);

@@ -38,6 +38,7 @@ import type { EntanglementProofsWrapper } from "./EntanglementProofsWrapper";
 import type { EventName } from "./Events";
 import type { ExportRequest } from "./ExportRequest";
 import type { ExpressionInteractRequest } from "./ExpressionInteractRequest";
+import type { ExpressionManyEntry } from "./ExpressionManyEntry";
 import type { ExpressionManyRequest } from "./ExpressionManyRequest";
 import type { ExpressionRendered } from "./ExpressionRendered";
 import type { ExpressionUrlRequest } from "./ExpressionUrlRequest";
@@ -210,7 +211,7 @@ export interface RpcMethods {
   "events.watch": { params: Partial<Record<EventName, Array<string> | null>>; result: boolean };
   "expression.create": { params: CreateExpressionRequest; result: string };
   "expression.get": { params: ExpressionUrlRequest; result: ExpressionRendered | null };
-  "expression.getMany": { params: ExpressionManyRequest; result: Array<ExpressionRendered | null> };
+  "expression.getMany": { params: ExpressionManyRequest; result: Array<ExpressionManyEntry | null> };
   "expression.getRaw": { params: ExpressionUrlRequest; result: string | null };
   "expression.interact": { params: ExpressionInteractRequest; result: string };
   "expression.interactions": { params: ExpressionUrlRequest; result: Array<InteractionMeta> };

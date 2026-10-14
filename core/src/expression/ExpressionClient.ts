@@ -1,4 +1,4 @@
-import { ApiClient } from "../apiClient";
+import { ApiClient, RpcError } from "../apiClient";
 import { InteractionCall, InteractionMeta } from "../language/Language";
 import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
@@ -13,15 +13,15 @@ export class ExpressionClient {
     /** Maximum total size (in bytes of JSON) of the expressions kept in memory. */
     static MAX_MEM_BYTES = 5 * 1024 * 1024; // 5 MB
 
-    // A `get` miss reads with `expression.get`; the misses of `getMany` calls
-    // made in the same tick go out in one `expression.getMany`.
+    // The misses of the `get` and `getMany` calls made in one tick go out in
+    // one `expression.getMany`, which answers per URL what `expression.get` would.
     #expressions: KeyedCache<ExpressionRendered>;
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
         this.#expressions = new KeyedCache<ExpressionRendered>({
-            loadOne: (url) => this.#apiClient.call('expression.get', { url }),
-            loadMany: (urls) => this.#apiClient.call('expression.getMany', { urls }),
+            loadMany: async (urls) => (await this.#apiClient.call('expression.getMany', { urls })).map(entry =>
+                entry && 'code' in entry ? new RpcError(entry.code, entry.message) : entry as ExpressionRendered | null),
             persistent: createPersistentCache<StoredEntry<ExpressionRendered>>('ad4m-expression-cache', 'expressions'),
             limits: () => ({ entries: ExpressionClient.MAX_MEM_ENTRIES, bytes: ExpressionClient.MAX_MEM_BYTES }),
         });
@@ -45,7 +45,10 @@ export class ExpressionClient {
         return this.#expressions.get(url);
     }
 
-    /** The expressions at `urls`, in order (`null` when not found); the misses go out in one call. */
+    /**
+     * The expressions at `urls`, in order (`null` when not found); the misses go
+     * out in one call. Rejects with the `RpcError` `get` gives when a URL's read fails.
+     */
     async getMany(urls: string[]): Promise<ExpressionRendered[]> {
         return this.#expressions.getMany(urls);
     }

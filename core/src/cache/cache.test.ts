@@ -20,17 +20,25 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
     'agent.byDIDs': (p: Record<string, unknown>) =>
         (p.dids as string[]).map(did => (MOCK_RESPONSES['agent.byDid'] as (p: Record<string, unknown>) => unknown)({ did })),
-    'expression.get': (p: Record<string, unknown>) => ({
-        author: 'did:test:123', timestamp: '2024-01-01', data: `{"url":"${p.url}"}`,
-        language: { address: 'lang://test' }, proof: { valid: true },
-    }),
-    'expression.getMany': (p: Record<string, unknown>) => {
-        const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
+    // Like the executor: `.../missing` is unknown (null), `.../broken` fails, and
+    // `getMany` answers per URL what `get` does (a failure as `{ code, message }`).
+    'expression.get': (p: Record<string, unknown>) => {
+        const url = p.url as string;
+        if (url.endsWith('/missing')) return null;
+        if (url.endsWith('/broken')) throw { code: 500, message: `Failed to get expression ${url}: language failed` };
+        return {
             author: 'did:test:123', timestamp: '2024-01-01', data: `{"url":"${url}"}`,
             language: { address: 'lang://test' }, proof: { valid: true },
-        }));
+        };
     },
+    'expression.getMany': (p: Record<string, unknown>) =>
+        ((p.urls || []) as string[]).map(url => {
+            try {
+                return (MOCK_RESPONSES['expression.get'] as (p: Record<string, unknown>) => unknown)({ url });
+            } catch (failure) {
+                return failure;
+            }
+        }),
     'expression.interact': () => 'ok',
     'expression.create': (p: Record<string, unknown>) => `lang://test/Qm-created-${Date.now()}`,
 };
@@ -85,12 +93,17 @@ class MockWebSocket {
                 return;
             }
 
-            const result = typeof handler === 'function'
-                ? (handler as (p: Record<string, unknown>) => unknown)(params)
-                : handler;
+            let reply: Record<string, unknown>;
+            try {
+                reply = { id, result: typeof handler === 'function'
+                    ? (handler as (p: Record<string, unknown>) => unknown)(params)
+                    : handler };
+            } catch (error) {
+                reply = { id, error }; // a handler throws `{ code, message }` to fail the call
+            }
 
             setTimeout(() => {
-                this.onmessage?.({ data: JSON.stringify({ id, result }) });
+                this.onmessage?.({ data: JSON.stringify(reply) });
             }, 0);
         } catch { /* malformed JSON */ }
     }
@@ -411,13 +424,44 @@ describe('Profile and expression lookups batch concurrent misses', () => {
             ad4m.expression.get('lang://test/Qm-shared'),
             ad4m.expression.getMany(['lang://test/Qm-shared', 'lang://test/Qm-own']),
         ]);
-        expect(calls('expression.get')).toHaveLength(1);
-        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-own']]);
+        expect(calls('expression.get')).toHaveLength(0);
+        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-shared', 'lang://test/Qm-own']]);
         expect(JSON.stringify(many[0])).toEqual(JSON.stringify(one));
+    });
+
+    test('concurrent get() calls make one expression.getMany, each settling as a lone get() does', async () => {
+        const urls = ['lang://test/Qm-g1', 'lang://test/Qm-g2', 'lang://test/missing', 'lang://test/broken', 'lang://test/Qm-g1'];
+        const batched = await Promise.allSettled(urls.map(url => ad4m.expression.get(url)));
+        expect(calls('expression.getMany')).toHaveLength(1);
+        expect(calls('expression.get')).toHaveLength(0);
+
+        // Golden: each outcome equals what one `expression.get` call gives.
+        const alone = await Promise.allSettled(urls.map(url => new Ad4mClient('http://127.0.0.1:12002', 'test-token').expression.get(url, true)));
+        expect(calls('expression.get')).toHaveLength(urls.length);
+        const outcome = (r: PromiseSettledResult<unknown>) => r.status === 'fulfilled'
+            ? { value: JSON.stringify(r.value) }
+            : { error: (r.reason as Error).constructor.name, message: (r.reason as Error).message, status: (r.reason as { status?: number }).status };
+        expect(batched.map(outcome)).toEqual(alone.map(outcome));
+        expect(batched[2]).toEqual({ status: 'fulfilled', value: null });
+        expect(batched[3]).toMatchObject({ status: 'rejected', reason: { name: 'RpcError', status: 500 } });
+    });
+
+    test('a failed URL rejects only its own get(), and is read again next time', async () => {
+        const [good, bad] = await Promise.allSettled([
+            ad4m.expression.get('lang://test/Qm-ok'),
+            ad4m.expression.get('lang://test/broken'),
+        ]);
+        expect(good.status).toBe('fulfilled');
+        expect(bad.status).toBe('rejected');
+        await expect(ad4m.expression.getMany(['lang://test/Qm-ok', 'lang://test/broken'])).rejects.toMatchObject({ status: 500 });
+        expect(calls('expression.getMany').map(c => c.params.urls)).toEqual([['lang://test/Qm-ok', 'lang://test/broken'], ['lang://test/broken']]);
     });
 });
 
 // ===================== EXPRESSION CACHE TESTS =====================
+
+/** RPCs that read expressions: `expression.get` (alwaysGet) or a batch of `get`/`getMany` misses. */
+const expressionReads = () => rpcCallLog.filter(c => c.type === 'expression.get' || c.type === 'expression.getMany');
 
 describe('ExpressionClient Cache', () => {
     test('get() deduplication — 3 concurrent calls = 1 RPC', async () => {
@@ -431,7 +475,7 @@ describe('ExpressionClient Cache', () => {
         expect(e2.author).toBe('did:test:123');
         expect(e3.author).toBe('did:test:123');
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(1);
     });
 
@@ -439,7 +483,7 @@ describe('ExpressionClient Cache', () => {
         await ad4m.expression.get('lang://test/Qm-l1hit');
         await ad4m.expression.get('lang://test/Qm-l1hit');
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(1);
     });
 
@@ -447,7 +491,7 @@ describe('ExpressionClient Cache', () => {
         await ad4m.expression.get('lang://test/Qm-always');
         await ad4m.expression.get('lang://test/Qm-always', true);
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(2);
     });
 
@@ -455,7 +499,7 @@ describe('ExpressionClient Cache', () => {
         await ad4m.expression.get('lang://test/Qm-a');
         await ad4m.expression.get('lang://test/Qm-b');
 
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(2);
     });
 
@@ -468,19 +512,19 @@ describe('ExpressionClient Cache', () => {
             await ad4m.expression.get('lang://test/Qm-lru-1');
             await ad4m.expression.get('lang://test/Qm-lru-2');
             await ad4m.expression.get('lang://test/Qm-lru-3');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(3);
+            expect(expressionReads()).toHaveLength(3);
 
             // Add 4th — should evict Qm-lru-1
             await ad4m.expression.get('lang://test/Qm-lru-4');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(4);
+            expect(expressionReads()).toHaveLength(4);
 
             // Qm-lru-2 should still be cached (no new RPC)
             await ad4m.expression.get('lang://test/Qm-lru-2');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(4);
+            expect(expressionReads()).toHaveLength(4);
 
             // Qm-lru-1 was evicted — should need a new RPC
             await ad4m.expression.get('lang://test/Qm-lru-1');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(5);
+            expect(expressionReads()).toHaveLength(5);
         } finally {
             ExpressionClient.MAX_MEM_ENTRIES = originalMax;
         }
@@ -489,7 +533,7 @@ describe('ExpressionClient Cache', () => {
     test('getMany() partial cache hits — only fetches uncached URLs', async () => {
         // Pre-populate Qm-1 in cache
         await ad4m.expression.get('lang://test/Qm-1');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         // getMany with Qm-1 (cached) + Qm-2 (not cached)
         const results = await ad4m.expression.getMany([
@@ -503,8 +547,8 @@ describe('ExpressionClient Cache', () => {
 
         // getMany should only have fetched Qm-2 (the uncached one)
         const getManyCalls = rpcCallLog.filter(c => c.type === 'expression.getMany');
-        expect(getManyCalls).toHaveLength(1);
-        expect(getManyCalls[0].params.urls).toEqual(['lang://test/Qm-2']);
+        expect(getManyCalls).toHaveLength(2);
+        expect(getManyCalls[1].params.urls).toEqual(['lang://test/Qm-2']);
     });
 
     test('getMany() all cached — no RPC', async () => {
@@ -524,25 +568,25 @@ describe('ExpressionClient Cache', () => {
 
     test('clearCache() forces re-fetch', async () => {
         await ad4m.expression.get('lang://test/Qm-clear');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         ad4m.expression.clearCache();
 
         await ad4m.expression.get('lang://test/Qm-clear');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+        expect(expressionReads()).toHaveLength(2);
     });
 
     test('interact() invalidates cache for that URL', async () => {
         const url = 'lang://test/Qm-interact';
         await ad4m.expression.get(url);
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         // interact should invalidate cache
         await ad4m.expression.interact(url, { interactionName: 'modify', parameters: {} } as any);
 
         // Next get should hit network again (cache invalidated)
         await ad4m.expression.get(url);
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+        expect(expressionReads()).toHaveLength(2);
     });
 });
 
@@ -552,17 +596,17 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
     test('interact() only invalidates the targeted URL, not others', async () => {
         await ad4m.expression.get('lang://test/Qm-keep');
         await ad4m.expression.get('lang://test/Qm-invalidate');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+        expect(expressionReads()).toHaveLength(2);
 
         await ad4m.expression.interact('lang://test/Qm-invalidate', { interactionName: 'modify', parameters: {} } as any);
 
         // Qm-keep should still be cached
         await ad4m.expression.get('lang://test/Qm-keep');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2); // no new RPC
+        expect(expressionReads()).toHaveLength(2); // no new RPC
 
         // Qm-invalidate was invalidated — needs re-fetch
         await ad4m.expression.get('lang://test/Qm-invalidate');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(3);
+        expect(expressionReads()).toHaveLength(3);
     });
 
     test('create() does not pollute cache — fresh get() fetches from network', async () => {
@@ -570,7 +614,7 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
         // create returns an address string, not an ExpressionRendered
         // Cache should not have this address yet
         await ad4m.expression.get(addr);
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(1); // went to network
     });
 
@@ -638,12 +682,12 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
         await ad4m.expression.get('lang://test/Qm-cross1');
         await ad4m.expression.get('lang://test/Qm-cross2');
 
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(0); // no individual RPCs
+        expect(expressionReads()).toHaveLength(1); // no RPC after the getMany
     });
 
     test('get() populates cache for subsequent getMany()', async () => {
         await ad4m.expression.get('lang://test/Qm-pre');
-        expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(1);
+        expect(expressionReads()).toHaveLength(1);
 
         rpcCallLog = [];
 
@@ -669,15 +713,15 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
         try {
             await ad4m.expression.get('lang://test/Qm-bytes-1');
             await ad4m.expression.get('lang://test/Qm-bytes-2');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(2);
+            expect(expressionReads()).toHaveLength(2);
 
             // Adding 3rd should evict 1st (oldest)
             await ad4m.expression.get('lang://test/Qm-bytes-3');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(3);
+            expect(expressionReads()).toHaveLength(3);
 
             // Qm-bytes-1 was evicted — needs re-fetch
             await ad4m.expression.get('lang://test/Qm-bytes-1');
-            expect(rpcCallLog.filter(c => c.type === 'expression.get')).toHaveLength(4);
+            expect(expressionReads()).toHaveLength(4);
         } finally {
             ExpressionClient.MAX_MEM_ENTRIES = origMaxEntries;
             ExpressionClient.MAX_MEM_BYTES = origMaxBytes;
@@ -771,7 +815,7 @@ describe('Cache isolation between clients', () => {
         // 2 RPCs for each — both clients went to network independently
         const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
         expect(byDidCalls).toHaveLength(2);
-        const getCalls = rpcCallLog.filter(c => c.type === 'expression.get');
+        const getCalls = expressionReads();
         expect(getCalls).toHaveLength(2);
     });
 });

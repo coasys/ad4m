@@ -159,10 +159,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         };
     },
     'expression.getMany': (p: Record<string, unknown>) => {
-        // Return one result per URL (aligned by index), matching real API behavior
+        // One entry per URL, in order: what `expression.get` answers for it.
         const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
-            author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' },
+        return urls.map(() => ({
+            author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
         }));
     },
@@ -1016,8 +1016,8 @@ describe('ExpressionClient', () => {
     test('getMany() returns multiple expressions', async () => {
         const exprs = await ad4m.expression.getMany(['url1', 'url2']);
         expect(exprs).toHaveLength(2);
-        expect(exprs[0].author).toBe('did:test:1');
-        expect(exprs[1].author).toBe('did:test:1');
+        expect(exprs[0].author).toBe('did:test:123');
+        expect(exprs[1].author).toBe('did:test:123');
     });
 
     test('getRaw() returns raw expression', async () => {
