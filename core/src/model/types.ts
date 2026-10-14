@@ -346,6 +346,14 @@ export type Query = {
   order?: Order;
   offset?: number;
   limit?: number;
+  /**
+   * Keyset cursor: `""` for the first page, then the previous result's
+   * `nextCursor`. Needs the timestamp order (no `order`, or one of
+   * `timestamp` / `createdAt` / `updatedAt`, either direction), a `limit`, and
+   * no non-zero `offset`; the executor refuses it on any other query. Unlike
+   * `offset`, a row added before the cursor does not shift the next page.
+   */
+  after?: string;
   /** Ask for `totalCount`. Without it the result has none and the executor runs no COUNT query. */
   count?: boolean;
   /**
@@ -686,6 +694,8 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;
+  /** See {@link Query.after}. */
+  after?: string;
   count?: boolean;
   deepQuery?: boolean;
   /** See {@link Query.linkStatus}. */
@@ -713,7 +723,12 @@ export type GetOptions = Pick<Query, 'include' | 'properties'>;
 // ---------------------------------------------------------------------------
 
 export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number };
-export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
+export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number; nextCursor?: string };
+/**
+ * One cursor page. `nextCursor` is present while a full page came back; pass
+ * it to the next `page()` call. Its absence means this was the last page.
+ */
+export type CursorPage<T> = { results: T[]; nextCursor?: string; pageSize: number };
 export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
 
 // ---------------------------------------------------------------------------

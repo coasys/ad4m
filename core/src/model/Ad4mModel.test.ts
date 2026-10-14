@@ -775,6 +775,69 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(page.pageSize).toBe(10);
     expect(page.pageNumber).toBe(1);
   });
+
+  describe("cursor pages (P8)", () => {
+    const sentQuery = (call = 0) => JSON.parse(mockPerspective.modelQuery.mock.calls[call][1]);
+
+    it("Ad4mModel.page() asks for the first page with an empty cursor and no offset", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({
+        instances: [{ id: "literal:recipe1", name: "Pasta" }],
+        nextCursor: "c1",
+      });
+
+      const page = await Recipe.page(mockPerspective, 10);
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const q = sentQuery();
+      expect(q.after).toBe("");
+      expect(q.limit).toBe(10);
+      expect(q.offset).toBeUndefined();
+      expect(q.count).toBeUndefined();
+      expect(page.results).toHaveLength(1);
+      expect(page.nextCursor).toBe("c1");
+      expect(page.pageSize).toBe(10);
+    });
+
+    it("Ad4mModel.page() continues from the cursor it is given and keeps the query", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [] });
+
+      const page = await Recipe.page(mockPerspective, 5, "c1", {
+        where: { name: "Pasta" },
+        order: { createdAt: "DESC" },
+      });
+
+      const q = sentQuery();
+      expect(q.after).toBe("c1");
+      expect(q.limit).toBe(5);
+      expect(q.where).toEqual({ name: "Pasta" });
+      expect(q.order).toEqual([["createdAt", "DESC"]]);
+      expect(page.nextCursor).toBeUndefined();
+    });
+
+    it("ModelQueryBuilder.page() sends the cursor instead of an offset", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c2" });
+
+      const page = await Recipe.query(mockPerspective)
+        .where({ rating: { gt: 3 } })
+        .offset(30)
+        .page(10, "c1");
+
+      const q = sentQuery();
+      expect(q.after).toBe("c1");
+      expect(q.limit).toBe(10);
+      expect(q.offset).toBeUndefined();
+      expect(page.nextCursor).toBe("c2");
+    });
+
+    it("findAll forwards `after` and executeModelQuery returns nextCursor", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c3" });
+
+      const { nextCursor } = await (Recipe as any).executeModelQuery(mockPerspective, { after: "", limit: 2 });
+
+      expect(sentQuery().after).toBe("");
+      expect(nextCursor).toBe("c3");
+    });
+  });
 });
 
 describe("Ad4mModel.count() with advanced where conditions", () => {

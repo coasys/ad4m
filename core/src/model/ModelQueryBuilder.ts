@@ -10,7 +10,7 @@ import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectivePr
 import { LiveQuery } from "../perspectives/LiveQuery";
 import type {
   Where, Order, IncludeMap, Query,
-  ResultsWithTotalCount, PaginationResult,
+  ResultsWithTotalCount, PaginationResult, CursorPage,
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
@@ -587,6 +587,29 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.execute(paginationQuery);
     return { results, totalCount, pageSize, pageNumber };
+  }
+
+  /**
+   * One page in timestamp order, continued by cursor rather than by offset.
+   *
+   * Pass no `after` (or `""`) for the first page, then each page's
+   * `nextCursor`; its absence means the last page. A row created while you
+   * page cannot shift a later page the way it shifts an `offset` page. The
+   * builder's `order` must be `timestamp`, `createdAt` or `updatedAt` (either
+   * direction) or unset; the executor refuses any other order. The builder's
+   * `offset` is ignored. Use `paginate()` for page numbers or other orders.
+   *
+   * @example
+   * ```typescript
+   * const builder = Message.query(perspective).order({ createdAt: "DESC" });
+   * let page = await builder.page(50);
+   * while (page.nextCursor) page = await builder.page(50, page.nextCursor);
+   * ```
+   */
+  async page(pageSize: number, after?: string): Promise<CursorPage<T>> {
+    const { offset: _offset, ...rest } = this.queryParams || {};
+    const { results, nextCursor } = await this.execute({ ...rest, limit: pageSize, after: after ?? '' });
+    return { results, ...(nextCursor !== undefined ? { nextCursor } : {}), pageSize };
   }
 
   /**

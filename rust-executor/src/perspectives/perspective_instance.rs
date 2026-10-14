@@ -3977,6 +3977,7 @@ impl PerspectiveInstance {
                 return serde_json::to_string(&super::model_query::ModelQueryResult {
                     instances: vec![],
                     total_count: query_input.count.unwrap_or(false).then_some(0),
+                    next_cursor: None,
                 })
                 .map_err(|e| {
                     deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)

@@ -144,6 +144,14 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
     if classes.is_empty() {
         return Err(anyhow!("classNames: name at least one class"));
     }
+    // The keyset is one class's `(first timestamp, id)` order in the store;
+    // the union sorts and pages its rows in the executor.
+    if query.after.is_some() {
+        return Err(anyhow!(
+            "classNames: `after` cursors are not supported over several classes. Page the \
+             union with `limit`/`offset`, or query one class at a time."
+        ));
+    }
     // A per-anchor limit and a walk pick their rows inside the store, once per
     // class, so `limitPerAnchor: 5` would keep five per anchor *per class*.
     if let Some(Scope::Traverse {
@@ -321,6 +329,7 @@ pub async fn execute_union_query(
         return Ok(ModelQueryResult {
             instances: vec![],
             total_count,
+            next_cursor: None,
         });
     }
     let page: Vec<String> = union
@@ -359,6 +368,7 @@ pub async fn execute_union_query(
             order: None,
             limit: None,
             offset: None,
+            after: None,
             count: None,
             ..query.clone()
         };
@@ -381,6 +391,7 @@ pub async fn execute_union_query(
     Ok(ModelQueryResult {
         instances: page.iter().filter_map(|id| hydrated.remove(id)).collect(),
         total_count,
+        next_cursor: None,
     })
 }
 
