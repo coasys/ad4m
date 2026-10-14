@@ -17,7 +17,13 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'events.watch': true,
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    // Like the executor: `did:test:missing` is unknown (null), `did:test:broken`
+    // fails, and one failing DID fails the whole `agent.byDIDs` call (#1213).
+    'agent.byDid': (p: Record<string, unknown>) => {
+        if (p.did === 'did:test:missing') return null;
+        if (p.did === 'did:test:broken') throw { code: 500, message: `Failed to get agent ${p.did}: language failed` };
+        return { did: p.did, perspective: new Perspective() };
+    },
     'agent.byDIDs': (p: Record<string, unknown>) =>
         (p.dids as string[]).map(did => (MOCK_RESPONSES['agent.byDid'] as (p: Record<string, unknown>) => unknown)({ did })),
     // Like the executor: `.../missing` is unknown (null), `.../broken` fails, and
@@ -286,6 +292,36 @@ describe('AgentClient Cache', () => {
         } finally {
             AgentClient.REMOTE_AGENT_TTL_MS = originalTTL;
         }
+    });
+
+    test('byDID() — one failing DID rejects only its own callers', async () => {
+        // What a lone byDID gives for each DID.
+        const lone = {
+            ok: await ad4m.agent.byDID('did:test:lone-ok'),
+            missing: await ad4m.agent.byDID('did:test:missing'),
+            broken: await ad4m.agent.byDID('did:test:broken').then(() => null, (e) => e),
+        };
+        expect(lone.ok.did).toBe('did:test:lone-ok');
+        expect(lone.missing).toBeNull();
+        expect(lone.broken).toMatchObject({ status: 500 });
+        rpcCallLog = [];
+
+        const [ok, missing, broken] = await Promise.allSettled([
+            ad4m.agent.byDID('did:test:batch-ok'),
+            ad4m.agent.byDID('did:test:missing'),
+            ad4m.agent.byDID('did:test:broken'),
+        ]);
+        expect(ok).toMatchObject({ status: 'fulfilled', value: { did: 'did:test:batch-ok' } });
+        expect(missing).toEqual({ status: 'fulfilled', value: null });
+        expect(broken).toMatchObject({ status: 'rejected', reason: { status: lone.broken.status, message: lone.broken.message } });
+
+        // One batch, then each DID of the failed batch alone.
+        expect(rpcCallLog.filter(c => c.type.startsWith('agent.by')).map(c => [c.type, c.params.dids ?? c.params.did])).toEqual([
+            ['agent.byDIDs', ['did:test:batch-ok', 'did:test:missing', 'did:test:broken']],
+            ['agent.byDid', 'did:test:batch-ok'],
+            ['agent.byDid', 'did:test:missing'],
+            ['agent.byDid', 'did:test:broken'],
+        ]);
     });
 
     test('invalidateByDid() clears cache and forces re-fetch', async () => {

@@ -1,4 +1,4 @@
-import {ApiClient, CallOptions } from '../apiClient';
+import {ApiClient, CallOptions, RpcError } from '../apiClient';
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
   Agent,
@@ -44,7 +44,7 @@ export class AgentClient {
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     this.#agents = new KeyedCache<Agent>({
-      loadMany: async (dids) => (await this.#apiClient.call('agent.byDIDs', { dids })).map(toAgent),
+      loadMany: (dids) => this.#loadAgents(dids),
       maxBatch: MAX_DIDS_PER_CALL,
       persistent: createPersistentCache<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
       maxAgeMs: (did) => did === this.#selfDid ? Infinity : AgentClient.REMOTE_AGENT_TTL_MS,
@@ -97,6 +97,22 @@ export class AgentClient {
     // agent-updated events keep cached entries fresh (the self-DID entry has no TTL).
     this.#listen();
     return this.#agents.get(did);
+  }
+
+  /**
+   * One `agent.byDIDs` call for the misses of one tick. The executor fails
+   * that call when one DID's lookup fails (500), so the DIDs of a failed
+   * batch are then read alone: each caller gets what a lone `byDID` gives.
+   */
+  async #loadAgents(dids: string[]): Promise<Array<Agent | null | Error>> {
+    try {
+      return (await this.#apiClient.call('agent.byDIDs', { dids })).map(toAgent);
+    } catch (error) {
+      if (dids.length === 1 || !(error instanceof RpcError) || error.status !== 500) throw error;
+      return Promise.all(dids.map(did =>
+        this.#apiClient.call('agent.byDid', { did }).then(toAgent, (failure) =>
+          failure instanceof Error ? failure : new Error(String(failure)))));
+    }
   }
 
   #cacheAgent(agent: Agent): void {
