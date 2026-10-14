@@ -28,7 +28,9 @@ concurrency:
 jobs:
   publish:
     # Only branches of this repository. A pull request from a fork would publish its code under
-    # this repository's name.
+    # this repository's name. This skips ordinary fork runs but does not enforce anything: a pull
+    # request runs its own copy of this file, so a fork can change the condition. What gates fork
+    # code is the repository's approval setting for fork pull request workflows.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     # pkg.pr.new authenticates the run through its GitHub App, not this token.
@@ -58,9 +60,11 @@ jobs:
       - name: Build modules
         run: pnpm run build-npm-packages
 
-      # Both packages in one call, so connect's `workspace:` dependency on core is rewritten to the
-      # core snapshot from this same commit rather than to a released version. `--pnpm` packs with
-      # `pnpm pack`, which, unlike `npm pack`, resolves `workspace:` specifiers (#1217).
+      # Both packages in one call, so the PR comment lists them together. Connect's snapshot matches
+      # core's because connect's build bundles core from this checkout; core is only a
+      # devDependency of connect, which an app installing connect does not get. An app installs
+      # both snapshots from the same commit. `--pnpm` packs with `pnpm pack`, which, unlike
+      # `npm pack`, resolves `workspace:` specifiers (#1217).
       # `--commentWithSha` makes the PR comment link the commit's snapshot, which never changes,
       # rather than the PR's, which moves with every push.
       - name: Publish to pkg.pr.new
