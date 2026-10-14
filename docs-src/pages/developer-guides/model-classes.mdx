@@ -650,9 +650,9 @@ const recipe = await Recipe.create(perspective, { name: "Cake" }, {
 ### Reading
 
 ```typescript
-// Get by ID
+// Get by ID: resolves to the instance, or null when no instance has this ID
 const recipe = new Recipe(perspective, existingId);
-await recipe.get();
+if (!(await recipe.get())) throw new Error("Recipe not found");
 
 // Get with eager-loaded relations
 await recipe.get({ include: { comments: true } });
@@ -1208,7 +1208,7 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `create` | `create(perspective, data?, options?)` | Create and save in one step. `options` supports `parent` and `batchId` |
-| `update` | `update(perspective, id, data)` | Fetch by ID, merge data, save |
+| `update` | `update(perspective, id, data)` | Fetch by ID, merge data, save. Rejects if no instance has this ID |
 | `delete` | `delete(perspective, id)` | Delete by ID, with the incoming links of relations that target the model |
 | `remove` | `remove(perspective, id)` | *Deprecated* — alias for `delete` |
 | `findAll` | `findAll(perspective, query?)` | Query all matching instances |

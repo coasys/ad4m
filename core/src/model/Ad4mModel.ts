@@ -992,50 +992,48 @@ export class Ad4mModel {
     return changed;
   }
 
-  private async getData(opts?: GetOptions) {
-    // Route through the Rust model query endpoint — same pipeline as executeModelQuery
-    // but for a single instance by ID.
-    try {
-      const ctor = this.constructor as typeof Ad4mModel;
-      const query: Query = {
-        where: { id: this._baseExpression },
-        limit: 1,
-        deepQuery: true,  // Single-instance get() always evaluates property getters
-      };
-      if (opts?.properties) query.properties = opts.properties;
-      if (opts?.include) query.include = opts.include;
+  /** Hydrate this instance from the executor. `null` when no instance has this ID. */
+  private async getData(opts?: GetOptions): Promise<this | null> {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const query: Query = {
+      where: { id: this._baseExpression },
+      limit: 1,
+      deepQuery: true,  // Single-instance get() always evaluates property getters
+    };
+    if (opts?.properties) query.properties = opts.properties;
+    if (opts?.include) query.include = opts.include;
 
-      const { results } = await (ctor as any).executeModelQuery(
-        this._perspective, query, null
-      );
+    const { results } = await (ctor as any).executeModelQuery(
+      this._perspective, query, null
+    );
+    if (results.length === 0) return null;
 
-      if (results.length > 0) {
-        const hydrated = results[0];
-        // Copy all hydrated values from the Rust-side result onto this instance
-        for (const [key, value] of Object.entries(hydrated as any)) {
-          if (key === '_baseExpression' || key === '_perspective' || key === '_snapshot') continue;
-          if (key.startsWith('_')) continue;
-          // Check for readonly getters
-          let isReadonly = false;
-          let proto = Object.getPrototypeOf(this);
-          while (proto) {
-            const desc = Object.getOwnPropertyDescriptor(proto, key);
-            if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
-            proto = Object.getPrototypeOf(proto);
-          }
-          if (isReadonly) continue;
-          (this as any)[key] = value;
-        }
+    // Copy all hydrated values from the executor's result onto this instance
+    for (const [key, value] of Object.entries(results[0] as any)) {
+      if (key.startsWith('_')) continue;
+      // Check for readonly getters
+      let isReadonly = false;
+      let proto = Object.getPrototypeOf(this);
+      while (proto) {
+        const desc = Object.getOwnPropertyDescriptor(proto, key);
+        if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+        proto = Object.getPrototypeOf(proto);
       }
-
-      // Property getters and relation conformance getters are now evaluated
-      // Rust-side via evaluate_getters() in model_query.rs.
-    } catch (e) {
-      console.error(`getData via Rust model query failed for ${this._baseExpression}:`, e);
+      if (isReadonly) continue;
+      (this as any)[key] = value;
     }
 
     this.takeSnapshot(opts?.include);
     return this;
+  }
+
+  /**
+   * Re-read this instance after a write. A model whose instances leave no
+   * links of their own (all-optional, nothing set) reads back as missing;
+   * it still gets a snapshot, so the next save() updates instead of creating.
+   */
+  private async refresh() {
+    if (!(await this.getData())) this.takeSnapshot();
   }
 
   /**
@@ -1713,7 +1711,7 @@ export class Ad4mModel {
         // saves within the same batch diff correctly.
         this.takeSnapshot();
       } else {
-        await this.getData();
+        await this.refresh();
       }
       return;
     }
@@ -1778,7 +1776,7 @@ export class Ad4mModel {
     // until the batch is committed.
     if (batchCreatedHere) {
       await this.perspective.commitBatch(batchId)
-      await this.getData();
+      await this.refresh();
     } else {
       // Take a snapshot so that a subsequent save() within the same batch
       // routes through the UPDATE path instead of CREATE, avoiding duplicate
@@ -1997,13 +1995,13 @@ export class Ad4mModel {
    * @param optsOrInclude - Optional hydration options. Accepts two forms:
    *   - `GetOptions` wrapper: `{ include: { comments: true }, properties: ['title'] }`
    *   - `IncludeMap` shorthand: `{ comments: true }` (equivalent to `{ include: { comments: true } }`)
-   * @returns The populated model instance
-   * @throws Will throw if data retrieval fails
+   * @returns This instance, populated, or `null` when no instance has this ID
+   * @throws If the read fails
    *
    * @example
    * ```typescript
    * const recipe = new Recipe(perspective, existingId);
-   * await recipe.get();
+   * if (!(await recipe.get())) throw new Error('not found');
    * console.log(recipe.name, recipe.ingredients);
    *
    * // Shorthand — pass IncludeMap directly:
@@ -2013,7 +2011,7 @@ export class Ad4mModel {
    * await recipe.get({ include: { ingredients: true }, properties: ['name'] });
    * ```
    */
-  async get(optsOrInclude?: GetOptions | IncludeMap) {
+  async get(optsOrInclude?: GetOptions | IncludeMap): Promise<this | null> {
     // Normalise: if the caller passed a plain IncludeMap shorthand (no `include`
     // or `properties` key at the top level) wrap it in GetOptions automatically.
     let opts: GetOptions | undefined;
@@ -2165,7 +2163,7 @@ export class Ad4mModel {
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
-      await instance.get();
+      await instance.refresh();
       return instance;
     }
 
@@ -2196,6 +2194,7 @@ export class Ad4mModel {
    * @param id - The expression URI of the instance to update
    * @param data - Property values to merge before saving
    * @returns The updated model instance
+   * @throws If no instance has this `id` (nothing is written)
    *
    * @example
    * ```typescript
@@ -2211,7 +2210,9 @@ export class Ad4mModel {
     data: Record<string, any>,
   ): Promise<T> {
     const instance = new this(perspective, id) as T;
-    await instance.get();
+    if (!(await instance.get())) {
+      throw new Error(`${this.getModelMetadata().className} not found: ${id}`);
+    }
     Object.assign(instance, data);
     await instance.save();
     return instance;

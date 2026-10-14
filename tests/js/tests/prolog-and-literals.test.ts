@@ -817,7 +817,7 @@ describe("Prolog + Literals", () => {
 
                     await recipe.save();
 
-                    const data = await recipe.get();
+                    const data = (await recipe.get())!;
 
                     expect(data.name).to.equal("getData all test");
                     expect(data.booleanTest).to.equal(true);

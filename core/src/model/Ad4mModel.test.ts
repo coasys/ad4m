@@ -4165,6 +4165,55 @@ describe("delete() and incoming links", () => {
   });
 });
 
+describe("get() and update() on a missing instance", () => {
+  @Model({ name: "MissCard" })
+  class MissCard extends Ad4mModel {
+    @Flag({ through: "miss://kind", value: "miss://card" })
+    kind: string = "";
+    @Property({ through: "miss://title" })
+    title: string = "";
+  }
+
+  const makePerspective = (instances: any[]) => ({
+    uuid: "p",
+    modelQuery: jest.fn().mockResolvedValue({ instances, totalCount: instances.length }),
+    createBatch: jest.fn(async () => "batch-1"),
+    commitBatch: jest.fn(async () => ({})),
+    createSubject: jest.fn(async () => {}),
+    executeAction: jest.fn(async () => {}),
+    setSingleTarget: jest.fn(async () => {}),
+    add: jest.fn(async () => {}),
+  }) as any;
+
+  it("get() returns the hydrated instance when it exists", async () => {
+    const perspective = makePerspective([{ id: "miss://1", kind: "miss://card", title: "found" }]);
+    const card = new MissCard(perspective, "miss://1");
+    const result = await card.get();
+    expect(result).toBe(card);
+    expect(card.title).toBe("found");
+  });
+
+  it("get() returns null for a missing instance", async () => {
+    const perspective = makePerspective([]);
+    expect(await new MissCard(perspective, "miss://none").get()).toBeNull();
+  });
+
+  it("get() rejects when the read fails", async () => {
+    const perspective = makePerspective([]);
+    const failure = new Error("query failed");
+    perspective.modelQuery.mockRejectedValue(failure);
+    await expect(new MissCard(perspective, "miss://1").get()).rejects.toBe(failure);
+  });
+
+  it("update() rejects for a missing ID and writes nothing", async () => {
+    const perspective = makePerspective([]);
+    await expect(MissCard.update(perspective, "miss://none", { title: "x" })).rejects.toThrow(/not found/);
+    for (const write of ["createBatch", "createSubject", "executeAction", "setSingleTarget", "add"]) {
+      expect(perspective[write]).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("querying by class name (overrideModelClassName)", () => {
   @Model({ name: "ByNameCard" })
   class ByNameCard extends Ad4mModel {
