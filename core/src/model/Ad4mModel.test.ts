@@ -4117,3 +4117,73 @@ describe("Ad4mModel.transaction()", () => {
     ).rejects.toBe(failure);
   });
 });
+
+describe("querying by class name (overrideModelClassName)", () => {
+  @Model({ name: "ByNameCard" })
+  class ByNameCard extends Ad4mModel {
+    @Flag({ through: "byname://kind", value: "byname://card" })
+    kind: string = "";
+    @Property({ through: "byname://title" })
+    title: string = "";
+  }
+
+  @Model({ name: "ByNameNote" })
+  class ByNameNote extends Ad4mModel {
+    @Property({ through: "byname://body" })
+    body: string = "";
+  }
+
+  const rows = [
+    { id: "byname://c1", kind: "byname://card", title: "one" },
+    { id: "byname://c2", kind: "byname://card", title: "two" },
+  ];
+  const makePerspective = () => {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "s", revision: 0, result: { instances: rows, totalCount: rows.length },
+      }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    return {
+      uuid: "p",
+      client,
+      modelQuery: jest.fn().mockResolvedValue({ instances: rows, totalCount: rows.length }),
+      modelSubscribe: (className: any, queryJson: string) => client.modelSubscribe("p", className, queryJson),
+    } as any;
+  };
+  const data = (results: any[]) => results.map((r) => ({ id: r.id, title: r.title }));
+  const query = { where: { title: "one" }, order: { title: "ASC" as const }, limit: 5 };
+
+  it("get() sends the same request and returns the same rows as a query by class", async () => {
+    const byClass = makePerspective();
+    const byName = makePerspective();
+    const viaClass = await ByNameCard.query(byClass, query).get();
+    const viaName = await Ad4mModel.query(byName, query).overrideModelClassName("ByNameCard").get();
+
+    expect(byName.modelQuery.mock.calls[0].slice(0, 2)).toEqual(byClass.modelQuery.mock.calls[0].slice(0, 2));
+    expect(data(viaName)).toEqual(data(viaClass));
+  });
+
+  it("count() and subscribe() work by class name", async () => {
+    const perspective = makePerspective();
+    const builder = Ad4mModel.query(perspective).overrideModelClassName("ByNameCard");
+    await expect(builder.count()).resolves.toBe(2);
+    const results = await builder.subscribe(() => {});
+    builder.dispose();
+
+    expect(perspective.client.modelSubscribe.mock.calls[0][1]).toBe("ByNameCard");
+    expect(data(results)).toEqual(data(rows));
+  });
+
+  it("on a queryOf() builder, queries the named class only", async () => {
+    const perspective = makePerspective();
+    const results = await Ad4mModel.queryOf(perspective, [ByNameCard, ByNameNote])
+      .overrideModelClassName("ByNameCard")
+      .get();
+
+    expect(perspective.modelQuery.mock.calls[0][0]).toBe("ByNameCard");
+    expect(data(results)).toEqual(data(rows));
+  });
+});

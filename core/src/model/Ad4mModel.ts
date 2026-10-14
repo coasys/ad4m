@@ -241,11 +241,14 @@ function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined)
 
 /** Snapshot each top-level instance for dirty tracking, so `save()` on any
  *  hydrated instance (query, union or subscription push) takes the update
- *  path. Only the included relations (not `$` projections) are recorded. */
+ *  path. Only the included relations (not `$` projections) are recorded.
+ *  Rows of a query by class name are base `Ad4mModel`s: nothing to track. */
 function snapshotHydrated(instances: any[], include?: IncludeMap): void {
   const relations = include && Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')));
   const recorded = relations && Object.keys(relations).length > 0 ? relations : undefined;
-  for (const inst of instances) inst?.takeSnapshot?.(recorded);
+  for (const inst of instances) {
+    if (inst instanceof Ad4mModel && inst.constructor !== Ad4mModel) (inst as any).takeSnapshot(recorded);
+  }
 }
 
 function jsonToModelInstance<T extends Ad4mModel>(
@@ -1103,9 +1106,9 @@ export class Ad4mModel {
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
-  ): { className: string; queryJson: string; metadata: ModelMetadata } {
-    const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
+  ): { className: string; queryJson: string } {
+    // A query by class name runs on the undecorated base class: no metadata.
+    const className = classNameOverride || this.getModelMetadata().className;
 
     query = Ad4mModel.withIncludeAll([this], query);
 
@@ -1175,7 +1178,6 @@ export class Ad4mModel {
     return {
       className,
       queryJson: JSON.stringify(queryInput),
-      metadata,
     };
   }
 

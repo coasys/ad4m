@@ -375,8 +375,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     return this;
   }
 
+  /** Query the class registered under `className` instead (on a `queryOf()`
+   *  builder: instead of the union). Rows hydrate as plain `Ad4mModel`s. */
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
     this.modelClassName = className;
+    this.unionClasses = undefined;
     return this;
   }
 
