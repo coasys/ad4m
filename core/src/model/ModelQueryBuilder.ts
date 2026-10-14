@@ -70,7 +70,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /** Build model instances from a raw result pushed by a subscription. */
   private parse(raw: any): T[] {
-    const { include, properties } = this.queryParams;
+    const { include, properties } = (this.ctor as any).withIncludeAll(this.unionClasses ?? [this.ctor], this.queryParams);
     if (this.unionClasses) {
       return (this.ctor as any).parseUnionResult(this.unionClasses, this.perspective, raw, include, properties);
     }

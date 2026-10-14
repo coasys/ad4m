@@ -3976,3 +3976,101 @@ describe("save() on an instance pushed by a subscription", () => {
     expect(written(perspective)).toEqual(["literal:string:b2"]);
   });
 });
+
+describe("includeAll", () => {
+  const { BelongsToOne, BelongsToMany } = require("./decorators");
+
+  @Model({ name: "IncAllItem" })
+  class IncAllItem extends Ad4mModel {
+    @Property({ through: "inc://name" })
+    name: string = "";
+  }
+
+  @Model({ name: "IncAllList" })
+  class IncAllList extends Ad4mModel {
+    @Property({ through: "inc://title" })
+    title: string = "";
+    @HasMany(() => IncAllItem, { through: "inc://item" })
+    items: string[] = [];
+    @HasOne(() => IncAllItem, { through: "inc://pinned" })
+    pinned: string = "";
+    @BelongsToOne(() => IncAllList, { through: "inc://sublist" })
+    owner: string = "";
+    @BelongsToMany(() => IncAllList, { through: "inc://linked" })
+    linkedFrom: string[] = [];
+  }
+
+  @Model({ name: "IncAllOther" })
+  class IncAllOther extends Ad4mModel {
+    @Property({ through: "inc://other" })
+    other: string = "";
+  }
+
+  const row = {
+    id: "inc://l1",
+    title: "groceries",
+    items: [{ id: "inc://i1", name: "milk" }],
+    pinned: { id: "inc://i2", name: "eggs" },
+    owner: "inc://parent",
+    linkedFrom: ["inc://l0"],
+    __subjectClass: "IncAllList",
+  };
+  const perspectiveReturning = (instances: any[]) =>
+    ({ uuid: "p", modelQuery: jest.fn().mockResolvedValue({ instances, totalCount: instances.length }) }) as any;
+  const sentInclude = (perspective: any) => JSON.parse(perspective.modelQuery.mock.calls[0][1]).include;
+
+  it("asks for the forward relations only", () => {
+    const { queryJson } = (IncAllList as any).prepareModelQueryParams({ includeAll: true });
+    expect(Object.keys(JSON.parse(queryJson).include).sort()).toEqual(["items", "pinned"]);
+  });
+
+  it("hydrates the forward relations and leaves belongs-to ones as ids", async () => {
+    const perspective = perspectiveReturning([row]);
+    const [list] = await IncAllList.findAll(perspective, { includeAll: true });
+
+    expect(Object.keys(sentInclude(perspective)).sort()).toEqual(["items", "pinned"]);
+    expect(list.items[0]).toBeInstanceOf(IncAllItem);
+    expect(list.pinned).toBeInstanceOf(IncAllItem);
+    expect(list.owner).toBe("inc://parent");
+    expect(list.linkedFrom).toEqual(["inc://l0"]);
+  });
+
+  it("keeps an explicit include entry over the expansion", () => {
+    const { queryJson } = (IncAllList as any).prepareModelQueryParams({
+      includeAll: true,
+      include: { owner: true, items: false },
+    });
+    expect(JSON.parse(queryJson).include).toEqual({ items: false, pinned: true, owner: true });
+  });
+
+  it("hydrates the forward relations of a subscription result", async () => {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({ subscriptionId: "s", revision: 0, result: { instances: [row], totalCount: 1 } }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    const perspective = {
+      uuid: "p",
+      client,
+      modelSubscribe: (className: any, queryJson: string) => client.modelSubscribe("p", className, queryJson),
+    } as any;
+    const builder = IncAllList.query(perspective, { includeAll: true });
+    const [list] = await builder.subscribe(() => {});
+    builder.dispose();
+
+    expect(Object.keys(JSON.parse(client.modelSubscribe.mock.calls[0][2]).include).sort()).toEqual(["items", "pinned"]);
+    expect(list.items[0]).toBeInstanceOf(IncAllItem);
+    expect(list.owner).toBe("inc://parent");
+  });
+
+  it("applies to each class of a findAllOf() union", async () => {
+    const perspective = perspectiveReturning([row, { id: "inc://o1", other: "x", __subjectClass: "IncAllOther" }]);
+    const [list, other] = await Ad4mModel.findAllOf(perspective, [IncAllList, IncAllOther], { includeAll: true });
+
+    expect(Object.keys(sentInclude(perspective)).sort()).toEqual(["items", "pinned"]);
+    expect((list as IncAllList).items[0]).toBeInstanceOf(IncAllItem);
+    expect((list as IncAllList).owner).toBe("inc://parent");
+    expect(other).toBeInstanceOf(IncAllOther);
+  });
+});

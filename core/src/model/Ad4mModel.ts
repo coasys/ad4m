@@ -1078,6 +1078,23 @@ export class Ad4mModel {
   }
 
   /**
+   * `query` with `includeAll` expanded to an `include` of every forward
+   * (has-many / has-one) relation of `classes`; explicit `include` entries win.
+   * @internal
+   */
+  static withIncludeAll(classes: (typeof Ad4mModel)[], query: Query): Query {
+    if (!query.includeAll) return query;
+    const { includeAll, ...rest } = query;
+    const expanded: IncludeMap = {};
+    for (const c of classes) {
+      for (const [name, rel] of Object.entries(c.getModelMetadata().relations)) {
+        if (rel.direction !== 'reverse') expanded[name] = true;
+      }
+    }
+    return { ...rest, include: { ...expanded, ...query.include } };
+  }
+
+  /**
    * Build the JSON parameters needed for a model query/subscription endpoint.
    * Returns the className and queryJson that the Rust executor expects.
    * Shape resolution happens server-side from the perspective's SHACL triples.
@@ -1090,17 +1107,7 @@ export class Ad4mModel {
     const metadata = this.getModelMetadata();
     const className = classNameOverride || metadata.className;
 
-    // Expand includeAll: true to a full IncludeMap covering every forward relation.
-    if (query.includeAll) {
-      const allRelMeta = getRelationsMetadata(this as any);
-      const expanded: IncludeMap = {};
-      for (const [relName, relMeta] of Object.entries(allRelMeta)) {
-        if ((relMeta as any).direction !== 'reverse') {
-          expanded[relName] = true;
-        }
-      }
-      query = { ...query, include: { ...expanded, ...query.include } };
-    }
+    query = Ad4mModel.withIncludeAll([this], query);
 
     const queryInput: any = {};
     if (query.parent) {
@@ -1305,6 +1312,7 @@ export class Ad4mModel {
     query: Query = {},
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+    query = Ad4mModel.withIncludeAll(classes, query);
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
@@ -1383,8 +1391,8 @@ export class Ad4mModel {
     classNameOverride?: string | null,
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T>> {
-    // Delegate query input building to the shared prepareModelQueryParams
-    // helper.  The executor resolves the shape from SHACL server-side.
+    // The executor resolves the shape from SHACL server-side.
+    query = Ad4mModel.withIncludeAll([this], query);
     const { className, queryJson } = this.prepareModelQueryParams(
       query, classNameOverride,
     );
