@@ -36,12 +36,16 @@ pub enum Topic {
     PerspectiveQuerySubscription,
     AutoProcessorEvent,
     AutoProcessorNeighbourhoodState,
+    SfuCallRenegotiationOffer,
+    SfuMigrate,
+    SfuData,
+    SfuRoomRoster,
     FlowStateChanged,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 20] = [
+    pub const ALL: [Topic; 24] = [
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -61,6 +65,10 @@ impl Topic {
         Topic::PerspectiveQuerySubscription,
         Topic::AutoProcessorEvent,
         Topic::AutoProcessorNeighbourhoodState,
+        Topic::SfuCallRenegotiationOffer,
+        Topic::SfuMigrate,
+        Topic::SfuData,
+        Topic::SfuRoomRoster,
         Topic::FlowStateChanged,
     ];
 
@@ -87,6 +95,10 @@ impl Topic {
             Topic::PerspectiveQuerySubscription => "query-subscription-update",
             Topic::AutoProcessorEvent => "auto-processor-event",
             Topic::AutoProcessorNeighbourhoodState => "auto-processor-neighbourhood-state",
+            Topic::SfuCallRenegotiationOffer => "sfu-call-renegotiation-offer",
+            Topic::SfuMigrate => "sfu-migrate",
+            Topic::SfuData => "sfu-data",
+            Topic::SfuRoomRoster => "sfu-room-roster",
             Topic::FlowStateChanged => "flow-state-changed",
         }
     }
@@ -145,6 +157,13 @@ impl Topic {
             Topic::AiTranscriptionText => caps::AI_TRANSCRIBE_CAPABILITY.clone(),
             // `ai.modelLoadingStatus`.
             Topic::AiModelLoadingStatus => caps::AI_READ_CAPABILITY.clone(),
+            // The `sfu.*` reads check NEIGHBOURHOOD_READ (#712 gave the SFU streams the same).
+            // A call names its neighbourhood by URL, not by perspective, so on every
+            // perspective.
+            Topic::SfuCallRenegotiationOffer
+            | Topic::SfuMigrate
+            | Topic::SfuData
+            | Topic::SfuRoomRoster => caps::NEIGHBOURHOOD_READ_CAPABILITY.clone(),
         }
     }
 }
@@ -310,6 +329,33 @@ impl Event {
         }
     }
 
+    /// `sfu-call-renegotiation-offer`: a fresh SDP offer for one call participant, to that
+    /// participant (`targetDid`) only. It describes that agent's own media session.
+    pub fn sfu_renegotiation_offer(offer: &crate::sfu::SfuCallRenegotiationOffer) -> Event {
+        let audience = Audience::Dids(vec![offer.target_did.clone()]);
+        Event::new(Topic::SfuCallRenegotiationOffer, audience, offer)
+    }
+
+    /// `sfu-migrate`: the cascade asks one participant (`targetDid`) to rejoin on another SFU
+    /// node; to that participant only.
+    pub fn sfu_migrate(migrate: &crate::sfu::SfuMigrateEvent) -> Event {
+        let audience = Audience::Dids(vec![migrate.target_did.clone()]);
+        Event::new(Topic::SfuMigrate, audience, migrate)
+    }
+
+    /// `sfu-data`: a data channel message, to `recipients`, the other agents in its call room
+    /// on this executor (the SFU knows them when it relays). Not to the sender, which has what
+    /// it sent, and not to the room's neighbourhood at large: the call is the audience.
+    pub fn sfu_data(message: &crate::sfu::SfuDataMessage, recipients: Vec<String>) -> Event {
+        Event::new(Topic::SfuData, Audience::Dids(recipients), message)
+    }
+
+    /// `sfu-room-roster`: who is in a call room now, to the participants it lists.
+    pub fn sfu_room_roster(roster: &crate::sfu::SfuRoomRoster) -> Event {
+        let audience = Audience::Dids(roster.participants.clone());
+        Event::new(Topic::SfuRoomRoster, audience, roster)
+    }
+
     /// The event goes only to the socket of the RPC connection `connection_id`, if its
     /// session also may receive it.
     pub fn for_connection(mut self, connection_id: impl Into<String>) -> Event {
@@ -399,6 +445,70 @@ mod tests {
         assert_eq!(approved.topic, Topic::AppsChanged);
         assert_eq!(approved.audience, Audience::Dids(vec![did]));
         assert_eq!(approved.capability, *caps::AGENT_PERMIT_CAPABILITY);
+    }
+
+    // #712 filtered the SFU streams at delivery: `targetDid`, the roster's participants, the
+    // sender's room on this executor, all behind NEIGHBOURHOOD_READ. The publisher names the
+    // same agents now, and the capability stays NEIGHBOURHOOD_READ.
+    #[test]
+    fn sfu_events_reach_only_the_call_participants_they_name() {
+        use crate::agent::session::{Principal, Session};
+        use crate::sfu::{
+            SfuCallRenegotiationOffer, SfuDataMessage, SfuMigrateEvent, SfuRoomRoster,
+        };
+        let agent = |did: &str, caps: Vec<Capability>| {
+            Session::for_test(Principal::Agent(AgentContext::managed(did.to_string())))
+                .with_caps(caps)
+                .with_did(did)
+        };
+        let read = || vec![caps::NEIGHBOURHOOD_READ_CAPABILITY.clone()];
+        let alice = agent("did:alice", read());
+        let carol = agent("did:carol", read());
+        let alice_without_read = agent("did:alice", vec![caps::AGENT_READ_CAPABILITY.clone()]);
+
+        let events = [
+            Event::sfu_renegotiation_offer(&SfuCallRenegotiationOffer {
+                target_did: "did:alice".into(),
+                neighbourhood_url: "n".into(),
+                room_name: "r".into(),
+                sdp_offer: "{}".into(),
+                track_mapping: vec![],
+            }),
+            Event::sfu_migrate(&SfuMigrateEvent {
+                target_did: "did:alice".into(),
+                neighbourhood_url: "n".into(),
+                room_name: "r".into(),
+                migrate_to_did: "did:node".into(),
+            }),
+            Event::sfu_room_roster(&SfuRoomRoster {
+                neighbourhood_url: "n".into(),
+                room_name: "r".into(),
+                participants: vec!["did:alice".into(), "did:bob".into()],
+            }),
+            Event::sfu_data(
+                &SfuDataMessage::new(
+                    "did:bob".into(),
+                    "n".into(),
+                    "r".into(),
+                    "chat".into(),
+                    false,
+                    b"hi",
+                ),
+                vec!["did:alice".into()],
+            ),
+        ];
+        for event in &events {
+            assert_eq!(event.capability, *caps::NEIGHBOURHOOD_READ_CAPABILITY);
+            assert!(alice.may_receive(event), "{}", event.topic);
+            assert!(!carol.may_receive(event), "{}", event.topic);
+            assert!(!alice_without_read.may_receive(event), "{}", event.topic);
+        }
+        let data = crate::api::events_ws::wire_message(&events[3]);
+        let data: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(data["type"], "sfu-data");
+        assert_eq!(data["senderDid"], "did:bob");
+        assert_eq!(data["channelLabel"], "chat");
+        let _: SfuDataMessage = serde_json::from_value(data).unwrap();
     }
 
     #[test]

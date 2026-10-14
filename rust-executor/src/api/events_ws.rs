@@ -38,6 +38,10 @@
 //! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
 //! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
 //! | `auto-processor-neighbourhood-state` | (inline) | owners                | Coarse-grained neighbourhood view of "someone is auto-processing" |
+//! | `sfu-call-renegotiation-offer` | (inline)     | `targetDid`            | SFU server-pushed SDP offer          |
+//! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere (`acceptRedirect` joins only) |
+//! | `sfu-data`                    | (inline)      | the room's other agents on this executor | SFU data channel message |
+//! | `sfu-room-roster`             | (inline)      | the participants it lists | Who is in a call room now         |
 //! | `flow-state-changed`          | (inline)      | `agentDid`, if an owner | A flow instance's state moved on that agent's replica (#1424) |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
@@ -125,6 +129,10 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
+        EventSpec::of::<crate::sfu::SfuCallRenegotiationOffer>(SfuCallRenegotiationOffer, false),
+        EventSpec::of::<crate::sfu::SfuMigrateEvent>(SfuMigrate, false),
+        EventSpec::of::<crate::sfu::SfuDataMessage>(SfuData, false),
+        EventSpec::of::<crate::sfu::SfuRoomRoster>(SfuRoomRoster, false),
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
     ]
 }
@@ -250,6 +258,10 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::PerspectiveQuerySubscription
         | Topic::AutoProcessorEvent
         | Topic::AutoProcessorNeighbourhoodState
+        | Topic::SfuCallRenegotiationOffer
+        | Topic::SfuMigrate
+        | Topic::SfuData
+        | Topic::SfuRoomRoster
         | Topic::FlowStateChanged => None,
     }
 }
