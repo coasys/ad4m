@@ -91,7 +91,6 @@ mod getters;
 mod hydration;
 #[cfg(test)]
 mod integration_tests;
-pub(crate) mod interfaces;
 mod link_author;
 #[cfg(test)]
 mod link_author_tests;
@@ -123,12 +122,6 @@ pub(crate) mod utils;
 pub(crate) use filtering::matches_condition;
 pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
-/// Re-export the shared IRI-safety predicate so write-side callers
-/// (e.g. `perspective_instance::resolve_property_value`,
-/// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
-/// storage on the same rule the SPARQL query builder uses.  See
-/// [`utils::is_safe_iri_target`] for the full contract.
-pub use interfaces::{ClassSelector, InterfaceRef, InterfaceSpec};
 pub(crate) use links::{links_trigger_predicates, LINKS_KEY};
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
@@ -138,6 +131,10 @@ pub use types::{
     ModelShape, OrderDirection, ProducedByFlowFilter, ProjectionInput, Scope, ShapeResolver,
     WhereCondition, WhereOps,
 };
-pub(crate) use union::refuse_union_reads;
+/// Re-export the shared IRI-safety predicate so write-side callers
+/// (e.g. `perspective_instance::resolve_property_value`,
+/// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
+/// storage on the same rule the SPARQL query builder uses.  See
+/// [`utils::is_safe_iri_target`] for the full contract.
 pub use union::{execute_union_query, QueryClasses};
 pub use utils::is_safe_iri_target;

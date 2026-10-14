@@ -17,8 +17,6 @@ import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
-import { modelClassParams, type ModelQueryClasses } from "./ModelInterface";
-import type { SdnaType } from "./PerspectiveProxy";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -30,6 +28,10 @@ import type {
 } from "./FlowInstance";
 
 
+/** The wire form of a model query's classes: `class_name` for one, `class_names` for a union. */
+function classParams(className: string | string[]): { class_name: string } | { class_names: string[] } {
+    return Array.isArray(className) ? { class_names: className } : { class_name: className }
+}
 
 export class PerspectiveClient {
     #apiClient: ApiClient
@@ -128,9 +130,9 @@ export class PerspectiveClient {
     }
 
     /** `className` may name several classes: one query over their union (#1238). */
-    async modelQuery(uuid: string, className: ModelQueryClasses, queryJson: string, options?: CallOptions): Promise<any> {
+    async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, ...modelClassParams(className), query_json: queryJson }, options
+            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }
@@ -159,9 +161,9 @@ export class PerspectiveClient {
     }
 
     /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
-    async modelSubscribe(uuid: string, className: ModelQueryClasses, queryJson: string): Promise<Subscribed> {
+    async modelSubscribe(uuid: string, className: string | string[], queryJson: string): Promise<Subscribed> {
         return this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, ...modelClassParams(className), query_json: queryJson }
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }
         )
     }
 
@@ -431,14 +433,14 @@ export class PerspectiveClient {
         )
     }
 
-    async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: SdnaType, shaclJson?: string): Promise<boolean> {
+    async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
         const result = await this.#apiClient.call(
             'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
         )
         return typeof result === 'boolean' ? result : result.every(Boolean)
     }
 
-    async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: SdnaType; shaclJson?: string }[]): Promise<boolean[]> {
+    async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
         const result = await this.#apiClient.call(
             'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
         )

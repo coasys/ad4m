@@ -1020,36 +1020,6 @@ These are refused with an error rather than approximated: a `parent` scope with 
 
 The raw RPC takes the classes as an array: `perspective.modelQuery(["Placement", "EdgeRoute"], JSON.stringify({ limit: 50 }))`.
 
-### Querying by Interface
-
-An interface names what a record must have, not which class it is. A query over an interface reads every installed class that has those properties and relations, so a caller can ask for "anything with `text`" without knowing which app wrote the data or what it named its classes.
-
-```typescript
-// Every record of any class with a `text` property, whatever its predicate:
-const { instances } = await perspective.modelQuery(
-  { implements: { properties: ['text'] } },
-  JSON.stringify({ where: { id: base } }),
-);
-// [{ id, text, __subjectClass: 'TextBlock', __subjectClasses: ['TextBlock'] }]
-
-// A named interface, registered once:
-await perspective.addInterface('Container', {
-  relations: [{ through: 'ad4m://has_child', name: 'children' }],
-});
-await perspective.modelQuery({ interface: 'Container' }, '{}');
-```
-
-A class implements an interface when its shape has:
-
-| Interface part | Matches when |
-|---|---|
-| `'text'` (a property by name) | The class has a property named `text`, stored under any predicate. A getter-backed property counts. A relation named `text` does not. |
-| `{ name: 'text', through: 'we://text' }` | ... and it is stored under that predicate. |
-| `{ name: 'text', datatype: 'xsd:string' }` | ... and it declares that datatype (`xsd:string`, `xsd://string` and the XML Schema IRI are the same). |
-| `{ through: 'ad4m://has_child' }` (a relation) | The class has a relation through that predicate, pointing the given `direction` (`'forward'`, the default, or `'reverse'` for `belongsTo*`). Relation names do not matter. |
-
-The check uses the installed SDNA only, never instances. The query is then the union query over those classes ([above](#querying-several-classes-at-once)): the same rows, rules and limits. No implementing class is an empty result, not an error. `modelSubscribe` with an interface picks up a class installed after it was opened. An interface is not a class: it has no constructor, cannot be created, and is not listed by `subjectClasses()`. Registering a name again replaces its definition.
-
 ### Unverified Links
 
 Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.

@@ -144,13 +144,6 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
     if classes.is_empty() {
         return Err(anyhow!("classNames: name at least one class"));
     }
-    refuse_union_reads(query)
-}
-
-/// The reads a union cannot answer, whatever its classes. An interface query
-/// (#1435) checks these before it resolves its classes, so whether it is
-/// refused does not depend on what happens to be installed.
-pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
     // A per-anchor limit and a walk pick their rows inside the store, once per
     // class, so `limitPerAnchor: 5` would keep five per anchor *per class*.
     if let Some(Scope::Traverse {
@@ -161,9 +154,9 @@ pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
     {
         if limit_per_anchor.is_some() || levels.is_some() {
             return Err(anyhow!(
-                "classNames / interface: a parent scope with `limitPerAnchor` or `levels` is not \
-                 supported over several classes — each class would slice its own rows per \
-                 anchor. Page the union with `limit`/`offset`, or query one class at a time."
+                "classNames: a parent scope with `limitPerAnchor` or `levels` is not supported \
+                 over several classes — each class would slice its own rows per anchor. Page the \
+                 union with `limit`/`offset`, or query one class at a time."
             ));
         }
     }
@@ -173,9 +166,8 @@ pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
     if let Some(order) = &query.order {
         if let Some((key, _)) = order.iter().find(|(k, _)| k.contains('.')) {
             return Err(anyhow!(
-                "classNames / interface: order key '{key}' sorts on a relation, which is not \
-                 supported over several classes. Order by a property, a timestamp or a `$` \
-                 projection count."
+                "classNames: order key '{key}' sorts on a relation, which is not supported over \
+                 several classes. Order by a property, a timestamp or a `$` projection count."
             ));
         }
     }

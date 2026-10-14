@@ -10,8 +10,7 @@ use crate::agent::capabilities::*;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
-use crate::perspectives::model_query::interfaces::ImplementsInput;
-use crate::perspectives::model_query::{ClassSelector, InterfaceRef, InterfaceSpec, QueryClasses};
+use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
     is_sparql_query, result_json, PROLOG_LIVE_QUERY_UNSUPPORTED,
 };
@@ -1202,7 +1201,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let selector = query_selector(&params)?;
+    let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
@@ -1210,7 +1209,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query_selector(&selector, &query_json),
+        perspective.model_query_classes(&classes, &query_json),
     )
     .await;
 
@@ -1304,14 +1303,14 @@ async fn model_subscribe_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let selector = query_selector(&params)?;
+    let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
     let connection_id = connection_id(&ctx)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let reply = perspective
-        .model_subscribe_selector(selector, query_json, connection_id)
+        .model_subscribe_and_query(classes, query_json, connection_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     subscribed(reply)
@@ -3114,15 +3113,9 @@ pub struct PerspectiveSubscriptionParams {
 
 /// Wire names stay snake_case, as the handlers read them.
 ///
-/// Exactly one of:
-/// - `class_name`: one class;
-/// - `class_names`: one query over the union of several (#1238), whose rows
-///   carry `__subjectClass` and `__subjectClasses`;
-/// - `interface`: the union of every installed class that implements the
-///   named interface (#1435), registered with `addSdna(…, "interface", …)`;
-/// - `implements`: the same for an interface given inline.
-///
-/// An interface query is a union query: the same rows, the same limits.
+/// Exactly one of `class_name` and `class_names`: one class, or one query over
+/// the union of several (#1238), whose rows carry `__subjectClass` and
+/// `__subjectClasses`.
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveModelQueryParams {
@@ -3131,16 +3124,12 @@ pub struct PerspectiveModelQueryParams {
     pub class_name: Option<String>,
     #[ts(optional)]
     pub class_names: Option<Vec<String>>,
-    #[ts(optional)]
-    pub interface: Option<String>,
-    #[ts(optional)]
-    pub implements: Option<ImplementsInput>,
     pub query_json: String,
 }
 
-/// What a `modelQuery` / `modelSubscribe` call reads: exactly one of
-/// `class_name`, `class_names`, `interface` and `implements`.
-fn query_selector(params: &Value) -> Result<ClassSelector, WsRpcError> {
+/// The classes a `modelQuery` / `modelSubscribe` call names: `class_name` or
+/// `class_names`, never both and never neither.
+fn query_classes(params: &Value) -> Result<QueryClasses, WsRpcError> {
     let one = params.opt_str("class_name");
     let many: Option<Vec<String>> = match params.get("class_names") {
         None | Some(Value::Null) => None,
@@ -3150,53 +3139,17 @@ fn query_selector(params: &Value) -> Result<ClassSelector, WsRpcError> {
             ))
         })?),
     };
-    let interface = params.opt_str("interface");
-    let implements: Option<ImplementsInput> = match params.get("implements") {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| {
-            WsRpcError::bad_request(format!(
-                "Invalid parameter 'implements': expected {{ properties?: (string | \
-                 {{ name, through?, datatype? }})[], relations?: {{ through, direction?, name? }}[] }}: {e}"
-            ))
-        })?),
-    };
-    let given = [
-        one.is_some(),
-        many.is_some(),
-        interface.is_some(),
-        implements.is_some(),
-    ]
-    .iter()
-    .filter(|g| **g)
-    .count();
-    if given > 1 {
-        return Err(WsRpcError::bad_request(
-            "Pass one of 'class_name', 'class_names', 'interface' or 'implements'".to_string(),
-        ));
-    }
-    if let Some(name) = interface {
-        if name.is_empty() {
-            return Err(WsRpcError::bad_request(
-                "Parameter 'interface' must name an interface".to_string(),
-            ));
-        }
-        return Ok(ClassSelector::Interface(InterfaceRef::Named(name)));
-    }
-    if let Some(input) = implements {
-        let spec =
-            InterfaceSpec::try_from(input).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-        return Ok(ClassSelector::Interface(InterfaceRef::AdHoc(spec)));
-    }
     match (one, many) {
-        (Some(name), None) => Ok(QueryClasses::One(name).into()),
-        (None, Some(names)) if !names.is_empty() => Ok(QueryClasses::union(names).into()),
+        (Some(name), None) => Ok(QueryClasses::One(name)),
+        (None, Some(names)) if !names.is_empty() => Ok(QueryClasses::union(names)),
         (None, Some(_)) => Err(WsRpcError::bad_request(
             "Parameter 'class_names' must name at least one class".to_string(),
         )),
-        _ => Err(WsRpcError::bad_request(
-            "Missing required parameter: 'class_name' (or 'class_names', 'interface', \
-             'implements')"
-                .to_string(),
+        (Some(_), Some(_)) => Err(WsRpcError::bad_request(
+            "Pass 'class_name' or 'class_names', not both".to_string(),
+        )),
+        (None, None) => Err(WsRpcError::bad_request(
+            "Missing required parameter: 'class_name' (or 'class_names')".to_string(),
         )),
     }
 }

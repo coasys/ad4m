@@ -19,7 +19,6 @@ import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
 import { LiveQuery, Subscribed } from "./LiveQuery";
-import { interfaceShaclJson, type InterfaceDefinition, type ModelQueryClasses } from "./ModelInterface";
 import type { TranscriptTurn } from "../generated/api";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
@@ -55,9 +54,6 @@ function extractNamespaceFromUri(uri: string): string {
  * subscription.dispose();
  * ```
  */
-/** What `addSdna` registers. */
-export type SdnaType = "subject_class" | "flow" | "custom" | "interface";
-
 export class QuerySubscriptionProxy {
     #live: LiveQuery;
     #callbacks = new Set<QueryCallback>();
@@ -677,13 +673,11 @@ export class PerspectiveProxy {
      *
      * @param className - The model class name (e.g. "Recipe"), or several: one
      *   query over their union, whose rows carry `__subjectClass` and
-     *   `__subjectClasses` (#1238). Or an interface, `{ interface: 'Name' }`
-     *   or `{ implements: { properties, relations } }`: the union of every
-     *   installed class that implements it (#1435, see {@link ModelQueryClasses})
+     *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: ModelQueryClasses, queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
@@ -750,13 +744,11 @@ export class PerspectiveProxy {
      * The subscription ends with `disposeQuerySubscription()` or when the
      * socket closes.
      *
-     * @param className - The model class name, several, or an interface (same
-     *   as modelQuery). An interface subscription picks up classes installed
-     *   after it was opened.
+     * @param className - The model class name, or several (same as modelQuery)
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
      * @returns `subscriptionId`, initial `result` and `revision` (0)
      */
-    async modelSubscribe(className: ModelQueryClasses, queryJson: string): Promise<Subscribed> {
+    async modelSubscribe(className: string | string[], queryJson: string): Promise<Subscribed> {
         return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
     }
 
@@ -1183,8 +1175,7 @@ export class PerspectiveProxy {
      * 
      * @param name - Unique name for this SDNA definition
      * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
-     * @param sdnaType - Type of SDNA: "subject_class", "flow", "custom", or
-     *   "interface" (SHACL only; prefer {@link addInterface})
+     * @param sdnaType - Type of SDNA: "subject_class", "flow", or "custom"
      * @param shaclJson - SHACL JSON string (use addShacl() for type-safe alternative)
      * 
      * @example
@@ -1196,31 +1187,15 @@ export class PerspectiveProxy {
      * // Legacy: Prolog code is auto-converted to SHACL
      * await perspective.addSdna('Recipe', prologCode, 'subject_class');
      */
-    async addSdna(name: string, sdnaCode: string, sdnaType: SdnaType, shaclJson?: string) {
+    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
         return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType, shaclJson)
-    }
-
-    /**
-     * Registers a named interface (#1435): what a class must have to be read
-     * by `modelQuery({ interface: name }, …)`. An interface is not a class:
-     * it is never instantiated, listed among subject classes, or written to.
-     * Registering the same name again replaces its definition.
-     *
-     * @example
-     * await perspective.addInterface('Container', {
-     *   relations: [{ through: 'ad4m://has_child', name: 'children' }],
-     * })
-     * const containers = await perspective.modelQuery({ interface: 'Container' }, '{}')
-     */
-    async addInterface(name: string, definition: InterfaceDefinition, namespace?: string): Promise<boolean> {
-        return this.#client.addSdna(this.#handle.uuid, name, "", "interface", interfaceShaclJson(name, definition, namespace))
     }
 
     /**
      * Batch variant of addSdna — registers multiple SDNA entries in a single RPC call.
      * Acquires the Rust-side mutex once for the entire batch.
      */
-    async addSdnaAll(entries: { name: string; sdnaCode?: string; sdnaType: SdnaType; shaclJson?: string }[]): Promise<boolean[]> {
+    async addSdnaAll(entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
         return this.#client.addSdnaBatch(this.#handle.uuid, entries)
     }
 
@@ -1229,7 +1204,7 @@ export class PerspectiveProxy {
      * Skips classes already registered on this perspective instance.
      */
     async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
-        const entries: { name: string; sdnaCode?: string; sdnaType: SdnaType; shaclJson?: string }[] = [];
+        const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
         for (const jsClass of jsClasses) {
             const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
             if (this.#ensuredSubjectClasses.has(className)) continue;

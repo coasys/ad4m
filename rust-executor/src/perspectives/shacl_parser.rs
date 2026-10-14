@@ -1470,80 +1470,8 @@ fn propagate_property_local(shape: &mut SHACLShape) {
 
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
-    write_shape_links(shacl_json, class_name, ShapeKind::SubjectClass)
-}
-
-/// The type a named interface's target URI carries in place of
-/// `ad4m://SubjectClass` (#1435). Nothing that lists, loads or instantiates
-/// subject classes matches it.
-pub const INTERFACE_TYPE: &str = "ad4m://Interface";
-
-/// The links for a named interface (#1435): a node shape like a class's, typed
-/// [`INTERFACE_TYPE`], with no constructor, destructor, flags or actions, so
-/// nothing can create an instance of it.
-///
-/// A property with an empty `path` matches classes by name alone; a non-empty
-/// `path` pins the predicate, and `datatype` pins the datatype. A property with
-/// a `relation_kind` is a relation and needs its `path`: relations match by
-/// predicate. See `model_query::interfaces` for the conformance rule.
-pub fn parse_interface_shacl_to_links(
-    shacl_json: &str,
-    interface_name: &str,
-) -> Result<Vec<Link>, AnyError> {
-    write_shape_links(shacl_json, interface_name, ShapeKind::Interface)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ShapeKind {
-    SubjectClass,
-    Interface,
-}
-
-/// Refuse what an interface cannot carry: anything that writes data, and
-/// anything that would make it a class.
-fn validate_interface_shape(shape: &SHACLShape, name: &str) -> Result<(), AnyError> {
-    let refuse = |what: &str| {
-        Err(anyhow::anyhow!(
-            "Interface '{name}' {what}: an interface only describes properties and relations \
-             a class must have, and cannot be instantiated."
-        ))
-    };
-    if !shape.constructor_actions.is_empty() || !shape.destructor_actions.is_empty() {
-        return refuse("declares constructor or destructor actions");
-    }
-    if shape.properties.is_empty() {
-        return refuse("declares no property and no relation");
-    }
-    for prop in &shape.properties {
-        let label = prop.name.clone().unwrap_or_else(|| prop.path.clone());
-        if prop.has_value.is_some() {
-            return refuse(&format!("declares a flag value on '{label}'"));
-        }
-        if !prop.setter.is_empty() || !prop.adder.is_empty() || !prop.remover.is_empty() {
-            return refuse(&format!("declares write actions on '{label}'"));
-        }
-        if prop.name.as_deref().unwrap_or("").is_empty() && prop.path.is_empty() {
-            return refuse("declares a property with neither a name nor a path");
-        }
-        if prop.relation_kind.is_some() && prop.path.is_empty() {
-            return refuse(&format!(
-                "declares relation '{label}' without a path; relations match by predicate"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn write_shape_links(
-    shacl_json: &str,
-    class_name: &str,
-    kind: ShapeKind,
-) -> Result<Vec<Link>, AnyError> {
     let mut shape: SHACLShape = serde_json::from_str(shacl_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse SHACL JSON: {}", e))?;
-    if kind == ShapeKind::Interface {
-        validate_interface_shape(&shape, class_name)?;
-    }
 
     // Before a single link is generated: a property-shape `local: true` is a
     // declaration about the property, not about whichever actions happen to
@@ -1623,23 +1551,20 @@ fn write_shape_links(
         None => format!("{}{}", namespace, shape_suffix),
     };
 
-    // Create name mapping for class lookup (needed by isSubjectInstance).
-    // Not for an interface: it is not a class, and its name may be one's.
-    if kind == ShapeKind::SubjectClass {
-        let name_mapping = format!("literal:string:shacl://{}", class_name);
+    // Create name mapping for class lookup (needed by isSubjectInstance)
+    let name_mapping = format!("literal:string:shacl://{}", class_name);
 
-        links.push(Link {
-            source: "ad4m://self".to_string(),
-            predicate: Some("ad4m://has_shacl".to_string()),
-            target: name_mapping.clone(),
-        });
+    links.push(Link {
+        source: "ad4m://self".to_string(),
+        predicate: Some("ad4m://has_shacl".to_string()),
+        target: name_mapping.clone(),
+    });
 
-        links.push(Link {
-            source: name_mapping,
-            predicate: Some("ad4m://shacl_shape_uri".to_string()),
-            target: shape_uri.clone(),
-        });
-    }
+    links.push(Link {
+        source: name_mapping,
+        predicate: Some("ad4m://shacl_shape_uri".to_string()),
+        target: shape_uri.clone(),
+    });
 
     // Class definition links
     // Note: The ad4m://has_subject_class link is created by add_sdna(), not here,
@@ -1648,10 +1573,7 @@ fn write_shape_links(
     links.push(Link {
         source: shape.target_class.clone(),
         predicate: Some("rdf://type".to_string()),
-        target: match kind {
-            ShapeKind::SubjectClass => "ad4m://SubjectClass".to_string(),
-            ShapeKind::Interface => INTERFACE_TYPE.to_string(),
-        },
+        target: "ad4m://SubjectClass".to_string(),
     });
 
     links.push(Link {
@@ -1691,16 +1613,11 @@ fn write_shape_links(
 
     // Constructor and destructor actions (JSON in a literal). Written even
     // when empty: `create_subject` needs the constructor link to know the
-    // class exists, and an empty list is a valid no-op. An interface gets
-    // none, so `create_subject` refuses it.
-    let lifecycle: &[(&str, &Vec<AD4MAction>)] = match kind {
-        ShapeKind::SubjectClass => &[
-            ("ad4m://constructor", &shape.constructor_actions),
-            ("ad4m://destructor", &shape.destructor_actions),
-        ],
-        ShapeKind::Interface => &[],
-    };
-    for (predicate, actions) in lifecycle {
+    // class exists, and an empty list is a valid no-op.
+    for (predicate, actions) in [
+        ("ad4m://constructor", &shape.constructor_actions),
+        ("ad4m://destructor", &shape.destructor_actions),
+    ] {
         let json = serde_json::to_string(actions).unwrap_or_else(|_| "[]".to_string());
         links.push(Link {
             source: shape_uri.clone(),
@@ -1739,14 +1656,11 @@ fn write_shape_links(
             target: shape_type.to_string(),
         });
 
-        // An interface property without a path matches by name alone.
-        if !(kind == ShapeKind::Interface && prop.path.is_empty()) {
-            links.push(Link {
-                source: prop_shape_uri.clone(),
-                predicate: Some("sh://path".to_string()),
-                target: prop.path.clone(),
-            });
-        }
+        links.push(Link {
+            source: prop_shape_uri.clone(),
+            predicate: Some("sh://path".to_string()),
+            target: prop.path.clone(),
+        });
 
         // Natural-language property interpretation hint (semantic guidance for interpretation/tooling)
         if let Some(hint) = &prop.interpretation_hint {
