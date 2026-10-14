@@ -18,6 +18,10 @@ import type { PerspectiveLinkUpdatedEvent } from "./PerspectiveLinkUpdatedEvent"
 import type { PerspectiveRemovedEvent } from "./PerspectiveRemovedEvent";
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
 import type { QuerySubscriptionUpdateEvent } from "./QuerySubscriptionUpdateEvent";
+import type { SfuCallRenegotiationOffer } from "./SfuCallRenegotiationOffer";
+import type { SfuDataMessage } from "./SfuDataMessage";
+import type { SfuMigrateEvent } from "./SfuMigrateEvent";
+import type { SfuRoomRoster } from "./SfuRoomRoster";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -41,6 +45,10 @@ export interface EventMap {
   "query-subscription-update": QuerySubscriptionUpdateEvent;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;
+  "sfu-call-renegotiation-offer": SfuCallRenegotiationOffer;
+  "sfu-migrate": SfuMigrateEvent;
+  "sfu-data": SfuDataMessage;
+  "sfu-room-roster": SfuRoomRoster;
   "flow-state-changed": FlowStateChangedEvent;
 }
 
