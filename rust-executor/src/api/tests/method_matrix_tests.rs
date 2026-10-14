@@ -560,7 +560,51 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "instanceUri": "i" }),
     ),
     ("perspective.flowFired", || json!({ "instance": "i" })),
+    // #712's SFU. `sfu.servesAllMembers` names its perspective in `uuid`; the reads without
+    // params take `{}`.
+    ("sfu.startRoom", sfu_room),
+    ("sfu.stopRoom", sfu_room),
+    ("sfu.callLeave", sfu_room),
+    (
+        "sfu.callJoin",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}" }),
+    ),
+    (
+        "sfu.callSetQualityPreference",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "preference": "low" }),
+    ),
+    (
+        "sfu.callAnswerServerOffer",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpAnswer": "{}" }),
+    ),
+    (
+        "sfu.addIceCandidate",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "candidate": "c" }),
+    ),
+    (
+        "sfu.sendData",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "channelLabel": "c", "data": "d" }),
+    ),
+    ("sfu.getConfig", sfu_neighbourhood),
+    ("sfu.sfuPeerForNeighbourhood", sfu_neighbourhood),
+    ("sfu.sfuPeersForNeighbourhood", sfu_neighbourhood),
+    (
+        "sfu.setConfig",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "config": {} }),
+    ),
+    (
+        "sfu.ensureMembership",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "did": "did:key:z6Mk" }),
+    ),
 ];
+
+fn sfu_neighbourhood() -> Value {
+    json!({ "neighbourhoodUrl": "neighbourhood://Qm" })
+}
+
+fn sfu_room() -> Value {
+    json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r" })
+}
 
 fn link() -> Value {
     json!({ "source": "s", "target": "t" })
@@ -961,6 +1005,7 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "runtime.unytSendHot",
             "runtime.unytWalletBalance",
             "runtime.unytWalletHistory",
+            "sfu.ensureMembership",
             "user.credits",
             "user.freeAccess",
             "user.setMultiUserEnabled",
