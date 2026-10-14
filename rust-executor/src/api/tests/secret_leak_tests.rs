@@ -193,6 +193,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "address": "literal" })
         }
         "neighbourhood.hasTelepresence"
+        | "neighbourhood.ownOnlineStatus"
         | "neighbourhood.onlineAgents"
         | "neighbourhood.otherAgents"
         | "perspective.get"
@@ -223,6 +224,10 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "did": fx.main_did, "data": "leak", "signedData": "00" })
         }
         "user.wallet" => json!({ "email": fx.user_email }),
+        "sfu.getConfig" | "sfu.sfuPeerForNeighbourhood" | "sfu.sfuPeersForNeighbourhood" => {
+            json!({ "neighbourhoodUrl": "neighbourhood://leak" })
+        }
+        "sfu.servesAllMembers" => json!({ "uuid": uuid }),
         _ => json!({}),
     }
 }
