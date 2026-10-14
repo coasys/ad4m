@@ -4118,6 +4118,53 @@ describe("Ad4mModel.transaction()", () => {
   });
 });
 
+describe("delete() and incoming links", () => {
+  @Model({ name: "DelTarget" })
+  class DelTarget extends Ad4mModel {
+    @Flag({ through: "del://kind", value: "del://target" })
+    kind: string = "";
+  }
+
+  @Model({ name: "DelOwner" })
+  class DelOwner extends Ad4mModel {
+    @HasMany({ through: "del://has_target", target: () => DelTarget })
+    targets: string[] = [];
+  }
+
+  @Model({ name: "DelOther" })
+  class DelOther extends Ad4mModel {
+    @HasMany({ through: "del://mentions" })
+    mentions: string[] = [];
+  }
+
+  const ownerLink = { author: "a", timestamp: "1", data: { source: "del://owner", predicate: "del://has_target", target: "del://t1" } };
+  const otherLink = { author: "b", timestamp: "2", data: { source: "del://other", predicate: "del://mentions", target: "del://t1" } };
+
+  const makePerspective = () => ({
+    getAllShacl: jest.fn(async () =>
+      [DelTarget, DelOwner, DelOther].map((M) => ({ name: M.generateSHACL().name, shape: M.generateSHACL().shape })),
+    ),
+    removeSubject: jest.fn(async () => {}),
+    get: jest.fn(async (q: any) => (q.target === "del://t1" ? [ownerLink, otherLink] : [])),
+    removeLinks: jest.fn(async () => []),
+  }) as any;
+
+  it("removes incoming links of relations that target the model and keeps the others", async () => {
+    const perspective = makePerspective();
+    await new DelTarget(perspective, "del://t1").delete("batch-1");
+
+    expect(perspective.removeLinks).toHaveBeenCalledTimes(1);
+    expect(perspective.removeLinks).toHaveBeenCalledWith([ownerLink], "batch-1");
+  });
+
+  it("rejects when removing the incoming links fails", async () => {
+    const perspective = makePerspective();
+    const failure = new Error("remove failed");
+    perspective.removeLinks.mockRejectedValue(failure);
+    await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
+  });
+});
+
 describe("querying by class name (overrideModelClassName)", () => {
   @Model({ name: "ByNameCard" })
   class ByNameCard extends Ad4mModel {

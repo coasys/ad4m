@@ -2064,39 +2064,42 @@ export class Ad4mModel {
       //
       // Instead we only remove outgoing links whose predicate is declared
       // by THIS model's schema (properties + relations).
-      try {
-        const knownPredicates = new Set<string>();
-        for (const p of Object.values(metadata.properties)) {
-          if (p.predicate) knownPredicates.add(p.predicate);
-        }
-        for (const r of Object.values(metadata.relations)) {
-          if (r.predicate) knownPredicates.add(r.predicate);
-        }
+      const knownPredicates = new Set<string>();
+      for (const p of Object.values(metadata.properties)) {
+        if (p.predicate) knownPredicates.add(p.predicate);
+      }
+      for (const r of Object.values(metadata.relations)) {
+        if (r.predicate) knownPredicates.add(r.predicate);
+      }
 
-        const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
-        const ownLinks = outgoingLinks.filter(
-          (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
-        );
-        if (ownLinks.length > 0) {
-          await this._perspective.removeLinks(ownLinks, batchId);
-        }
-      } catch (e) {
-        console.warn(`delete(): failed to remove outgoing links for ${this._baseExpression}:`, e);
+      const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
+      const ownLinks = outgoingLinks.filter(
+        (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
+      );
+
+      if (ownLinks.length > 0) {
+        await this._perspective.removeLinks(ownLinks, batchId);
       }
     }
 
-    // Clean up incoming links — remove any links that point **to** this instance.
-    // Unlike outgoing links (scoped above), incoming links originate from OTHER
-    // nodes.  Removing them doesn't damage sibling models on this node; it
-    // prevents dangling references elsewhere (e.g. a parent's has_child link).
-    try {
-      const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
-      if (incomingLinks.length > 0) {
-        await this._perspective.removeLinks(incomingLinks, batchId);
+    // Incoming links: only those of forward relations (hasMany / hasOne) that
+    // the registered shapes declare with this model as their target. Links
+    // other models or agents hold to this instance (mentions, reactions) stay.
+    const incomingPredicates = new Set<string>();
+    for (const { shape } of await this._perspective.getAllShacl()) {
+      for (const p of shape.properties) {
+        if (p.targetClassName === metadata.className && p.path
+            && (p.relationKind === 'hasMany' || p.relationKind === 'hasOne')) {
+          incomingPredicates.add(p.path);
+        }
       }
-    } catch (e) {
-      // Non-fatal: the subject was already deleted; incoming link cleanup is best-effort
-      console.warn(`delete(): failed to clean up incoming links for ${this._baseExpression}:`, e);
+    }
+    if (incomingPredicates.size === 0) return;
+
+    const incomingLinks = (await this._perspective.get(new LinkQuery({ target: this._baseExpression })))
+      .filter((link) => link.data.predicate && incomingPredicates.has(link.data.predicate));
+    if (incomingLinks.length > 0) {
+      await this._perspective.removeLinks(incomingLinks, batchId);
     }
   }
 
@@ -2217,7 +2220,7 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also cleans up any incoming links that point to this instance.
+   * Also removes incoming links of relations that target this model.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
@@ -2240,7 +2243,7 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also cleans up any incoming links that point to this instance.
+   * Also removes incoming links of relations that target this model.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
