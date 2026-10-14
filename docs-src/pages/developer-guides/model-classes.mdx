@@ -773,6 +773,21 @@ const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
 const page = await Recipe.paginate(perspective, 10, 1, { where: { category: "Dessert" } });
 ```
 
+### What a Query Returns
+
+With no `properties` and no `include`, a query returns every field of each instance:
+
+- `id`, `author`, `createdAt` and `updatedAt`,
+- every property's value, including computed (`getter`) properties,
+- every relation as the ids it points at (raw URI strings), not as instances.
+
+This default is a contract, not an optimisation that may change. Two options change it, and only for the query that sets them:
+
+- `properties: [...]` returns only the named fields, plus `id` (see [Sparse Fieldsets](#sparse-fieldsets-with-properties)).
+- `include: { relation: true }` replaces that relation's ids with instances (see [Eager Loading](#eager-loading-with-include)).
+
+[Flows](/flows) depend on this default. A flow's outputs are hashed from exactly what a query by id returns through the output's class, with no other options, and every voter recomputes that hash on their own executor. If the default shape changed, executors on either side of the change would compute different hashes and refuse to co-sign.
+
 ### Paging by Cursor
 
 `paginate(pageSize, pageNumber)` pages by `offset`. It can jump straight to page N, but a row added while you page shifts every later page, so a row can repeat or be skipped. A cursor page cannot jump, but rows added before the cursor do not move the next page.
