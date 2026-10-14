@@ -97,3 +97,6 @@ rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
 .overnight-status/
 .codegraph/
 .graphcoder/
+
+# Multi-machine verification config (contains SSH hosts / network details)
+tests/js/helpers/sfu/multi-machine.config.json

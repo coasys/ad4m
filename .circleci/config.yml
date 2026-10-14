@@ -542,6 +542,28 @@ jobs:
           path: /tmp/test-artifacts
           destination: test-logs
 
+  # SFU and mesh calls end to end through the SDK: managed users on one
+  # executor, local languages (no Holochain). About 4 minutes. E6 shapes the
+  # loopback with `tc` for its own ports only (runners share the host), and
+  # skips where passwordless sudo is missing.
+  integration-tests-sfu-e2e:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          name: Run SFU end-to-end tests (local languages, no Holochain)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-sfu-e2e 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 20m
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
   # Multi-node suite over the server-link-language: Alice + Bob on local
   # languages (no Holochain), links syncing through a link-server the suite
   # starts (tests/js/tests/integration-server-link.test.ts).
@@ -728,6 +750,38 @@ jobs:
             cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain
           no_output_timeout: 60m
 
+  # Wind tunnel across executors: cascade, the two-executor session (T21)
+  # and network baselines, over Holochain. Several scenarios sleep on
+  # purpose (30s media/RTT, 35s TTL). That is a nightly measurement, not a
+  # merge check, so this job is only in `nightly-llm-e2e`; the single-executor
+  # calls run on every push in `integration-tests-sfu-e2e`. It builds its own
+  # binaries: that pipeline has no `build` job, and `build` deletes stashes
+  # older than 12 hours.
+  integration-tests-sfu:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment:
+          build_binaries: true
+      - run:
+          # T21 runs calls in real neighbourhoods, so it needs the test languages published.
+          name: Prepare the test languages
+          command: cd ./tests/js && pnpm run prepare-test
+      - run:
+          name: Run SFU wind tunnel tests
+          command: cd ./tests/js && pnpm run test-sfu
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: on_fail
+          command: |
+            mkdir -p /tmp/test-artifacts
+            cp -r /tmp/ad4m-sfu-test-* /tmp/test-artifacts/ 2>/dev/null || true
+      - store_artifacts:
+          when: on_fail
+          path: /tmp/test-artifacts
+          destination: sfu-test-logs
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -834,6 +888,9 @@ workflows:
       - integration-tests-js:
           requires:
             - build
+      - integration-tests-sfu-e2e:
+          requires:
+            - build
       - integration-tests-multi-node-server-link:
           requires:
             - build
@@ -853,9 +910,12 @@ workflows:
           requires:
             - build
 
-  # Nightly against `dev`. Fired by a CircleCI *scheduled pipeline*
-  # (visible under Project → Triggers), not by in-config cron.
-  # Same resource class (Marvin) so Ollama is local.
+  # Nightly against `dev`. An API trigger (or a Project Trigger) sets
+  # `run-nightly-llm`. In-config cron does not reach this project.
+  # Same resource class (Marvin) so Ollama is local. The SFU wind tunnel
+  # waits for llm-e2e: four runners share this host, and both jobs build
+  # Rust. A halted llm-e2e is success, so a quiet night still runs the tunnel.
+  # An llm-e2e failure skips the tunnel that night.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -863,3 +923,6 @@ workflows:
           # Provides `CIRCLECI_API_TOKEN` for the skip-if-unchanged preflight.
           context:
             - nightly-llm-e2e
+      - integration-tests-sfu:
+          requires:
+            - llm-e2e
