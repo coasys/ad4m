@@ -375,11 +375,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     return this;
   }
 
-  /** Query the class registered under `className` instead (on a `queryOf()`
-   *  builder: instead of the union). Rows hydrate as plain `Ad4mModel`s. */
+  /** Query the class registered under `className` instead of this builder's
+   *  class (how `Ad4mModel.query(p).overrideModelClassName(name)` queries a
+   *  model known only by name). On an undecorated `Ad4mModel` builder the rows
+   *  hydrate as plain `Ad4mModel`s, and `includeAll` is not available (list
+   *  the relations in `include`).
+   *  @throws On a `queryOf()` builder: a union already names its classes, and
+   *  its result type promises instances of them. */
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
+    if (this.unionClasses) {
+      throw new Error(
+        `overrideModelClassName("${className}") cannot be used on a queryOf() builder; ` +
+        `use Ad4mModel.query(perspective).overrideModelClassName("${className}") instead`,
+      );
+    }
     this.modelClassName = className;
-    this.unionClasses = undefined;
     return this;
   }
 

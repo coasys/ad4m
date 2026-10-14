@@ -1086,6 +1086,11 @@ export class Ad4mModel {
   static withIncludeAll(classes: (typeof Ad4mModel)[], query: Query): Query {
     if (!query.includeAll) return query;
     const { includeAll, ...rest } = query;
+    if (classes.some((c) => c === Ad4mModel)) {
+      // A query by class name runs on the undecorated base class: the client
+      // does not know the named model's relations, so it cannot expand them.
+      throw new Error("includeAll needs a decorated model class; for a query by class name, list the relations in `include`");
+    }
     const expanded: IncludeMap = {};
     for (const c of classes) {
       for (const [name, rel] of Object.entries(c.getModelMetadata().relations)) {

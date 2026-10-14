@@ -4349,13 +4349,18 @@ describe("querying by class name (overrideModelClassName)", () => {
     expect(data(results)).toEqual(data(rows));
   });
 
-  it("on a queryOf() builder, queries the named class only", async () => {
+  it("throws on a queryOf() builder instead of dropping the union", () => {
     const perspective = makePerspective();
-    const results = await Ad4mModel.queryOf(perspective, [ByNameCard, ByNameNote])
-      .overrideModelClassName("ByNameCard")
-      .get();
+    expect(() => Ad4mModel.queryOf(perspective, [ByNameCard, ByNameNote]).overrideModelClassName("ByNameCard"))
+      .toThrow(/queryOf\(\)/);
+    expect(perspective.modelQuery).not.toHaveBeenCalled();
+  });
 
-    expect(perspective.modelQuery.mock.calls[0][0]).toBe("ByNameCard");
-    expect(data(results)).toEqual(data(rows));
+  it("rejects includeAll with a clear error (the client does not know the named model's relations)", async () => {
+    const perspective = makePerspective();
+    await expect(
+      Ad4mModel.query(perspective, { includeAll: true }).overrideModelClassName("ByNameCard").get(),
+    ).rejects.toThrow(/includeAll needs a decorated model class/);
+    expect(perspective.modelQuery).not.toHaveBeenCalled();
   });
 });
