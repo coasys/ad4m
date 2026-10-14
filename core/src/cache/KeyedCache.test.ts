@@ -28,15 +28,6 @@ describe('KeyedCache', () => {
         expect(loadMany).toHaveBeenCalledTimes(1);
     });
 
-    test('get() uses loadOne when given; getMany() still uses loadMany', async () => {
-        const loadOne = jest.fn(async (k: string) => `one:${k}`);
-        const loadMany = jest.fn(async (keys: string[]) => keys.map(k => `many:${k}`));
-        const cache = new KeyedCache<string>({ loadOne, loadMany });
-        expect(await cache.get('a')).toBe('one:a');
-        expect(await cache.getMany(['a', 'b'])).toEqual(['one:a', 'many:b']);
-        expect(loadMany.mock.calls).toEqual([[['b']]]);
-    });
-
     test('maxBatch splits one tick of misses into calls of at most that size', async () => {
         const loadMany = jest.fn(async (keys: string[]) => keys);
         const cache = new KeyedCache<string>({ loadMany, maxBatch: 2 });

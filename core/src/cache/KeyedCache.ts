@@ -13,11 +13,6 @@ export interface KeyedCacheOptions<V> {
      * readers only).
      */
     loadMany(keys: string[]): Promise<Array<V | null | Error>>;
-    /**
-     * Reads one key. When set, `get` misses use it; otherwise `get` misses
-     * made in the same tick share one `loadMany` call, as `getMany` misses do.
-     */
-    loadOne?(key: string): Promise<V | null>;
     /** Most keys per `loadMany` call. Default: no limit. */
     maxBatch?: number;
     /** Second tier, read on a memory miss (IndexedDB in browsers). */
@@ -53,7 +48,7 @@ export class KeyedCache<V> {
     }
 
     get(key: string): Promise<V | null> {
-        return this.#read(key, this.#opts.loadOne);
+        return this.#read(key);
     }
 
     getMany(keys: string[]): Promise<Array<V | null>> {
@@ -81,13 +76,13 @@ export class KeyedCache<V> {
         if (persistent) this.#opts.persistent?.clear(); // fire-and-forget
     }
 
-    #read(key: string, loadOne?: (key: string) => Promise<V | null>): Promise<V | null> {
+    #read(key: string): Promise<V | null> {
         const hit = this.#values.get(key);
         if (hit && Date.now() - hit.ts < (this.#opts.maxAgeMs?.(key) ?? Infinity)) return Promise.resolve(hit.value);
         const inFlight = this.#pending.get(key);
         if (inFlight) return inFlight;
 
-        const loading = loadOne ? this.#loadOne(key, loadOne) : this.#enqueue(key);
+        const loading = this.#enqueue(key);
         const promise: Promise<V | null> = loading.then(
             ({ value, stored }) => {
                 // A set(), delete() or clear() since the read started wins over its result.
@@ -104,10 +99,6 @@ export class KeyedCache<V> {
         );
         this.#pending.set(key, promise);
         return promise;
-    }
-
-    async #loadOne(key: string, loadOne: (key: string) => Promise<V | null>): Promise<Loaded<V>> {
-        return (await this.#stored(key)) ?? { value: await loadOne(key), stored: false };
     }
 
     #enqueue(key: string): Promise<Loaded<V>> {
