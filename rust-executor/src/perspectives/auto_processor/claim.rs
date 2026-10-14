@@ -56,7 +56,11 @@
 //!   above sync latency, make a same-instant tie rare rather than impossible. A
 //!   hard exactly-once across an unbounded-latency link would need a consensus
 //!   round we deliberately avoid; the min-DID convergence covers every case
-//!   *except* the sub-sync-round simultaneous claim.
+//!   *except* the sub-sync-round simultaneous claim. [`settle_claim`] waits
+//!   [`CLAIM_SETTLE_MS`] for that claim to arrive and re-applies the min-DID
+//!   rule before a pass starts; a claim that arrives during the pass is
+//!   caught again by [`confirm_claim`] before `Processed` is emitted. A claim
+//!   that never syncs is still invisible, and both peers still proceed.
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -323,6 +327,72 @@ pub async fn try_claim(
     }
 }
 
+/// How long a locally-won claim waits for a same-round peer claim to sync
+/// before the pass starts.
+///
+/// Nightly 2026-10-14 job 43581: both executors picked the same two turns
+/// four seconds apart, each having read only its own claim, and both emitted
+/// `Processed`. Eight seconds covers that gap plus a short sync. A smaller
+/// DID that becomes visible ends the wait immediately.
+pub const CLAIM_SETTLE_MS: u64 = 8_000;
+const CLAIM_SETTLE_POLL_MS: u64 = 500;
+
+/// Min-DID decision over an already-loaded holder list. An empty list is a
+/// win: the caller just wrote its own claim, and a failed read must not
+/// stall the only peer that can process the batch.
+pub fn decide_claim(me: &str, holders: &[String]) -> ClaimOutcome {
+    match holders.first() {
+        Some(winner) if winner == me => ClaimOutcome::Won,
+        Some(winner) => ClaimOutcome::BackedOff {
+            holder: winner.clone(),
+        },
+        None => ClaimOutcome::Won,
+    }
+}
+
+/// Re-read claimants. A smaller DID that arrived after [`try_claim`] wins.
+pub async fn confirm_claim(
+    perspective: &PerspectiveInstance,
+    processor: &str,
+    item_ids: &[String],
+    now_ms: i64,
+    context: &AgentContext,
+) -> anyhow::Result<ClaimOutcome> {
+    let me = did_for_context(context).map_err(|e| anyhow::anyhow!("did_for_context: {e:#}"))?;
+    let key = batch_key(item_ids);
+    let holders = active_claimants(perspective, processor, &key, now_ms).await?;
+    Ok(decide_claim(&me, &holders))
+}
+
+/// Poll until another claimant is visible or `settle_ms` elapses, then apply
+/// the min-DID rule. `settle_ms == 0` re-reads once and returns, so a
+/// single-process caller does not sleep.
+pub async fn settle_claim(
+    perspective: &PerspectiveInstance,
+    processor: &str,
+    item_ids: &[String],
+    now_ms: i64,
+    context: &AgentContext,
+    settle_ms: u64,
+) -> anyhow::Result<ClaimOutcome> {
+    let me = did_for_context(context).map_err(|e| anyhow::anyhow!("did_for_context: {e:#}"))?;
+    let key = batch_key(item_ids);
+    if settle_ms == 0 {
+        let holders = active_claimants(perspective, processor, &key, now_ms).await?;
+        return Ok(decide_claim(&me, &holders));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(settle_ms);
+    let poll = std::time::Duration::from_millis(CLAIM_SETTLE_POLL_MS);
+    loop {
+        let holders = active_claimants(perspective, processor, &key, now_ms).await?;
+        if holders.iter().any(|holder| holder != &me) || std::time::Instant::now() >= deadline {
+            return Ok(decide_claim(&me, &holders));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        tokio::time::sleep(remaining.min(poll)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +494,35 @@ mod tests {
             .expect("try_claim");
         assert_eq!(
             outcome,
+            ClaimOutcome::BackedOff {
+                holder: other.to_string()
+            }
+        );
+    }
+
+    /// The local read in `try_claim` cannot see a claim that arrives in the
+    /// same sync round. Once it is present, `settle_claim` must back off
+    /// even though `try_claim` already returned Won. Nightly job 43581.
+    #[tokio::test]
+    async fn settle_backs_off_when_smaller_claim_arrives_after_local_win() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string(), "i2".to_string()];
+        let key = batch_key(&items);
+        let won = try_claim(&mut p, "proc", &items, 60_000, 1_000, &ctx)
+            .await
+            .expect("try_claim");
+        assert_eq!(won, ClaimOutcome::Won);
+
+        let other = "aaa:late-peer";
+        write_claim(&mut p, "proc", &key, other, 60_000, &ctx)
+            .await
+            .expect("late claim");
+
+        let settled = settle_claim(&p, "proc", &items, 1_000, &ctx, 0)
+            .await
+            .expect("settle_claim");
+        assert_eq!(
+            settled,
             ClaimOutcome::BackedOff {
                 holder: other.to_string()
             }

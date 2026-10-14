@@ -27,7 +27,7 @@ use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{batch_key, renew_claim, try_claim, ClaimOutcome};
+use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
@@ -596,6 +596,9 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 ///    Empty `turns` = [`PassOutcome::EmptyTranscript`].
 /// 4. [`run_interpretation_with_strategy`] with the deserialized dedup.
 ///
+/// `settle_ms` is how long a local claim win waits for a same-round peer
+/// claim to sync before the pass starts. `0` re-reads once and does not sleep.
+///
 /// The pass always uses the executor's default LLM (via `AIService`).
 /// `AutoProcessorConfig` is a neighbourhood-shared record and must not carry
 /// per-peer LLM overrides — each peer picks a model that matches its local
@@ -607,6 +610,7 @@ pub async fn run_one_pass(
     now_ms: i64,
     context: &AgentContext,
     escalate_past_election: bool,
+    settle_ms: u64,
 ) -> anyhow::Result<PassOutcome> {
     // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
     // `me` (the acting agent's DID) is resolved up front so every signal is
@@ -747,6 +751,26 @@ pub async fn run_one_pass(
         // (fires every tick while another peer holds the claim).
         log::debug!(
             "⚙️ auto_processor `{}`: backed off — holder `{holder}` has the claim",
+            cfg.processor_id
+        );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
+    // The local read above cannot see a peer that claimed in this same sync
+    // round. Wait for that claim, then apply the min-DID rule again, before
+    // this pass spends an LLM call or emits `Processed`.
+    let settled = settle_claim(
+        perspective,
+        &cfg.processor_id,
+        &item_ids,
+        now_ms,
+        context,
+        settle_ms,
+    )
+    .await?;
+    if let ClaimOutcome::BackedOff { holder } = settled {
+        log::info!(
+            "⚙️ auto_processor `{}`: backed off after claim settle — holder `{holder}`",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
@@ -1066,6 +1090,22 @@ pub async fn run_one_pass(
             uuid
         );
         let holder = String::from("(claim lost during interpretation)");
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
+    // A peer claim that synced during the pass. The bases may already be
+    // written (the interpretation engine commits them); refusing `Processed`
+    // is what stops the other executor's retirement from being counted twice.
+    if let ClaimOutcome::BackedOff { holder } =
+        confirm_claim(perspective, &cfg.processor_id, &item_ids, now_ms, context).await?
+    {
+        log::warn!(
+            "❌ ⚙️ auto-processor lost the claim during the pass — holder `{holder}` \
+             processor={} items={} perspective={}: not emitting Processed",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
+        );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
@@ -1758,7 +1798,7 @@ mod tests {
             .await
             .expect("seed incumbent");
 
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         assert!(
@@ -1777,7 +1817,7 @@ mod tests {
         let mut cfg = cfg("proc", 100, 32);
         cfg.interpretation_classes = vec!["ns://Unregistered".into()];
         let items = vec![pt("i1")];
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         match outcome {
