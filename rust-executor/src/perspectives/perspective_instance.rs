@@ -1131,7 +1131,7 @@ impl PerspectiveInstance {
         nh: &crate::types::DecoratedNeighbourhoodExpression,
         mut language: Language,
     ) {
-        let agents_to_register = {
+        let local_agents = || async {
             let handle = self.persisted.lock().await;
             match &handle.owners {
                 Some(owners) if !owners.is_empty() => owners.clone(),
@@ -1139,15 +1139,24 @@ impl PerspectiveInstance {
                 _ => vec![crate::agent::did()],
             }
         };
-        log::info!(
-            "Setting local agents for link language: {:?}",
-            agents_to_register
-        );
-        if let Err(e) = language.set_local_agents(agents_to_register).await {
+        let registered = local_agents().await;
+        log::info!("Setting local agents for link language: {:?}", registered);
+        if let Err(e) = language.set_local_agents(registered.clone()).await {
             log::error!("Failed to set local agents on link language: {:?}", e);
         }
 
-        *self.link_language.write().await = Some(language);
+        *self.link_language.write().await = Some(language.clone());
+        // A user who joined while this attached (`install_neighbourhood_with_context`
+        // adds them as an owner) found no link language to tell, and joins
+        // now land straight after a publish. From here on the join tells it
+        // itself; before here, tell it now. Setting agents is additive.
+        let owners = local_agents().await;
+        if owners != registered {
+            log::info!("Setting local agents joined while attaching: {:?}", owners);
+            if let Err(e) = language.set_local_agents(owners).await {
+                log::error!("Failed to set local agents on link language: {:?}", e);
+            }
+        }
         // Cache language→perspective mapping for fast signal routing
         {
             let handle = self.persisted.lock().await.clone();
