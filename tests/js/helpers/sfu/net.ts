@@ -80,6 +80,37 @@ export function setNetem(opts: NetemOptions, iface: string = DEFAULT_IFACE): boo
 }
 
 /**
+ * Apply netem only to loopback traffic to or from `ports` (TCP and UDP).
+ *
+ * `setNetem` impairs the whole interface, and machine CI runners on one
+ * host share it: every other job's localhost RPC would suffer too. Here a
+ * prio qdisc sends the matching packets to a fourth band carrying netem; the
+ * priomap keeps everything else in the three plain bands.
+ */
+export function setNetemOnPorts(ports: number[], opts: NetemOptions, iface: string = DEFAULT_IFACE): boolean {
+  if (!tcAvailable() || ports.length === 0) return false;
+  const netem: string[] = [];
+  if (opts.lossPct != null) netem.push(`loss ${opts.lossPct}%`);
+  if (opts.delayMs != null) netem.push(`delay ${opts.delayMs}ms${opts.jitterMs != null ? ` ${opts.jitterMs}ms` : ""}`);
+  if (netem.length === 0) return false;
+  const tc = (args: string) => execSync(`sudo -n tc ${args}`, { stdio: "pipe" });
+  try {
+    clearNet(iface);
+    tc(`qdisc add dev ${iface} root handle 1: prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1`);
+    tc(`qdisc add dev ${iface} parent 1:4 handle 40: netem ${netem.join(" ")}`);
+    for (const port of ports) {
+      for (const field of ["sport", "dport"]) {
+        tc(`filter add dev ${iface} parent 1: protocol ip prio 1 u32 match ip ${field} ${port} 0xffff flowid 1:4`);
+      }
+    }
+    return true;
+  } catch {
+    clearNet(iface);
+    return false;
+  }
+}
+
+/**
  * Check whether tc + sudo are usable.  Scenarios use this to decide
  * whether to run end-to-end or report `skipped: tc unavailable`.
  */

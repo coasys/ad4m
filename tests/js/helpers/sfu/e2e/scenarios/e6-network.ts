@@ -1,8 +1,10 @@
 /**
  * E6: a bad network, then no network.
  *
- * Impairs the loopback interface every agent shares — signalling and media
- * alike, as a host's network failing does:
+ * Impairs this world's traffic on the loopback — its executor's API and its
+ * SFU, so signalling and media alike, as a host's network failing does. Only
+ * those ports: other processes on the host (CI runners share it) are not
+ * touched.
  *
  * - Loss and jitter (5%, 40 ms ± 20 ms): the call stays up and everyone
  *   keeps hearing everyone.
@@ -14,7 +16,8 @@
  * Needs `sudo -n tc`; skipped without it. Always clears the impairment, pass or fail.
  */
 
-import { clearNet, netAvailable, setNetem } from "../../net.js";
+import { clearNet, netAvailable, setNetemOnPorts, type NetemOptions } from "../../net.js";
+import type { Check } from "../call.js";
 import { e2eScenario } from "../scenario.js";
 
 const EVERYONE = ["u1", "u2", "u3", "u4", "u5", "u6"];
@@ -29,8 +32,17 @@ export const e6Network = e2eScenario({
     neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
   },
   unavailable: () => (netAvailable() ? null : "needs passwordless `sudo -n tc` to impair the loopback interface"),
-  async run({ call: inSpace, step, metric }) {
+  async run({ world, call: inSpace, step, metric }) {
+    const ports = await world.ports();
+    const setNetem = (opts: NetemOptions) => {
+      if (!setNetemOnPorts(ports, opts)) throw new Error(`could not impair ports ${ports.join(", ")}`);
+    };
     const call = inSpace("space", "e6", { video: false });
+    // An outage that reached nobody would pass every step after it: check that it cut the audio.
+    // Frames keep arriving (the receiver conceals loss), so listen for the tones instead.
+    const silence: Check = (snapshots) =>
+      [...snapshots].flatMap(([name, s]) =>
+        Object.values(s.remotes).some((remote) => remote.tone !== null) ? [`${name} still hears a tone`] : []);
     try {
       await step("six join and settle", async () => {
         await call.join(EVERYONE);
@@ -51,7 +63,9 @@ export const e6Network = e2eScenario({
         const departures = async () => [...(await call.snapshots())].map(([name, s]) => `${name}:${s.departures}`).join(" ");
         const before = await departures();
         setNetem({ lossPct: 100 });
-        await sleep(6_000);
+        const cut = Date.now();
+        await call.eventually(silence, 5_000, "the outage takes effect");
+        await sleep(6_000 - (Date.now() - cut));
         clearNet();
         await call.eventually(call.hearsEveryone(), 20_000, "audio after a short outage");
         await call.eventually(call.rosterIsEveryone(), 1, "roster after a short outage");
@@ -62,7 +76,9 @@ export const e6Network = e2eScenario({
 
       metric("long_outage_recovery_ms", await step("a 20 s outage: every session rejoins by itself", async () => {
         setNetem({ lossPct: 100 });
-        await sleep(20_000);
+        const cut = Date.now();
+        await call.eventually(silence, 5_000, "the outage takes effect");
+        await sleep(20_000 - (Date.now() - cut));
         clearNet();
         const started = Date.now();
         await call.eventually(call.rosterIsEveryone(), 90_000, "roster after a long outage");

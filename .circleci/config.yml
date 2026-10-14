@@ -544,7 +544,8 @@ jobs:
 
   # SFU and mesh calls end to end through the SDK: managed users on one
   # executor, local languages (no Holochain). About 4 minutes. E6 shapes the
-  # loopback with `tc` and skips where passwordless sudo is missing.
+  # loopback with `tc` for its own ports only (runners share the host), and
+  # skips where passwordless sudo is missing.
   integration-tests-sfu-e2e:
     machine: true
     resource_class: coasys/marvin

@@ -52,6 +52,8 @@ export interface World {
   url(name: string): string;
   /** Stop the executor and start it again on the same data, as an operator's restart does. */
   restartExecutor(): Promise<void>;
+  /** The ports this world's traffic uses: the executor's API (TCP) and its SFU (UDP). */
+  ports(): Promise<number[]>;
   stop(): Promise<void>;
 }
 
@@ -148,6 +150,11 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
         const url = urls.get(name);
         if (!url) throw new Error(`no neighbourhood "${name}"`);
         return url;
+      },
+      ports: async () => {
+        // The operator's view of the SFU, read only to aim the network impairment.
+        const { bindAddress } = await admin.neighbourhood.sfuStatus();
+        return [port, Number(bindAddress.split(":").pop())];
       },
       restartExecutor: async () => {
         const old = executor!;

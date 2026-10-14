@@ -126,8 +126,11 @@ so the same file runs on both link languages.
   outsider is the one exemption). The admin client only builds the world.
 - Each user sends its own tone (`toneFor(i)`) and a video of known size, so
   receivers check *who* they hear and at which simulcast layer.
-- E6 shapes the loopback with `tc netem` and skips without passwordless
-  `sudo -n tc`.
+- E6 shapes the loopback with `tc netem`, only for its world's ports
+  (`setNetemOnPorts`: executor API and SFU UDP), and skips without
+  passwordless `sudo -n tc`. Never impair the whole of `lo` in a PR job:
+  machine runners on one host share it, and every other job's localhost
+  RPC times out (seen as `executeCommands`/`otherAgents` 30 s timeouts).
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
