@@ -1,3 +1,4 @@
+use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
@@ -4609,16 +4610,10 @@ impl PerspectiveInstance {
         // present — i.e. a real multi-executor neighbourhood).
         let link_language_clone = self.link_language.read().await.clone();
         let has_link_language = link_language_clone.is_some();
+        // A remote multi-user node publishes its agents' statuses as one bundle;
+        // `unpack` turns it back into one verified entry per agent.
         let mut agents: Vec<OnlineAgent> = if let Some(mut link_language) = link_language_clone {
-            link_language
-                .get_online_agents()
-                .await?
-                .into_iter()
-                .map(|mut a| {
-                    a.status.verify_signatures();
-                    a
-                })
-                .collect()
+            hosted_status::unpack(link_language.get_online_agents().await?)
         } else {
             Vec::new()
         };
@@ -4628,26 +4623,17 @@ impl PerspectiveInstance {
         // last-seen window — no Holochain round-trip needed. Mirrors
         // `send_signal`'s local re-routing so telepresence is transparent across
         // the multi-tenancy (one executor) vs. multi-executor boundary. This is
-        // the presence source the auto-processor's `elect_author` reads.
+        // the presence source the auto-processor's `elect_author` reads. Their
+        // status is the one each set here (see `hosted_status`), or empty.
         let handle = self.persisted.lock().await.clone();
-        if handle.shared_url.is_some() {
+        if let Some(neighbourhood) = &handle.shared_url {
             let owners: Vec<String> = handle.owners.clone().unwrap_or_default();
             if !owners.is_empty() {
-                let now = chrono::Utc::now().timestamp();
-                let managed =
-                    Ad4mDb::with_global_instance(|db| db.list_users()).unwrap_or_default();
-                for user in managed {
-                    let recently_active = user
-                        .last_seen
-                        .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS);
-                    if recently_active
-                        && owners.contains(&user.did)
-                        && !agents.iter().any(|a| a.did == user.did)
-                    {
-                        agents.push(OnlineAgent {
-                            did: user.did,
-                            status: PerspectiveExpression::default(),
-                        });
+                for did in Self::recently_active_users() {
+                    if owners.contains(&did) && !agents.iter().any(|a| a.did == did) {
+                        let status =
+                            hosted_status::status_of(neighbourhood, &did).unwrap_or_default();
+                        agents.push(OnlineAgent { did, status });
                     }
                 }
             }
@@ -4669,13 +4655,58 @@ impl PerspectiveInstance {
         Ok(agents)
     }
 
-    pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
+    /// DIDs of managed users who used any authed API within
+    /// [`Self::LOCAL_ONLINE_THRESHOLD_SECS`].
+    fn recently_active_users() -> Vec<String> {
+        let now = chrono::Utc::now().timestamp();
+        Ad4mDb::with_global_instance(|db| db.list_users())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|user| {
+                user.last_seen
+                    .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS)
+            })
+            .map(|user| user.did)
+            .collect()
+    }
+
+    /// The online status `did` last set in this neighbourhood on this
+    /// executor, if any.
+    pub async fn online_status_of(&self, did: &str) -> Option<PerspectiveExpression> {
+        let neighbourhood = self.persisted.lock().await.shared_url.clone()?;
+        hosted_status::status_of(&neighbourhood, did)
+    }
+
+    /// Set `status` as its author's online status in this neighbourhood.
+    ///
+    /// The link language holds one status for this whole node, shared by every
+    /// user here who joined the neighbourhood. So the status is recorded per
+    /// agent first, and the link language gets what [`hosted_status::to_publish`]
+    /// builds from all of them (signed as `context`, the agent setting it).
+    pub async fn set_online_status(
+        &self,
+        status: PerspectiveExpression,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            link_language.set_online_status(status).await
-        } else {
-            Err(self.no_link_language_error().await)
-        }
+        let Some(mut link_language) = link_language_clone else {
+            return Err(self.no_link_language_error().await);
+        };
+        let shared_url = self.persisted.lock().await.shared_url.clone();
+        let Some(neighbourhood) = shared_url else {
+            return link_language.set_online_status(status).await;
+        };
+        hosted_status::record(&neighbourhood, &status);
+        let main_agent_did = did_for_context(&AgentContext::main_agent())?;
+        let active = Self::recently_active_users();
+        let published = hosted_status::to_publish(
+            &neighbourhood,
+            &status,
+            &main_agent_did,
+            |did| did == main_agent_did || active.iter().any(|a| a == did),
+            context,
+        )?;
+        link_language.set_online_status(published).await
     }
 
     pub async fn send_signal(
