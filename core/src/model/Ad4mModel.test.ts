@@ -1858,50 +1858,7 @@ describe("ModelQueryBuilder reconnect", () => {
 // Performance Optimisation Tests
 // ============================================================================
 
-import { getCachedResult, setCachedResult, clearQueryCache, queryCacheSize } from "./query-cache";
 import { getPropertiesMetadata, getRelationsMetadata, getMemoizedSHACL } from "./decorators";
-
-describe("QueryCache", () => {
-  beforeEach(() => clearQueryCache());
-
-  it("should return undefined for cache miss", () => {
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
-  });
-
-  it("should return cached result within TTL", () => {
-    const result = [{ s: "test" }];
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", result);
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe(result);
-  });
-
-  it("should expire after TTL", async () => {
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", [{ s: "test" }], 50);
-    await new Promise(r => setTimeout(r, 60));
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
-  });
-
-  it("should cache independently per perspective", () => {
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", "result1");
-    setCachedResult("uuid2", "SELECT ?s WHERE {}", "result2");
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe("result1");
-    expect(getCachedResult("uuid2", "SELECT ?s WHERE {}")).toBe("result2");
-  });
-
-  it("should cache independently per query", () => {
-    setCachedResult("uuid1", "query1", "r1");
-    setCachedResult("uuid1", "query2", "r2");
-    expect(getCachedResult("uuid1", "query1")).toBe("r1");
-    expect(getCachedResult("uuid1", "query2")).toBe("r2");
-  });
-
-  it("should clear all entries", () => {
-    setCachedResult("uuid1", "q1", "r1");
-    setCachedResult("uuid2", "q2", "r2");
-    expect(queryCacheSize()).toBe(2);
-    clearQueryCache();
-    expect(queryCacheSize()).toBe(0);
-  });
-});
 
 describe("SHACL Memoisation", () => {
   it("should memoise generateSHACL() per class", () => {

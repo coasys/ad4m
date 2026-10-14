@@ -16,7 +16,6 @@ import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
-import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
 import { LiveQuery, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
@@ -309,9 +308,7 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result
+        return this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
     }
 
     /**
@@ -649,19 +646,18 @@ export class PerspectiveProxy {
      * keep its blocking thread busy until it completes; what's saved is the
      * serialise + network + client-deserialise tax on the result.  Aborted
      * calls reject with `DOMException('Aborted', 'AbortError')` — match
-     * `fetch()` for handling. Cached results bypass the round-trip entirely
-     * and are returned synchronously, ignoring the signal.
+     * `fetch()` for handling. A call with `options` makes its own RPC.
+     *
+     * **Sharing:** concurrent identical calls without `options` share one RPC;
+     * each caller gets its own result object. Nothing is cached once the
+     * call settles: use a live query for repeated reads of the same data.
      *
      * @param query - SPARQL query string (read-only operations only)
      * @param options - Optional call options (e.g. AbortSignal for cancellation)
      * @returns Query results as parsed JSON
      */
     async querySparql<T = any>(query: string, options?: CallOptions): Promise<T> {
-        const cached = getCachedResult(this.#handle.uuid, query);
-        if (cached !== undefined) return cached as T;
-        const result = await this.#client.querySparql(this.#handle.uuid, query, options);
-        setCachedResult(this.#handle.uuid, query, result);
-        return result as T;
+        return this.#client.querySparql<T>(this.#handle.uuid, query, options);
     }
 
     /**
@@ -778,9 +774,7 @@ export class PerspectiveProxy {
      * ```
      */
     async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.addLink(this.#handle.uuid, link, status, batchId)
     }
 
     /**
@@ -793,9 +787,7 @@ export class PerspectiveProxy {
      * @returns Array of created LinkExpressions
      */
     async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.addLinks(this.#handle.uuid, links, status, batchId)
     }
 
     /**
@@ -806,9 +798,7 @@ export class PerspectiveProxy {
      * @returns Array of removed LinkExpressions
      */
     async removeLinks(links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        const result = await this.#client.removeLinks(this.#handle.uuid, links, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.removeLinks(this.#handle.uuid, links, batchId)
     }
 
     /**
@@ -820,9 +810,7 @@ export class PerspectiveProxy {
      * @returns Object containing results of the mutations
      */
     async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
-        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.linkMutations(this.#handle.uuid, mutations, status)
     }
 
         /**
@@ -845,9 +833,7 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async update(oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        const result = await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
     }
 
     /**
@@ -895,9 +881,7 @@ export class PerspectiveProxy {
         } else {
             resolvedLink = link as LinkExpressionInput;
         }
-        const result = await this.#client.removeLink(this.#handle.uuid, resolvedLink, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.removeLink(this.#handle.uuid, resolvedLink, batchId)
     }
 
     /** Creates a new batch for grouping operations */
@@ -907,9 +891,7 @@ export class PerspectiveProxy {
 
     /** Commits a batch of operations */
     async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
-        const result = await this.#client.commitBatch(this.#handle.uuid, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.commitBatch(this.#handle.uuid, batchId)
     }
     /**
      * Retrieves and renders an Expression referenced in this perspective.

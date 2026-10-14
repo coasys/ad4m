@@ -38,6 +38,7 @@ export class PerspectiveClient {
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
+    #sparqlInFlight = new Map<string, Promise<string>>()
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -101,9 +102,21 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
+    /**
+     * Concurrent identical calls (same perspective and query, no `options`)
+     * share one RPC. Each caller parses its own copy of the reply, and a call
+     * made after the shared one settled makes a new RPC.
+     */
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
-        const result = await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
-        return JSON.parse(result) as T
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)) as T
+        const key = `${uuid}\n${query}`
+        let reply = this.#sparqlInFlight.get(key)
+        if (!reply) {
+            reply = this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query })
+                .finally(() => this.#sparqlInFlight.delete(key))
+            this.#sparqlInFlight.set(key, reply)
+        }
+        return JSON.parse(await reply) as T
     }
 
     /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */

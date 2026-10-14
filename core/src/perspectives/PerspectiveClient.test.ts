@@ -1,5 +1,6 @@
 import { PerspectiveClient } from "./PerspectiveClient"
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle"
+import { PerspectiveProxy } from "./PerspectiveProxy"
 import { RpcError } from "../apiClient"
 import { LinkQuery } from "./LinkQuery"
 
@@ -241,6 +242,80 @@ describe('PerspectiveClient RPC operations', () => {
             expect.objectContaining({ uuid: 'uuid-q', query: 'foo(X).' }),
             { signal: controller.signal },
         )
+    })
+})
+
+describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
+    const QUERY = 'SELECT ?s WHERE { ?s ?p ?o }'
+
+    function sparqlCalls() {
+        return mockCall.mock.calls.filter(([method]) => method === 'perspective.querySparql').length
+    }
+
+    function makeProxy(client = new PerspectiveClient('http://localhost:12000', 'token'), uuid = 'uuid-s') {
+        return new PerspectiveProxy(makeHandle(uuid, 'S'), client)
+    }
+
+    beforeEach(() => {
+        mockCall.mockReset().mockResolvedValue(JSON.stringify([{ s: 'a' }]))
+        mockOn.mockReset().mockReturnValue(() => {})
+    })
+
+    it('two concurrent identical calls make one RPC and return equal results', async () => {
+        const proxy = makeProxy()
+        const [a, b] = await Promise.all([proxy.querySparql(QUERY), proxy.querySparql(QUERY)])
+        expect(sparqlCalls()).toBe(1)
+        expect(a).toEqual([{ s: 'a' }])
+        expect(b).toEqual(a)
+    })
+
+    it('shares across proxies of the same perspective on one client', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await Promise.all([makeProxy(client).querySparql(QUERY), makeProxy(client).querySparql(QUERY)])
+        expect(sparqlCalls()).toBe(1)
+    })
+
+    it('gives each caller its own result object', async () => {
+        const proxy = makeProxy()
+        const [a, b] = await Promise.all([proxy.querySparql(QUERY), proxy.querySparql(QUERY)])
+        expect(a).not.toBe(b)
+        a[0].s = 'changed'
+        expect(b).toEqual([{ s: 'a' }])
+    })
+
+    it('a call after the first settled makes a new RPC and sees the new result', async () => {
+        const proxy = makeProxy()
+        await proxy.querySparql(QUERY)
+        mockCall.mockResolvedValue(JSON.stringify([{ s: 'b' }]))
+        expect(await proxy.querySparql(QUERY)).toEqual([{ s: 'b' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('does not share between perspectives, queries or clients', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await Promise.all([
+            makeProxy(client, 'p1').querySparql(QUERY),
+            makeProxy(client, 'p2').querySparql(QUERY),
+            makeProxy(client, 'p1').querySparql(QUERY + ' LIMIT 1'),
+            makeProxy(undefined, 'p1').querySparql(QUERY),
+        ])
+        expect(sparqlCalls()).toBe(4)
+    })
+
+    it('a failed call rejects every sharer, and the next call retries', async () => {
+        const proxy = makeProxy()
+        mockCall.mockRejectedValueOnce(new Error('boom'))
+        const results = await Promise.allSettled([proxy.querySparql(QUERY), proxy.querySparql(QUERY)])
+        expect(results.map(r => r.status)).toEqual(['rejected', 'rejected'])
+        expect(await proxy.querySparql(QUERY)).toEqual([{ s: 'a' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('a call with an AbortSignal makes its own RPC, so aborting it cannot fail another caller', async () => {
+        const proxy = makeProxy()
+        const controller = new AbortController()
+        await Promise.all([proxy.querySparql(QUERY), proxy.querySparql(QUERY, { signal: controller.signal })])
+        expect(sparqlCalls()).toBe(2)
     })
 })
 
