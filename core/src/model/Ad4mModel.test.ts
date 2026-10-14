@@ -3908,3 +3908,119 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
     ).toThrow(/different predicates/);
   });
 });
+
+import { valueToLiteralIri } from "./query-sparql";
+
+describe("Model writes: one executeAction call per write (P4)", () => {
+  @Model({ name: "P4Card" })
+  class P4Card extends Ad4mModel {
+    @Optional({ through: "p4://title" })
+    title?: string;
+
+    @Optional({ through: "p4://note", local: true })
+    note?: string;
+
+    @Optional({ through: "p4://rank" })
+    rank?: number;
+
+    @HasMany({ through: "p4://tag" })
+    tags: string[] = [];
+
+    @HasMany({ through: "p4://link" })
+    links: string[] = [];
+  }
+
+  const makePerspective = () =>
+    ({
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  /**
+   * The links each `executeAction` call writes, resolved as the executor's
+   * `execute_commands` resolves them: one left-to-right pass, longest
+   * parameter name first; `this` is the instance; `collectionSetter` takes
+   * every parameter of its call as a member.
+   */
+  const resolved = (perspective: any) =>
+    perspective.executeAction.mock.calls.flatMap(([commands, expression, parameters]: any[]) => {
+      const names = [...(parameters ?? [])].sort((a: any, b: any) => b.name.length - a.name.length);
+      const sub = (input?: string) => {
+        if (input == null) return input;
+        let out = "";
+        for (let i = 0; i < input.length;) {
+          const p = names.find((p: any) => p.name && input.startsWith(p.name, i));
+          if (p) { out += p.value; i += p.name.length; } else { out += input[i]; i += 1; }
+        }
+        return out;
+      };
+      const self = (s?: string) => (s === "this" ? expression : s);
+      return commands.map((c: any) => ({
+        action: c.action,
+        source: self(sub(c.source)),
+        predicate: self(sub(c.predicate)),
+        target: c.action === "collectionSetter" ? (parameters ?? []).map((p: any) => p.value) : sub(c.target),
+        local: !!c.local,
+      }));
+    });
+
+  const edited = (perspective: any) => {
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.takeSnapshot();
+    card.title = "Hello";
+    card.note = "private";
+    card.rank = 3;
+    return card;
+  };
+
+  it("an update of three scalar fields makes one call with each field's link and status", async () => {
+    const perspective = makePerspective();
+    await edited(perspective).save("batch-1");
+
+    expect(perspective.executeAction).toHaveBeenCalledTimes(1);
+    expect(perspective.executeAction.mock.calls[0][3]).toBe("batch-1");
+    expect(resolved(perspective)).toEqual([
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
+    ]);
+  });
+
+  it("adder and remover values join the scalar writes; each collection set is a call of its own", async () => {
+    const perspective = makePerspective();
+    // No snapshot: every field is written, in field order (tags, links, then the scalars).
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.tags = { action: "adder", value: ["t1", "t2"] };
+    card.links = ["l1", "l2"];
+    card.title = "Hello";
+    card.note = "private";
+    card.rank = 3;
+    await card.innerUpdate(true, "batch-1");
+
+    // tags (two adds) in one call; links (collectionSetter) alone; the three scalars in one.
+    expect(perspective.executeAction).toHaveBeenCalledTimes(3);
+    expect(resolved(perspective)).toEqual([
+      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t1", local: false },
+      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t2", local: false },
+      { action: "collectionSetter", source: "p4://card/1", predicate: "p4://link", target: ["l1", "l2"], local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
+    ]);
+  });
+
+  it("a single write is sent as before, with its `value` parameter", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.takeSnapshot();
+    card.title = "Only";
+    await card.save("batch-1");
+
+    expect(perspective.executeAction.mock.calls).toEqual([[
+      [{ action: "setSingleTarget", source: "this", predicate: "p4://title", target: "value" }],
+      "p4://card/1",
+      [{ name: "value", value: "literal:string:Only" }],
+      "batch-1",
+    ]]);
+  });
+});
