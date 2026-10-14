@@ -121,6 +121,82 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let did = params.require_str("did")?;
+    agent_by_did(&did).await
+}
+
+/// Most DIDs one `agent.byDIDs` call may name.
+pub(crate) const MAX_AGENTS_BY_DIDS: usize = 200;
+
+/// Most agent-language lookups one `agent.byDIDs` call runs at once.
+pub(crate) const AGENTS_BY_DIDS_CONCURRENCY: usize = 16;
+
+/// `agent.byDIDs { dids }` → one entry per input DID, in input order: the
+/// agent as `agent.byDid` returns it, or `null` when the DID is unknown.
+/// A lookup that fails fails the whole call (500 naming the DID), as it
+/// fails `agent.byDid`. Each distinct DID is looked up once. More than
+/// [`MAX_AGENTS_BY_DIDS`] DIDs → 400.
+async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY).map_err(WsRpcError::forbidden)?;
+
+    let body: AgentsByDidsRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.dids.len() > MAX_AGENTS_BY_DIDS {
+        return Err(WsRpcError::bad_request(format!(
+            "`dids` holds {} entries; the limit is {}",
+            body.dids.len(),
+            MAX_AGENTS_BY_DIDS
+        )));
+    }
+
+    let agents =
+        lookup_agents_by_dids(&body.dids, |did| async move { agent_by_did(&did).await }).await?;
+    Ok(Value::Array(agents))
+}
+
+/// Looks up each distinct DID of `dids` once through `lookup`, at most
+/// [`AGENTS_BY_DIDS_CONCURRENCY`] at a time, and returns one entry per input
+/// DID in input order. The first failed lookup fails the call with a 500
+/// naming the DID; `Ok(Value::Null)` (unknown DID) stays `null`.
+async fn lookup_agents_by_dids<F, Fut>(dids: &[String], lookup: F) -> Result<Vec<Value>, WsRpcError>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, WsRpcError>>,
+{
+    use futures::stream::{StreamExt, TryStreamExt};
+
+    let mut unique: Vec<&str> = Vec::new();
+    for did in dids {
+        if !unique.contains(&did.as_str()) {
+            unique.push(did);
+        }
+    }
+    // Owned DIDs: a stream over `&str` makes the handler future's
+    // closure lifetime-generic, which the `Send` bound on handlers rejects.
+    let owned: Vec<String> = unique.iter().map(|did| did.to_string()).collect();
+    let found: Vec<Value> = futures::stream::iter(owned.into_iter().map(|did: String| {
+        let fut = lookup(did.clone());
+        async move {
+            fut.await.map_err(|e| {
+                WsRpcError::internal(format!(
+                    "agent.byDIDs: lookup of {did} failed: {}",
+                    e.message
+                ))
+            })
+        }
+    }))
+    .buffered(AGENTS_BY_DIDS_CONCURRENCY)
+    .try_collect()
+    .await?;
+    let by_did: std::collections::HashMap<&str, Value> = unique.into_iter().zip(found).collect();
+    Ok(dids
+        .iter()
+        .map(|did| by_did[did.as_str()].clone())
+        .collect())
+}
+
+/// Shared body of `agent.byDid` and `agent.byDIDs`.
+async fn agent_by_did(did: &str) -> Result<Value, WsRpcError> {
+    let did = did.to_string();
 
     // Check if DID matches main agent
     let did_match = {
@@ -894,6 +970,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read();
     map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
         .read();
+    map.method::<AgentsByDidsRequest, Vec<Option<Agent>>>("agent.byDIDs", get_agents_by_dids)
+        .read();
     map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long();
@@ -1111,6 +1189,91 @@ mod app_management_tests {
                 .expect_err(op);
             assert_eq!(err.code, 403, "{op}: {}", err.message);
         }
+    }
+}
+
+#[cfg(test)]
+mod agents_by_dids_tests {
+    use super::{lookup_agents_by_dids, AGENTS_BY_DIDS_CONCURRENCY};
+    use crate::api::ws_handler::WsRpcError;
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn dids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|d| d.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_fails_the_call_instead_of_reading_as_null() {
+        let err =
+            lookup_agents_by_dids(&dids(&["did:key:ok", "did:key:broken"]), |did| async move {
+                if did == "did:key:broken" {
+                    Err(WsRpcError::internal("agent language unreachable"))
+                } else {
+                    Ok(json!({ "did": did }))
+                }
+            })
+            .await
+            .expect_err("a failed lookup is not an unknown DID");
+        assert_eq!(err.code, 500);
+        assert!(err.message.contains("did:key:broken"), "{}", err.message);
+        assert!(
+            err.message.contains("agent language unreachable"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_did_is_null_in_input_order() {
+        let calls = AtomicUsize::new(0);
+        let calls = &calls;
+        let reply = lookup_agents_by_dids(
+            &dids(&["did:key:a", "did:key:unknown", "did:key:a"]),
+            |did| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(if did == "did:key:unknown" {
+                    Value::Null
+                } else {
+                    json!({ "did": did })
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reply,
+            vec![
+                json!({ "did": "did:key:a" }),
+                Value::Null,
+                json!({ "did": "did:key:a" })
+            ]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "each distinct DID once");
+    }
+
+    #[tokio::test]
+    async fn lookups_run_at_most_the_concurrency_limit_at_once() {
+        let in_flight = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let (in_flight, peak) = (&in_flight, &peak);
+        let input: Vec<String> = (0..AGENTS_BY_DIDS_CONCURRENCY * 4)
+            .map(|i| format!("did:key:{i}"))
+            .collect();
+        let reply = lookup_agents_by_dids(&input, |did| async move {
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(json!(did))
+        })
+        .await
+        .unwrap();
+        let expected: Vec<Value> = input.iter().map(|d| json!(d)).collect();
+        assert_eq!(reply, expected, "input order is kept");
+        assert_eq!(peak.load(Ordering::SeqCst), AGENTS_BY_DIDS_CONCURRENCY);
     }
 }
 
