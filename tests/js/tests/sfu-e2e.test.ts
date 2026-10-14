@@ -1,5 +1,7 @@
 import { expect } from "chai";
-import { readdirSync, readFileSync } from "node:fs";
+import { execSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sfuScenario } from "../helpers/sfu/harness.js";
@@ -37,6 +39,26 @@ describe("SFU: end to end through the SDK", function () {
       .filter((file) => file.endsWith(".ts") && !file.endsWith("e11-outsider.ts"))
       .filter((file) => shortcut.test(readFileSync(file, "utf8")));
     expect(offenders).to.deep.equal([]);
+  });
+
+  it("E6's loopback impairment ends with its run, however the run ends", function () {
+    // On a real kernel but in a throwaway network namespace: its own `lo` and
+    // lock file, never the host's. The owners drop back to this user, so tc
+    // goes through `sudo -n` as in E6.
+    try {
+      execSync("sudo -n unshare -n true", { stdio: "pipe" });
+    } catch {
+      this.skip();
+    }
+    const check = join(dirname(fileURLToPath(import.meta.url)), "../helpers/sfu/net-lease-check.ts");
+    const lock = join(mkdtempSync(join(tmpdir(), "wt-net-")), "lock");
+    const asUser = 'ip link set lo up && uid=$1 gid=$2 && shift 2 && exec setpriv --reuid="$uid" --regid="$gid" --init-groups -- "$@"';
+    const run = spawnSync("sudo", [
+      "-n", "env", `PATH=${process.env.PATH}:/usr/sbin:/sbin`, `HOME=${process.env.HOME}`, `WT_NET_LOCK=${lock}`,
+      "unshare", "-n", "--", "sh", "-c", asUser, "sh", String(process.getuid!()), String(process.getgid!()),
+      process.execPath, ...process.execArgv, check,
+    ], { stdio: "inherit", timeout: 180_000 });
+    expect(run.status).to.equal(0);
   });
 
   sfuScenario(e1TwoUsers, 600_000);
