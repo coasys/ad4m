@@ -229,6 +229,18 @@ pub fn checkpoint_stores(
     Ok(persp_dir)
 }
 
+/// The stored perspectives that have no open store in `stores`.
+fn missing_stores(
+    stored: &[crate::types::PerspectiveHandle],
+    stores: &[(String, std::sync::Arc<SparqlStore>)],
+) -> Vec<String> {
+    stored
+        .iter()
+        .filter(|h| !stores.iter().any(|(uuid, _)| *uuid == h.uuid))
+        .map(|h| h.uuid.clone())
+        .collect()
+}
+
 /// Backup all perspective data to the platform backend.
 ///
 /// 1. Checkpoint every open SPARQL store into a staging directory next to
@@ -249,6 +261,19 @@ pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
         .into_iter()
         .map(|p| (p.uuid.clone(), p.sparql_store.clone()))
         .collect();
+    // Start-up opens each stored perspective in its own task. An archive taken
+    // before all are open would replace the last full snapshot with a partial
+    // one, so refuse until every stored perspective has its store.
+    let stored = crate::db::Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+        .map_err(|e| anyhow!("Failed to list perspectives: {}", e))?;
+    let loading = missing_stores(&stored, &stores);
+    if !loading.is_empty() {
+        return Err(anyhow!(
+            "Skipping snapshot: {} perspective(s) still loading: {}",
+            loading.len(),
+            loading.join(", ")
+        ));
+    }
     // A unique name, so a shutdown backup and a periodic one cannot collide.
     let staging = persp_dir
         .parent()
@@ -420,6 +445,28 @@ mod tests {
             let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
             assert_eq!(store.get_all_links().unwrap().len(), count, "{uuid}");
         }
+    }
+
+    /// A stored perspective whose store is not open yet blocks the backup.
+    #[test]
+    fn a_stored_perspective_without_an_open_store_is_missing() {
+        use crate::types::PerspectiveHandle;
+        use std::sync::Arc;
+
+        let handle = |uuid: &str| PerspectiveHandle {
+            uuid: uuid.to_string(),
+            ..Default::default()
+        };
+        let open = vec![(
+            "uuid-a".to_string(),
+            Arc::new(SparqlStore::new(None).unwrap()),
+        )];
+
+        assert!(missing_stores(&[handle("uuid-a")], &open).is_empty());
+        assert_eq!(
+            missing_stores(&[handle("uuid-a"), handle("uuid-b")], &open),
+            vec!["uuid-b".to_string()]
+        );
     }
 
     #[test]
