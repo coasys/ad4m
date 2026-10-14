@@ -18,7 +18,7 @@ export const e11Outsider = e2eScenario({
   description: "A non-member cannot join, list or observe a call; members are undisturbed",
   world: {
     users: [{ name: "ann" }, { name: "ben" }, { name: "eve" }],
-    neighbourhoods: [{ name: "space", owner: "ann", members: ["ann", "ben"], call: { mode: "designated" } }],
+    neighbourhoods: [{ name: "space", owner: "ann", members: ["ann", "ben"], call: { mode: "sfu" } }],
   },
   async run({ world, call: inSpace, step }) {
     const call = inSpace("space", "e11");

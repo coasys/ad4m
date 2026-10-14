@@ -351,8 +351,6 @@ export interface RpcMethods {
   "sfu.sendData": { params: SfuSendDataParams; result: boolean };
   "sfu.servesAllMembers": { params: SfuPerspectiveParams; result: boolean };
   "sfu.setConfig": { params: SfuSetConfigParams; result: boolean };
-  "sfu.sfuPeerForNeighbourhood": { params: SfuNeighbourhoodParams; result: string | null };
-  "sfu.sfuPeersForNeighbourhood": { params: SfuNeighbourhoodParams; result: Array<string> };
   "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
   "sfu.status": { params: Record<string, never>; result: SfuStatus };
   "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
@@ -444,8 +442,6 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.listRooms",
   "sfu.qualityPreferences",
   "sfu.servesAllMembers",
-  "sfu.sfuPeerForNeighbourhood",
-  "sfu.sfuPeersForNeighbourhood",
   "sfu.status",
   "user.list",
   "user.multiUserEnabled",

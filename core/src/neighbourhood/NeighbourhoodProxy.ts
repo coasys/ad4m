@@ -175,14 +175,6 @@ export class NeighbourhoodProxy {
         return await this.#client.sfuSetConfig(neighbourhoodUrl, config)
     }
 
-    async sfuPeer(neighbourhoodUrl: string): Promise<string | null> {
-        return await this.#client.sfuPeerForNeighbourhood(neighbourhoodUrl)
-    }
-
-    async sfuPeers(neighbourhoodUrl: string): Promise<string[]> {
-        return await this.#client.sfuPeersForNeighbourhood(neighbourhoodUrl)
-    }
-
     async sfuStartRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
         return await this.#client.sfuStartRoom(neighbourhoodUrl, roomName)
     }

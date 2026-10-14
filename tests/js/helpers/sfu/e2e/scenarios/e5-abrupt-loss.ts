@@ -17,7 +17,7 @@ export const e5AbruptLoss = e2eScenario({
   description: "Kill a participant's process; the others see it leave and carry on; it rejoins on a fresh client",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu" } }],
   },
   async run({ call: inSpace, step, metric }) {
     const call = inSpace("space", "e5", { video: false });

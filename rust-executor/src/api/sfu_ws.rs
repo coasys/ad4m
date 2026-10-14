@@ -263,34 +263,6 @@ async fn set_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     Ok(Value::Bool(true))
 }
 
-async fn sfu_peer_for_neighbourhood(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(WsRpcError::forbidden)?;
-    let p: SfuNeighbourhoodParams = parse(params)?;
-    member_did(&ctx, &p.neighbourhood_url)?;
-    let peer = service()?
-        .sfu_peer_for_neighbourhood(&p.neighbourhood_url)
-        .await;
-    Ok(serde_json::to_value(peer)?)
-}
-
-async fn sfu_peers_for_neighbourhood(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
-        .map_err(WsRpcError::forbidden)?;
-    let p: SfuNeighbourhoodParams = parse(params)?;
-    member_did(&ctx, &p.neighbourhood_url)?;
-    let peers = service()?
-        .sfu_peers_for_neighbourhood(&p.neighbourhood_url)
-        .await;
-    Ok(serde_json::to_value(peers)?)
-}
-
 // ── Server-initiated renegotiation answer ───────────────────────────────────
 //
 // The SFU pushes an `sfu-call-renegotiation-offer` event over the existing
@@ -526,16 +498,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<SfuNeighbourhoodParams, SfuConfig>("sfu.getConfig", get_config)
         .read();
     map.method::<SfuSetConfigParams, bool>("sfu.setConfig", set_config);
-    map.method::<SfuNeighbourhoodParams, Option<String>>(
-        "sfu.sfuPeerForNeighbourhood",
-        sfu_peer_for_neighbourhood,
-    )
-    .read();
-    map.method::<SfuNeighbourhoodParams, Vec<String>>(
-        "sfu.sfuPeersForNeighbourhood",
-        sfu_peers_for_neighbourhood,
-    )
-    .read();
     map.method::<SfuAddIceCandidateParams, bool>("sfu.addIceCandidate", add_ice_candidate);
     map.method::<SfuSendDataParams, bool>("sfu.sendData", send_data);
     map.method::<NoParams, SfuStatus>("sfu.status", sfu_status)
@@ -756,11 +718,10 @@ mod tests {
     /// `setConfig` takes a partial config: absent fields get their defaults.
     #[test]
     fn set_config_params_fill_config_defaults() {
-        let p: SfuSetConfigParams = serde_json::from_value(
-            json!({ "neighbourhoodUrl": "n", "config": { "mode": "cascaded" } }),
-        )
-        .unwrap();
-        assert_eq!(p.config.mode, "cascaded");
+        let p: SfuSetConfigParams =
+            serde_json::from_value(json!({ "neighbourhoodUrl": "n", "config": { "mode": "sfu" } }))
+                .unwrap();
+        assert_eq!(p.config.mode, "sfu");
         assert_eq!(p.config.fallback, "mesh");
         assert_eq!(p.config.max_mesh_participants, 4);
         assert!(p.config.sfu_peers.is_empty());
@@ -816,8 +777,6 @@ mod tests {
                 "sfu.listRooms",
                 "sfu.qualityPreferences",
                 "sfu.servesAllMembers",
-                "sfu.sfuPeerForNeighbourhood",
-                "sfu.sfuPeersForNeighbourhood",
                 "sfu.status",
             ]
         );

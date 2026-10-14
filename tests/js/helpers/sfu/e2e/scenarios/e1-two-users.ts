@@ -16,7 +16,7 @@ export const e1TwoUsers = e2eScenario({
   description: "Roster, attributed audio, video, data both ways and a leave, through the SDK",
   world: {
     users: [{ name: "ann" }, { name: "ben" }],
-    neighbourhoods: [{ name: "space", owner: "ann", members: ["ann", "ben"], call: { mode: "designated" } }],
+    neighbourhoods: [{ name: "space", owner: "ann", members: ["ann", "ben"], call: { mode: "sfu" } }],
   },
   async run({ call: inSpace, step }) {
     const call = inSpace("space", "e1");

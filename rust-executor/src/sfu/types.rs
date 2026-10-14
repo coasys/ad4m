@@ -16,18 +16,21 @@ use ts_rs::TS;
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SfuConfig {
-    /// `"mesh"` | `"designated"` | `"gateway"` | `"cascaded"`
+    /// `"mesh"`: peer to peer. `"sfu"`: this executor's SFU. `"auto"`
+    /// (the default): the SFU when every member is hosted on this executor
+    /// and its SFU is public, otherwise mesh. `setConfig` also takes the
+    /// earlier `"designated"`, `"gateway"` and `"cascaded"` as `"sfu"`.
     #[serde(default = "default_mode")]
-    #[ts(type = r#""mesh" | "designated" | "gateway" | "cascaded""#)]
+    #[ts(type = r#""mesh" | "sfu" | "auto""#)]
     pub mode: String,
     /// Not stored, and `sfu.setConfig` refuses it: a client always joins
     /// its own executor's SFU.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub designated_peer: Option<String>,
-    /// Fallback mode when SFU is unavailable.
+    /// Fallback mode when SFU is unavailable. Not stored; nothing reads it.
     #[serde(default = "default_fallback")]
-    #[ts(type = r#""mesh" | "designated" | "gateway" | "cascaded""#)]
+    #[ts(type = r#""mesh" | "sfu" | "auto""#)]
     pub fallback: String,
     /// Maximum participants before mesh is degraded.
     #[serde(default = "default_max_mesh")]
@@ -79,7 +82,7 @@ pub struct IceServer {
 }
 
 fn default_mode() -> String {
-    "mesh".to_string()
+    "auto".to_string()
 }
 fn default_fallback() -> String {
     "mesh".to_string()

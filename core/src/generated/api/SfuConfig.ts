@@ -9,18 +9,21 @@ import type { IceServer } from "./IceServer";
  */
 export type SfuConfig = { 
 /**
- * `"mesh"` | `"designated"` | `"gateway"` | `"cascaded"`
+ * `"mesh"`: peer to peer. `"sfu"`: this executor's SFU. `"auto"`
+ * (the default): the SFU when every member is hosted on this executor
+ * and its SFU is public, otherwise mesh. `setConfig` also takes the
+ * earlier `"designated"`, `"gateway"` and `"cascaded"` as `"sfu"`.
  */
-mode: "mesh" | "designated" | "gateway" | "cascaded", 
+mode: "mesh" | "sfu" | "auto", 
 /**
  * Not stored, and `sfu.setConfig` refuses it: a client always joins
  * its own executor's SFU.
  */
 designatedPeer?: string, 
 /**
- * Fallback mode when SFU is unavailable.
+ * Fallback mode when SFU is unavailable. Not stored; nothing reads it.
  */
-fallback: "mesh" | "designated" | "gateway" | "cascaded", 
+fallback: "mesh" | "sfu" | "auto", 
 /**
  * Maximum participants before mesh is degraded.
  */

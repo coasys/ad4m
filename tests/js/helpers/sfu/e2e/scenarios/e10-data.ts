@@ -16,7 +16,7 @@ export const e10Data = e2eScenario({
   description: "String and binary data from six users reach every other participant once, intact, never echoed",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu" } }],
   },
   async run({ world, call: inSpace, step }) {
     const call = inSpace("space", "e10", { video: false });

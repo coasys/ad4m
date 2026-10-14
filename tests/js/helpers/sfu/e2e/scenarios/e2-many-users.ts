@@ -20,7 +20,7 @@ export const e2ManyUsers = e2eScenario({
   description: "8 join at once, 4 late; roster, attributed audio and video for every pair; a leave and a rejoin",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated", maxMeshParticipants: 6 } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu", maxMeshParticipants: 6 } }],
   },
   async run({ call: inSpace, step, metric }) {
     const call = inSpace("space", "e2");

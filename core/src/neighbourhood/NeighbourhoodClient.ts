@@ -215,14 +215,6 @@ export class NeighbourhoodClient {
         return this.#apiClient.call("sfu.setConfig", { neighbourhoodUrl, config })
     }
 
-    async sfuPeerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
-        return this.#apiClient.call("sfu.sfuPeerForNeighbourhood", { neighbourhoodUrl })
-    }
-
-    async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
-        return this.#apiClient.call("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
-    }
-
     // ── Trickle ICE ───────────────────────────────────────────────────
 
     /**

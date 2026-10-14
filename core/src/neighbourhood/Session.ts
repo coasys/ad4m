@@ -159,7 +159,9 @@ export function createSession(config: SessionImplConfig): Session {
      * Resolve the effective topology.
      *
      * Explicit "sfu" or "mesh" returns immediately; so does "auto" with an
-     * `sfuConfig`. Otherwise "auto" must not split the call: the SFU path
+     * `sfuConfig` whose mode is "sfu" or "mesh" (any other stored value, from
+     * an older executor, means the SFU). A config whose mode is "auto", or
+     * none, leaves it to this rule. "auto" must not split the call: the SFU path
      * joins this executor's SFU only, and the mesh path never reaches it.
      * So it picks the SFU only when the executor says every member of the
      * neighbourhood is hosted on it and its SFU is public. Anything else,
@@ -169,7 +171,7 @@ export function createSession(config: SessionImplConfig): Session {
         if (topology === "sfu") return "sfu"
         if (topology === "mesh") return "mesh"
 
-        if (sfuConfig) {
+        if (sfuConfig && sfuConfig.mode !== "auto") {
             return sfuConfig.mode === "mesh" ? "mesh" : "sfu"
         }
 

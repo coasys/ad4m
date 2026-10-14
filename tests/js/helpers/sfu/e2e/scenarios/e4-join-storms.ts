@@ -19,7 +19,7 @@ export const e4JoinStorms = e2eScenario({
   description: "10 join at once; 3 leave and rejoin together, 3 times; a leave-and-rejoin at once; rosters and audio settle each time",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu" } }],
   },
   async run({ call: inSpace, step }) {
     const call = inSpace("space", "e4", { video: false });
