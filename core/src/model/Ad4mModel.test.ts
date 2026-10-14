@@ -1340,6 +1340,69 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
   });
 });
 
+describe("totalCount is asked for only by the readers of it (P3)", () => {
+  const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+  @Model({ name: "CountedThing" })
+  class CountedThing extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://counted" })
+    type: string = "test://counted";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  function perspective() {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "count-sub",
+        revision: 0,
+        result: { instances: [], totalCount: 4 },
+      }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    return {
+      uuid: "count-uuid",
+      client,
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 4 }),
+      modelSubscribe: jest.fn((className: string, queryJson: string) =>
+        client.modelSubscribe("count-uuid", className, queryJson),
+      ),
+    } as any;
+  }
+  const sentQuery = (fn: jest.Mock) => JSON.parse(fn.mock.calls[0][1]);
+
+  it("findAll() and get() send no count", async () => {
+    const p = perspective();
+    await CountedThing.findAll(p, { limit: 5 });
+    expect(sentQuery(p.modelQuery)).not.toHaveProperty("count");
+    const q = perspective();
+    await CountedThing.query(q).limit(5).get();
+    expect(sentQuery(q.modelQuery)).not.toHaveProperty("count");
+  });
+
+  it("findAllAndCount(), count() and the builder's count() send count: true", async () => {
+    for (const run of [
+      (p: any) => CountedThing.findAllAndCount(p, { limit: 5 }),
+      (p: any) => CountedThing.count(p),
+      (p: any) => CountedThing.query(p).count(),
+    ]) {
+      const p = perspective();
+      await run(p);
+      expect(sentQuery(p.modelQuery).count).toBe(true);
+    }
+  });
+
+  it("countSubscribe() opens its subscription with count: true", async () => {
+    const p = perspective();
+    const builder = CountedThing.query(p);
+    expect(await builder.countSubscribe(() => {})).toBe(4);
+    expect(sentQuery(p.modelSubscribe)).toMatchObject({ limit: 0, count: true });
+    builder.dispose();
+  });
+});
+
 describe("ModelQueryBuilder paginateSubscribe", () => {
   it("paginateSubscribe should use a single query with count: true", async () => {
     const mockSubscriptionId = "paginate-sub-123";

@@ -514,7 +514,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0 });
+    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0, count: true });
     return totalCount;
   }
 
@@ -556,7 +556,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const { initial } = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
+    const { initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => callback(raw.totalCount ?? 0));
     return initial.totalCount ?? 0;
   }
 

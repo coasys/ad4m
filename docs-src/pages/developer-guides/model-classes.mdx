@@ -1168,7 +1168,7 @@ not re-run a `Post` subscription, even when both classes use the same flag
 predicate. A query over several classes (`Ad4mModel.queryOf`) is one
 subscription that re-runs on a write any of its classes would re-run on. When
 the result changes, the executor sends only the change (the records added,
-updated and removed, with the new `totalCount`), and the builder applies it to
+updated and removed, with the new `totalCount` when the query set `count: true`), and the builder applies it to
 the result it holds before calling your callback.
 
 #### Subscriptions and `dispose()`

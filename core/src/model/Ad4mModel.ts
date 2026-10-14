@@ -1500,7 +1500,7 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query, undefined, options);
+    const out = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), count: true }, undefined, options);
     return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
   }
 
@@ -1566,7 +1566,7 @@ export class Ad4mModel {
     query?: TypedQuery<T>,
     options?: CallOptions,
   ): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 }, undefined, options);
+    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0, count: true }, undefined, options);
     return totalCount;
   }
 

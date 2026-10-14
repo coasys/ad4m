@@ -583,7 +583,10 @@ pub struct ModelQueryInput {
 #[serde(rename_all = "camelCase")]
 pub struct ModelQueryResult {
     pub instances: Vec<Value>,
-    pub total_count: usize,
+    /// Only when the query asked for it (`count: true`); computing it costs a
+    /// COUNT query on a paged read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_count: Option<usize>,
 }
 
 /// The `where: { producedByFlow: { flow, state? } }` filter, extracted from

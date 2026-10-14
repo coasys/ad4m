@@ -84,7 +84,18 @@ async fn selection_a_forged_admin_link_does_not_satisfy_an_author_condition() {
             let query = json!({ "where": clause, "limit": limit });
             let got = run(&store, query.clone()).await;
             assert_eq!(ids(&got), expected, "{query}");
-            assert_eq!(got.total_count, expected.len(), "{query}: totalCount");
+            assert_eq!(
+                got.total_count.unwrap(),
+                expected.len(),
+                "{query}: totalCount"
+            );
+            let uncounted = json!({ "where": clause, "limit": limit, "count": false });
+            let got_uncounted = run(&store, uncounted).await;
+            assert_eq!(
+                got_uncounted.instances, got.instances,
+                "{query} without count"
+            );
+            assert_eq!(got_uncounted.total_count, None, "{query} without count");
             let got = run(&store, opted_in(query.clone())).await;
             assert_eq!(ids(&got), expected_opted_in, "{query} with the opt-in");
         }
@@ -111,14 +122,14 @@ async fn selection_a_forged_flag_does_not_make_a_node_conform() {
         let query = json!({ "limit": limit });
         let got = run(&store, query.clone()).await;
         assert_eq!(ids(&got), vec!["sg://g/1"], "{query}");
-        assert_eq!(got.total_count, 1, "{query}: totalCount");
+        assert_eq!(got.total_count.unwrap(), 1, "{query}: totalCount");
         let got = run(&store, opted_in(query.clone())).await;
-        assert_eq!(got.total_count, 2, "{query} with the opt-in");
+        assert_eq!(got.total_count.unwrap(), 2, "{query} with the opt-in");
     }
     let count = run(&store, json!({ "limit": 0 })).await;
-    assert_eq!(count.total_count, 1, "a forged flag was counted");
+    assert_eq!(count.total_count.unwrap(), 1, "a forged flag was counted");
     let count = run(&store, opted_in(json!({ "limit": 0 }))).await;
-    assert_eq!(count.total_count, 2, "the opt-in counts it");
+    assert_eq!(count.total_count.unwrap(), 2, "the opt-in counts it");
 }
 
 /// Grants `a`, `b`, `c`, typed in that order... except that `c`'s type link is
@@ -152,9 +163,13 @@ async fn selection_a_forged_value_is_not_counted() {
         let mut query = by_x.clone();
         query["limit"] = limit;
         let got = run(&store, query.clone()).await;
-        assert_eq!(got.total_count, 2, "{query}: a forged value was counted");
+        assert_eq!(
+            got.total_count.unwrap(),
+            2,
+            "{query}: a forged value was counted"
+        );
         let got = run(&store, opted_in(query.clone())).await;
-        assert_eq!(got.total_count, 3, "{query}: the opt-in counts it");
+        assert_eq!(got.total_count.unwrap(), 3, "{query}: the opt-in counts it");
     }
 
     let not_x = json!({ "where": { "NOT": { "name": "x" } } });
@@ -180,7 +195,7 @@ async fn selection_a_forged_value_does_not_move_an_instance_across_a_page() {
     let page = |offset: usize| json!({ "where": { "name": "x" }, "limit": 2, "offset": offset });
     let first = run(&store, page(0)).await;
     assert_eq!(ids(&first), vec!["sg://g/a", "sg://g/b"], "page 1");
-    assert_eq!(first.total_count, 2, "page 1: totalCount");
+    assert_eq!(first.total_count.unwrap(), 2, "page 1: totalCount");
     let second = run(&store, page(2)).await;
     assert!(ids(&second).is_empty(), "page 2: {:?}", ids(&second));
 
@@ -232,7 +247,7 @@ async fn selection_a_forged_link_does_not_pass_a_scope_or_a_projection_where() {
         query["limit"] = limit;
         let got = run(&store, query.clone()).await;
         assert_eq!(ids(&got), vec!["sg://g/1"], "{query}");
-        assert_eq!(got.total_count, 1, "{query}: totalCount");
+        assert_eq!(got.total_count.unwrap(), 1, "{query}: totalCount");
         let got = run(&store, opted_in(query.clone())).await;
         assert_eq!(
             ids(&got),
@@ -381,14 +396,15 @@ async fn selection_a_forged_link_does_not_pass_a_quantifier_or_structural_confor
     // A node matched only by a forged link hydrates no rows, so the leak
     // would show in the count and the page, not in the rows.
     for limit in [json!(0), json!(10)] {
-        let query = json!({ "limit": limit });
+        let query = json!({ "limit": limit, "count": true });
         let got = run_class("Note", query.clone()).await;
         assert_eq!(
-            got.total_count, 1,
+            got.total_count.unwrap(),
+            1,
             "{query}: a forged link conformed a Note"
         );
         let got = run_class("Note", opted_in(query.clone())).await;
-        assert_eq!(got.total_count, 2, "{query} with the opt-in");
+        assert_eq!(got.total_count.unwrap(), 2, "{query} with the opt-in");
     }
     assert_eq!(sorted(run_class("Note", json!({})).await), vec!["sg://n/1"]);
 }
@@ -489,7 +505,7 @@ async fn selection_two_passing_links_on_one_triple_do_not_duplicate_an_instance(
             "{query}: {:?}",
             guarded.instances
         );
-        assert_eq!(guarded.total_count, 1, "{query}: totalCount");
+        assert_eq!(guarded.total_count.unwrap(), 1, "{query}: totalCount");
         assert_eq!(
             guarded.instances, open.instances,
             "{query}: same as unguarded"

@@ -671,9 +671,9 @@ export class PerspectiveProxy {
      *   query over their union, whose rows carry `__subjectClass` and
      *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
-     * @returns Object with `instances` array and `totalCount`
+     * @returns Object with `instances` array, and `totalCount` when the query sets `count: true`
      */
-    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 

@@ -346,6 +346,7 @@ export type Query = {
   order?: Order;
   offset?: number;
   limit?: number;
+  /** Ask for `totalCount`. Without it the result has none and the executor runs no COUNT query. */
   count?: boolean;
   /**
    * When true, SPARQL property getters (@Property with `getter`) ARE evaluated
