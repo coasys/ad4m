@@ -13,10 +13,11 @@
  * - A 20 s outage, longer than that grace: the server drops everyone, and
  *   every session rejoins by itself once the network is back.
  *
- * Needs `sudo -n tc`; skipped without it. Always clears the impairment, pass or fail.
+ * Needs `sudo -n tc`; skipped without it. One run impairs a host at a time, and
+ * its impairment ends with the run however the run ends (`leaseNet`).
  */
 
-import { clearNet, netAvailable, setNetemOnPorts, type NetemOptions } from "../../net.js";
+import { leaseNet, netAvailable, type NetemOptions } from "../../net.js";
 import type { Check } from "../call.js";
 import { e2eScenario } from "../scenario.js";
 
@@ -34,9 +35,8 @@ export const e6Network = e2eScenario({
   unavailable: () => (netAvailable() ? null : "needs passwordless `sudo -n tc` to impair the loopback interface"),
   async run({ world, call: inSpace, step, metric }) {
     const ports = await world.ports();
-    const setNetem = (opts: NetemOptions) => {
-      if (!setNetemOnPorts(ports, opts)) throw new Error(`could not impair ports ${ports.join(", ")}`);
-    };
+    const net = await leaseNet({ onWait: () => console.log("e6: waiting for another run's impairment on this host to end") });
+    const setNetem = (opts: NetemOptions) => net.impair(ports, opts);
     const call = inSpace("space", "e6", { video: false });
     // An outage that reached nobody would pass every step after it: check that it cut the audio.
     // Frames keep arriving (the receiver conceals loss), so listen for the tones instead.
@@ -56,7 +56,7 @@ export const e6Network = e2eScenario({
           await call.eventually(call.hearsEveryone(), 5_000, `audio under loss, sample ${n + 1}`);
           await sleep(2_000);
         }
-        clearNet();
+        net.clear();
       });
 
       await step("a 6 s outage: nobody is dropped, audio comes back", async () => {
@@ -66,7 +66,7 @@ export const e6Network = e2eScenario({
         const cut = Date.now();
         await call.eventually(silence, 5_000, "the outage takes effect");
         await sleep(6_000 - (Date.now() - cut));
-        clearNet();
+        net.clear();
         await call.eventually(call.hearsEveryone(), 20_000, "audio after a short outage");
         await call.eventually(call.rosterIsEveryone(), 1, "roster after a short outage");
         // The same connections carried on: no session saw anyone leave, not even for a moment.
@@ -79,14 +79,14 @@ export const e6Network = e2eScenario({
         const cut = Date.now();
         await call.eventually(silence, 5_000, "the outage takes effect");
         await sleep(20_000 - (Date.now() - cut));
-        clearNet();
+        net.clear();
         const started = Date.now();
         await call.eventually(call.rosterIsEveryone(), 90_000, "roster after a long outage");
         await call.eventually(call.hearsEveryone(), 60_000, "audio after a long outage");
         return Date.now() - started;
       }));
     } finally {
-      clearNet();
+      await net.release();
     }
   },
 });
