@@ -744,7 +744,8 @@ export class PerspectiveProxy {
      * socket closes.
      *
      * @param className - The model class name, or several (same as modelQuery)
-     * @param queryJson - JSON-serialized query parameters (same as modelQuery)
+     * @param queryJson - JSON-serialized query parameters (same as modelQuery,
+     *   except `after`: a subscription re-runs one query, so a cursor is refused)
      * @returns `subscriptionId`, initial `result` and `revision` (0)
      */
     async modelSubscribe(className: string | string[], queryJson: string): Promise<Subscribed> {

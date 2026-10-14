@@ -352,6 +352,7 @@ export type Query = {
    * `timestamp` / `createdAt` / `updatedAt`, either direction), a `limit`, and
    * no non-zero `offset`; the executor refuses it on any other query. Unlike
    * `offset`, a row added before the cursor does not shift the next page.
+   * Subscriptions refuse it; the builder's subscribe methods leave it out.
    */
   after?: string;
   /** Ask for `totalCount`. Without it the result has none and the executor runs no COUNT query. */

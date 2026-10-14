@@ -131,6 +131,21 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
 /// still runs through `perspective.queryProlog`).
 pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
 
+/// The error a model subscription that sends `after` gets. A subscription
+/// re-runs one query on every matching write, so a cursor would re-read the
+/// same page forever; cursor paging is a one-shot `perspective.modelQuery`.
+pub(crate) const MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED: &str = "Model subscriptions do not take an `after` cursor: a subscription re-runs one query, so it would re-read the same page forever. Subscribe without `after` (use `limit`/`offset`), and page by cursor with perspective.modelQuery";
+
+/// Whether a model query JSON sends a cursor (`after`, even `""`). `null`
+/// reads as no cursor, as it does in the query itself. JSON that does not
+/// parse is left to the query, which reports it.
+pub(crate) fn model_query_sends_cursor(query_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(query_json)
+        .ok()
+        .and_then(|q| q.get("after").map(|a| !a.is_null()))
+        .unwrap_or(false)
+}
+
 pub(crate) fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
     // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
@@ -5824,12 +5839,17 @@ impl PerspectiveInstance {
     ///
     /// `classes` is one class or a union (#1238). A union is one subscription:
     /// it re-runs when a diff touches the trigger set of any class it names.
+    /// A query that sends `after` fails with
+    /// [`MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED`].
     pub async fn model_subscribe_and_query(
         &self,
         classes: super::model_query::QueryClasses,
         query_json: String,
         connection_id: String,
     ) -> Result<(String, u64, String), AnyError> {
+        if model_query_sends_cursor(&query_json) {
+            return Err(anyhow!(MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED));
+        }
         // Build trigger SPARQL from shape predicates resolved through the cache.
         // Each class contributes its own trigger set; the matcher below is
         // predicate-only, so the sets meet as their union.

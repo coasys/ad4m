@@ -1466,6 +1466,73 @@ describe("totalCount is asked for only by the readers of it (P3)", () => {
   });
 });
 
+describe("subscriptions never send a cursor (P8)", () => {
+  const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+  @Model({ name: "CursorlessThing" })
+  class CursorlessThing extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://cursorless" })
+    type: string = "test://cursorless";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  function perspective() {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "cursorless-sub",
+        revision: 0,
+        result: { instances: [], totalCount: 0 },
+      }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    return {
+      uuid: "cursorless-uuid",
+      client,
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+      modelSubscribe: jest.fn((className: string, queryJson: string) =>
+        client.modelSubscribe("cursorless-uuid", className, queryJson),
+      ),
+    } as any;
+  }
+  const sentQueries = (fn: jest.Mock) => fn.mock.calls.map((c: any[]) => JSON.parse(c[1]));
+  const withCursor = { limit: 5, after: "c1" };
+
+  it("subscribe() drops the query's `after`", async () => {
+    const p = perspective();
+    const builder = CursorlessThing.query(p, withCursor);
+    await builder.subscribe(() => {});
+    expect(sentQueries(p.modelSubscribe)).toHaveLength(1);
+    expect(sentQueries(p.modelSubscribe)[0]).not.toHaveProperty("after");
+    expect(sentQueries(p.modelSubscribe)[0].limit).toBe(5);
+    builder.dispose();
+  });
+
+  it("countSubscribe() drops the query's `after`", async () => {
+    const p = perspective();
+    const builder = CursorlessThing.query(p, withCursor);
+    await builder.countSubscribe(() => {});
+    expect(sentQueries(p.modelSubscribe)[0]).not.toHaveProperty("after");
+    builder.dispose();
+  });
+
+  it("paginateSubscribe() sends `after` neither to the subscription nor to its page reads", async () => {
+    const p = perspective();
+    const builder = CursorlessThing.query(p, withCursor);
+    await builder.paginateSubscribe(10, 2, () => {});
+    expect(sentQueries(p.modelSubscribe)[0]).not.toHaveProperty("after");
+    const reads = sentQueries(p.modelQuery);
+    expect(reads.length).toBeGreaterThan(0);
+    for (const q of reads) {
+      expect(q).not.toHaveProperty("after");
+      expect(q.offset).toBe(10);
+    }
+    builder.dispose();
+  });
+});
+
 describe("ModelQueryBuilder paginateSubscribe", () => {
   it("paginateSubscribe should use a single query with count: true", async () => {
     const mockSubscriptionId = "paginate-sub-123";

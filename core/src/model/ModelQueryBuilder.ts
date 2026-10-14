@@ -88,9 +88,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   /** Open a live model query for `params` as the current subscription.
    *  Resolves with it and the raw initial result; `onResult` gets every later one.
    *  A failed open ends only its own query: a later call may already own
-   *  `currentSubscription`. */
+   *  `currentSubscription`. A cursor (`after`) is never sent: the executor
+   *  refuses it on a subscription, which re-runs one query, not a page walk. */
   private async live(params: Query, onResult: (raw: any) => void): Promise<{ live: LiveQuery; initial: any }> {
-    const { className, queryJson } = this.prepare(params);
+    const { after: _after, ...cursorless } = params;
+    const { className, queryJson } = this.prepare(cursorless);
     const live = new LiveQuery(
       this.perspective.client, this.perspective.uuid,
       () => this.perspective.modelSubscribe(className, queryJson),
@@ -664,9 +666,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     delete subscriptionParams.limit;
     delete subscriptionParams.offset;
 
-    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
+    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call).
+    // Page numbers are offsets, so a cursor (`after`) is not sent.
+    const { after: _after, ...cursorless } = this.queryParams || {};
     const paginatedQuery = {
-      ...(this.queryParams || {}),
+      ...cursorless,
       limit: pageSize,
       offset: pageSize * (pageNumber - 1),
       count: true,
