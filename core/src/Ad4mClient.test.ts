@@ -42,7 +42,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
     'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    'agent.byDIDs': (p: Record<string, unknown>) => (p.dids as string[]).map(did => ({ did, perspective: new Perspective() })),
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
@@ -464,6 +464,7 @@ describe('AgentClient', () => {
 
     test('byDID() fetches agent by DID', async () => {
         const agent = await ad4m.agent.byDID('did:test:other');
+        expect(lastRpcCall!.params.dids).toEqual(['did:test:other']);
         expect(agent.did).toBe('did:test:other');
     });
 
