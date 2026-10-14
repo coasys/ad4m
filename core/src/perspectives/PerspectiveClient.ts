@@ -518,13 +518,12 @@ export class PerspectiveClient {
     }
 
     /**
-     * Retrieve all SHACL shapes in one call.  Returns an array of
-     * `{name, shapeUri, links}` — one entry per shape (one RPC call).
+     * Retrieve SHACL shapes in one call: every shape, or only those in
+     * `names` (unknown names are left out). Returns `{name, shapeUri, links}`
+     * per shape.
      */
-    async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
-        return this.#apiClient.call(
-            'perspective.getAllShacl', { uuid }
-        )
+    async getAllShacl(uuid: string, names?: string[]): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
+        return this.#apiClient.call('perspective.getAllShacl', { uuid, names })
     }
 
     // ExpressionClient functions, needed for Subjects:

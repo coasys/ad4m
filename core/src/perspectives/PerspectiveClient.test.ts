@@ -319,6 +319,37 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
     })
 })
 
+describe('PerspectiveProxy.getAllShacl reads shapes in one RPC', () => {
+    const shape = (name: string) => ({
+        name,
+        shapeUri: `app://${name}Shape`,
+        links: [{ source: `app://${name}Shape`, predicate: 'sh://targetClass', target: `app://${name}` }],
+    })
+
+    beforeEach(() => {
+        mockCall.mockReset()
+        mockOn.mockReset().mockReturnValue(() => {})
+    })
+
+    function proxy() {
+        return new PerspectiveProxy(makeHandle('uuid-shacl', 'S'), new PerspectiveClient('http://localhost:12000', 'token'))
+    }
+
+    it('getAllShacl() makes one perspective.getAllShacl RPC with no name filter', async () => {
+        mockCall.mockResolvedValue([shape('A'), shape('B')])
+        const shapes = await proxy().getAllShacl()
+        expect(mockCall.mock.calls).toEqual([['perspective.getAllShacl', { uuid: 'uuid-shacl' }]])
+        expect(shapes.map(s => [s.name, s.shape.targetClass])).toEqual([['A', 'app://A'], ['B', 'app://B']])
+    })
+
+    it('getAllShacl({ names }) sends the names in the same single RPC', async () => {
+        mockCall.mockResolvedValue([shape('B')])
+        const shapes = await proxy().getAllShacl({ names: ['B', 'Missing'] })
+        expect(mockCall.mock.calls).toEqual([['perspective.getAllShacl', { uuid: 'uuid-shacl', names: ['B', 'Missing'] }]])
+        expect(shapes.map(s => s.name)).toEqual(['B'])
+    })
+})
+
 /**
  * Unit tests for PerspectiveProxy utility functions.
  */
