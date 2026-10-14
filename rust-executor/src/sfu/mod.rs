@@ -22,6 +22,7 @@ pub mod server;
 pub mod types;
 
 mod service;
+mod simulcast;
 
 // `SignalGossip` is not constructed yet: see `gossip::signal`.
 pub use gossip::{
@@ -35,7 +36,7 @@ pub use service::{get_sfu_service, SfuService, MAX_MESH_PARTICIPANTS};
 pub use types::{
     CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuDataMessage,
     SfuMigrateEvent, SfuParticipantInfo, SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer,
-    SfuRoomInfo, TrackMapEntry,
+    SfuRoomInfo, SfuRoomRoster, TrackMapEntry,
 };
 
 /// Detect the default outbound IP address of this machine.

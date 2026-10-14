@@ -23,6 +23,7 @@ import type {
     SfuConfig,
     SfuDataMessage,
     SfuQualityPreference,
+    SfuRoomRoster,
 } from "./SfuTypes"
 
 // ── Public types ──────────────────────────────────────────────────
@@ -69,6 +70,9 @@ export interface SfuNeighbourhoodApi {
     subscribeSfuDataChannel(
         callback: (message: SfuDataMessage) => void,
     ): () => void
+    subscribeSfuRoomRoster(
+        callback: (roster: SfuRoomRoster) => void,
+    ): () => void
 }
 
 export type SfuTopology = "sfu" | "mesh" | "cascaded"
@@ -81,8 +85,6 @@ export interface SfuCallState {
     participants: Map<string, SfuParticipantState>
     localStream: MediaStream | null
     peerConnection: RTCPeerConnection | null
-    /** DIDs of participants already in the room at join time */
-    knownParticipantDids: string[]
 }
 
 export interface SfuParticipantState {
@@ -176,16 +178,32 @@ export class SfuManager {
     private state: SfuCallState
     private callbacks: Map<SfuEvent, SfuEventCallback[]> = new Map()
     private iceServers: RTCIceServer[]
-    private streamToParticipant: Map<string, string> = new Map()
     /** Reconnects since ICE last reached connected — not since a join: a
      *  join can succeed while the media path never comes up. */
     private reconnectAttempts: number = 0
     private static readonly MAX_RECONNECTS = 3
+    /** How long one rebuild keeps retrying a join the executor cannot take yet. */
+    private static readonly REJOIN_WINDOW_MS = 120_000
+    /** How long ICE may stay disconnected before a rebuild: the executor's `ICE_DISCONNECT_GRACE`. */
+    private static readonly DISCONNECT_GRACE_MS = 10_000
+    /** A rebuild is running: a second failure signal joins it rather than starting another. */
+    private reconnecting = false
     /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
     private generation: number = 0
+    /** Which participant each received media section carries, from the server's mappings. */
     private midToParticipant: Map<string, string> = new Map()
-    private trackDidIndex: number = 0
+    /** DIDs the roster removed and has not listed since. */
+    private departed: Set<string> = new Set()
+    /** The sender of each kind of local media: declared at join, so a later camera or screen needs no renegotiation. */
+    private senders: Map<"audio" | "video", RTCRtpSender> = new Map()
+    /** Tracks `replaceTrack` set since the user's join, for a rebuilt connection to send. */
+    private replacedTracks: Map<"audio" | "video", MediaStreamTrack | null> = new Map()
+    /** The last quality preference set, for a rebuilt connection to restore. */
+    private qualityPreference: SfuQualityPreference | null = null
+    /** Server offers waiting to be applied, in arrival order, one at a time. */
+    private offerQueue: Promise<void> = Promise.resolve()
     private renegotiationUnsubscribe: (() => void) | null = null
+    private rosterUnsubscribe: (() => void) | null = null
     private dataChannelUnsubscribe: (() => void) | null = null
     private disconnectedTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -209,7 +227,6 @@ export class SfuManager {
             participants: new Map(),
             localStream: null,
             peerConnection: null,
-            knownParticipantDids: [],
         }
 
         // Resolution order for ICE servers:
@@ -244,13 +261,18 @@ export class SfuManager {
 
     /**
      * Rebuild the call after its connection failed: leave, then join again
-     * on this executor, up to `MAX_RECONNECTS` times in a row. Leaving first
-     * matters: the executor still holds this DID's old session until it
-     * notices the connection died.
+     * on this executor. Leaving first matters: the executor still holds this
+     * DID's old session until it notices the connection died.
+     *
+     * Two budgets. A rebuild whose join works but whose connection fails
+     * again counts once against `MAX_RECONNECTS`, reset when ICE connects.
+     * Within one rebuild, a join that fails because the executor cannot be
+     * reached — a restart, an outage — is retried with backoff for up to
+     * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can.
      */
     private async reconnect(): Promise<void> {
         const stream = this.state.localStream
-        if (!stream) return
+        if (!stream || this.reconnecting) return
         const generation = this.generation
         if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
             this.emit("error", new Error("SFU reconnect attempts exhausted"))
@@ -259,23 +281,40 @@ export class SfuManager {
         console.info(
             `SFU: connection failed, reconnecting (${this.reconnectAttempts}/${SfuManager.MAX_RECONNECTS})`,
         )
-        this.releaseServerEvents()
-        if (this.state.peerConnection) {
-            this.state.peerConnection.close()
-            this.state.peerConnection = null
-        }
+        this.reconnecting = true
         try {
-            await this.neighbourhood.sfuCallLeave(this.neighbourhoodUrl, this.roomId)
-        } catch {
-            /* best-effort: the executor frees a dead session on its own */
-        }
-        if (generation !== this.generation) return // left meanwhile
-        this.resetParticipants()
-        try {
-            await this.join(stream)
-        } catch (e) {
-            console.error("SFU reconnect failed:", e)
-            this.emit("error", e)
+            const deadline = Date.now() + SfuManager.REJOIN_WINDOW_MS
+            for (let delay = 1000; ; delay = Math.min(delay * 2, 10_000)) {
+                this.releaseServerEvents()
+                if (this.state.peerConnection) {
+                    this.state.peerConnection.close()
+                    this.state.peerConnection = null
+                }
+                try {
+                    await this.neighbourhood.sfuCallLeave(this.neighbourhoodUrl, this.roomId)
+                } catch {
+                    /* best-effort: the executor frees a dead session on its own */
+                }
+                if (generation !== this.generation) return // left meanwhile
+                this.resetParticipants()
+                try {
+                    await this.join(stream)
+                    if (this.qualityPreference) await this.setQualityPreference(this.qualityPreference)
+                    return
+                } catch (e) {
+                    if (generation !== this.generation) return
+                    if (Date.now() + delay > deadline) {
+                        console.error("SFU reconnect failed:", e)
+                        this.emit("error", e)
+                        return
+                    }
+                    console.warn(`SFU: rejoin failed, retrying in ${delay} ms:`, e)
+                    await new Promise((resolve) => setTimeout(resolve, delay))
+                    if (generation !== this.generation) return
+                }
+            }
+        } finally {
+            this.reconnecting = false
         }
     }
 
@@ -323,8 +362,10 @@ export class SfuManager {
         this.state.peerConnection = pc
 
         // ICE state monitoring for reconnecting.
-        // "disconnected" is often transient (network blip, route change) —
-        // wait 3 seconds to let it recover.  "failed" reconnects at once.
+        // "disconnected" is often transient (network blip, route change):
+        // the connection gets the same grace the server gives it before
+        // dropping the peer, and a rebuild only follows once the server
+        // would have dropped it anyway.  "failed" reconnects at once.
         pc.oniceconnectionstatechange = () => {
             if (this.state.peerConnection !== pc) return // superseded
             if (pc.iceConnectionState === "failed") {
@@ -345,7 +386,7 @@ export class SfuManager {
                         ) {
                             this.reconnect()
                         }
-                    }, 3000)
+                    }, SfuManager.DISCONNECT_GRACE_MS)
                 }
             } else {
                 // Any other state (connected, completed, checking) cancels
@@ -364,85 +405,49 @@ export class SfuManager {
             }
         }
 
-        // Add local tracks — video with simulcast encodings
-        for (const track of localStream.getTracks()) {
-            if (track.kind === "video") {
-                pc.addTransceiver(track, {
-                    direction: "sendrecv",
-                    sendEncodings: [
-                        { rid: "high", maxBitrate: 1500000 },
-                        {
-                            rid: "medium",
-                            maxBitrate: 500000,
-                            scaleResolutionDownBy: 2,
-                        },
-                        {
-                            rid: "low",
-                            maxBitrate: 150000,
-                            scaleResolutionDownBy: 4,
-                        },
-                    ],
-                })
-            } else {
-                pc.addTrack(track, localStream)
-            }
+        // Both kinds of local media, send-only, declared now whether or not a
+        // track exists yet: the SFU only ever receives on these sections, and a
+        // camera or screen started later replaces an empty track with no
+        // renegotiation. Video goes out as three simulcast layers.
+        this.senders.clear()
+        for (const kind of ["audio", "video"] as const) {
+            const track = this.replacedTracks.has(kind)
+                ? this.replacedTracks.get(kind)
+                : localStream.getTracks().find((t) => t.kind === kind)
+            const transceiver = pc.addTransceiver(track ?? kind, {
+                direction: "sendonly",
+                streams: [localStream],
+                ...(kind === "video"
+                    ? {
+                          sendEncodings: [
+                              { rid: "high", maxBitrate: 1500000 },
+                              { rid: "medium", maxBitrate: 500000, scaleResolutionDownBy: 2 },
+                              { rid: "low", maxBitrate: 150000, scaleResolutionDownBy: 4 },
+                          ],
+                      }
+                    : {}),
+            })
+            this.senders.set(kind, transceiver.sender)
         }
 
-        // Handle incoming tracks from SFU
+        // Incoming media belongs to the participant the server mapped its
+        // section to. A track on a section with no mapping is not someone's
+        // media, so it is left alone rather than attributed by guesswork.
         pc.ontrack = (event: RTCTrackEvent) => {
-            const stream = event.streams[0]
-            if (!stream) return
-
-            const existing = Array.from(
-                this.state.participants.values(),
-            ).find((p) => p.stream.id === stream.id)
-
-            // Resolve participant DID via three paths:
-            // 1. Mid-based lookup from server track_mapping
-            // 2. Stream-id cache from a prior ontrack
-            // 3. Arrival-order index into knownParticipantDids
-            let participantDid: string | undefined
+            if (this.state.peerConnection !== pc) return
             const mid = event.transceiver?.mid
-            if (mid) {
-                participantDid = this.midToParticipant.get(mid)
-                if (participantDid)
-                    this.streamToParticipant.set(stream.id, participantDid)
-            }
-            if (!participantDid)
-                participantDid = this.streamToParticipant.get(stream.id)
-            if (
-                !participantDid &&
-                this.state.knownParticipantDids.length > 0 &&
-                this.trackDidIndex <
-                    this.state.knownParticipantDids.length
-            ) {
-                participantDid =
-                    this.state.knownParticipantDids[this.trackDidIndex]
-                this.streamToParticipant.set(stream.id, participantDid)
-                this.trackDidIndex++
-            }
-            if (!participantDid) participantDid = stream.id
-
-            if (existing) {
-                existing.hasAudio =
-                    existing.hasAudio || event.track.kind === "audio"
-                existing.hasVideo =
-                    existing.hasVideo || event.track.kind === "video"
-            } else {
-                const participant: SfuParticipantState = {
-                    did: participantDid,
-                    stream,
-                    hasAudio: event.track.kind === "audio",
-                    hasVideo: event.track.kind === "video",
-                    isActiveSpeaker: false,
-                }
-                this.state.participants.set(stream.id, participant)
-                this.emit("participant-joined", participant)
-            }
-
-            this.emit("stream-added", stream, event.track)
-            event.track.onended = () =>
-                this.emit("stream-removed", stream, event.track)
+            const did = mid ? this.midToParticipant.get(mid) : undefined
+            // Someone the roster said left stays gone: a late offer can still name them.
+            if (!did || did === this.agentDid || this.departed.has(did)) return
+            const participant = this.ensureParticipant(did)
+            participant.stream.addTrack(event.track)
+            this.refreshKinds(participant)
+            this.emit("stream-added", participant.stream, event.track)
+            event.track.addEventListener("ended", () => {
+                participant.stream.removeTrack(event.track)
+                this.refreshKinds(participant)
+                this.emit("stream-removed", participant.stream, event.track)
+            })
         }
 
         // ── Trickle ICE ──────────────────────────────────────────────
@@ -477,7 +482,11 @@ export class SfuManager {
         await pc.setLocalDescription(offer)
 
         const sdpOffer = JSON.stringify(pc.localDescription)
-        this.subscribeServerEvents(() => joinComplete)
+        // Server offers can arrive before the join's own answer is applied;
+        // they wait for it, then apply in order.
+        let markJoined!: () => void
+        const joined = new Promise<void>((resolve) => { markJoined = resolve })
+        this.subscribeServerEvents(pc, joined)
         let session: CallSessionInfo
         try {
             session = await this.neighbourhood.sfuCallJoin(
@@ -486,33 +495,27 @@ export class SfuManager {
                 sdpOffer,
             )
         } catch (err) {
+            // Settled either way: offers queued behind this join reach
+            // `applyServerOffer`, which drops them for the abandoned connection.
+            markJoined()
             this.abandon(pc)
             throw err
         }
         this.state.participantId = session.participantId
 
-        if (
-            session.streamMapping &&
-            session.streamMapping.length > 0
-        ) {
-            // streamMapping entries may arrive as "participantId:did" —
-            // extract the bare DID for participant resolution.
-            this.state.knownParticipantDids = session.streamMapping.map(
-                (entry) => {
-                    const colonIdx = entry.indexOf(":")
-                    return colonIdx >= 0 ? entry.slice(colonIdx + 1) : entry
-                },
-            )
-            this.trackDidIndex = 0
-        }
-
         try {
             const answer = JSON.parse(session.sdpAnswer)
             await pc.setRemoteDescription(new RTCSessionDescription(answer))
         } catch (err) {
+            markJoined()
             this.abandon(pc)
             throw err
         }
+        markJoined()
+
+        // Who was in the room when this join landed (`participantId:did`).
+        // The roster event keeps it current from here.
+        this.applyRoster(session.streamMapping.map((entry) => entry.slice(entry.indexOf(":") + 1)), false)
 
         // Flush buffered trickle ICE candidates
         joinComplete = true
@@ -530,10 +533,12 @@ export class SfuManager {
         }
     }
 
-    /** Drop the server-event subscription of the current join. */
+    /** Drop the server-event subscriptions of the current join. */
     private releaseServerEvents(): void {
         this.renegotiationUnsubscribe?.()
         this.renegotiationUnsubscribe = null
+        this.rosterUnsubscribe?.()
+        this.rosterUnsubscribe = null
     }
 
     /** Undo a join that failed part way: its subscription and its connection. */
@@ -544,80 +549,122 @@ export class SfuManager {
     }
 
     /**
-     * Subscribe to the server-pushed renegotiation offers for this
-     * join.  `join` calls this before `sfuCallJoin`: the
+     * Subscribe to the server's events for this join: renegotiation offers
+     * and the room roster. `join` calls this before `sfuCallJoin`: the
      * executor sends a socket only the events it watches, and a call
      * carries the pending watch ahead of itself, so no event the join
-     * causes is lost.  Events that arrive before `isJoined()` turns true
-     * are dropped — the peer connection cannot apply them yet.
+     * causes is lost. Offers wait for `joined` and then apply one at a
+     * time, in arrival order; one that arrives for a connection already
+     * replaced is dropped.
      */
-    private subscribeServerEvents(isJoined: () => boolean): void {
-        // Join may run more than once (a reconnect).  The prior
-        // subscription goes after the new one exists, so the event
-        // socket never drops to zero listeners in between.
-        const previous = this.renegotiationUnsubscribe
+    private subscribeServerEvents(pc: RTCPeerConnection, joined: Promise<void>): void {
+        // Join may run more than once (a reconnect). The prior
+        // subscriptions go after the new ones exist, so the event socket
+        // never drops to zero listeners in between.
+        const previous = [this.renegotiationUnsubscribe, this.rosterUnsubscribe]
+        const ours = (e: { neighbourhoodUrl: string; roomName: string }) =>
+            e.neighbourhoodUrl === this.neighbourhoodUrl && e.roomName === this.roomId
 
-        // Subscribe to server-initiated renegotiation offers
-        this.renegotiationUnsubscribe =
-            this.neighbourhood.subscribeSfuCallRenegotiationOffer(
-                this.agentDid,
-                async (event) => {
-                    if (!isJoined()) return
-                    if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
-                        return
-                    if (event.roomName !== this.roomId) return
+        this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
+            this.agentDid,
+            (event) => {
+                if (!ours(event)) return
+                this.offerQueue = this.offerQueue
+                    .then(() => joined)
+                    .then(() => this.applyServerOffer(pc, event))
+            },
+        )
+        this.rosterUnsubscribe = this.neighbourhood.subscribeSfuRoomRoster((roster) => {
+            if (!ours(roster) || this.state.peerConnection !== pc) return
+            void joined.then(() => {
+                if (this.state.peerConnection === pc) this.applyRoster(roster.participants, true)
+            })
+        })
 
-                    if (event.trackMapping) {
-                        for (const entry of event.trackMapping) {
-                            this.midToParticipant.set(
-                                entry.mid,
-                                entry.agentDid,
-                            )
-                        }
-                    }
+        for (const unsubscribe of previous) unsubscribe?.()
+    }
 
-                    const currentPc = this.state.peerConnection
-                    if (!currentPc) {
-                        console.warn(
-                            "SFU: no peer connection for renegotiation",
-                        )
-                        return
-                    }
-                    try {
-                        const offerSdp = JSON.parse(event.sdpOffer)
-                        await currentPc.setRemoteDescription(
-                            new RTCSessionDescription(offerSdp),
-                        )
-                        const renegAnswer = await currentPc.createAnswer()
-                        await currentPc.setLocalDescription(renegAnswer)
-                        const answerJson = JSON.stringify(
-                            currentPc.localDescription,
-                        )
-                        await this.neighbourhood.sfuCallAnswerServerOffer(
-                            this.neighbourhoodUrl,
-                            event.roomName,
-                            answerJson,
-                        )
-                    } catch (err) {
-                        console.error("SFU: renegotiation failed:", err)
-                        this.emit("error", err)
-                    }
-                },
+    /** Apply one server offer to `pc` and answer it, unless `pc` is no longer the call's. */
+    private async applyServerOffer(pc: RTCPeerConnection, event: SfuCallRenegotiationOffer): Promise<void> {
+        if (this.state.peerConnection !== pc) return
+        // The mapping first: the tracks this offer adds arrive while it is applied.
+        for (const entry of event.trackMapping ?? []) {
+            this.midToParticipant.set(entry.mid, entry.agentDid)
+        }
+        try {
+            await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(event.sdpOffer)))
+            await pc.setLocalDescription(await pc.createAnswer())
+            await this.neighbourhood.sfuCallAnswerServerOffer(
+                this.neighbourhoodUrl,
+                event.roomName,
+                JSON.stringify(pc.localDescription),
             )
+        } catch (err) {
+            if (this.state.peerConnection !== pc) return
+            // A renegotiation that fails leaves this connection out of step
+            // with the server — or the server has already dropped it. Either
+            // way the call is rebuilt; `reconnect` reports an error only if
+            // that fails too.
+            console.warn("SFU: renegotiation failed, rebuilding the connection:", err)
+            void this.reconnect()
+        }
+    }
 
-        previous?.()
+    /**
+     * Make the participants match `dids`, the room's roster: everyone new
+     * joins, and — when `complete`, as the roster event is — everyone
+     * missing leaves. The join's own roster can lag the room, so it only adds.
+     */
+    private applyRoster(dids: string[], complete: boolean): void {
+        const present = new Set(dids.filter((did) => did !== this.agentDid))
+        for (const did of present) {
+            this.departed.delete(did)
+            this.ensureParticipant(did)
+        }
+        if (!complete) return
+        for (const [did, participant] of [...this.state.participants]) {
+            if (present.has(did)) continue
+            this.state.participants.delete(did)
+            this.departed.add(did)
+            for (const [mid, owner] of this.midToParticipant) {
+                if (owner === did) this.midToParticipant.delete(mid)
+            }
+            this.emit("participant-left", participant)
+        }
+    }
+
+    /** The participant for `did`, joining them to the call if they are new. */
+    private ensureParticipant(did: string): SfuParticipantState {
+        let participant = this.state.participants.get(did)
+        if (!participant) {
+            participant = {
+                did,
+                stream: new MediaStream(),
+                hasAudio: false,
+                hasVideo: false,
+                isActiveSpeaker: false,
+            }
+            this.state.participants.set(did, participant)
+            this.emit("participant-joined", participant)
+        }
+        return participant
+    }
+
+    private refreshKinds(participant: SfuParticipantState): void {
+        participant.hasAudio = participant.stream.getAudioTracks().length > 0
+        participant.hasVideo = participant.stream.getVideoTracks().length > 0
     }
 
     async leave(): Promise<void> {
         this.generation++
-        if (this.renegotiationUnsubscribe) {
-            try {
-                this.renegotiationUnsubscribe()
-            } catch {
-                /* swallow */
-            }
-            this.renegotiationUnsubscribe = null
+        this.releaseServerEvents()
+        if (this.disconnectedTimer) {
+            clearTimeout(this.disconnectedTimer)
+            this.disconnectedTimer = null
         }
+        this.senders.clear()
+        this.replacedTracks.clear()
+        this.qualityPreference = null
         if (this.dataChannelUnsubscribe) {
             try {
                 this.dataChannelUnsubscribe()
@@ -649,14 +696,13 @@ export class SfuManager {
         this.state.participants.clear()
         this.state.participantId = null
         this.midToParticipant.clear()
-        this.streamToParticipant.clear()
-        this.trackDidIndex = 0
-        this.state.knownParticipantDids = []
+        this.departed.clear()
     }
 
     async setQualityPreference(
         preference: SfuQualityPreference,
     ): Promise<void> {
+        this.qualityPreference = preference
         if (!this.state.participantId) {
             console.warn(
                 "Cannot set quality preference: not connected to SFU",
@@ -688,23 +734,14 @@ export class SfuManager {
     /**
      * Replace the outbound track of a given kind on the SFU peer connection.
      *
-     * Uses `RTCRtpSender.replaceTrack` — no renegotiation required.
-     * Pass `null` to stop sending that kind.
+     * Both kinds were declared at join, so this is always
+     * `RTCRtpSender.replaceTrack` — no renegotiation. Pass `null` to stop
+     * sending that kind.
      */
     async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
-        const pc = this.state.peerConnection
-        if (!pc) return
-        const sender = pc.getSenders().find(
-            (s) => s.track?.kind === kind
-                || (!s.track && pc.getTransceivers().find(
-                    (t) => t.sender === s && t.receiver?.track?.kind === kind,
-                )),
-        )
-        if (sender) {
-            await sender.replaceTrack(track)
-        } else if (track) {
-            pc.addTrack(track)
-        }
+        this.replacedTracks.set(kind, track)
+        // Between connections (a rebuild) the next join sends it.
+        if (this.state.peerConnection) await this.senders.get(kind)?.replaceTrack(track)
     }
 
     // ── Data channel relay ──────────────────────────────────────────
@@ -774,7 +811,6 @@ export class SfuManager {
             console.error("Error during SFU destroy:", e)
         }
         this.callbacks.clear()
-        this.streamToParticipant.clear()
         this.midToParticipant.clear()
     }
 }

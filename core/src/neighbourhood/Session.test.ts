@@ -69,6 +69,7 @@ function fakeApi() {
         sfuAddIceCandidate: jest.fn(),
         sfuSendData: jest.fn(),
         subscribeSfuDataChannel: jest.fn(),
+        subscribeSfuRoomRoster: jest.fn(),
     }
 }
 

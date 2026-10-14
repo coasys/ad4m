@@ -34,6 +34,7 @@
 //! | `sfu-call-renegotiation-offer` | (inline)    | `targetDid`            | SFU server-pushed SDP offer          |
 //! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere (`acceptRedirect` joins only) |
 //! | `sfu-data`                    | (inline)      | participant of the room | SFU data channel message            |
+//! | `sfu-room-roster`             | (inline)      | participant of the room | Who is in a call room now           |
 //! | `flow-state-changed`          | (inline)      | agent DID, strict      | A flow instance's state moved on that agent's replica (#1424) |
 //!
 //! ## Client → Server messages
@@ -107,6 +108,7 @@ use crate::pubsub::{
     PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
     SFU_CALL_RENEGOTIATION_OFFER_TOPIC, SFU_DATA_CHANNEL_TOPIC, SFU_MIGRATE_TOPIC,
+    SFU_ROOM_ROSTER_TOPIC,
 };
 
 use super::auth::{AppState, AuthContext};
@@ -147,10 +149,11 @@ pub mod events {
     pub const SFU_CALL_RENEGOTIATION_OFFER: &str = "sfu-call-renegotiation-offer";
     pub const SFU_MIGRATE: &str = "sfu-migrate";
     pub const SFU_DATA: &str = "sfu-data";
+    pub const SFU_ROOM_ROSTER: &str = "sfu-room-roster";
     pub const FLOW_STATE_CHANGED: &str = "flow-state-changed";
 
     /// Every name above, in stream-builder order.
-    pub const ALL: [&str; 24] = [
+    pub const ALL: [&str; 25] = [
         AGENT_STATUS_CHANGED,
         AGENT_UPDATED,
         APPS_CHANGED_EVENT,
@@ -174,6 +177,7 @@ pub mod events {
         AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
         SFU_MIGRATE,
         SFU_DATA,
+        SFU_ROOM_ROSTER,
         FLOW_STATE_CHANGED,
     ];
 }
@@ -227,7 +231,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     };
     use crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent;
-    use crate::sfu::{SfuCallRenegotiationOffer, SfuDataMessage, SfuMigrateEvent};
+    use crate::sfu::{SfuCallRenegotiationOffer, SfuDataMessage, SfuMigrateEvent, SfuRoomRoster};
     use events::*;
     vec![
         EventSpec::of::<AgentStatusChangedEvent>(AGENT_STATUS_CHANGED, false),
@@ -253,6 +257,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<SfuCallRenegotiationOffer>(SFU_CALL_RENEGOTIATION_OFFER, false),
         EventSpec::of::<SfuMigrateEvent>(SFU_MIGRATE, false),
         EventSpec::of::<SfuDataMessage>(SFU_DATA, false),
+        EventSpec::of::<SfuRoomRoster>(SFU_ROOM_ROSTER, false),
         EventSpec::of::<FlowStateChangedEvent>(FLOW_STATE_CHANGED, true),
     ]
 }
@@ -778,10 +783,37 @@ pub(crate) async fn build_event_stream_for(
                     }
                     let did = did_cell.get()?;
                     let data: crate::sfu::SfuDataMessage = serde_json::from_str(&msg).ok()?;
+                    // The sender already has what it sent.
+                    if data.sender_did == did {
+                        return None;
+                    }
                     let in_room = crate::sfu::get_sfu_service()?
                         .is_participant(&data.neighbourhood_url, &data.room_name, &did)
                         .await;
                     in_room.then(|| wrap_event(events::SFU_DATA, &msg))
+                }
+            })
+    };
+
+    // SFU room roster — to the participants it lists.
+    let s_sfu_roster = {
+        let rx = pubsub.subscribe(&SFU_ROOM_ROSTER_TOPIC).await;
+        let did_cell = d_sfu.clone();
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = did_cell.clone();
+                async move {
+                    let msg = result.ok()?;
+                    if !sfu_events {
+                        return None;
+                    }
+                    let did = did_cell.get()?;
+                    let roster: crate::sfu::SfuRoomRoster = serde_json::from_str(&msg).ok()?;
+                    roster
+                        .participants
+                        .contains(&did)
+                        .then(|| wrap_event(events::SFU_ROOM_ROSTER, &msg))
                 }
             })
     };
@@ -830,7 +862,10 @@ pub(crate) async fn build_event_stream_for(
             ),
         ),
     );
-    let sfu = stream::select(stream::select(s_sfu_reneg, s_sfu_migrate), s_sfu_data);
+    let sfu = stream::select(
+        stream::select(s_sfu_reneg, s_sfu_migrate),
+        stream::select(s_sfu_data, s_sfu_roster),
+    );
 
     let top = stream::select(
         stream::select(agent, persp),

@@ -15,6 +15,7 @@ import type {
     SfuParticipantQualityPreference,
     SfuQualityPreference,
     SfuRoomInfo,
+    SfuRoomRoster,
     SfuStatus,
 } from "./SfuTypes"
 
@@ -278,6 +279,13 @@ export class NeighbourhoodClient {
         // A fresh handler per call: `on` merges a repeated handler, and
         // each subscription must own its unsubscribe.
         return this.#apiClient.on("sfu-data", (message) => callback(message))
+    }
+
+    /** Subscribe to the rosters of the call rooms this agent is in: who is in each, whenever that changes. */
+    subscribeSfuRoomRoster(
+        callback: (roster: SfuRoomRoster) => void,
+    ): () => void {
+        return this.#apiClient.on("sfu-room-roster", (roster) => callback(roster))
     }
 
     /**

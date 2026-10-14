@@ -93,7 +93,13 @@ export interface CallGenerations {
 }
 
 export type CallBody =
-    | { kind: "description"; description: RTCSessionDescriptionInit }
+    /**
+     * `offer` numbers the offers of one connection: an offer carries its own,
+     * an answer the one it answers. An answer to an offer this side has since
+     * replaced is refused by the browser, so it is dropped instead. Optional:
+     * a peer predating it sends none, and its answers apply as before.
+     */
+    | { kind: "description"; description: RTCSessionDescriptionInit; offer?: number }
     | { kind: "ice"; candidate: RTCIceCandidateInit }
     /** Throw this pair's connection away and build a new one. */
     | { kind: "reset" }
@@ -133,7 +139,13 @@ export function parseCallMessage(payload: unknown): CallMessage | null {
         const { type, sdp } = description as RTCSessionDescriptionInit
         if (type !== "offer" && type !== "answer" && type !== "pranswer" && type !== "rollback") return null
         if (sdp !== undefined && typeof sdp !== "string") return null
-        return { ...envelope, kind: "description", description: { type, sdp } }
+        const offer = (msg as { offer?: unknown }).offer
+        return {
+            ...envelope,
+            kind: "description",
+            description: { type, sdp },
+            ...(Number.isSafeInteger(offer) ? { offer: offer as number } : {}),
+        }
     }
 
     if (msg.kind === "ice") {
@@ -170,6 +182,13 @@ export interface SignallingChannel {
      * "the message has not gone yet" — see {@link MeshManager.outstanding}.
      */
     onPublishResult?(cb: (result: { ok: boolean; ms: number }) => void): () => void
+    /**
+     * Settles once messages published from now on reach `onMessage`.
+     * Optional: a transport that delivers from the moment `onMessage`
+     * returns has nothing to wait for. A peer told about this one before it
+     * listens would offer into the void until a repair resends.
+     */
+    listening?(): Promise<void>
 }
 
 /** Minimal telepresence surface the channel bridge needs. */
@@ -196,6 +215,7 @@ export function createTelepresenceChannel(
     selfDid: string,
 ): SignallingChannel {
     const resultListeners = new Set<(result: { ok: boolean; ms: number }) => void>()
+    let subscribed: Promise<void> = Promise.resolve()
     const report = (result: { ok: boolean; ms: number }) => {
         for (const cb of resultListeners) {
             try { cb(result) } catch (e) {
@@ -266,12 +286,14 @@ export function createTelepresenceChannel(
                 cb(link.author as string, parsed)
             }
 
-            proxy.addSignalHandler(handler).catch((err) => {
+            subscribed = proxy.addSignalHandler(handler).catch((err) => {
                 console.warn("mesh: signal handler registration failed — inbound traffic will get missed:", err)
             })
 
             return () => proxy.removeSignalHandler(handler)
         },
+
+        listening: () => subscribed,
 
         onPublishResult(cb) {
             resultListeners.add(cb)
@@ -371,7 +393,7 @@ const MAX_RETIRED_PER_PEER = 16
 
 /** Signalling held from agents the roster has not listed yet. Bounded: it buffers for strangers. */
 const MAX_PENDING_PEERS = 16
-const MAX_PENDING_PER_PEER = 8
+const MAX_PENDING_PER_PEER = 32
 
 /** A name for a new connection. Unique enough among one peer's connections, which is all it is compared with. */
 const newGeneration = () => Math.random().toString(36).slice(2, 10)
@@ -411,7 +433,11 @@ interface PeerSlot {
     /** Candidates that cannot be applied yet, each with the peer connection that gathered it. */
     earlyCandidates: { gen?: string; candidate: RTCIceCandidateInit }[]
     /** The last description this side sent, so a lost one can be sent again rather than rebuilt. */
-    lastSent: RTCSessionDescriptionInit | null
+    lastSent: Extract<CallBody, { kind: "description" }> | null
+    /** How many offers this connection has made: the last one's `offer` number. */
+    offers: number
+    /** The `offer` number of the peer's last applied offer, which this side's answer names. */
+    remoteOffer: number | undefined
     /** The `sdp` already resent once. Resending is worth exactly one try per description. */
     lastResent: string | null
     /** Connected at least once: what broke is the transport, not a message. */
@@ -425,6 +451,8 @@ interface PeerSlot {
     offeredAt: number
     /** The pending offer was made while the pair was already connected: a renegotiation. */
     renegotiating: boolean
+    /** An offer this side held back until the pair connects; see `onnegotiationneeded`. */
+    offerDeferred: boolean
     /** When this slot was created or last rebuilt — where the handshake deadline counts from. */
     since: number
     /** When the last repair was attempted, so rungs are spaced rather than fired in a burst. */
@@ -586,6 +614,8 @@ export class MeshManager {
 
             this.enqueue(from, slot, message)
         })
+        // A session announces itself once `join` returns; peers offer at once.
+        await this.channel.listening?.()
 
         /*
          * Spend the transport's first-send cost on something that does not
@@ -786,6 +816,14 @@ export class MeshManager {
         this.send(peerId, { ...message, ...this.stamp(slot) })
     }
 
+    /** Send the connection's local description, numbered as {@link CallBody} describes. */
+    private sendDescription(peerId: string, slot: PeerSlot): void {
+        const { type, sdp } = slot.pc.localDescription!
+        const offer = type === "offer" ? ++slot.offers : slot.remoteOffer
+        slot.lastSent = { kind: "description", description: { type, sdp }, ...(offer !== undefined ? { offer } : {}) }
+        this.sendFrom(peerId, slot, slot.lastSent)
+    }
+
     private retire(peerId: string, generation: string | null | undefined): void {
         if (!generation) return
         const list = this.retired.get(peerId) ?? []
@@ -817,10 +855,13 @@ export class MeshManager {
             remoteReady: false,
             earlyCandidates: [],
             lastSent: null,
+            offers: 0,
+            remoteOffer: undefined,
             lastResent: null,
             everConnected: false,
             offeredAt: 0,
             renegotiating: false,
+            offerDeferred: false,
             since: this.now(),
             lastAttempt: 0,
             attempts: 0,
@@ -828,26 +869,44 @@ export class MeshManager {
         }
         this.slots.set(peerId, slot)
 
-        pc.onnegotiationneeded = async () => {
+        const negotiate = async () => {
+            /*
+             * An answerer's first offer waits until the pair connects. Before
+             * that this side cannot know its answer arrived; if it was lost,
+             * the peer still has its offer out, reads this offer as glare and
+             * negotiates afresh, and both sides take the same DTLS role
+             * ("Failed to set SSL role"). Connecting proves the peer applied
+             * the answer: DTLS needs the fingerprint it carries. Once
+             * connected the roles are fixed, so later offers go at once.
+             * Read from the connection: the browser can fire this while the
+             * peer's offer is being applied, before any answer exists.
+             */
+            if (pc.remoteDescription?.type === "offer" && !slot.everConnected) {
+                slot.offerDeferred = true
+                return
+            }
+            slot.offerDeferred = false
             try {
                 slot.makingOffer = true
-                // No argument: the browser picks offer or answer from the
-                // signaling state, which makes the rolled-back case recover.
-                await pc.setLocalDescription()
-                if (pc.localDescription) {
-                    slot.lastSent = { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
-                    if (pc.localDescription.type === "offer") {
-                        slot.offeredAt = this.now()
-                        slot.renegotiating = pc.connectionState === "connected"
-                    }
-                    this.sendFrom(peerId, slot, { kind: "description", description: pc.localDescription })
-                }
+                /*
+                 * Always an offer, never "whatever the state calls for". The
+                 * browser can fire this during the rollback that accepting the
+                 * peer's offer starts; a description picked from the state when
+                 * the call runs is then the answer, and the answering path
+                 * makes an offer in its place. If the peer's offer got here
+                 * first the browser refuses, and asks again once stable.
+                 */
+                await pc.setLocalDescription({ type: "offer" })
+                slot.offeredAt = this.now()
+                slot.renegotiating = pc.connectionState === "connected"
+                this.sendDescription(peerId, slot)
             } catch (error) {
-                this.fail(`negotiating with ${peerId}`, error)
+                if (pc.signalingState === "stable") this.fail(`negotiating with ${peerId}`, error)
             } finally {
                 slot.makingOffer = false
             }
         }
+        pc.onnegotiationneeded = negotiate
 
         pc.onicecandidate = ({ candidate }) => {
             if (candidate) this.sendFrom(peerId, slot, { kind: "ice", candidate: candidate.toJSON() })
@@ -891,6 +950,7 @@ export class MeshManager {
                 slot.disconnectedAt = 0
                 // Keep only candidates from a peer connection this one has not met.
                 slot.earlyCandidates = slot.earlyCandidates.filter((held) => held.gen && held.gen !== slot.remoteGeneration)
+                if (slot.offerDeferred && pc.signalingState === "stable") void negotiate()
             }
             if (state === "disconnected" && !slot.disconnectedAt) slot.disconnectedAt = this.now()
             if (state === "connected" || state === "failed") slot.disconnectedAt = 0
@@ -979,7 +1039,13 @@ export class MeshManager {
         if (!this.pending.has(peerId) && this.pending.size >= MAX_PENDING_PEERS) return
         const queue = this.pending.get(peerId) ?? []
         queue.push(message)
-        if (queue.length > MAX_PENDING_PER_PEER) queue.shift()
+        // An offer is followed by its candidates; dropping the oldest message
+        // would drop the offer, which the pair cannot start without. Drop the
+        // oldest message that is not a description or a reset instead.
+        while (queue.length > MAX_PENDING_PER_PEER) {
+            const spare = queue.findIndex((held) => held.kind !== "description" && held.kind !== "reset")
+            queue.splice(spare === -1 ? 0 : spare, 1)
+        }
         this.pending.set(peerId, queue)
     }
 
@@ -1071,6 +1137,16 @@ export class MeshManager {
 
             if (message.kind === "description") {
                 const { description } = message
+                // An offer older than one already applied — overtaken on this
+                // unordered transport — describes m-lines the connection has
+                // moved past. The same number again is the resend rung's copy,
+                // and is answered.
+                if (
+                    description.type === "offer" &&
+                    message.offer !== undefined &&
+                    slot.remoteOffer !== undefined &&
+                    message.offer < slot.remoteOffer
+                ) return
                 const collision =
                     description.type === "offer" &&
                     (slot.makingOffer || slot.pc.signalingState !== "stable")
@@ -1084,8 +1160,12 @@ export class MeshManager {
                 // resend rung got one answer for each copy. Expected on this
                 // transport, so not an error.
                 if (description.type === "answer" && slot.pc.signalingState === "stable") return
+                // An answer to an earlier offer of this connection — a late copy
+                // from the resend rung — would be refused against the current one.
+                if (description.type === "answer" && message.offer !== undefined && message.offer !== slot.offers) return
 
                 await slot.pc.setRemoteDescription(description)
+                if (description.type === "offer") slot.remoteOffer = message.offer
                 // An answer settles this side's offer, and accepting the
                 // peer's offer rolled it back. Either way none is pending.
                 // An answered renegotiation is the evidence the connected-pair
@@ -1102,11 +1182,8 @@ export class MeshManager {
                 await this.flushCandidates(peerId, slot)
 
                 if (description.type === "offer") {
-                    await slot.pc.setLocalDescription()
-                    if (slot.pc.localDescription) {
-                        slot.lastSent = { type: slot.pc.localDescription.type, sdp: slot.pc.localDescription.sdp }
-                        this.sendFrom(peerId, slot, { kind: "description", description: slot.pc.localDescription })
-                    }
+                    await slot.pc.setLocalDescription({ type: "answer" })
+                    this.sendDescription(peerId, slot)
                 }
                 return
             }
@@ -1203,9 +1280,9 @@ export class MeshManager {
         if (state === "connected") {
             this.renegotiationRepairs.set(peerId, (this.renegotiationRepairs.get(peerId) ?? 0) + 1)
         }
-        if ((!slot.everConnected || unanswered) && slot.lastSent && slot.lastSent.sdp !== slot.lastResent) {
-            slot.lastResent = slot.lastSent.sdp ?? null
-            this.sendFrom(peerId, slot, { kind: "description", description: slot.lastSent })
+        if ((!slot.everConnected || unanswered) && slot.lastSent && slot.lastSent.description.sdp !== slot.lastResent) {
+            slot.lastResent = slot.lastSent.description.sdp ?? null
+            this.sendFrom(peerId, slot, slot.lastSent)
             this.emit("peer-recovery", peerId, { rung: "resend", attempts })
             return
         }

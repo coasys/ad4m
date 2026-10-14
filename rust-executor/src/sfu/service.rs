@@ -146,6 +146,9 @@ pub struct SfuService {
     /// DIDs of the cascade peers this node was configured with
     /// (`--sfu-cascade-peers`).
     cascade_peer_dids: Vec<String>,
+    /// Serialises [`Self::publish_roster`]: a roster read before another
+    /// join must not be published after that join's roster.
+    roster_order: tokio::sync::Mutex<()>,
 }
 
 impl SfuService {
@@ -196,6 +199,7 @@ impl SfuService {
             reachability,
             preferred_node,
             cascade_peer_dids,
+            roster_order: tokio::sync::Mutex::new(()),
         });
 
         if let Some(rx) = gossip.take_inbound() {
@@ -794,6 +798,49 @@ impl SfuService {
         }
     }
 
+    /// How many people a room in `neighbourhood_url` holds: four times the
+    /// space's mesh limit. A space with no policy gets the most any policy
+    /// may set — bounded, never unlimited. A cascade's per-node capacity
+    /// plays no part.
+    async fn room_capacity(neighbourhood_url: &str) -> usize {
+        config_store::stored_policy(neighbourhood_url)
+            .await
+            .map_or(MAX_MESH_PARTICIPANTS, |c| c.max_mesh_participants) as usize
+            * 4
+    }
+
+    /// Tell everyone in `room_id` who is in it now. Called after every join
+    /// and every departure, so clients follow membership without inferring it
+    /// from media.
+    async fn publish_roster(&self, room_id: &RoomId) {
+        let _order = self.roster_order.lock().await;
+        let mut participants: Vec<String> = self
+            .rooms
+            .read()
+            .await
+            .get_room(room_id)
+            .map(|room| {
+                room.participants
+                    .values()
+                    .map(|p| p.agent_did.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        participants.sort();
+        participants.dedup();
+        let roster = super::SfuRoomRoster {
+            neighbourhood_url: room_id.neighbourhood_url.clone(),
+            room_name: room_id.room_name.clone(),
+            participants,
+        };
+        if let Ok(json) = serde_json::to_string(&roster) {
+            crate::pubsub::get_global_pubsub()
+                .await
+                .publish(&crate::pubsub::SFU_ROOM_ROSTER_TOPIC, &json)
+                .await;
+        }
+    }
+
     /// Get the local address of the SFU server.
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.server.local_addr
@@ -857,12 +904,7 @@ impl SfuService {
     ) -> Result<SfuRoomInfo, String> {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         // Read before taking the rooms lock: it reads the neighbourhood's links.
-        // SFU supports ~4x the mesh limit. A neighbourhood with no config gets
-        // the most any config may set: bounded, never unlimited.
-        let max = config_store::stored_policy(neighbourhood_url)
-            .await
-            .map_or(MAX_MESH_PARTICIPANTS, |c| c.max_mesh_participants) as usize
-            * 4;
+        let max = Self::room_capacity(neighbourhood_url).await;
         let mut rooms = self.rooms.write().await;
         if rooms.get_room(&room_id).is_none() {
             Self::check_new_room(&rooms, &room_id)?;
@@ -950,29 +992,29 @@ impl SfuService {
         } else {
             None
         };
-        let max_per_node = {
+        // A cascade's per-node capacity decides only where a redirectable
+        // joiner goes, never whether a room is full.
+        if accept_redirect {
             let mgr = self.cascade_manager.read().await;
-            if accept_redirect {
-                let rooms = self.rooms.read().await;
-                let local_count = rooms
-                    .get_room(&room_id)
-                    .map(|r| r.participant_count() as u32)
-                    .unwrap_or(0);
-                if let Some(node) =
-                    mgr.pick_redirect_node(&room_id.to_string(), local_count, preferred.as_deref())
-                {
-                    return Ok(CallSessionInfo {
-                        room_name: room_name.to_string(),
-                        neighbourhood_url: neighbourhood_url.to_string(),
-                        participant_id: String::new(),
-                        sdp_answer: String::new(),
-                        redirect_to: Some(node.did.clone()),
-                        stream_mapping: Vec::new(),
-                    });
-                }
+            let rooms = self.rooms.read().await;
+            let local_count = rooms
+                .get_room(&room_id)
+                .map(|r| r.participant_count() as u32)
+                .unwrap_or(0);
+            if let Some(node) =
+                mgr.pick_redirect_node(&room_id.to_string(), local_count, preferred.as_deref())
+            {
+                return Ok(CallSessionInfo {
+                    room_name: room_name.to_string(),
+                    neighbourhood_url: neighbourhood_url.to_string(),
+                    participant_id: String::new(),
+                    sdp_answer: String::new(),
+                    redirect_to: Some(node.did.clone()),
+                    stream_mapping: Vec::new(),
+                });
             }
-            mgr.max_participants_per_node() as usize
-        };
+        }
+        let max_per_room = Self::room_capacity(neighbourhood_url).await;
 
         // Parse SDP offer and create Rtc instance — do this BEFORE
         // creating the room or registering the participant so failures
@@ -1003,7 +1045,7 @@ impl SfuService {
                 ));
             }
             rooms
-                .create_room(room_id.clone(), Some(max_per_node))
+                .create_room(room_id.clone(), Some(max_per_room))
                 .map_err(|e| e.to_string())?;
             let room = rooms
                 .get_room_mut(&room_id)
@@ -1059,6 +1101,7 @@ impl SfuService {
         };
 
         self.announce_room(&room_id.to_string(), local_count).await;
+        self.publish_roster(&room_id).await;
 
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
@@ -1070,7 +1113,7 @@ impl SfuService {
         })
     }
 
-    /// Leave a call.
+    /// Leave a call. `false` when this agent is not in it (any more).
     pub async fn call_leave(
         &self,
         neighbourhood_url: &str,
@@ -1080,12 +1123,14 @@ impl SfuService {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let (pid, local_count) = {
             let mut rooms = self.rooms.write().await;
-            let room = rooms
+            // Already gone — the server dropped the connection first, or the
+            // room ended with it: there is nothing to leave.
+            let Some(pid) = rooms
                 .get_room_mut(&room_id)
-                .ok_or_else(|| RoomError::NotFound.to_string())?;
-            let pid = room
-                .participant_id_for_did(agent_did)
-                .ok_or_else(|| "Agent not in room".to_string())?;
+                .and_then(|room| room.participant_id_for_did(agent_did))
+            else {
+                return Ok(false);
+            };
             (
                 pid.clone(),
                 Self::remove_from_room(&mut rooms, &room_id, &pid),
@@ -1152,6 +1197,7 @@ impl SfuService {
         // room will never come.
         let room_key = room_id.to_string();
         self.announce_room(&room_key, local_count).await;
+        self.publish_roster(room_id).await;
         if local_count == 0 {
             let signal = CascadeSignal::Leave {
                 did: self.gossip.local_did().to_string(),

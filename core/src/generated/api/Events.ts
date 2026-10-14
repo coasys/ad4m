@@ -22,6 +22,7 @@ import type { QuerySubscriptionUpdateEvent } from "./QuerySubscriptionUpdateEven
 import type { SfuCallRenegotiationOffer } from "./SfuCallRenegotiationOffer";
 import type { SfuDataMessage } from "./SfuDataMessage";
 import type { SfuMigrateEvent } from "./SfuMigrateEvent";
+import type { SfuRoomRoster } from "./SfuRoomRoster";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -49,6 +50,7 @@ export interface EventMap {
   "sfu-call-renegotiation-offer": SfuCallRenegotiationOffer;
   "sfu-migrate": SfuMigrateEvent;
   "sfu-data": SfuDataMessage;
+  "sfu-room-roster": SfuRoomRoster;
   "flow-state-changed": FlowStateChangedEvent;
 }
 

@@ -92,6 +92,11 @@ export function sfuScenario(
     });
 
     it(`${scenario.id}: ${scenario.description}`, async function () {
+      const missing = scenario.unavailable?.();
+      if (missing) {
+        console.warn(`[${scenario.id}] skipped: ${missing}`);
+        this.skip();
+      }
       const executorPath = resolveExecutorPath();
       const ctx: ScenarioContext = {
         client: client!,

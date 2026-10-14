@@ -46,5 +46,7 @@ export interface Scenario {
    * Used by the agent-harness (A-series) pod scenarios.
    */
   managesOwnEnvironment?: boolean;
+  /** Why this host cannot run the scenario, or null when it can. The runner then skips it. */
+  unavailable?(): string | null;
   run(ctx: ScenarioContext): Promise<ScenarioResult>;
 }

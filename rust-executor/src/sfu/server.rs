@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
+use super::simulcast::{is_keyframe, LayerSelector};
 
 /// A connected WebRTC peer managed by the SFU server.
 ///
@@ -61,7 +62,16 @@ pub struct SfuPeer {
     /// Open data channels: ChannelId → label.  Populated from
     /// `Event::ChannelOpen`; used for data relay routing.
     pub channels: HashMap<ChannelId, String>,
+    /// When ICE last reported `Disconnected` without coming back, or `None`.
+    /// See [`ICE_DISCONNECT_GRACE`].
+    pub disconnected_since: Option<Instant>,
 }
+
+/// How long a peer may stay ICE-disconnected before it is dropped.
+/// `Disconnected` is transient by design — missed consent checks on a
+/// busy host or a brief network blip — and usually returns to
+/// `Connected` within seconds; dropping at once tore down live calls.
+pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 
 impl SfuPeer {
     pub fn new(
@@ -84,6 +94,7 @@ impl SfuPeer {
             deferred_tracks: Vec::new(),
             is_pipe,
             channels: HashMap::new(),
+            disconnected_since: None,
         }
     }
 }
@@ -104,30 +115,6 @@ impl std::fmt::Debug for SfuPeer {
             .field("channels", &self.channels.len())
             .finish()
     }
-}
-
-/// Determine whether a media packet should pass the simulcast filter.
-///
-/// When the sender uses simulcast, each `MediaData` event carries a
-/// `rid` that identifies the layer ("high", "medium", "low").  The
-/// subscriber's quality preference (defaulting to "high") selects
-/// which layer to forward.  Non-simulcast sources (`rid = None`)
-/// always pass — there's only one layer to forward.
-///
-/// "auto" maps to "high" in this implementation.  True adaptive
-/// quality selection requires TWCC/REMB bandwidth estimation, which
-/// is a separate feature.
-pub(crate) fn should_forward_rid(rid: Option<&Rid>, preference: Option<&str>) -> bool {
-    let Some(rid) = rid else {
-        return true; // non-simulcast source — always forward
-    };
-    let desired: Rid = match preference.unwrap_or("high") {
-        "low" => Rid::from("low"),
-        "medium" => Rid::from("medium"),
-        // "high", "auto", and any unexpected value default to high
-        _ => Rid::from("high"),
-    };
-    *rid == desired
 }
 
 /// Commands sent to the SFU event loop from the GraphQL API / signalling layer.
@@ -341,6 +328,7 @@ impl SfuServer {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
         let mut relay = MediaRelay::new();
         let mut quality_preferences: HashMap<ParticipantId, String> = HashMap::new();
+        let mut layers = LayerSelector::default();
         let mut buf = vec![0u8; 2000];
 
         info!("SFU event loop started on {}", local_addr);
@@ -368,6 +356,7 @@ impl SfuServer {
                             info!("SFU: peer {} left room {}", pid, room_id);
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
+                            layers.forget(&pid);
                             clean_stale_track_refs(&mut peers, &pid, &room_id);
                         }
                     }
@@ -379,45 +368,9 @@ impl SfuServer {
                             "SFU: peer {} quality preference set to '{}'",
                             participant_id, preference
                         );
-                        quality_preferences.insert(participant_id.clone(), preference);
-
-                        // Request a keyframe from every video origin
-                        // that feeds this subscriber.  The new layer's
-                        // decoder needs a keyframe to start rendering
-                        // after a layer switch.
-                        if let Some(sub_peer) = peers.get(&participant_id) {
-                            let room_id = sub_peer.room_id.clone();
-                            let video_origins: Vec<(ParticipantId, Mid)> = sub_peer
-                                .tracks_out
-                                .values()
-                                .filter_map(|(origin_pid, origin_mid)| {
-                                    peers.get(origin_pid).and_then(|op| {
-                                        op.tracks_in.get(origin_mid).and_then(|kind| {
-                                            if kind.is_video() {
-                                                Some((origin_pid.clone(), *origin_mid))
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    })
-                                })
-                                .collect();
-                            for (origin_pid, origin_mid) in video_origins {
-                                if let Some(origin_peer) = peers.get_mut(&origin_pid) {
-                                    if origin_peer.room_id == room_id {
-                                        if let Some(mut writer) = origin_peer.rtc.writer(origin_mid)
-                                        {
-                                            let _ = writer
-                                                .request_keyframe(None, KeyframeRequestKind::Pli);
-                                            debug!(
-                                                "SFU: requested keyframe from {} mid {} for layer switch on {}",
-                                                origin_pid, origin_mid, participant_id
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        // The layer selector switches on the next packets
+                        // and asks the senders for the keyframes it needs.
+                        quality_preferences.insert(participant_id, preference);
                     }
                     Ok(SfuCommand::ApplyServerAnswer {
                         participant_id,
@@ -640,11 +593,21 @@ impl SfuServer {
             // after a remote node crash).
             {
                 let mut dead_peers: Vec<DeadPeer> = Vec::new();
+                for (pid, peer) in peers.iter_mut() {
+                    if peer
+                        .disconnected_since
+                        .is_some_and(|since| since.elapsed() >= ICE_DISCONNECT_GRACE)
+                    {
+                        info!("SFU: peer {} stayed disconnected, dropping it", pid);
+                        peer.rtc.disconnect();
+                    }
+                }
                 peers.retain(|pid, peer| {
                     if !peer.rtc.is_alive() {
                         info!("SFU: peer {} disconnected", pid);
                         relay.remove_participant(pid);
                         quality_preferences.remove(pid);
+                        layers.forget(pid);
                         dead_peers.push(DeadPeer {
                             room_id: peer.room_id.clone(),
                             agent_did: peer.agent_did.clone(),
@@ -712,9 +675,12 @@ impl SfuServer {
                         Ok(Output::Event(event)) => match event {
                             Event::IceConnectionStateChange(state) => {
                                 info!("SFU: peer {} ICE state: {:?}", pid, state);
-                                if state == IceConnectionState::Disconnected {
-                                    peer.rtc.disconnect();
-                                }
+                                peer.disconnected_since = match state {
+                                    IceConnectionState::Disconnected => {
+                                        peer.disconnected_since.or(Some(Instant::now()))
+                                    }
+                                    _ => None,
+                                };
                             }
                             Event::MediaAdded(e) => {
                                 info!("SFU: peer {} added {:?} track mid={}", pid, e.kind, e.mid);
@@ -782,6 +748,8 @@ impl SfuServer {
             }
 
             // Relay media data to other peers in the same room
+            let now = Instant::now();
+            let mut layer_keyframes: Vec<(ParticipantId, Mid, Rid)> = Vec::new();
             for (origin_pid, data) in &media_to_relay {
                 let origin_room = match peers.get(origin_pid) {
                     Some(p) => p.room_id.clone(),
@@ -793,6 +761,10 @@ impl SfuServer {
                     relay.update_voice_activity(origin_pid, data);
                 }
 
+                let track = (origin_pid.clone(), data.mid);
+                layers.observe(now, &track, data.rid.as_ref());
+                let keyframe = is_keyframe(&data.codec_extra);
+
                 // Forward to all other peers in the same room
                 for (target_pid, target_peer) in peers.iter_mut() {
                     if target_pid == origin_pid {
@@ -802,23 +774,25 @@ impl SfuServer {
                         continue;
                     }
 
-                    // Simulcast filter: when the source sends multiple
-                    // layers (data.rid = Some("high"|"medium"|"low")),
-                    // only forward the layer matching the subscriber's
-                    // quality preference.  Non-simulcast packets
-                    // (rid = None) always pass through.
-                    if !should_forward_rid(
-                        data.rid.as_ref(),
-                        quality_preferences.get(target_pid).map(|s| s.as_str()),
-                    ) {
-                        continue;
-                    }
-
-                    // Find the outgoing Mid on the target peer that maps to this origin track
-                    if let Some(&out_mid) = target_peer
-                        .tracks_out_rev
-                        .get(&(origin_pid.clone(), data.mid))
-                    {
+                    // The outgoing Mid on the target peer that maps to this
+                    // origin track; a peer not (yet) subscribed gets nothing
+                    // and needs no layer.
+                    if let Some(&out_mid) = target_peer.tracks_out_rev.get(&track) {
+                        // One simulcast layer per receiver (see `simulcast`).
+                        let route = layers.route(
+                            now,
+                            target_pid,
+                            &track,
+                            data.rid.as_ref(),
+                            keyframe,
+                            quality_preferences.get(target_pid).map(|s| s.as_str()),
+                        );
+                        if let Some(rid) = route.request_keyframe {
+                            layer_keyframes.push((origin_pid.clone(), data.mid, rid));
+                        }
+                        if !route.forward {
+                            continue;
+                        }
                         if let Some(writer) = target_peer.rtc.writer(out_mid) {
                             if let Err(e) = writer.write(
                                 data.pt,
@@ -833,6 +807,12 @@ impl SfuServer {
                             }
                         }
                     }
+                }
+            }
+            for (origin_pid, mid, rid) in layer_keyframes {
+                if let Some(mut writer) = peers.get_mut(&origin_pid).and_then(|p| p.rtc.writer(mid))
+                {
+                    let _ = writer.request_keyframe(Some(rid), KeyframeRequestKind::Pli);
                 }
             }
 
@@ -1071,9 +1051,12 @@ impl SfuServer {
                 if let Some((origin_pid, origin_mid)) =
                     requesting_peer.tracks_out.get(&req.mid).cloned()
                 {
+                    // A simulcast origin keys its streams by rid: ask for
+                    // the layer this receiver gets.
+                    let rid = layers.layer_of(requesting_pid, &(origin_pid.clone(), origin_mid));
                     if let Some(origin_peer) = peers.get_mut(&origin_pid) {
                         if let Some(mut writer) = origin_peer.rtc.writer(origin_mid) {
-                            let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
+                            let _ = writer.request_keyframe(rid, req.kind);
                         }
                     }
                 }
@@ -1278,84 +1261,6 @@ mod tests {
         assert_eq!(sfu_bind_ip(Some("0.0.0.0"), false), loopback);
         assert_eq!(sfu_bind_ip(Some("not-an-ip"), false), loopback);
         assert_eq!(sfu_bind_ip(None, false), crate::sfu::detect_outbound_ip());
-    }
-
-    #[test]
-    fn test_forward_rid_non_simulcast() {
-        // No RID (non-simulcast sender) — always forward regardless
-        // of subscriber preference.
-        assert!(should_forward_rid(None, None));
-        assert!(should_forward_rid(None, Some("high")));
-        assert!(should_forward_rid(None, Some("medium")));
-        assert!(should_forward_rid(None, Some("low")));
-        assert!(should_forward_rid(None, Some("auto")));
-    }
-
-    #[test]
-    fn test_forward_rid_default_high() {
-        // No preference set → default to "high".
-        let high = Rid::from("high");
-        let medium = Rid::from("medium");
-        let low = Rid::from("low");
-
-        assert!(should_forward_rid(Some(&high), None));
-        assert!(!should_forward_rid(Some(&medium), None));
-        assert!(!should_forward_rid(Some(&low), None));
-    }
-
-    #[test]
-    fn test_forward_rid_explicit_high() {
-        let high = Rid::from("high");
-        let medium = Rid::from("medium");
-        let low = Rid::from("low");
-
-        assert!(should_forward_rid(Some(&high), Some("high")));
-        assert!(!should_forward_rid(Some(&medium), Some("high")));
-        assert!(!should_forward_rid(Some(&low), Some("high")));
-    }
-
-    #[test]
-    fn test_forward_rid_medium() {
-        let high = Rid::from("high");
-        let medium = Rid::from("medium");
-        let low = Rid::from("low");
-
-        assert!(!should_forward_rid(Some(&high), Some("medium")));
-        assert!(should_forward_rid(Some(&medium), Some("medium")));
-        assert!(!should_forward_rid(Some(&low), Some("medium")));
-    }
-
-    #[test]
-    fn test_forward_rid_low() {
-        let high = Rid::from("high");
-        let medium = Rid::from("medium");
-        let low = Rid::from("low");
-
-        assert!(!should_forward_rid(Some(&high), Some("low")));
-        assert!(!should_forward_rid(Some(&medium), Some("low")));
-        assert!(should_forward_rid(Some(&low), Some("low")));
-    }
-
-    #[test]
-    fn test_forward_rid_auto_maps_to_high() {
-        let high = Rid::from("high");
-        let medium = Rid::from("medium");
-        let low = Rid::from("low");
-
-        // "auto" forwards "high" layer only
-        assert!(should_forward_rid(Some(&high), Some("auto")));
-        assert!(!should_forward_rid(Some(&medium), Some("auto")));
-        assert!(!should_forward_rid(Some(&low), Some("auto")));
-    }
-
-    #[test]
-    fn test_forward_rid_unknown_preference_defaults_high() {
-        let high = Rid::from("high");
-        let medium = Rid::from("medium");
-
-        // Unknown preference string falls through to high
-        assert!(should_forward_rid(Some(&high), Some("ultra")));
-        assert!(!should_forward_rid(Some(&medium), Some("ultra")));
     }
 
     #[test]

@@ -220,6 +220,19 @@ pub struct SfuMigrateEvent {
     pub migrate_to_did: String,
 }
 
+/// Who is in a call room now. Published whenever the room's participants
+/// change, and delivered to each of them, so a client knows who joined and
+/// who left without waiting on media.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuRoomRoster {
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// DIDs of the room's participants on this node, sorted.
+    pub participants: Vec<String>,
+}
+
 /// Data channel message relayed through the SFU, published on the
 /// `sfu-data` event to the room's members.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

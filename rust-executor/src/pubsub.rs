@@ -174,6 +174,9 @@ lazy_static::lazy_static! {
     /// text otherwise).  Filtered by room membership in the events_ws
     /// fanout.
     pub static ref SFU_DATA_CHANNEL_TOPIC: String = "sfu-data-channel-topic".to_owned();
+    /// A call room's participants changed (`SfuRoomRoster`). Delivered to
+    /// the participants it lists.
+    pub static ref SFU_ROOM_ROSTER_TOPIC: String = "sfu-room-roster-topic".to_owned();
     /// A flow instance's derived state moved on one agent's replica
     /// (`FlowStateChangedEvent`). Per-agent bookkeeping (#1424), so the event
     /// stream delivers it to that agent's sockets only.
