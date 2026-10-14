@@ -1437,8 +1437,8 @@ impl Ad4mDb {
     /// **Caller must enforce authorization.** This method trusts
     /// that the caller already verified the DID matches the
     /// authenticated identity (or holds admin privileges).
-    /// The `sfu.ensureMembership` WS handler gates this behind
-    /// `is_admin_credential`.
+    /// The `sfu.ensureMembership` WS handler allows only the executor's
+    /// operator (`RequestContext::is_operator`).
     pub fn ensure_neighbourhood_member(
         &self,
         neighbourhood_url: &str,

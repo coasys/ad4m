@@ -169,11 +169,11 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 /// here, or `null`. Lets a client change part of its status without
 /// replacing the rest.
 async fn own_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let did = crate::agent::did_for_context(&agent_context)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     let perspective = get_perspective(&uuid)
