@@ -4074,3 +4074,46 @@ describe("includeAll", () => {
     expect(other).toBeInstanceOf(IncAllOther);
   });
 });
+
+describe("Ad4mModel.transaction()", () => {
+  /** A perspective that tracks which batches are still open. */
+  const makePerspective = () => {
+    const open = new Set<string>();
+    let next = 0;
+    const perspective = {
+      createBatch: jest.fn(async () => { const id = `batch-${++next}`; open.add(id); return id; }),
+      commitBatch: jest.fn(async (id: string) => { open.delete(id); return {}; }),
+      discardBatch: jest.fn(async (id: string) => open.delete(id)),
+    } as any;
+    return { perspective, open };
+  };
+
+  it("commits the batch and returns the callback's value", async () => {
+    const { perspective, open } = makePerspective();
+    const result = await Ad4mModel.transaction(perspective, async (tx) => tx.batchId);
+    expect(result).toBe("batch-1");
+    expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.discardBatch).not.toHaveBeenCalled();
+    expect(open.size).toBe(0);
+  });
+
+  it("discards the batch and rethrows when the callback throws", async () => {
+    const { perspective, open } = makePerspective();
+    const failure = new Error("callback failed");
+    await expect(
+      Ad4mModel.transaction(perspective, async () => { throw failure; }),
+    ).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.commitBatch).not.toHaveBeenCalled();
+    expect(open.size).toBe(0);
+  });
+
+  it("rethrows the callback's error when the discard fails too", async () => {
+    const { perspective } = makePerspective();
+    perspective.discardBatch.mockRejectedValue(new Error("socket closed"));
+    const failure = new Error("callback failed");
+    await expect(
+      Ad4mModel.transaction(perspective, async () => { throw failure; }),
+    ).rejects.toBe(failure);
+  });
+});

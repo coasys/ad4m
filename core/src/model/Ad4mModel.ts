@@ -2304,8 +2304,8 @@ export class Ad4mModel {
    *
    * All `save`, `update`, and `delete` calls made via the provided `batchId`
    * are buffered and flushed atomically when the callback completes.
-   * If the callback throws, the batch is **not** committed, preventing
-   * partial writes.
+   * If the callback throws, the batch is discarded, not committed, and the
+   * error is rethrown: no partial writes.
    *
    * @param perspective - The perspective to operate on
    * @param fn - Async callback that receives a `TransactionContext` object.
@@ -2331,7 +2331,14 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    const result = await fn({ batchId });
+    let result: R;
+    try {
+      result = await fn({ batchId });
+    } catch (e) {
+      // A failed discard must not hide the callback's error.
+      await perspective.discardBatch(batchId).catch(() => {});
+      throw e;
+    }
     await perspective.commitBatch(batchId);
     return result;
   }

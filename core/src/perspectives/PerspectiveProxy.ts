@@ -911,6 +911,11 @@ export class PerspectiveProxy {
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
+
+    /** Drops an open batch without applying it; see {@link PerspectiveClient.discardBatch}. */
+    async discardBatch(batchId: string): Promise<boolean> {
+        return await this.#client.discardBatch(this.#handle.uuid, batchId)
+    }
     /**
      * Retrieves and renders an Expression referenced in this perspective.
      * 
