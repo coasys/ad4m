@@ -1010,8 +1010,7 @@ export class PerspectiveProxy {
      * ```
      */
     async getSingleTarget(query: LinkQuery): Promise<string|void> {
-        delete query.target
-        const foundLinks = await this.get(query)
+        const foundLinks = await this.get(new LinkQuery({ ...query, target: undefined }))
         if(foundLinks.length)
             return foundLinks[0].data.target
         else
