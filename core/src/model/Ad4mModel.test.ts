@@ -4131,30 +4131,50 @@ describe("delete() and incoming links", () => {
     targets: string[] = [];
   }
 
+  // A different model whose relation names no target class.
   @Model({ name: "DelOther" })
   class DelOther extends Ad4mModel {
     @HasMany({ through: "del://mentions" })
     mentions: string[] = [];
   }
 
+  // A polymorphic container (no single target class), like a block tree's
+  // parent -> child relation.
+  @Model({ name: "DelContainer" })
+  class DelContainer extends Ad4mModel {
+    @HasMany({ through: "del://child", polymorphic: true })
+    children: string[] = [];
+  }
+
+  // An all-optional model: delete() removes its own outgoing links itself.
+  @Model({ name: "DelOptional" })
+  class DelOptional extends Ad4mModel {
+    @Property({ through: "del://note" })
+    note?: string;
+  }
+
   const ownerLink = { author: "a", timestamp: "1", data: { source: "del://owner", predicate: "del://has_target", target: "del://t1" } };
   const otherLink = { author: "b", timestamp: "2", data: { source: "del://other", predicate: "del://mentions", target: "del://t1" } };
+  const childLink = { author: "c", timestamp: "3", data: { source: "del://container", predicate: "del://child", target: "del://t1" } };
+  const incoming = [ownerLink, otherLink, childLink];
 
+  // No getAllShacl: the cascade must not depend on registered shapes.
   const makePerspective = () => ({
-    getAllShacl: jest.fn(async () =>
-      [DelTarget, DelOwner, DelOther].map((M) => ({ name: M.generateSHACL().name, shape: M.generateSHACL().shape })),
-    ),
     removeSubject: jest.fn(async () => {}),
-    get: jest.fn(async (q: any) => (q.target === "del://t1" ? [ownerLink, otherLink] : [])),
+    get: jest.fn(async (q: any) => (q.target === "del://t1" ? incoming : [])),
     removeLinks: jest.fn(async () => []),
   }) as any;
 
-  it("removes incoming links of relations that target the model and keeps the others", async () => {
+  it("removes every incoming link (other models, polymorphic relations) in the delete's batch", async () => {
+    // The declared models are only there to make the links realistic.
+    expect([DelOwner, DelOther, DelContainer].every((M) => M.generateSHACL())).toBe(true);
     const perspective = makePerspective();
     await new DelTarget(perspective, "del://t1").delete("batch-1");
 
+    expect(perspective.removeSubject).toHaveBeenCalledWith(expect.anything(), "del://t1", "batch-1");
+    expect(perspective.get).toHaveBeenCalledWith(expect.objectContaining({ target: "del://t1" }));
     expect(perspective.removeLinks).toHaveBeenCalledTimes(1);
-    expect(perspective.removeLinks).toHaveBeenCalledWith([ownerLink], "batch-1");
+    expect(perspective.removeLinks).toHaveBeenCalledWith(incoming, "batch-1");
   });
 
   it("rejects when removing the incoming links fails", async () => {
@@ -4162,6 +4182,23 @@ describe("delete() and incoming links", () => {
     const failure = new Error("remove failed");
     perspective.removeLinks.mockRejectedValue(failure);
     await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
+  });
+
+  it("rejects when reading the incoming links fails", async () => {
+    const perspective = makePerspective();
+    const failure = new Error("read failed");
+    perspective.get.mockRejectedValue(failure);
+    await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
+  });
+
+  it("rejects when removing an all-optional model's own links fails", async () => {
+    const own = { author: "a", timestamp: "1", data: { source: "del://t1", predicate: "del://note", target: "literal://string:x" } };
+    const perspective = makePerspective();
+    perspective.get.mockImplementation(async (q: any) => (q.source === "del://t1" ? [own] : []));
+    const failure = new Error("remove failed");
+    perspective.removeLinks.mockRejectedValue(failure);
+    await expect(new DelOptional(perspective, "del://t1").delete()).rejects.toBe(failure);
+    expect(perspective.removeLinks).toHaveBeenCalledWith([own], undefined);
   });
 });
 

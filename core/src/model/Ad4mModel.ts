@@ -2031,9 +2031,15 @@ export class Ad4mModel {
 
   /**
    * Deletes the model instance from the perspective.
+   *
+   * Also removes every incoming link (any link whose target is this
+   * instance, e.g. a parent's `@HasMany` link to it), so no reference to the
+   * deleted instance is left behind. Incoming links are read from committed
+   * state: a link to this instance added earlier in the same batch is not
+   * removed.
    * 
    * @param batchId - Optional batch ID for batch operations
-   * @throws Will throw if removal fails
+   * @throws Will throw if removing the instance's links or its incoming links fails
    * 
    * @example
    * ```typescript
@@ -2083,22 +2089,17 @@ export class Ad4mModel {
       }
     }
 
-    // Incoming links: only those of forward relations (hasMany / hasOne) that
-    // the registered shapes declare with this model as their target. Links
-    // other models or agents hold to this instance (mentions, reactions) stay.
-    const incomingPredicates = new Set<string>();
-    for (const { shape } of await this._perspective.getAllShacl()) {
-      for (const p of shape.properties) {
-        if (p.targetClassName === metadata.className && p.path
-            && (p.relationKind === 'hasMany' || p.relationKind === 'hasOne')) {
-          incomingPredicates.add(p.path);
-        }
-      }
-    }
-    if (incomingPredicates.size === 0) return;
-
-    const incomingLinks = (await this._perspective.get(new LinkQuery({ target: this._baseExpression })))
-      .filter((link) => link.data.predicate && incomingPredicates.has(link.data.predicate));
+    // Remove every incoming link — any link that points **to** this instance,
+    // whatever model or relation it belongs to (including polymorphic
+    // relations, which name no single target class, e.g. a parent's child
+    // link). Unlike outgoing links (scoped above), incoming links have OTHER
+    // subjects as their source. Removing them doesn't damage sibling models
+    // on this base expression; leaving them would leave dangling references.
+    // A failed read or removal rejects delete(): a delete that silently leaves
+    // references behind is worse than one that reports its failure.
+    // The read sees committed links only: links staged earlier in the same
+    // batch (`batchId`) are not returned by `get()` and so are not removed.
+    const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
     if (incomingLinks.length > 0) {
       await this._perspective.removeLinks(incomingLinks, batchId);
     }
@@ -2224,10 +2225,11 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also removes incoming links of relations that target this model.
+   * Also removes every incoming link that points to this instance.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
+   * @throws Will throw if removing the instance's links or its incoming links fails
    *
    * @example
    * ```typescript
@@ -2247,10 +2249,11 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also removes incoming links of relations that target this model.
+   * Also removes every incoming link that points to this instance.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
+   * @throws Will throw if removing the instance's links or its incoming links fails
    *
    * @example
    * ```typescript
