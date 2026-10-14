@@ -1739,6 +1739,9 @@ export class Ad4mModel {
       await this.perspective.discardBatch(ownBatch).catch(() => {});
       throw e;
     }
+    // The record now exists: snapshot first, so if the re-read below fails a
+    // retried save() updates instead of creating a second copy.
+    this.takeSnapshot();
     await this.refresh();
   }
 

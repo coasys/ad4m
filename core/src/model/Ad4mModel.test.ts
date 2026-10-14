@@ -4225,6 +4225,27 @@ describe("save() create path and its own batch", () => {
     expect(perspective.commitBatch).not.toHaveBeenCalled();
   });
 
+  it("updates on a retried save() when the re-read after a committed create fails", async () => {
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => {}),
+    } as any;
+    const card = new SaveBatchCard(perspective);
+    const reread = new Error("read failed");
+    jest.spyOn(card as any, "getData").mockRejectedValueOnce(reread).mockResolvedValue(card);
+    jest.spyOn(card as any, "innerUpdate").mockResolvedValue(undefined);
+
+    await expect(card.save()).rejects.toBe(reread);
+    await card.save();
+
+    // The retry took the update path: the record was created once.
+    expect(perspective.createSubject).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves a caller's batch open when createSubject fails", async () => {
     const failure = new Error("createSubject failed");
     const perspective = {
