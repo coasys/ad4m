@@ -326,9 +326,15 @@ pub enum SdnaType {
 impl SdnaType {
     /// The SHACL links for an SDNA entry of this type, validated before the
     /// store is touched (see `add_sdna_inner`).
-    fn parse_shacl(&self, shacl_json: Option<&str>, name: &str) -> Result<Option<Vec<Link>>, AnyError> {
+    fn parse_shacl(
+        &self,
+        shacl_json: Option<&str>,
+        name: &str,
+    ) -> Result<Option<Vec<Link>>, AnyError> {
         match (self, shacl_json) {
-            (SdnaType::Interface, Some(shacl)) => parse_interface_shacl_to_links(shacl, name).map(Some),
+            (SdnaType::Interface, Some(shacl)) => {
+                parse_interface_shacl_to_links(shacl, name).map(Some)
+            }
             (SdnaType::Interface, None) => Err(anyhow!(
                 "Interface '{name}': an interface is defined by its SHACL; pass shaclJson"
             )),
@@ -2900,7 +2906,11 @@ impl PerspectiveInstance {
 
     /// A class and an interface must not share a target URI: they would share
     /// one node shape, and each refresh would purge the other's triples.
-    fn refuse_class_interface_clash(&self, links: &[Link], shape_type: &str) -> Result<(), AnyError> {
+    fn refuse_class_interface_clash(
+        &self,
+        links: &[Link],
+        shape_type: &str,
+    ) -> Result<(), AnyError> {
         let other = if shape_type == INTERFACE_TYPE {
             "ad4m://SubjectClass"
         } else {
@@ -2921,7 +2931,11 @@ impl PerspectiveInstance {
                     "'{}' is already registered as {}; a class and an interface need different \
                      target URIs",
                     link.source,
-                    if other == INTERFACE_TYPE { "an interface" } else { "a subject class" }
+                    if other == INTERFACE_TYPE {
+                        "an interface"
+                    } else {
+                        "a subject class"
+                    }
                 ));
             }
         }

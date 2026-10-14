@@ -42,18 +42,25 @@ const TEXT_INTERFACE: &str = r#"{
 fn has_text() -> InterfaceRef {
     InterfaceRef::AdHoc(
         InterfaceSpec::new(
-            vec![crate::perspectives::model_query::interfaces::InterfaceProperty {
-                name: "text".into(),
-                through: None,
-                datatype: None,
-            }],
+            vec![
+                crate::perspectives::model_query::interfaces::InterfaceProperty {
+                    name: "text".into(),
+                    through: None,
+                    datatype: None,
+                },
+            ],
             vec![],
         )
         .unwrap(),
     )
 }
 
-async fn install(perspective: &mut PerspectiveInstance, ctx: &AgentContext, class: &str, sdna: &str) {
+async fn install(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    class: &str,
+    sdna: &str,
+) {
     perspective
         .add_sdna(
             class.to_string(),
@@ -117,7 +124,10 @@ async fn the_class_list_is_cached_and_dropped_when_sdna_changes() {
     let first = perspective.classes_implementing(&has_text()).unwrap();
     assert_eq!(*first, vec!["Chat".to_string()]);
     let again = perspective.classes_implementing(&has_text()).unwrap();
-    assert!(Arc::ptr_eq(&first, &again), "a second resolution is served from the cache");
+    assert!(
+        Arc::ptr_eq(&first, &again),
+        "a second resolution is served from the cache"
+    );
 
     install(&mut perspective, &ctx, "Block", BLOCK_SDNA).await;
     let after = perspective.classes_implementing(&has_text()).unwrap();
@@ -133,7 +143,10 @@ async fn a_synced_shape_drops_the_class_list() {
     perspective.clear_shape_cache();
     assert!(perspective.shapes_generation() > generation);
     let after = perspective.classes_implementing(&has_text()).unwrap();
-    assert!(!Arc::ptr_eq(&before, &after), "resolved again after the shapes changed");
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "resolved again after the shapes changed"
+    );
 }
 
 /// `model_query_selector` over an ad-hoc interface returns the rows of every
@@ -147,9 +160,30 @@ async fn an_interface_query_returns_rows_of_every_implementing_class() {
         ("Task", TASK_SDNA),
     ])
     .await;
-    create(&mut perspective, &ctx, "Chat", "ad4m://chat/1", serde_json::json!({"text": "hi @data"})).await;
-    create(&mut perspective, &ctx, "Block", "ad4m://block/1", serde_json::json!({"text": "notes"})).await;
-    create(&mut perspective, &ctx, "Task", "ad4m://task/1", serde_json::json!({"title": "t", "owner": "o"})).await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Chat",
+        "ad4m://chat/1",
+        serde_json::json!({"text": "hi @data"}),
+    )
+    .await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Block",
+        "ad4m://block/1",
+        serde_json::json!({"text": "notes"}),
+    )
+    .await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Task",
+        "ad4m://task/1",
+        serde_json::json!({"title": "t", "owner": "o"}),
+    )
+    .await;
 
     let json = perspective
         .model_query_selector(&ClassSelector::Interface(has_text()), ALL)
@@ -165,11 +199,13 @@ async fn an_interface_query_returns_rows_of_every_implementing_class() {
 
     let nobody = InterfaceRef::AdHoc(
         InterfaceSpec::new(
-            vec![crate::perspectives::model_query::interfaces::InterfaceProperty {
-                name: "nonexistent".into(),
-                through: None,
-                datatype: None,
-            }],
+            vec![
+                crate::perspectives::model_query::interfaces::InterfaceProperty {
+                    name: "nonexistent".into(),
+                    through: None,
+                    datatype: None,
+                },
+            ],
             vec![],
         )
         .unwrap(),
@@ -200,8 +236,22 @@ async fn an_interface_query_returns_rows_of_every_implementing_class() {
 async fn a_named_interface_is_registered_queried_and_refreshed() {
     let (mut perspective, _shapes, ctx) =
         setup_perspective_no_llm(&[("Chat", CHAT_SDNA), ("Block", BLOCK_SDNA)]).await;
-    create(&mut perspective, &ctx, "Chat", "ad4m://chat/n", serde_json::json!({"text": "hello"})).await;
-    create(&mut perspective, &ctx, "Block", "ad4m://block/n", serde_json::json!({"text": "world"})).await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Chat",
+        "ad4m://chat/n",
+        serde_json::json!({"text": "hello"}),
+    )
+    .await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Block",
+        "ad4m://block/n",
+        serde_json::json!({"text": "world"}),
+    )
+    .await;
     perspective
         .add_sdna(
             "Text".into(),
@@ -265,14 +315,26 @@ async fn a_named_interface_is_registered_queried_and_refreshed() {
     );
 
     let unknown = perspective
-        .model_query_selector(&ClassSelector::Interface(InterfaceRef::Named("Txet".into())), ALL)
+        .model_query_selector(
+            &ClassSelector::Interface(InterfaceRef::Named("Txet".into())),
+            ALL,
+        )
         .await
         .unwrap_err();
-    assert!(unknown.to_string().contains("No interface 'Txet'"), "{unknown}");
+    assert!(
+        unknown.to_string().contains("No interface 'Txet'"),
+        "{unknown}"
+    );
 
     // An interface needs its SHACL, and must not take a class's URI.
     assert!(perspective
-        .add_sdna("Bare".into(), String::new(), SdnaType::Interface, None, &ctx)
+        .add_sdna(
+            "Bare".into(),
+            String::new(),
+            SdnaType::Interface,
+            None,
+            &ctx
+        )
         .await
         .is_err());
     assert!(perspective
@@ -304,7 +366,9 @@ async fn next_update_for(
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), wait).await.ok()
+    tokio::time::timeout(Duration::from_secs(5), wait)
+        .await
+        .ok()
 }
 
 /// The writes `add_sdna` / `create_subject` report, one link each, as the
@@ -345,16 +409,29 @@ async fn an_interface_subscription_picks_up_a_class_installed_after_subscribe() 
         )]))
         .await;
     assert!(
-        next_update_for(&mut rx, &perspective.uuid, &id).await.is_none(),
+        next_update_for(&mut rx, &perspective.uuid, &id)
+            .await
+            .is_none(),
         "installing a class changes no row"
     );
 
     // The write under test, alone: Block's first record.
-    create(&mut perspective, &ctx, "Block", "ad4m://block/late", serde_json::json!({"text": "@data hi"})).await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Block",
+        "ad4m://block/late",
+        serde_json::json!({"text": "@data hi"}),
+    )
+    .await;
     perspective
         .check_subscribed_queries(writes(&[
             ("ad4m://block/late", "ns://type", "ns://block"),
-            ("ad4m://block/late", "ns://text", "literal://string:@data hi"),
+            (
+                "ad4m://block/late",
+                "ns://text",
+                "literal://string:@data hi",
+            ),
         ]))
         .await;
     let update = next_update_for(&mut rx, &perspective.uuid, &id)
@@ -390,9 +467,18 @@ async fn an_interface_subscription_with_no_class_yet_picks_one_up() {
             "ns://Chat.text",
         )]))
         .await;
-    assert!(next_update_for(&mut rx, &perspective.uuid, &id).await.is_none());
+    assert!(next_update_for(&mut rx, &perspective.uuid, &id)
+        .await
+        .is_none());
 
-    create(&mut perspective, &ctx, "Chat", "ad4m://chat/late", serde_json::json!({"text": "first"})).await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Chat",
+        "ad4m://chat/late",
+        serde_json::json!({"text": "first"}),
+    )
+    .await;
     perspective
         .check_subscribed_queries(writes(&[
             ("ad4m://chat/late", "ns://type", "ns://chat"),

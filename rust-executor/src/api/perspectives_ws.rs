@@ -3141,8 +3141,8 @@ fn query_selector(params: &Value) -> Result<ClassSelector, WsRpcError> {
         return Ok(ClassSelector::Interface(InterfaceRef::Named(name)));
     }
     if let Some(input) = implements {
-        let spec = InterfaceSpec::try_from(input)
-            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+        let spec =
+            InterfaceSpec::try_from(input).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
         return Ok(ClassSelector::Interface(InterfaceRef::AdHoc(spec)));
     }
     match (one, many) {

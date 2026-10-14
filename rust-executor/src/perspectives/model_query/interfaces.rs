@@ -268,7 +268,10 @@ pub(crate) fn load_interface(store: &SparqlStore, name: &str) -> Result<Interfac
             .map(|(_, n)| n.to_string())
             .unwrap_or_default();
         let path = row["path"].as_str().map(str::to_string);
-        match row["relationKind"].as_str().map(decode_literal_string_target) {
+        match row["relationKind"]
+            .as_str()
+            .map(decode_literal_string_target)
+        {
             Some(kind) => {
                 let Some(through) = path else {
                     return Err(anyhow!(

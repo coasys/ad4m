@@ -252,8 +252,10 @@ fn a_relation_matches_by_predicate_and_direction() {
 fn a_relation_does_not_satisfy_a_property() {
     let store = all_classes();
     assert!(resolve(&store, serde_json::json!({"properties": ["children"]})).is_empty());
-    assert!(!resolve(&store, serde_json::json!({"properties": ["text"]}))
-        .contains(&"Article".to_string()));
+    assert!(
+        !resolve(&store, serde_json::json!({"properties": ["text"]}))
+            .contains(&"Article".to_string())
+    );
 }
 
 /// The ad-hoc form is checked: nothing asked for, a nameless property, a
@@ -330,7 +332,10 @@ fn a_named_interface_round_trips_through_shacl_and_is_not_a_class() {
         .contains(&"Message".to_string()));
     assert!(load_shape_from_store(&store, "Message").is_err());
     let missing = load_interface(&store, "Messag").unwrap_err();
-    assert!(missing.downcast_ref::<MissingInterface>().is_some(), "{missing}");
+    assert!(
+        missing.downcast_ref::<MissingInterface>().is_some(),
+        "{missing}"
+    );
 }
 
 /// A pinned property in a named interface keeps its pin through SHACL.
@@ -388,17 +393,35 @@ fn the_interface_writer_refuses_class_parts() {
 
 fn text_block(store: &SparqlStore, id: &str, text: &str, ts: &str) {
     add(store, id, "we://type", "we://text_block", ts);
-    add(store, id, "we://text", &format!("literal:string:{text}"), ts);
+    add(
+        store,
+        id,
+        "we://text",
+        &format!("literal:string:{text}"),
+        ts,
+    );
 }
 
 fn post(store: &SparqlStore, id: &str, text: &str, ts: &str) {
     add(store, id, "app://kind", "app://post", ts);
-    add(store, id, "app://content", &format!("literal:string:{text}"), ts);
+    add(
+        store,
+        id,
+        "app://content",
+        &format!("literal:string:{text}"),
+        ts,
+    );
 }
 
 fn poll(store: &SparqlStore, id: &str, title: &str, ts: &str) {
     add(store, id, "app://kind", "app://poll", ts);
-    add(store, id, "app://title", &format!("literal:string:{title}"), ts);
+    add(
+        store,
+        id,
+        "app://title",
+        &format!("literal:string:{title}"),
+        ts,
+    );
 }
 
 /// Fixture links carry no verifiable proof, so reads opt in to unverified rows.
