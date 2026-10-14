@@ -136,7 +136,8 @@ pub(crate) const AGENTS_BY_DIDS_CONCURRENCY: usize = 16;
 /// fails `agent.byDid`. Each distinct DID is looked up once. More than
 /// [`MAX_AGENTS_BY_DIDS`] DIDs → 400.
 async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY).map_err(WsRpcError::forbidden)?;
+    ctx.require(&AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: AgentsByDidsRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;

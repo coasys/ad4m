@@ -868,11 +868,8 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// dropped, `false` if it was already committed, discarded or timed out.
 async fn discard_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(WsRpcError::forbidden)?;
+    ctx.require(&perspective_update_capability(vec![uuid.clone()]))
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: DiscardBatchRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
