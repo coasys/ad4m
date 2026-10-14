@@ -120,6 +120,7 @@ async fn handle_ws(
             ctx.user_email.clone(),
             ctx.is_admin_credential,
             can_approve_apps,
+            super::events_ws::sfu_events_allowed(&ctx),
             ctx.connection_id.clone(),
         )
         .await
