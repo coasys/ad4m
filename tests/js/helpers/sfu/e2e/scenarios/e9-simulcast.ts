@@ -24,7 +24,7 @@ export const e9Simulcast = e2eScenario({
   description: "A receiver's quality preference picks the simulcast layer it receives; the others are unaffected",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu" } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
   },
   async run({ call: inSpace, step }) {
     const call = inSpace("space", "e9", { video: CAMERA });

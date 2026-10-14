@@ -29,7 +29,7 @@ export const e6Network = e2eScenario({
   description: "Loss and jitter, a short outage within the grace, a long outage past it: the call holds or rebuilds itself",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu" } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
   },
   unavailable: () => (netAvailable() ? null : "needs passwordless `sudo -n tc` to impair the loopback interface"),
   async run({ world, call: inSpace, step, metric }) {

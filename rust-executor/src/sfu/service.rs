@@ -76,12 +76,15 @@ fn max_quality_preference<'a>(values: impl Iterator<Item = &'a String>) -> Strin
 /// flags), and ICE credentials must not go into a link every member syncs,
 /// so a config that sets them is refused rather than stored in part.
 fn call_policy(config: SfuConfig) -> Result<config_store::CallPolicy, String> {
-    let Some(mode) = config_store::call_mode(&config.mode) else {
-        return Err(format!(
-            "Invalid SFU mode: '{}'. Must be 'mesh', 'sfu' or 'auto'",
-            config.mode
-        ));
-    };
+    match config.mode.as_str() {
+        "gateway" | "designated" | "mesh" | "cascaded" => {}
+        other => {
+            return Err(format!(
+                "Invalid SFU mode: '{}'. Must be 'gateway', 'designated', 'mesh', or 'cascaded'",
+                other
+            ))
+        }
+    }
 
     let executor_fields: Vec<&str> = [
         ("designatedPeer", config.designated_peer.is_some()),
@@ -113,7 +116,7 @@ fn call_policy(config: SfuConfig) -> Result<config_store::CallPolicy, String> {
     }
 
     Ok(config_store::CallPolicy {
-        mode: mode.to_string(),
+        mode: config.mode,
         max_mesh_participants: config.max_mesh_participants,
     })
 }
@@ -1540,6 +1543,38 @@ impl SfuService {
         config_store::write_policy(neighbourhood_url, &policy, context).await
     }
 
+    /// The SFU node a client of this executor reaches under the
+    /// neighbourhood's mode: this node itself for `designated`, the
+    /// `"gateway"` sentinel for `gateway`, none otherwise.
+    pub async fn sfu_peer_for_neighbourhood(&self, neighbourhood_url: &str) -> Option<String> {
+        match config_store::stored_policy(neighbourhood_url)
+            .await?
+            .mode
+            .as_str()
+        {
+            "designated" => Some(self.gossip.local_did().to_string()),
+            "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
+            _ => None,
+        }
+    }
+
+    /// The SFU nodes under the neighbourhood's mode: for `cascaded`, this
+    /// node and its configured cascade peers.
+    pub async fn sfu_peers_for_neighbourhood(&self, neighbourhood_url: &str) -> Vec<String> {
+        let Some(policy) = config_store::stored_policy(neighbourhood_url).await else {
+            return vec![];
+        };
+        let local = self.gossip.local_did().to_string();
+        match policy.mode.as_str() {
+            "cascaded" => std::iter::once(local)
+                .chain(self.cascade_peer_dids.iter().cloned())
+                .collect(),
+            "designated" => vec![local],
+            "gateway" => vec!["gateway".to_string()],
+            _ => vec![],
+        }
+    }
+
     /// Shut down the SFU service.
     pub async fn shutdown(&self) {
         let _ = self.server.command_tx.send(SfuCommand::Shutdown).await;
@@ -1584,22 +1619,11 @@ mod tests {
     fn set_config_stores_only_the_call_policy() {
         let policy = call_policy(SfuConfig {
             max_mesh_participants: 6,
-            ..config("sfu")
+            ..config("designated")
         })
         .unwrap();
-        assert_eq!(policy.mode, "sfu");
+        assert_eq!(policy.mode, "designated");
         assert_eq!(policy.max_mesh_participants, 6);
-    }
-
-    /// The earlier SFU modes all meant this executor's SFU: they are stored
-    /// as `"sfu"`. `"auto"` is stored as it is.
-    #[test]
-    fn set_config_stores_earlier_sfu_modes_as_sfu() {
-        for earlier in ["designated", "gateway", "cascaded"] {
-            assert_eq!(call_policy(config(earlier)).unwrap().mode, "sfu");
-        }
-        assert_eq!(call_policy(config("auto")).unwrap().mode, "auto");
-        assert_eq!(call_policy(config("mesh")).unwrap().mode, "mesh");
     }
 
     /// Node fields and ICE servers are refused, each by name, never stored
@@ -1613,28 +1637,28 @@ mod tests {
         refused(
             SfuConfig {
                 designated_peer: Some("did:node".into()),
-                ..config("sfu")
+                ..config("designated")
             },
             "designatedPeer",
         );
         refused(
             SfuConfig {
                 sfu_peers: vec!["did:a".into()],
-                ..config("sfu")
+                ..config("cascaded")
             },
             "sfuPeers",
         );
         refused(
             SfuConfig {
                 max_participants_per_node: Some(9),
-                ..config("sfu")
+                ..config("cascaded")
             },
             "maxParticipantsPerNode",
         );
         refused(
             SfuConfig {
                 preferred_sfu_did: Some("did:a".into()),
-                ..config("sfu")
+                ..config("cascaded")
             },
             "preferredSfuDid",
         );
@@ -1645,7 +1669,7 @@ mod tests {
                     username: Some("u".into()),
                     credential: Some("c".into()),
                 }],
-                ..config("sfu")
+                ..config("designated")
             },
             "iceServers",
         );

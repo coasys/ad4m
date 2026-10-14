@@ -77,19 +77,6 @@ pub async fn neighbourhood_creator(neighbourhood_url: &str) -> Option<String> {
     handle.neighbourhood.as_ref().map(|n| n.author.clone())
 }
 
-/// The stored form of a call mode: `"mesh"`, `"sfu"` or `"auto"`. The
-/// earlier SFU modes (`"designated"`, `"gateway"`, `"cascaded"`) all ran a
-/// call on the caller's own executor's SFU, so they read as `"sfu"`. `None`
-/// for anything else.
-pub(crate) fn call_mode(mode: &str) -> Option<&'static str> {
-    match mode {
-        "mesh" => Some("mesh"),
-        "auto" => Some("auto"),
-        "sfu" | "designated" | "gateway" | "cascaded" => Some("sfu"),
-        _ => None,
-    }
-}
-
 /// `literal:json:<RFC 3986-encoded JSON>`, as the SDK's `Literal` writes it.
 fn to_literal(policy: &CallPolicy) -> Result<String, String> {
     let json = serde_json::to_string(policy).map_err(|e| e.to_string())?;
@@ -102,7 +89,7 @@ fn from_literal(target: &str) -> Option<CallPolicy> {
     let encoded = target.strip_prefix("literal:json:")?;
     let config: SfuConfig = serde_json::from_str(&urlencoding::decode(encoded).ok()?).ok()?;
     Some(CallPolicy {
-        mode: call_mode(&config.mode)?.to_string(),
+        mode: config.mode,
         max_mesh_participants: config.max_mesh_participants,
     })
 }
@@ -234,26 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn a_link_with_an_unknown_mode_is_not_a_policy() {
-        assert!(from_literal(&mode("p2p")).is_none());
-    }
-
-    #[test]
-    fn no_stored_policy_means_auto() {
-        assert_eq!(CallPolicy::default().mode, "auto");
-    }
-
-    #[test]
     fn the_literal_round_trips_in_the_sdks_format() {
-        let literal = to_literal(&policy("sfu", 6)).unwrap();
+        let literal = to_literal(&policy("cascaded", 6)).unwrap();
         assert!(literal.starts_with("literal:json:%7B"), "{literal}");
-        assert_eq!(from_literal(&literal), Some(policy("sfu", 6)));
+        assert_eq!(from_literal(&literal), Some(policy("cascaded", 6)));
         assert!(from_literal("literal:string:x").is_none());
     }
 
-    /// A link an older build wrote carries topology and ICE credentials too,
-    /// and an earlier SFU mode. Only the policy is read from it, its mode as
-    /// `"sfu"`; the rest never reaches a config.
+    /// A link an older build wrote carries topology and ICE credentials too.
+    /// Only the policy is read from it; the rest never reaches a config.
     #[test]
     fn a_link_with_executor_fields_yields_only_its_policy() {
         let old = serde_json::json!({
@@ -267,7 +243,7 @@ mod tests {
         });
         let target = format!("literal:json:{}", urlencoding::encode(&old.to_string()));
         let read = from_literal(&target).unwrap();
-        assert_eq!(read, policy("sfu", 5));
+        assert_eq!(read, policy("designated", 5));
         let config = read.into_config();
         assert!(config.designated_peer.is_none());
         assert!(config.sfu_peers.is_empty());
@@ -282,12 +258,22 @@ mod tests {
             link(
                 "did:creator",
                 "2026-10-01T00:00:00.000Z",
-                mode("mesh"),
+                mode("designated"),
                 true,
             ),
-            link("did:creator", "2026-10-02T00:00:00.000Z", mode("sfu"), true),
+            link(
+                "did:creator",
+                "2026-10-02T00:00:00.000Z",
+                mode("cascaded"),
+                true,
+            ),
             // Newer, but not the creator's.
-            link("did:member", "2026-10-03T00:00:00.000Z", mode("auto"), true),
+            link(
+                "did:member",
+                "2026-10-03T00:00:00.000Z",
+                mode("gateway"),
+                true,
+            ),
             // Newer and claims the creator, but its signature does not hold.
             link(
                 "did:creator",
@@ -296,7 +282,10 @@ mod tests {
                 false,
             ),
         ];
-        assert_eq!(creators_latest(&links, "did:creator").unwrap().mode, "sfu");
+        assert_eq!(
+            creators_latest(&links, "did:creator").unwrap().mode,
+            "cascaded"
+        );
         assert!(creators_latest(&links, "did:nobody").is_none());
     }
 
@@ -344,10 +333,10 @@ mod tests {
         assert!(stored_policy(&url).await.is_none());
         assert_eq!(read_policy(&url).await, CallPolicy::default());
 
-        write_policy(&url, &policy("sfu", 6), &context)
+        write_policy(&url, &policy("cascaded", 6), &context)
             .await
             .unwrap();
-        assert_eq!(stored_policy(&url).await, Some(policy("sfu", 6)));
+        assert_eq!(stored_policy(&url).await, Some(policy("cascaded", 6)));
 
         write_policy(&url, &policy("mesh", 3), &context)
             .await

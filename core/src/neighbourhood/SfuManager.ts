@@ -75,7 +75,7 @@ export interface SfuNeighbourhoodApi {
     ): () => void
 }
 
-export type SfuTopology = "sfu" | "mesh"
+export type SfuTopology = "sfu" | "mesh" | "cascaded"
 
 export interface SfuCallState {
     topology: SfuTopology
@@ -117,6 +117,56 @@ export interface SfuIceConfig {
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
 ]
+
+// ── Topology resolution ───────────────────────────────────────────
+
+/**
+ * Determine the optimal call topology from the SFU config and the
+ * current participant count.  Returns the topology, the DID of the
+ * SFU peer to connect to (if any), and the full config.
+ */
+export async function resolveTopology(
+    neighbourhood: NeighbourhoodProxy,
+    neighbourhoodUrl: string,
+    participantCount: number,
+): Promise<{ topology: SfuTopology; sfuPeer: string | null; config: SfuConfig }> {
+    const config = await neighbourhood.sfuConfig(neighbourhoodUrl)
+
+    if (config.mode === "cascaded") {
+        const sfuPeers: string[] = await neighbourhood.sfuPeers(neighbourhoodUrl)
+        if (sfuPeers.length > 1) {
+            return { topology: "cascaded", sfuPeer: sfuPeers[0], config }
+        }
+        if (sfuPeers.length === 1) {
+            return { topology: "sfu", sfuPeer: sfuPeers[0], config }
+        }
+        return { topology: "mesh", sfuPeer: null, config }
+    }
+
+    if (config.mode === "mesh") {
+        return { topology: "mesh", sfuPeer: null, config }
+    }
+
+    const sfuPeer = await neighbourhood.sfuPeer(neighbourhoodUrl)
+
+    if (!sfuPeer) {
+        if (participantCount <= config.maxMeshParticipants) {
+            return { topology: "mesh", sfuPeer: null, config }
+        }
+        console.warn(
+            `SFU peer unavailable and ${participantCount} participants ` +
+            `exceeds mesh limit (${config.maxMeshParticipants}). ` +
+            `Attempting mesh anyway.`,
+        )
+        return { topology: "mesh", sfuPeer: null, config }
+    }
+
+    if (participantCount <= config.maxMeshParticipants) {
+        return { topology: "mesh", sfuPeer, config }
+    }
+
+    return { topology: "sfu", sfuPeer, config }
+}
 
 // ── SFU Manager ───────────────────────────────────────────────────
 

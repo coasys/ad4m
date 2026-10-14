@@ -37,8 +37,8 @@ export const e8Capacity = e2eScenario({
   world: {
     users: [...ROOM, BUSY, ...HOSTS].map((name) => ({ name })),
     neighbourhoods: [
-      { name: "small", owner: "u1", members: [...ROOM, BUSY], call: { mode: "sfu", maxMeshParticipants: 2 } },
-      { name: "rooms", owner: "h1", members: HOSTS, call: { mode: "sfu" } },
+      { name: "small", owner: "u1", members: [...ROOM, BUSY], call: { mode: "designated", maxMeshParticipants: 2 } },
+      { name: "rooms", owner: "h1", members: HOSTS, call: { mode: "designated" } },
     ],
   },
   async run({ call: inSpace, step }) {

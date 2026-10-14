@@ -17,7 +17,7 @@ export const e7ExecutorRestart = e2eScenario({
   description: "The executor restarts mid-call; every session rejoins by itself and everyone hears everyone",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu" } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
   },
   async run({ world, call: inSpace, step, metric }) {
     const call = inSpace("space", "e7", { video: false });

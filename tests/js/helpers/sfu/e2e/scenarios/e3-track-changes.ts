@@ -17,7 +17,7 @@ export const e3TrackChanges = e2eScenario({
   description: "Mute, unmute, camera off/on, screen share on/off reach everyone; a late joiner gets the current state",
   world: {
     users: EVERYONE.map((name) => ({ name })),
-    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "sfu" } }],
+    neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
   },
   async run({ call: inSpace, step }) {
     const call = inSpace("space", "e3");

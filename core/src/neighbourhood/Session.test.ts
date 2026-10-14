@@ -217,47 +217,14 @@ describe("topology resolution", () => {
         expect(links.map((l: any) => l.predicate)).not.toContain("ad4m://sfu/available")
     })
 
-    it("resolves 'auto' with sfuConfig.mode='sfu' to SFU path", async () => {
+    it("resolves 'auto' with sfuConfig.mode='designated' to SFU path", async () => {
         const session = createSession(baseConfig({
             topology: "auto",
-            sfuConfig: { mode: "sfu", fallback: "mesh", maxMeshParticipants: 6, sfuPeers: [] },
+            sfuConfig: { mode: "designated", fallback: "mesh", maxMeshParticipants: 6, sfuPeers: [] },
         }))
         await session.join(fakeMediaStream())
         expect(SfuManager).toHaveBeenCalled()
         expect(MeshManager).not.toHaveBeenCalled()
-    })
-
-    it("resolves an earlier SFU mode from an older executor to SFU path", async () => {
-        const session = createSession(baseConfig({
-            topology: "auto",
-            sfuConfig: { mode: "designated" as any, fallback: "mesh", maxMeshParticipants: 6, sfuPeers: [] },
-        }))
-        await session.join(fakeMediaStream())
-        expect(SfuManager).toHaveBeenCalled()
-    })
-
-    it("leaves sfuConfig.mode='auto' to the membership rule", async () => {
-        const policy = { mode: "auto" as const, fallback: "mesh" as const, maxMeshParticipants: 6, sfuPeers: [] }
-        const served = createSession(baseConfig({
-            topology: "auto",
-            sfuConfig: policy,
-            localSfuStatus: PUBLIC_SFU,
-            sfuServesAllMembers: async () => true,
-        }))
-        await served.join(fakeMediaStream())
-        expect(SfuManager).toHaveBeenCalled()
-
-        jest.mocked(SfuManager).mockClear()
-        const notServed = createSession(baseConfig({
-            topology: "auto",
-            sfuConfig: policy,
-            channel: fakeChannel(),
-            localSfuStatus: PUBLIC_SFU,
-            sfuServesAllMembers: async () => false,
-        }))
-        await notServed.join(fakeMediaStream())
-        expect(SfuManager).not.toHaveBeenCalled()
-        expect(MeshManager).toHaveBeenCalled()
     })
 })
 
