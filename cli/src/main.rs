@@ -170,6 +170,34 @@ enum Domain {
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         #[arg(long)]
         pid_file: Option<String>,
+        /// Local DID for this SFU node in a cascade cluster.  Set this
+        /// alongside `--sfu-cascade-listen` to enable cascade gossip;
+        /// leave unset for a standalone SFU.
+        #[arg(long)]
+        sfu_local_did: Option<String>,
+        /// Capacity hint published by this SFU node when it announces
+        /// itself to peer nodes.  Defaults to 8 if unset and cascade
+        /// is enabled.
+        #[arg(long)]
+        sfu_max_participants_per_node: Option<u32>,
+        /// Local `host:port` that the cascade gossip listener binds.
+        /// Required for cascade mode.
+        #[arg(long)]
+        sfu_cascade_listen: Option<String>,
+        /// Peer SFU nodes in `did=host:port` form.  Comma-separated
+        /// `--sfu-cascade-peers did1=host:port,did2=host:port`.
+        #[arg(long, value_delimiter = ',')]
+        sfu_cascade_peers: Option<Vec<String>>,
+        /// IP address the SFU media server binds its UDP socket to.
+        /// str0m requires a real interface IP (not 0.0.0.0).
+        /// Defaults to 127.0.0.1 (loopback, local-only).  Set to the
+        /// machine's LAN or public IP for cross-machine media.
+        #[arg(long)]
+        sfu_bind_addr: Option<String>,
+        /// STUN server (`host:port`) that checks a public bind address is
+        /// reachable. Unset: no probe.
+        #[arg(long)]
+        sfu_stun_server: Option<String>,
     },
     Eve {
         #[command(subcommand)]
@@ -251,6 +279,12 @@ async fn main() -> Result<()> {
         mcp_port,
         dynamic_class_tools,
         pid_file,
+        sfu_local_did,
+        sfu_max_participants_per_node,
+        sfu_cascade_listen,
+        sfu_cascade_peers,
+        sfu_bind_addr,
+        sfu_stun_server,
     } = args.domain
     {
         // Not compiled: cli/Cargo.toml's [[bin]] "ad4m" is src/ad4m.rs, which
@@ -279,6 +313,12 @@ async fn main() -> Result<()> {
                 mcp_port,
                 dynamic_class_tools,
                 pid_file,
+                sfu_local_did,
+                sfu_max_participants_per_node,
+                sfu_cascade_listen,
+                sfu_cascade_peers,
+                sfu_bind_addr,
+                sfu_stun_server,
                 localhost: None,
                 auto_permit_cap_requests: None,
                 tls: None,
@@ -357,6 +397,12 @@ async fn main() -> Result<()> {
             mcp_port: _,
             dynamic_class_tools: _,
             pid_file: _,
+            sfu_local_did: _,
+            sfu_max_participants_per_node: _,
+            sfu_cascade_listen: _,
+            sfu_cascade_peers: _,
+            sfu_bind_addr: _,
+            sfu_stun_server: _,
         } => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
     }
