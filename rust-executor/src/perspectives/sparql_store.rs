@@ -518,55 +518,10 @@ impl SparqlStore {
             })
     }
 
+    /// Write all quads of one link in a single transaction: a failure, or a
+    /// crash before the commit, leaves none of them, and readers never see a
+    /// direct triple without its reifier and annotations.
     fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
-        let reifier_iri = make_reifier_iri(link);
-
-        // 1. Direct triple in default graph. `target_term` may be a typed
-        //    literal (for `literal:*` wire values) or a NamedNode.
-        let target_ref: TermRef = match &target_term {
-            Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-            Term::Literal(l) => TermRef::Literal(l.as_ref()),
-            Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-            Term::Triple(_) => {
-                return Err(anyhow!(
-                    "Triple-shaped target is not supported in link storage"
-                ));
-            }
-        };
-        self.store.insert(QuadRef::new(
-            source_iri.as_ref(),
-            predicate_iri.as_ref(),
-            target_ref,
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
-        //    Triple's object position accepts any Term, so a typed literal
-        //    target reifies the same way a NamedNode target does.
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        let triple_term = Triple::new(
-            source_iri.clone(),
-            predicate_iri.clone(),
-            target_term.clone(),
-        );
-        self.store.insert(QuadRef::new(
-            reifier_iri.as_ref(),
-            rdf_reifies,
-            TermRef::Triple(&triple_term),
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        // 3. Metadata on the reifier node (all default graph)
-        let proof = &link.proof;
-
-        // `proof.valid` is a read view over the signature: always compute it from
-        // the key and signature, never trust the caller's field. This means no
-        // test helper, migration, or external caller can slip a fabricated or
-        // stale verdict onto disk. The caller's `proof.valid` is intentionally
-        // ignored here â tests that want `Some(true)` must carry a real signature.
-        let valid_str = link.compute_proof_valid().to_string();
-
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -582,6 +537,54 @@ impl SparqlStore {
                 link.data.target
             )
         })?;
+        let mut tx = self.store.start_transaction()?;
+        let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
+        let reifier_iri = make_reifier_iri(link);
+
+        // 1. Direct triple in default graph. `target_term` may be a typed
+        //    literal (for `literal:*` wire values) or a NamedNode.
+        let target_ref: TermRef = match &target_term {
+            Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
+            Term::Literal(l) => TermRef::Literal(l.as_ref()),
+            Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
+            Term::Triple(_) => {
+                return Err(anyhow!(
+                    "Triple-shaped target is not supported in link storage"
+                ));
+            }
+        };
+        tx.insert(QuadRef::new(
+            source_iri.as_ref(),
+            predicate_iri.as_ref(),
+            target_ref,
+            GraphNameRef::DefaultGraph,
+        ));
+
+        // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
+        //    Triple's object position accepts any Term, so a typed literal
+        //    target reifies the same way a NamedNode target does.
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        let triple_term = Triple::new(
+            source_iri.clone(),
+            predicate_iri.clone(),
+            target_term.clone(),
+        );
+        tx.insert(QuadRef::new(
+            reifier_iri.as_ref(),
+            rdf_reifies,
+            TermRef::Triple(&triple_term),
+            GraphNameRef::DefaultGraph,
+        ));
+
+        // 3. Metadata on the reifier node (all default graph)
+        let proof = &link.proof;
+
+        // `proof.valid` is a read view over the signature: always compute it from
+        // the key and signature, never trust the caller's field. This means no
+        // test helper, migration, or external caller can slip a fabricated or
+        // stale verdict onto disk. The caller's `proof.valid` is intentionally
+        // ignored here â tests that want `Some(true)` must carry a real signature.
+        let valid_str = link.compute_proof_valid().to_string();
 
         let wire_target = signed_target_annotation(link, &target_term);
 
@@ -607,8 +610,7 @@ impl SparqlStore {
             // new one: a link once stored "true" keeps reading back verified,
             // and the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
             // `query_links` matches both quads and returns the link twice.
-            let stale: Vec<_> = self
-                .store
+            let stale: Vec<_> = tx
                 .quads_for_pattern(
                     Some(reifier_iri.as_ref().into()),
                     Some(pred),
@@ -617,19 +619,20 @@ impl SparqlStore {
                 )
                 .collect::<Result<Vec<_>, _>>()?;
             for quad in &stale {
-                self.store.remove(quad)?;
+                tx.remove(quad);
             }
 
             let Some(value) = value else { continue };
             let lit = literal(value);
-            self.store.insert(QuadRef::new(
+            tx.insert(QuadRef::new(
                 reifier_iri.as_ref(),
                 pred,
                 TermRef::Literal(lit.as_ref()),
                 GraphNameRef::DefaultGraph,
-            ))?;
+            ));
         }
 
+        tx.commit()?;
         Ok(())
     }
 
@@ -682,11 +685,13 @@ impl SparqlStore {
 
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
+        // One transaction, as in `insert_link_triples`: the reifier, its
+        // annotations and the direct triple go together or not at all.
+        let mut tx = self.store.start_transaction()?;
         let reifier_iri = make_reifier_iri(link);
 
         // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
-        let quads: Vec<_> = self
-            .store
+        let quads: Vec<_> = tx
             .quads_for_pattern(
                 Some(reifier_iri.as_ref().into()),
                 None,
@@ -695,16 +700,16 @@ impl SparqlStore {
             )
             .collect::<Result<Vec<_>, _>>()?;
         for quad in &quads {
-            self.store.remove(quad)?;
+            tx.remove(quad);
         }
 
-        // 2. Remove the direct triple IF no other reifier references it
+        // 2. Remove the direct triple IF no other reifier references it. The
+        //    transaction reads its own removals, so this reifier no longer counts.
         let (source, predicate, target_term) = make_direct_triple(link);
         let triple_term = Triple::new(source.clone(), predicate.clone(), target_term.clone());
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
 
-        let still_referenced = self
-            .store
+        let still_referenced = tx
             .quads_for_pattern(
                 None,
                 Some(rdf_reifies),
@@ -719,16 +724,17 @@ impl SparqlStore {
                 Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
                 Term::Literal(l) => TermRef::Literal(l.as_ref()),
                 Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-                Term::Triple(_) => return Ok(()),
+                Term::Triple(_) => return Ok(tx.commit()?),
             };
-            self.store.remove(QuadRef::new(
+            tx.remove(QuadRef::new(
                 source.as_ref(),
                 predicate.as_ref(),
                 target_ref,
                 GraphNameRef::DefaultGraph,
-            ))?;
+            ));
         }
 
+        tx.commit()?;
         Ok(())
     }
 
@@ -1650,6 +1656,62 @@ mod tests {
             .find(|r| r["p"].as_str() == Some("ad4m://ontology/author"))
             .unwrap();
         assert_eq!(author_row["v"].as_str().unwrap(), signer.did.as_str());
+    }
+
+    /// A link the store refuses leaves no quad behind. The status check used
+    /// to run after the direct triple and the reifier were already stored.
+    #[test]
+    fn a_refused_link_leaves_no_quads() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let mut link = make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t");
+        link.status = None;
+
+        assert!(svc.add_link(&link).is_err());
+        assert_eq!(svc.quad_count(), 0);
+    }
+
+    /// A concurrent reader sees each link whole or not at all: never a direct
+    /// triple without its complete reifier, while links are added and removed.
+    #[test]
+    fn a_reader_never_sees_a_half_written_link() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let links: Vec<_> = (0..300)
+            .map(|i| make_link(&signer, &format!("ad4m://s/{i}"), "ad4m://p", "ad4m://t"))
+            .collect();
+        let half_written = format!(
+            "SELECT ?s WHERE {{ ?s <ad4m://p> ?t . FILTER NOT EXISTS {{ \
+               ?r <{RDF_REIFIES}> <<( ?s <ad4m://p> ?t )>> ; \
+                  <{ONT_AUTHOR}> ?a ; <{ONT_PROOF_VALID}> ?v }} }}"
+        );
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (svc, done) = (svc.clone(), done.clone());
+            std::thread::spawn(move || {
+                for link in &links {
+                    svc.add_link(link).unwrap();
+                }
+                for link in &links {
+                    svc.remove_link(link).unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+
+        let mut reads = 0;
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            let rows: Vec<serde_json::Value> =
+                serde_json::from_str(&svc.query(&half_written).unwrap()).unwrap();
+            assert!(
+                rows.is_empty(),
+                "read {reads} saw half-written links: {rows:?}"
+            );
+            reads += 1;
+        }
+        writer.join().unwrap();
+        assert_eq!(svc.quad_count(), 0);
     }
 
     #[test]
