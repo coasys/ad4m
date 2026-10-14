@@ -89,6 +89,7 @@ mod eval_transform;
 mod filtering;
 mod getters;
 mod hydration;
+pub(crate) mod interfaces;
 #[cfg(test)]
 mod integration_tests;
 mod link_author;
@@ -136,5 +137,7 @@ pub use types::{
 /// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
 /// storage on the same rule the SPARQL query builder uses.  See
 /// [`utils::is_safe_iri_target`] for the full contract.
+pub use interfaces::{ClassSelector, InterfaceRef, InterfaceSpec};
+pub(crate) use union::refuse_union_reads;
 pub use union::{execute_union_query, QueryClasses};
 pub use utils::is_safe_iri_target;
