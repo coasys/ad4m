@@ -4239,6 +4239,45 @@ describe("save() create path and its own batch", () => {
     expect(perspective.createBatch).not.toHaveBeenCalled();
     expect(perspective.discardBatch).not.toHaveBeenCalled();
   });
+
+  it("create() with a parent discards the batch it opened and rethrows when the parent link fails", async () => {
+    const failure = new Error("add failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => {}),
+      add: jest.fn(async () => { throw failure; }),
+    } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } }),
+    ).rejects.toBe(failure);
+    expect(perspective.add).toHaveBeenCalledWith(expect.objectContaining({ source: "sb://parent", predicate: "sb://child" }), "shared", "batch-1");
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.commitBatch).not.toHaveBeenCalled();
+  });
+
+  it("create() with a parent keeps the create's error when the discard fails too", async () => {
+    const failure = new Error("createSubject failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => { throw new Error("discard failed"); }),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => { throw failure; }),
+      add: jest.fn(async () => {}),
+    } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } }),
+    ).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.add).not.toHaveBeenCalled();
+  });
 });
 
 describe("get() and update() on a missing instance", () => {

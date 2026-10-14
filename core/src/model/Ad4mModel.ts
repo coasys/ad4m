@@ -2156,20 +2156,27 @@ export class Ad4mModel {
 
     // When a parent scope is provided without a caller-supplied batch, open a
     // new batch ourselves so that the instance creation and the parent→child
-    // link are committed atomically.  If either step throws, commitBatch is
-    // never reached and the batch is implicitly abandoned (rollback).
+    // link are committed atomically.  If any step throws, the batch is
+    // discarded (nothing is written, and it does not stay open on the
+    // executor) and the original error is rethrown.
     if (options?.parent && !options?.batchId) {
-      const batchId = await perspective.createBatch();
-      await instance.save(batchId);
       const parent = requireSingleParent(options.parent);
       const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', batchId);
-      await perspective.commitBatch(batchId);
+      const batchId = await perspective.createBatch();
+      try {
+        await instance.save(batchId);
+        const link = new Link({
+          source: parent.id,
+          predicate,
+          target: instance.id,
+        });
+        await perspective.add(link, 'shared', batchId);
+        await perspective.commitBatch(batchId);
+      } catch (e) {
+        // A failed discard must not hide the original error.
+        await perspective.discardBatch(batchId).catch(() => {});
+        throw e;
+      }
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
       await instance.refresh();
