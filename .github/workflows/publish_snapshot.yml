@@ -20,7 +20,8 @@ on:
 
 # On a pull request, a newer commit supersedes a run still in progress. Each push to `dev` gets a
 # group of its own, so every `dev` commit gets a snapshot: with one group per ref, a merge landing
-# while the previous one publishes would cancel it, and a third would drop the queued second.
+# while the previous one publishes cancels it, and without `cancel-in-progress` a group still holds
+# only one pending run, so a third merge would drop the queued second.
 concurrency:
   group: publish-snapshot-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
