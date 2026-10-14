@@ -84,7 +84,7 @@ static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// that spent most of its budget waiting still has headroom to
 /// execute the query itself before the outer WS timeout fires.
 /// Local-only perspectives never enter the wait path.
-const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
+pub(super) const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
@@ -538,6 +538,10 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The containment predicates this perspective declares, resolved once —
+    /// `None` until first asked for, dropped when a declaration is written or
+    /// removed. See `containment.rs`.
+    pub(super) containment_cache: Arc<std::sync::RwLock<Option<Arc<Vec<String>>>>>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -632,6 +636,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            containment_cache: Arc::new(std::sync::RwLock::new(None)),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
@@ -1007,6 +1012,7 @@ impl PerspectiveInstance {
             .collect();
         self.sparql_store.reload(link_exprs)?;
         self.shape_cache.write().unwrap().clear();
+        self.invalidate_containment();
         Ok(())
     }
 
@@ -3882,7 +3888,7 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT, None)
             .await
     }
 
@@ -3892,20 +3898,24 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT, None)
             .await
     }
 
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
-    async fn model_query_within(
+    ///
+    /// `parent` replaces the query's own parent scope — the way the executor
+    /// passes a scope no client can spell (`Scope::Contained`).
+    pub(super) async fn model_query_within(
         &self,
         class_name: &str,
         query_json: &str,
         shape_wait: Duration,
+        parent: Option<super::model_query::Scope>,
     ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(&classes, query_json, shape_wait)
+        self.model_query_classes_within(&classes, query_json, shape_wait, parent)
             .await
     }
 
@@ -3917,9 +3927,13 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
+        parent: Option<super::model_query::Scope>,
     ) -> Result<String, deno_core::anyhow::Error> {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+        if parent.is_some() {
+            query_input.parent = parent;
+        }
 
         // `where.producedByFlow` is resolved here, not in the pipeline: it
         // needs the perspective (receipts, flow catalogue) and signature
@@ -4084,6 +4098,9 @@ impl PerspectiveInstance {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
+        // The one sink for local and remote writes alike, so a containment
+        // declaration arriving either way drops the cached set.
+        self.note_containment_writes(diff);
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
@@ -5879,7 +5896,7 @@ impl PerspectiveInstance {
             connection: connection_id,
         };
         let first_result =
-            self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
+            self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT, None);
         self.open_subscription(subscribed_query, first_result).await
     }
 
@@ -6003,6 +6020,7 @@ impl PerspectiveInstance {
                             &params.classes,
                             &params.query_json,
                             Duration::ZERO,
+                            None,
                         )
                         .await
                     {
@@ -8570,7 +8588,12 @@ mod tests {
                 .expect("add Task");
         };
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, Duration::from_secs(10)),
+            perspective.model_query_within(
+                "Board",
+                NESTED_INCLUDE_QUERY,
+                Duration::from_secs(10),
+                None
+            ),
             late_sync
         );
 
@@ -8595,7 +8618,7 @@ mod tests {
 
         let started = Instant::now();
         let err = perspective
-            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget, None)
             .await
             .expect_err("Task's shape never arrives");
         let elapsed = started.elapsed();
@@ -8624,7 +8647,7 @@ mod tests {
 
         let started = Instant::now();
         let err = perspective
-            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget, None)
             .await
             .expect_err("Task is not registered");
         let elapsed = started.elapsed();
@@ -8707,7 +8730,7 @@ mod tests {
         };
         let started = Instant::now();
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, SHARED_BUDGET),
+            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, SHARED_BUDGET, None),
             late_task
         );
         let elapsed = started.elapsed();
@@ -8741,7 +8764,7 @@ mod tests {
         };
         let started = Instant::now();
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, SHARED_BUDGET),
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, SHARED_BUDGET, None),
             late_board
         );
         let elapsed = started.elapsed();

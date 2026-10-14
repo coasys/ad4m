@@ -1,4 +1,4 @@
-import { WakerSubscriptionManager, hintFor } from './WakerSubscriptionManager';
+import { WakerSubscriptionManager, hintFor, parentQuery } from './WakerSubscriptionManager';
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -293,5 +293,14 @@ describe('WakerSubscriptionManager', () => {
       expect(hint).toContain('operator');
     }
     expect(hintFor('connection refused')).toBe('');
+  });
+
+  it('walks every containment predicate the perspective declares, one concrete pattern each', () => {
+    const query = parentQuery(['ad4m://has_child', 'app://child', 'not an iri'], 'test://message');
+    expect(query).toBe(
+      'SELECT ?source WHERE { { ?source <ad4m://has_child> <test://message> . } UNION { ?source <app://child> <test://message> . } }',
+    );
+    // Nothing declared is has_child alone.
+    expect(parentQuery(undefined, 'test://message')).toContain('<ad4m://has_child> <test://message>');
   });
 });

@@ -1166,6 +1166,14 @@ pub(crate) async fn write_mint_scope_links(
                  (id + predicate); `Model` scopes carry no linking predicate"
             );
         }
+        Scope::Contained { .. } => {
+            // A read across several containment predicates names no single one
+            // to write the new link under.
+            anyhow::bail!(
+                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
+                 (id + predicate); a containment read names no single predicate"
+            );
+        }
         Scope::Traverse { .. } => {
             // A traversal describes how to *read* outward from anchors. Minting
             // against it would have to pick one of them to hang the new link

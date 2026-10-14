@@ -396,10 +396,31 @@ pub(super) async fn run_model_query(
     class_name: &str,
     query: &Value,
 ) -> Result<(Vec<Value>, usize), String> {
-    let raw = perspective
-        .model_query(class_name, &query.to_string())
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    run_model_query_under(perspective, class_name, query, None).await
+}
+
+/// [`run_model_query`] narrowed to what one item contains, through every
+/// containment predicate the perspective has — `has_child` and whatever its
+/// schema declares (`perspectives::containment`). `None` is no narrowing.
+pub(super) async fn run_model_query_under(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    query: &Value,
+    parent: Option<&str>,
+) -> Result<(Vec<Value>, usize), String> {
+    let raw = match parent {
+        Some(parent) => {
+            perspective
+                .model_query_contained_by(class_name, &query.to_string(), parent)
+                .await
+        }
+        None => {
+            perspective
+                .model_query(class_name, &query.to_string())
+                .await
+        }
+    }
+    .map_err(|e| format!("{e:#}"))?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let instances = parsed
         .get("instances")

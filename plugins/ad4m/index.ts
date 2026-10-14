@@ -732,6 +732,38 @@ Notes:
    * Reusable by both the explicit tool and the auto-subscription hooks.
    * Returns a human-readable status string, or throws on failure.
    */
+  /**
+   * A saved subscription with its query asked for afresh — see the restore loop. A mention
+   * subscription is rebuilt by the executor's mention config, a children subscription by the waker
+   * query for its parent; anything else is returned as it was saved.
+   */
+  async function refreshSavedQuery(sub: WakerSubscription): Promise<WakerSubscription> {
+    if (sub.type === "mention") {
+      const data = extractMcpResultData(
+        await callToolWithRetry("get_mention_waker_config", { perspective_id: sub.perspective }),
+      );
+      const query = data?.query ?? data?.subscription?.query;
+      if (data?.error || !query) return sub;
+      return {
+        ...sub,
+        query,
+        ...(Array.isArray(data.containment_predicates) ? { containment: data.containment_predicates } : {}),
+      };
+    }
+    if (sub.type === "channel-messages" && sub.channel) {
+      const data = extractMcpResultData(
+        await callToolWithRetry("generate_waker_query", {
+          perspective_id: sub.perspective,
+          class_name: "Message",
+          parent: sub.channel,
+        }),
+      );
+      const query = data?.query ?? data?.waker_config?.query;
+      return data?.error || !query ? sub : { ...sub, query };
+    }
+    return sub;
+  }
+
   async function subscribeToMentionsForPerspective(
     perspectiveId: string,
   ): Promise<string> {
@@ -758,6 +790,8 @@ Notes:
       channel: "",
       query: data.query ?? data.subscription?.query,
       neighbourhood: data.neighbourhood,
+      // Every predicate the perspective treats as containment, for the parent walk.
+      ...(Array.isArray(data.containment_predicates) ? { containment: data.containment_predicates } : {}),
     };
 
     if (!subscription.query) {
@@ -1363,8 +1397,12 @@ Notes:
       logger.info(
         `[ad4m-waker] Restoring ${saved.length} persisted subscription(s)...`,
       );
-      for (const sub of saved) {
+      for (const stored of saved) {
         if (stale()) return true;
+        // The saved query is asked for again rather than replayed: what counts as containment (and,
+        // for mentions, how a mention is found) is the perspective's to declare, and may have changed
+        // since the subscription was made. Kept as saved when the executor cannot be asked.
+        const sub = await refreshSavedQuery(stored).catch(() => stored);
         try {
           await createLiveSubscription(sub);
           if (stale()) return true;

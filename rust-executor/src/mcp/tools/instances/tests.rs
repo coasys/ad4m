@@ -2252,3 +2252,142 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
         "a failed add_to_collection must not leave the item linked: {got}"
     );
 }
+
+/// A predicate the perspective declares as containment is read as containment
+/// by `get_children` — and only once it is declared: the resolved set is cached
+/// and dropped when a declaration is written, so the declaration takes effect
+/// without a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_children_follows_declared_containment() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let link = |source: &str, predicate: &str, target: &str| {
+        crate::mcp::tools::perspectives::AddLinkParams {
+            perspective_id: uuid.clone(),
+            source: source.into(),
+            predicate: predicate.into(),
+            target: target.into(),
+        }
+    };
+    let listed = |handler: &Ad4mMcpHandler| {
+        let uuid = uuid.clone();
+        let handler = handler.clone();
+        async move {
+            parse(
+                &handler
+                    .get_children(Parameters(GetChildrenParams {
+                        perspective_id: uuid,
+                        parent: "app://room".into(),
+                        limit: None,
+                    }))
+                    .await,
+            )
+        }
+    };
+
+    let a = parse(
+        &handler
+            .add_link(Parameters(link(
+                "app://room",
+                "ad4m://has_child",
+                "app://part",
+            )))
+            .await,
+    );
+    assert_eq!(a["success"], true, "{a}");
+    let b = parse(
+        &handler
+            .add_link(Parameters(link(
+                "app://room",
+                "app://child",
+                "app://declared-part",
+            )))
+            .await,
+    );
+    assert_eq!(b["success"], true, "{b}");
+
+    // Before the declaration: has_child alone.
+    let before = listed(&handler).await;
+    assert_eq!(before["count"], 1, "{before}");
+
+    let declared = parse(
+        &handler
+            .add_link(Parameters(link(
+                "app://child",
+                crate::perspectives::containment::SUB_PROPERTY_OF,
+                crate::perspectives::containment::HAS_CHILD,
+            )))
+            .await,
+    );
+    assert_eq!(declared["success"], true, "{declared}");
+
+    let after = listed(&handler).await;
+    assert_eq!(after["count"], 2, "{after}");
+    let ids: Vec<&str> = after["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"app://declared-part"), "{after}");
+}
+
+/// `instance_query(parent=…)` reads what the parent contains through every
+/// containment predicate — the executor's own read, through a scope no client
+/// can spell — while an app's model query naming its relation is unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_query_follows_declared_containment() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let made = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Message".to_string(),
+                properties: Some(props(&[("body", json!("in the room"))])),
+                base_uri: Some("app://message-1".into()),
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(made["created"], true, "{made}");
+    for (source, predicate, target) in [
+        ("app://room", "app://child", "app://message-1"),
+        (
+            "app://child",
+            crate::perspectives::containment::SUB_PROPERTY_OF,
+            crate::perspectives::containment::HAS_CHILD,
+        ),
+    ] {
+        let added = parse(
+            &handler
+                .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                    perspective_id: uuid.clone(),
+                    source: source.into(),
+                    predicate: predicate.into(),
+                    target: target.into(),
+                }))
+                .await,
+        );
+        assert_eq!(added["success"], true, "{added}");
+    }
+
+    let found = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "Message".to_string(),
+                filter: None,
+                parent: Some("app://room".into()),
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    );
+    assert_eq!(found["count"], 1, "{found}");
+    assert_eq!(
+        found["instances"][0]["base_uri"]
+            .as_str()
+            .or(found["instances"][0]["id"].as_str()),
+        Some("app://message-1"),
+        "{found}"
+    );
+}

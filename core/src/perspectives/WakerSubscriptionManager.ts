@@ -14,6 +14,12 @@ export interface WakerSubscription {
   channel: string;
   query: string;
   neighbourhood?: string;
+  /**
+   * The predicates this perspective treats as containment — `ad4m://has_child` and any its
+   * schema declares — for walking a mentioned item's parents. Absent reads as `has_child` alone.
+   * The executor answers it with the subscription (`get_mention_waker_config`).
+   */
+  containment?: string[];
 }
 
 /** Per-message parent resolution result for mention subscriptions. */
@@ -28,6 +34,21 @@ export interface MentionMessage {
    * parents have none, or the walk could not be made.
    */
   ancestors: string[];
+}
+
+/** The containment predicates to follow, each a usable IRI — `has_child` alone when none are given. */
+function containmentOf(declared: string[] | undefined): string[] {
+  const usable = (declared ?? []).filter((p) => /^[A-Za-z][^\s<>"{}|\\^`]*:[^\s<>"{}|\\^`]*$/.test(p));
+  return usable.length ? [...new Set(usable)] : ["ad4m://has_child"];
+}
+
+/**
+ * The parents of one item through any containment predicate: one concrete triple pattern per
+ * predicate, joined by UNION, rather than a variable predicate.
+ */
+export function parentQuery(declared: string[] | undefined, address: string): string {
+  const branches = containmentOf(declared).map((p) => `{ ?source <${p}> <${address}> . }`);
+  return `SELECT ?source WHERE { ${branches.join(" UNION ")} }`;
 }
 
 export interface WakerLogger {
@@ -467,10 +488,10 @@ export class WakerSubscriptionManager {
     return this.activeSubscriptions.has(id);
   }
 
-  /** The items holding one item through `ad4m://has_child`. A failed lookup reads as none. */
+  /** The items holding one item through any containment predicate. A failed lookup reads as none. */
   private async parentsOf(sub: WakerSubscription, address: string): Promise<string[]> {
     try {
-      const query = `SELECT ?source WHERE { ?source <ad4m://has_child> <${address}> . }`;
+      const query = parentQuery(sub.containment, address);
       const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, query);
       if (!Array.isArray(rows)) return [];
       // A row omits a variable left unbound in its solution.

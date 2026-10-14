@@ -672,6 +672,13 @@ impl Walk<'_> {
                 self.rules.anchors.insert(id.clone());
                 self.rules.near.add(predicate);
             }
+            // `Raw` over each containment predicate (`perspectives::containment`).
+            Scope::Contained { id, predicates } => {
+                self.rules.anchors.insert(id.clone());
+                for predicate in predicates {
+                    self.rules.near.add(predicate);
+                }
+            }
             Scope::Model { id, field, .. } => {
                 self.rules.anchors.insert(id.clone());
                 match field {

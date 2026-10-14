@@ -87,7 +87,7 @@ instance_create(perspective_id, class_name="Message",
     base_uri is auto-generated when omitted. Returns the instance's id.
 
 instance_query(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
-  → instances that are ad4m://has_child children of parent, as raw property maps
+  → instances parent contains (ad4m://has_child or a declared containment predicate), as raw property maps
     (id, author, timestamp, one key per property).
     There is NO order parameter: results come oldest-first, and limit keeps the
     OLDEST N — so this is not how you read "the latest messages"
@@ -128,6 +128,16 @@ time.
 
 Instances below a parent are linked via `ad4m://has_child`. The root of a
 perspective's tree is `ad4m://self`.
+
+A perspective's schema may declare more containment predicates, as standard
+RDF: `<app://child> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf>
+<ad4m://has_child>`, signed by the perspective's owner or the neighbourhood's
+author (a declaration from anybody else is ignored). An app with two kinds of
+containment — a document's parts, and the posts in a feed — declares each, so
+it can keep them apart while every read here follows both: `get_children`,
+`instance_query(parent=…)`, `instance_transcript`, child subscriptions, and the
+parents and ancestors in a wake event. Writes (`add_child`,
+`instance_create(parent=…)`) still write `ad4m://has_child`.
 
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple

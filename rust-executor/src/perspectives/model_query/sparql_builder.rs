@@ -727,6 +727,33 @@ pub(super) fn build_query_patterns(
                     return matches_nothing();
                 }
             }
+            Scope::Contained { id, predicates } => {
+                let preds: Vec<&str> = predicates
+                    .iter()
+                    .filter_map(|p| validate_iri(p).ok())
+                    .collect();
+                match validate_iri(id) {
+                    Ok(safe_id) if !preds.is_empty() => {
+                        let (subj, filter) = parent_subject(safe_id);
+                        // One branch per predicate, each a concrete IRI, so a
+                        // subscription still narrows to what it reads.
+                        let branches: Vec<String> = preds
+                            .iter()
+                            .map(|p| {
+                                let pred = format!("<{p}>");
+                                let guarded = guard.join("?_sr", &subj, &pred, "?source");
+                                format!("{{ {subj} {pred} ?source .{guarded} }}")
+                            })
+                            .collect();
+                        conformance_patterns.push(format!("    {}", branches.join(" UNION ")));
+                        conformance_patterns.extend(filter);
+                    }
+                    _ => {
+                        log::warn!("Contained scope matches nothing: invalid IRI in id='{}' or no valid predicate", id);
+                        return matches_nothing();
+                    }
+                }
+            }
             Scope::Model { id, field, model } => {
                 let safe_id = match validate_iri(id) {
                     Ok(s) => s,
