@@ -2,7 +2,10 @@ use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
+use super::shacl_parser::{
+    check_consensus_rule_links, parse_interface_shacl_to_links, parse_shacl_to_links,
+    INTERFACE_TYPE,
+};
 use super::update_perspective;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
@@ -72,6 +75,10 @@ mod subscription_triggers;
 #[path = "perspective_instance_subscription_tests.rs"]
 mod subscription_tests;
 
+#[cfg(test)]
+#[path = "perspective_instance_interface_tests.rs"]
+mod interface_tests;
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
@@ -118,8 +125,16 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
             return true;
         }
         match predicate {
-            "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => return true,
-            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
+            "ad4m://has_subject_class"
+            | "ad4m://has_interface"
+            | "ad4m://sdna"
+            | "ad4m://shape" => return true,
+            "rdf://type"
+                if decorated.data.target == "ad4m://SubjectClass"
+                    || decorated.data.target == INTERFACE_TYPE =>
+            {
+                return true
+            }
             _ => {}
         }
     }
@@ -304,16 +319,42 @@ pub enum SdnaType {
     SubjectClass,
     Flow,
     Custom,
+    /// A named interface (#1435): SHACL only, written typed `ad4m://Interface`.
+    Interface,
 }
 
 impl SdnaType {
+    /// The SHACL links for an SDNA entry of this type, validated before the
+    /// store is touched (see `add_sdna_inner`).
+    fn parse_shacl(&self, shacl_json: Option<&str>, name: &str) -> Result<Option<Vec<Link>>, AnyError> {
+        match (self, shacl_json) {
+            (SdnaType::Interface, Some(shacl)) => parse_interface_shacl_to_links(shacl, name).map(Some),
+            (SdnaType::Interface, None) => Err(anyhow!(
+                "Interface '{name}': an interface is defined by its SHACL; pass shaclJson"
+            )),
+            (_, Some(shacl)) => parse_shacl_to_links(shacl, name).map(Some),
+            (_, None) => Ok(None),
+        }
+    }
+
+    /// The `rdf://type` the SHACL writer gives a target of this type, for the
+    /// types whose SHACL is refreshed on re-registration.
+    fn shape_type(&self) -> Option<&'static str> {
+        match self {
+            SdnaType::SubjectClass => Some("ad4m://SubjectClass"),
+            SdnaType::Interface => Some(INTERFACE_TYPE),
+            SdnaType::Flow | SdnaType::Custom => None,
+        }
+    }
+
     pub fn from_string(s: &str) -> Result<Self, AnyError> {
         match s {
             "subject_class" => Ok(SdnaType::SubjectClass),
             "flow" => Ok(SdnaType::Flow),
             "custom" => Ok(SdnaType::Custom),
+            "interface" => Ok(SdnaType::Interface),
             _ => Err(anyhow!(
-                "Invalid SDNA type: {}. Must one of 'subject_class', 'flow' or 'custom'.",
+                "Invalid SDNA type: {}. Must one of 'subject_class', 'flow', 'custom' or 'interface'.",
                 s
             )),
         }
@@ -457,6 +498,10 @@ pub struct PerspectiveMemoryStats {
 #[derive(Clone)]
 struct ModelSubscriptionParams {
     classes: super::model_query::QueryClasses,
+    /// The interface `classes` were resolved from (#1435), with the shapes
+    /// generation they were resolved at. `None` when the caller named the
+    /// classes. See `refresh_interface_subscriptions`.
+    interface: Option<(super::model_query::InterfaceRef, u64)>,
     query_json: String,
     /// Which writes re-run it; holds the nodes of `last_result`.
     trigger: subscription_triggers::ModelTrigger,
@@ -538,6 +583,10 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The classes implementing each interface asked about (#1435). Derived
+    /// from every class's shape, so dropped whenever any shape is (see
+    /// [`Self::forget_derived_shapes`]).
+    interface_cache: Arc<std::sync::RwLock<InterfaceCache>>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -572,6 +621,15 @@ pub struct PerspectiveInstance {
     /// without a running link language. Compiled out in non-test builds.
     #[cfg(test)]
     force_shape_sync_wait: Arc<AtomicBool>,
+}
+
+/// The resolved class lists of interfaces (#1435), and how many times the
+/// installed shapes have changed. A subscription over an interface keeps the
+/// generation it resolved at and resolves again when it moves.
+#[derive(Default)]
+struct InterfaceCache {
+    generation: u64,
+    resolved: HashMap<super::model_query::InterfaceRef, Arc<Vec<String>>>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -632,6 +690,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            interface_cache: Arc::new(std::sync::RwLock::new(InterfaceCache::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
@@ -677,6 +736,92 @@ impl PerspectiveInstance {
     /// (re-)written for the class so the next query re-parses fresh state.
     pub fn invalidate_shape(&self, class_name: &str) {
         self.shape_cache.write().unwrap().remove(class_name);
+        self.forget_derived_shapes();
+    }
+
+    /// Drop every cached shape, and what was derived from them.
+    fn clear_shape_cache(&self) {
+        self.shape_cache.write().unwrap().clear();
+        self.forget_derived_shapes();
+    }
+
+    /// The installed shapes changed: a class was added, refreshed or synced
+    /// in. Any of these can change which classes implement an interface.
+    fn forget_derived_shapes(&self) {
+        let mut cache = self.interface_cache.write().unwrap();
+        cache.generation += 1;
+        cache.resolved.clear();
+    }
+
+    /// How many times the installed shapes have changed. Read it *before*
+    /// resolving an interface: a change that lands mid-resolution moves it,
+    /// so the result is never mistaken for current.
+    fn shapes_generation(&self) -> u64 {
+        self.interface_cache.read().unwrap().generation
+    }
+
+    /// Every installed class that implements `interface` (#1435), cached until
+    /// the installed shapes change. A named interface that is not stored is a
+    /// `MissingInterface` error; an interface no class implements is an empty
+    /// list.
+    pub fn classes_implementing(
+        &self,
+        interface: &super::model_query::InterfaceRef,
+    ) -> Result<Arc<Vec<String>>, AnyError> {
+        use super::model_query::{interfaces, InterfaceRef};
+        let generation = {
+            let cache = self.interface_cache.read().unwrap();
+            if let Some(hit) = cache.resolved.get(interface) {
+                return Ok(hit.clone());
+            }
+            cache.generation
+        };
+        let loaded;
+        let spec = match interface {
+            InterfaceRef::Named(name) => {
+                loaded = interfaces::load_interface(&self.sparql_store, name)?;
+                &loaded
+            }
+            InterfaceRef::AdHoc(spec) => spec,
+        };
+        let classes = Arc::new(interfaces::classes_implementing(
+            &self.sparql_store,
+            &self.shape_resolver(),
+            spec,
+        )?);
+        let mut cache = self.interface_cache.write().unwrap();
+        // Computed against shapes that changed meanwhile: answer, don't keep.
+        if cache.generation == generation {
+            cache.resolved.insert(interface.clone(), classes.clone());
+        }
+        Ok(classes)
+    }
+
+    /// [`Self::classes_implementing`], waiting up to `budget` for a named
+    /// interface to sync from a peer, as [`Self::get_shape_or_wait`] waits for
+    /// a class.
+    async fn classes_implementing_or_wait(
+        &self,
+        interface: &super::model_query::InterfaceRef,
+        budget: Duration,
+    ) -> Result<Arc<Vec<String>>, AnyError> {
+        let missing = |e: &AnyError| {
+            e.downcast_ref::<super::model_query::interfaces::MissingInterface>()
+                .is_some()
+        };
+        let deadline = Instant::now() + budget;
+        loop {
+            match self.classes_implementing(interface) {
+                Err(e) if missing(&e) => {
+                    let now = Instant::now();
+                    if now >= deadline || !self.shapes_may_still_sync().await {
+                        return Err(e);
+                    }
+                    sleep(Duration::from_millis(100).min(deadline - now)).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Like [`get_shape`], but for perspectives joined to a
@@ -1006,7 +1151,7 @@ impl PerspectiveInstance {
             })
             .collect();
         self.sparql_store.reload(link_exprs)?;
-        self.shape_cache.write().unwrap().clear();
+        self.clear_shape_cache();
         Ok(())
     }
 
@@ -1701,7 +1846,7 @@ impl PerspectiveInstance {
         // peer that has never registered a class locally still picks up
         // the class the moment its SHACL arrives.
         if inbound_touches_shacl(&decorated_diff) {
-            self.shape_cache.write().unwrap().clear();
+            self.clear_shape_cache();
         }
 
         // Queue the Prolog fact update and the notification + live-query checks
@@ -1838,6 +1983,14 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        // A class's SHACL written or removed by any path — `add_sdna`, a raw
+        // link write, a wipe — can change which classes implement an
+        // interface (#1435). Shapes are cached per class and refreshed where
+        // they are written; the interface lists span every class, so any such
+        // write drops them.
+        if inbound_touches_shacl(&decorated_diff) {
+            self.forget_derived_shapes();
+        }
         // A `FlowInstance` minted by an agent this node acts for gets its
         // bookkeeping row now, before any pass can treat it as a catch-up
         // (#1424). Awaited, not spawned: a client's `start` is followed at
@@ -2633,10 +2786,7 @@ impl PerspectiveInstance {
     ) -> Result<bool, AnyError> {
         let is_flow = matches!(sdna_type, SdnaType::Flow);
         // Validate before touching the store: see `add_sdna_inner`.
-        let shacl_links = shacl_json
-            .as_deref()
-            .map(|shacl| parse_shacl_to_links(shacl, &name))
-            .transpose()?;
+        let shacl_links = sdna_type.parse_shacl(shacl_json.as_deref(), &name)?;
         let result = {
             let mutex = self.sdna_change_mutex.clone();
             let _guard = mutex.lock().await;
@@ -2748,6 +2898,36 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// A class and an interface must not share a target URI: they would share
+    /// one node shape, and each refresh would purge the other's triples.
+    fn refuse_class_interface_clash(&self, links: &[Link], shape_type: &str) -> Result<(), AnyError> {
+        let other = if shape_type == INTERFACE_TYPE {
+            "ad4m://SubjectClass"
+        } else {
+            INTERFACE_TYPE
+        };
+        for link in links {
+            if link.predicate.as_deref() != Some("rdf://type") || link.target != shape_type {
+                continue;
+            }
+            let clash = self.get_links_local(&LinkQuery {
+                source: Some(link.source.clone()),
+                predicate: Some("rdf://type".to_string()),
+                target: Some(other.to_string()),
+                ..Default::default()
+            })?;
+            if !clash.is_empty() {
+                return Err(anyhow!(
+                    "'{}' is already registered as {}; a class and an interface need different \
+                     target URIs",
+                    link.source,
+                    if other == INTERFACE_TYPE { "an interface" } else { "a subject class" }
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
     pub async fn add_sdna_batch(
         &mut self,
@@ -2763,10 +2943,7 @@ impl PerspectiveInstance {
         let entries = entries
             .into_iter()
             .map(|(name, sdna_code, sdna_type, shacl_json)| {
-                let shacl_links = shacl_json
-                    .as_deref()
-                    .map(|shacl| parse_shacl_to_links(shacl, &name))
-                    .transpose()?;
+                let shacl_links = sdna_type.parse_shacl(shacl_json.as_deref(), &name)?;
                 Ok((name, sdna_code, sdna_type, shacl_links))
             })
             .collect::<Result<Vec<_>, AnyError>>()?;
@@ -2818,6 +2995,7 @@ impl PerspectiveInstance {
             SdnaType::SubjectClass => "ad4m://has_subject_class",
             SdnaType::Flow => "ad4m://has_flow",
             SdnaType::Custom => "ad4m://has_custom_sdna",
+            SdnaType::Interface => "ad4m://has_interface",
         };
 
         let literal_name = Literal::from_string(name.clone())
@@ -2833,12 +3011,18 @@ impl PerspectiveInstance {
         //
         // When `shacl_links` is `None` and the class already exists, we
         // preserve the historical no-op behaviour: nothing to refresh.
-        if matches!(sdna_type, SdnaType::SubjectClass) {
-            // Check for any existing SubjectClass with this name, regardless of namespace
-            // We query by target (ad4m://SubjectClass) and then filter by class name
+        //
+        // An interface is refreshed the same way, among interfaces only.
+        if let Some(shape_type) = sdna_type.shape_type() {
+            if let Some(links) = &shacl_links {
+                self.refuse_class_interface_clash(links, shape_type)?;
+            }
+            // Check for any existing SubjectClass (or interface) with this
+            // name, regardless of namespace. We query by target
+            // (ad4m://SubjectClass) and then filter by class name
             let all_class_links = self.get_links_local(&LinkQuery {
                 predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
+                target: Some(shape_type.to_string()),
                 ..Default::default()
             })?;
 
@@ -3896,6 +4080,46 @@ impl PerspectiveInstance {
             .await
     }
 
+    /// [`Self::model_query_classes`] over classes named by the caller, or over
+    /// every installed class that implements an interface (#1435). An
+    /// interface query is a union query over those classes; none of them is
+    /// an empty result.
+    pub async fn model_query_selector(
+        &self,
+        selector: &super::model_query::ClassSelector,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        match selector {
+            super::model_query::ClassSelector::Classes(classes) => {
+                self.model_query_classes(classes, query_json).await
+            }
+            super::model_query::ClassSelector::Interface(interface) => {
+                let deadline = Instant::now() + MODEL_QUERY_SHAPE_WAIT;
+                let classes = self
+                    .interface_union(interface, query_json, MODEL_QUERY_SHAPE_WAIT)
+                    .await?;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                self.model_query_classes_within(&classes, query_json, remaining)
+                    .await
+            }
+        }
+    }
+
+    /// The union an interface query reads. What a union refuses is refused
+    /// first, so the answer does not depend on which classes are installed.
+    async fn interface_union(
+        &self,
+        interface: &super::model_query::InterfaceRef,
+        query_json: &str,
+        budget: Duration,
+    ) -> Result<super::model_query::QueryClasses, deno_core::anyhow::Error> {
+        let query: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
+            .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+        super::model_query::refuse_union_reads(&query)?;
+        let classes = self.classes_implementing_or_wait(interface, budget).await?;
+        Ok(super::model_query::QueryClasses::union(classes.to_vec()))
+    }
+
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
     async fn model_query_within(
@@ -3930,6 +4154,17 @@ impl PerspectiveInstance {
         // mis-placed filters error rather than silently admit everything.
         let produced_by_flow = super::model_query::take_produced_by_flow(&mut query_input)
             .map_err(deno_core::anyhow::Error::msg)?;
+
+        // An interface no installed class implements (#1435): nothing to read.
+        if classes.names().is_empty() {
+            return serde_json::to_string(&super::model_query::ModelQueryResult {
+                instances: vec![],
+                total_count: 0,
+            })
+            .map_err(|e| {
+                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+            });
+        }
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
@@ -5829,6 +6064,50 @@ impl PerspectiveInstance {
         query_json: String,
         connection_id: String,
     ) -> Result<(String, u64, String), AnyError> {
+        self.open_model_subscription(classes, None, query_json, connection_id)
+            .await
+    }
+
+    /// [`Self::model_subscribe_and_query`] over classes named by the caller or
+    /// over an interface (#1435). An interface subscription resolves its
+    /// classes again whenever the installed shapes change, so a class
+    /// installed after subscribe starts producing rows.
+    pub async fn model_subscribe_selector(
+        &self,
+        selector: super::model_query::ClassSelector,
+        query_json: String,
+        connection_id: String,
+    ) -> Result<(String, u64, String), AnyError> {
+        match selector {
+            super::model_query::ClassSelector::Classes(classes) => {
+                self.model_subscribe_and_query(classes, query_json, connection_id)
+                    .await
+            }
+            super::model_query::ClassSelector::Interface(interface) => {
+                // Before resolving: a change that lands meanwhile is seen.
+                let generation = self.shapes_generation();
+                let classes = self
+                    .interface_union(&interface, &query_json, MODEL_QUERY_SHAPE_WAIT)
+                    .await?;
+                self.open_model_subscription(
+                    classes,
+                    Some((interface, generation)),
+                    query_json,
+                    connection_id,
+                )
+                .await
+            }
+        }
+    }
+
+    /// The trigger SPARQL and predicate set of a model subscription over
+    /// `classes`: the union of each class's trigger set, matched on the
+    /// predicate alone.
+    fn model_trigger_query(
+        &self,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+    ) -> (String, HashSet<String>) {
         // Build trigger SPARQL from shape predicates resolved through the cache.
         // Each class contributes its own trigger set; the matcher below is
         // predicate-only, so the sets meet as their union.
@@ -5836,7 +6115,7 @@ impl PerspectiveInstance {
             .names()
             .iter()
             .flat_map(|class_name| {
-                self.build_model_trigger_predicates(class_name, Some(&query_json))
+                self.build_model_trigger_predicates(class_name, Some(query_json))
             })
             .collect();
         trigger_predicates.sort();
@@ -5857,7 +6136,17 @@ impl PerspectiveInstance {
             )
         };
 
-        let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
+        (trigger_sparql, trigger_predicates.into_iter().collect())
+    }
+
+    async fn open_model_subscription(
+        &self,
+        classes: super::model_query::QueryClasses,
+        interface: Option<(super::model_query::InterfaceRef, u64)>,
+        query_json: String,
+        connection_id: String,
+    ) -> Result<(String, u64, String), AnyError> {
+        let (trigger_sparql, predicate_set) = self.model_trigger_query(&classes, &query_json);
         let trigger = self.build_model_trigger(
             classes.names().iter().map(String::as_str),
             &query_json,
@@ -5872,6 +6161,7 @@ impl PerspectiveInstance {
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
                 classes: classes.clone(),
+                interface,
                 query_json: query_json.clone(),
                 trigger,
             }),
@@ -5922,7 +6212,72 @@ impl PerspectiveInstance {
         predicates
     }
 
+    /// Resolve every interface subscription (#1435) again whose classes were
+    /// resolved before the installed shapes last changed. Returns the ids
+    /// whose class list changed: those re-run this pass whatever was written,
+    /// because their old trigger knows nothing of the new classes.
+    async fn refresh_interface_subscriptions(&self) -> HashSet<String> {
+        let generation = self.shapes_generation();
+        let stale: Vec<(String, super::model_query::InterfaceRef, String)> = {
+            let queries = self.subscribed_queries.lock().await;
+            queries
+                .iter()
+                .filter_map(|(id, q)| {
+                    let params = q.model_query_params.as_ref()?;
+                    match &params.interface {
+                        Some((interface, at)) if *at != generation => {
+                            Some((id.clone(), interface.clone(), params.query_json.clone()))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+        let mut changed = HashSet::new();
+        for (id, interface, query_json) in stale {
+            let classes = match self.classes_implementing(&interface) {
+                Ok(classes) => super::model_query::QueryClasses::union(classes.to_vec()),
+                Err(e) => {
+                    // Keep the old list; this is retried on the next pass.
+                    log::warn!("interface subscription {id}: resolving its classes failed: {e}");
+                    continue;
+                }
+            };
+            let (trigger_sparql, predicates) = self.model_trigger_query(&classes, &query_json);
+            let mut queries = self.subscribed_queries.lock().await;
+            let Some(query) = queries.get_mut(&id) else {
+                continue;
+            };
+            let same = query
+                .model_query_params
+                .as_ref()
+                .is_some_and(|p| p.classes == classes);
+            let trigger = (!same).then(|| {
+                self.build_model_trigger(
+                    classes.names().iter().map(String::as_str),
+                    &query_json,
+                    &query.last_result,
+                )
+            });
+            let Some(params) = query.model_query_params.as_mut() else {
+                continue;
+            };
+            params.interface = Some((interface, generation));
+            if let Some(trigger) = trigger {
+                params.trigger = trigger;
+                params.classes = classes;
+                query.query = trigger_sparql;
+                query.predicates = predicates;
+                changed.insert(id);
+            }
+        }
+        changed
+    }
+
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
+        // First, so the queries collected below carry the new class lists.
+        let reresolved = self.refresh_interface_subscriptions().await;
+
         let mut query_futures: Vec<
             std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
         > = Vec::new();
@@ -5950,9 +6305,13 @@ impl PerspectiveInstance {
 
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
+            if reresolved.contains(&id) {
+                // An interface subscription whose classes just changed: its
+                // old trigger knew nothing of the new classes, so it runs.
+            }
             // Model subscriptions match each written link against their
             // trigger (see `subscription_triggers`), not the predicate alone.
-            if let (Some(params), ChangedPredicates::Specific(ref writes)) =
+            else if let (Some(params), ChangedPredicates::Specific(ref writes)) =
                 (&model_params, &changed_predicates)
             {
                 if !params.trigger.matches(writes, &mut trigger_lookups) {
