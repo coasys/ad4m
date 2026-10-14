@@ -96,7 +96,15 @@ fn build_signed_perspective(
             .map(|l| create_signed_expression(l, agent_context))
             .filter_map(Result::ok)
             .map(LinkExpression::from)
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
+            // No `status`: the perspective signature below must cover only
+            // what reaches the receiver, and a link language carries a
+            // signal's links without one (p-diff-sync's zome type has no such
+            // field). Signed with it, every signal from another node failed
+            // verification there.
+            .map(|l| DecoratedLinkExpression {
+                status: None,
+                ..DecoratedLinkExpression::from((l, LinkStatus::Shared))
+            })
             .collect();
         let perspective = DomainPerspective { links };
         let signed = create_signed_expression(perspective, agent_context)
@@ -152,11 +160,24 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         build_signed_perspective(&body.status, body.signed.unwrap_or(true), &agent_context)?;
 
     perspective_instance
-        .set_online_status(signed_perspective)
+        .set_online_status(signed_perspective, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))
+}
+
+/// The caller's own online status in the neighbourhood, as it last set it
+/// here, or `null`. Lets a client change part of its status without
+/// replacing the rest.
+async fn own_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
+    let did = crate::agent::did_for_context(&ctx.acts_as())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(
+        perspective.online_status_of(&did).await,
+    )?)
 }
 
 async fn has_telepresence(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -223,6 +244,12 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         set_online_status,
     )
     .guard(Guard::perspective(neighbourhood_update));
+    map.method::<NeighbourhoodUuidParams, Option<PerspectiveExpression>>(
+        "neighbourhood.ownOnlineStatus",
+        own_online_status,
+    )
+    .read()
+    .guard(Guard::perspective(neighbourhood_read));
     map.method::<NeighbourhoodUuidParams, bool>("neighbourhood.hasTelepresence", has_telepresence)
         .read()
         .guard(Guard::perspective(neighbourhood_read));
@@ -296,4 +323,47 @@ pub struct NeighbourhoodOnlineStatusParams {
     pub status: NeighbourhoodPerspectivePayload,
     #[ts(optional)]
     pub signed: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A signal as a link language delivers it on another node: p-diff-sync's
+    /// zome carries each link as author, data, timestamp and a proof of key and
+    /// signature, so nothing else survives the trip.
+    fn through_link_language(signal: &PerspectiveExpression) -> PerspectiveExpression {
+        let mut value = serde_json::to_value(signal).unwrap();
+        for link in value["data"]["links"].as_array_mut().unwrap() {
+            let link = link.as_object_mut().unwrap();
+            link.retain(|key, _| ["author", "data", "timestamp", "proof"].contains(&key.as_str()));
+            let proof = link["proof"].as_object_mut().unwrap();
+            proof.retain(|key, _| ["key", "signature"].contains(&key.as_str()));
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    // `sendBroadcastU` / `sendSignalU` / `setOnlineStatusU`: the executor signs
+    // the links and the perspective. A remote receiver must verify both.
+    #[test]
+    fn an_unsigned_payload_verifies_after_crossing_a_link_language() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let payload = json!({ "links": [
+            { "source": "{\"kind\":\"description\"}", "predicate": "ad4m://session/rtc", "target": "*" },
+        ]});
+        let signal = build_signed_perspective(&payload, false, &AgentContext::main_agent())
+            .unwrap_or_else(|e| panic!("signing failed: {}", e.message));
+
+        let mut received = through_link_language(&signal);
+        received.verify_signatures();
+
+        assert_eq!(
+            received.data.links[0].proof.valid,
+            Some(true),
+            "link signature"
+        );
+        assert_eq!(received.proof.valid, Some(true), "perspective signature");
+    }
 }
