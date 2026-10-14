@@ -142,7 +142,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-172 methods: Cap 56, Executor 33, Open 5, Operator 15, Owns 63.
+191 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 65.
 
 | Method | Guard |
 |---|---|
@@ -209,6 +209,7 @@ the guard checked:
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
 | `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `neighbourhood.ownOnlineStatus` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.publish` | `Owns(Perspective perspectiveUuid or perspectiveUUID, neighbourhood:CREATE)` |
 | `neighbourhood.sendBroadcast` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.sendSignal` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
@@ -305,6 +306,24 @@ the guard checked:
 | `runtime.unytWalletHistory` | `Operator` |
 | `runtime.updateNotification` | `Cap(agent:UPDATE)` |
 | `runtime.verifySignature` | `Cap(agent:READ)` |
+| `sfu.addIceCandidate` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callAnswerServerOffer` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callJoin` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callLeave` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callSetQualityPreference` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.cascadeStatus` | `Cap(neighbourhood:READ)` |
+| `sfu.ensureMembership` | `Operator` |
+| `sfu.getConfig` | `Cap(neighbourhood:READ)` |
+| `sfu.listRooms` | `Cap(neighbourhood:READ)` |
+| `sfu.qualityPreferences` | `Cap(neighbourhood:READ)` |
+| `sfu.sendData` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.servesAllMembers` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `sfu.setConfig` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.sfuPeerForNeighbourhood` | `Cap(neighbourhood:READ)` |
+| `sfu.sfuPeersForNeighbourhood` | `Cap(neighbourhood:READ)` |
+| `sfu.startRoom` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.status` | `Cap(neighbourhood:READ)` |
+| `sfu.stopRoom` | `Cap(neighbourhood:UPDATE)` |
 | `user.create` | `Cap(runtime.user_management:CREATE)` |
 | `user.credits` | `Operator` |
 | `user.emailTest` | `Executor(*:*)` |
