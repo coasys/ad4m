@@ -35,8 +35,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # On a pull request, `github.sha` is GitHub's merge of the PR into its base, but pkg.pr.new
+      # files the snapshot under the PR's head commit. Building the head commit makes
+      # `@coasys/ad4m@<sha>` the build of `<sha>`, whatever the base held when the job ran.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - uses: pnpm/action-setup@v4
