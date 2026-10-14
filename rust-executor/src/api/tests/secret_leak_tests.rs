@@ -179,6 +179,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
     let uuid = fx.perspective.as_str();
     match method {
         "agent.byDid" | "runtime.friendStatus" => json!({ "did": fx.main_did }),
+        "agent.byDIDs" => json!({ "dids": [fx.main_did] }),
         "agent.entanglementProofPreflight" => {
             json!({ "deviceKey": "leak-test-device", "deviceKeyType": "ethereum" })
         }

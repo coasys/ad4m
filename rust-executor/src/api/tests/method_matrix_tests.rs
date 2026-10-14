@@ -223,6 +223,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("agent.revokeToken", || json!({ "token": TARGET })),
     ("agent.addTrustedAgents", || json!({ "agents": [] })),
     ("agent.byDid", || json!({ "did": "did:key:z6Mk" })),
+    ("agent.byDIDs", || json!({ "dids": ["did:key:z6Mk"] })),
     (
         "agent.import",
         || json!({ "did": "did:key:z6Mk", "didDocument": "{}", "keystore": "k", "passphrase": "p" }),
@@ -511,6 +512,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
     ),
     ("perspective.commitBatch", || json!({ "batchId": "b" })),
+    ("perspective.discardBatch", || json!({ "batchId": "b" })),
     (
         "perspective.runInterpretation",
         || json!({ "transcript": [], "basePrefix": "test://" }),

@@ -142,12 +142,13 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-170 methods: Cap 55, Executor 33, Open 5, Operator 15, Owns 62.
+172 methods: Cap 56, Executor 33, Open 5, Operator 15, Owns 63.
 
 | Method | Guard |
 |---|---|
 | `agent.addEntanglementProofs` | `Executor(agent:UPDATE)` |
 | `agent.addTrustedAgents` | `Executor(runtime.trusted_agents:CREATE)` |
+| `agent.byDIDs` | `Cap(agent:READ)` |
 | `agent.byDid` | `Cap(agent:READ)` |
 | `agent.deleteEntanglementProofs` | `Executor(agent:UPDATE)` |
 | `agent.deleteTrustedAgents` | `Executor(runtime.trusted_agents:DELETE)` |
@@ -224,6 +225,7 @@ the guard checked:
 | `perspective.create` | `Cap(perspective:CREATE)` |
 | `perspective.createBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.discardBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |

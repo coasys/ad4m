@@ -27,6 +27,8 @@ pub mod neighbourhood_access_tests;
 #[cfg(test)]
 pub mod notification_ws_tests;
 #[cfg(test)]
+pub mod protocol_tests;
+#[cfg(test)]
 pub mod runtime_access_tests;
 #[cfg(test)]
 pub mod runtime_ws_tests;

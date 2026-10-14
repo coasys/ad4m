@@ -791,6 +791,16 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     })?)
 }
 
+/// `perspective.discardBatch` → `true` if the batch was open and is now
+/// dropped, `false` if it was already committed, discarded or timed out.
+async fn discard_batch(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: DiscardBatchRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let perspective = guarded_perspective(&params).await?;
+    Ok(Value::Bool(perspective.discard_batch(&body.batch_id).await))
+}
+
 async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -2275,7 +2285,12 @@ async fn get_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, Ws
 /// with `SHACLShape.fromLinks(entry.links, entry.shapeUri)`.  Equivalent to
 /// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
 /// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
+///
+/// Optional `names: string[]` restricts the reply to those shapes, in the
+/// perspective's order; unknown names are left out.
 async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let wanted = params.opt_str_set("names")?;
+
     let perspective = guarded_perspective(&params).await?;
 
     // Step 1: get all shape names
@@ -2290,6 +2305,7 @@ async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
         .iter()
         .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
         .filter(|name| seen_names.insert(name.clone()))
+        .filter(|name| wanted.as_ref().is_none_or(|w| w.contains(name)))
         .collect();
 
     // Step 2: resolve each shape's full link set. Concurrent per-shape
@@ -2461,6 +2477,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         commit_batch,
     )
     .guard(update());
+    map.method::<PerspectiveDiscardBatchParams, bool>("perspective.discardBatch", discard_batch)
+        .guard(update());
     map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
         "perspective.subscribeQuery",
         subscribe_query,
@@ -2601,7 +2619,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
-    map.method::<PerspectiveUuidParams, Vec<PerspectiveNamedShacl>>(
+    map.method::<PerspectiveGetAllShaclParams, Vec<PerspectiveNamedShacl>>(
         "perspective.getAllShacl",
         get_all_shacl,
     )
@@ -2783,6 +2801,24 @@ pub struct PerspectiveCommitBatchParams {
     pub uuid: String,
     #[serde(flatten)]
     pub body: CommitBatchRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveDiscardBatchParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: DiscardBatchRequest,
+}
+
+/// `names` restricts the reply to those shapes; unknown names are left out.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveGetAllShaclParams {
+    pub uuid: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub names: Option<Vec<String>>,
 }
 
 /// Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`:
