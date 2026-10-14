@@ -104,12 +104,6 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Duplicate agent fix [#641](https://github.com/coasys/ad4m/pull/641)
 
 ### Added
-- **Model query over an interface: select instances by shape, not class name** [#1435](https://github.com/coasys/ad4m/issues/1435)
-  - `perspective.modelQuery` / `modelSubscribe` take `{ implements: { properties, relations } }` or `{ interface: 'Name' }` in place of class names. The query reads every installed class that has what the interface asks for, as one union query (`__subjectClass`, `where`, `order`, paging and `include` as for a list of class names). No implementing class is an empty result.
-  - A property matches by name (`'text'`), whatever predicate it is stored under; `{ name, through }` pins the predicate and `{ name, datatype }` the datatype. A relation matches by predicate and direction (`{ through: 'ad4m://has_child' }`), never by name.
-  - `perspective.addInterface(name, definition)` registers a named interface: a SHACL node shape typed `ad4m://Interface` (`addSdna(name, '', 'interface', shacl)`). It is not a class: it is never instantiated or listed among subject classes.
-  - A subscription over an interface resolves its classes again when SDNA changes, so a class installed after it was opened starts producing rows.
-  - Same limits as any union: a `parent` scope with `limitPerAnchor` / `levels` and dotted order keys are refused.
 - **Headless executor guide and a self-updating staging deployment** [#1215](https://github.com/coasys/ad4m/issues/1215)
   - `docs-src/headless-executor.md`: how to run `ad4m-executor` as a `systemd --user` service without the launcher: config file, secrets through `LoadCredential=`, health check, update with a copy of the data directory, rollback, secret rotation, accounts without SMTP, a reverse proxy, and moving a node off the launcher. `deploy/staging/`: `systemd --user` units and `update.sh`, which builds the head of a branch, snapshots the data directory, checks `/health` plus an unlocked agent within a time limit, rolls back on failure and writes a `status.json`. CI runs shellcheck and a stubbed test of `update.sh` (`deploy-scripts` job).
 - **`ad4m-executor run --config <file>`: a headless executor's settings in one JSON file** [#1215](https://github.com/coasys/ad4m/issues/1215)
