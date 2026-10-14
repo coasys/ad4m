@@ -114,35 +114,70 @@ fn result_rows(json: &str) -> Vec<(String, String)> {
 
 const ALL: &str = r#"{"includeUnverified":true}"#;
 
-/// The resolved list is cached (the same `Arc` comes back) until SDNA
+async fn register_text_interface(perspective: &mut PerspectiveInstance, ctx: &AgentContext) {
+    perspective
+        .add_sdna(
+            "Text".into(),
+            String::new(),
+            SdnaType::Interface,
+            Some(TEXT_INTERFACE.into()),
+            ctx,
+        )
+        .await
+        .expect("add_sdna(Text interface)");
+}
+
+fn named_text() -> InterfaceRef {
+    InterfaceRef::Named("Text".into())
+}
+
+/// A named interface's list is cached (the same `Arc` comes back) until SDNA
 /// changes; a class installed after the first resolution is then included.
+/// An ad-hoc spec comes from the caller, so its list is never kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_class_list_is_cached_and_dropped_when_sdna_changes() {
     let (mut perspective, _shapes, ctx) =
         setup_perspective_no_llm(&[("Chat", CHAT_SDNA), ("Task", TASK_SDNA)]).await;
+    register_text_interface(&mut perspective, &ctx).await;
 
-    let first = perspective.classes_implementing(&has_text()).unwrap();
+    let first = perspective.classes_implementing(&named_text()).unwrap();
     assert_eq!(*first, vec!["Chat".to_string()]);
-    let again = perspective.classes_implementing(&has_text()).unwrap();
+    let again = perspective.classes_implementing(&named_text()).unwrap();
     assert!(
         Arc::ptr_eq(&first, &again),
         "a second resolution is served from the cache"
     );
 
+    let ad_hoc = perspective.classes_implementing(&has_text()).unwrap();
+    let ad_hoc_again = perspective.classes_implementing(&has_text()).unwrap();
+    assert_eq!(ad_hoc, first, "the same classes");
+    assert!(
+        !Arc::ptr_eq(&ad_hoc, &ad_hoc_again),
+        "an ad-hoc spec is resolved each time, not kept"
+    );
+
     install(&mut perspective, &ctx, "Block", BLOCK_SDNA).await;
-    let after = perspective.classes_implementing(&has_text()).unwrap();
+    let after = perspective.classes_implementing(&named_text()).unwrap();
     assert_eq!(*after, vec!["Block".to_string(), "Chat".to_string()]);
 }
 
 /// A shape synced in from a peer drops the cache too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_synced_shape_drops_the_class_list() {
-    let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[("Chat", CHAT_SDNA)]).await;
-    let before = perspective.classes_implementing(&has_text()).unwrap();
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[("Chat", CHAT_SDNA)]).await;
+    register_text_interface(&mut perspective, &ctx).await;
+    let before = perspective.classes_implementing(&named_text()).unwrap();
+    assert!(
+        Arc::ptr_eq(
+            &before,
+            &perspective.classes_implementing(&named_text()).unwrap()
+        ),
+        "cached before the change"
+    );
     let generation = perspective.shapes_generation();
     perspective.clear_shape_cache();
     assert!(perspective.shapes_generation() > generation);
-    let after = perspective.classes_implementing(&has_text()).unwrap();
+    let after = perspective.classes_implementing(&named_text()).unwrap();
     assert!(
         !Arc::ptr_eq(&before, &after),
         "resolved again after the shapes changed"
