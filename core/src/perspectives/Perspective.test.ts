@@ -69,6 +69,25 @@ describe('Perspective', () => {
             expect(first).toBeInstanceOf(LinkExpression)
             expect(first.hash()).toBe(early.hash())
         })
+
+        it('works on a snapshot held in a reactive Proxy', () => {
+            // What Vue reactive() / Svelte 5 $state do: every nested read returns a Proxy.
+            const deepProxy = <T extends object>(o: T): T => new Proxy(o, {
+                get(t, k, r) {
+                    const v = Reflect.get(t, k, r)
+                    return v && typeof v === 'object' ? deepProxy(v) : v
+                },
+            })
+            const p = deepProxy(snapshot())
+            const result = p.get(new LinkQuery({ source: 'a' }))
+            expect(result).toEqual([early, late])
+            expect(result[0]).toBeInstanceOf(LinkExpression)
+        })
+
+        it('accepts dates given as strings', () => {
+            const query = { predicate: 'p://name', fromDate: '2026-01-15T00:00:00Z' } as unknown as LinkQuery
+            expect(snapshot().get(query)).toEqual([middle])
+        })
     })
 
     it('getSingleTarget() leaves its argument unchanged', () => {

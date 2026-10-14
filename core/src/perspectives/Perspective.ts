@@ -43,14 +43,20 @@ export class Perspective {
      *  does not change this snapshot. */
     get(query: LinkQuery): LinkExpression[] {
         const { source, predicate, target, fromDate, untilDate, limit } = query ?? {} as LinkQuery
+        // Dates may arrive as strings (a plain-object query), as PerspectiveProxy accepts.
+        const from = fromDate ? new Date(fromDate).getTime() : undefined
+        const until = untilDate ? new Date(untilDate).getTime() : undefined
         let result = this.links.filter(l =>
             (!source || l.data.source === source) &&
             (!predicate || l.data.predicate === predicate) &&
             (!target || l.data.target === target) &&
-            (!fromDate || new Date(l.timestamp) >= fromDate) &&
-            (!untilDate || new Date(l.timestamp) <= untilDate))
+            (from === undefined || new Date(l.timestamp).getTime() >= from) &&
+            (until === undefined || new Date(l.timestamp).getTime() <= until))
         if (limit) result = result.slice(0, limit)
-        return result.map(l => Object.setPrototypeOf(structuredClone(l), Object.getPrototypeOf(l)))
+        // A JSON copy, not structuredClone: a framework may hold this snapshot
+        // in a reactive Proxy (Vue reactive(), Svelte 5 $state), and
+        // structuredClone throws DataCloneError on a Proxy.
+        return result.map(l => Object.setPrototypeOf(JSON.parse(JSON.stringify(l)), Object.getPrototypeOf(l)))
     }
 
     /** Convenience function to get the target of the first link that matches the given query
