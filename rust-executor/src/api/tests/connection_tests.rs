@@ -50,12 +50,14 @@ impl Socket {
         let connection_id = uuid::Uuid::new_v4().to_string();
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        // `admin_ctx()` holds every capability, so this socket can approve apps.
+        // `admin_ctx()` holds every capability, so this socket can approve apps
+        // and receive SFU events.
         let events = build_event_stream_for(
             TokenCheck::new("", false),
             Some(did.into()),
             None,
             false,
+            true,
             true,
             Some(connection_id.clone()),
         )

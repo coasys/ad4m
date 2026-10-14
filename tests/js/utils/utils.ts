@@ -316,8 +316,10 @@ export async function startExecutor(dataPath: string,
     return spawnExecutor(args, apiPort, { enableMcp });
 }
 
-/** The `ad4m-executor` binary the suites run. */
+/** The `ad4m-executor` binary the suites run: `EXECUTOR_PATH` if set (as in
+ *  the SFU wind tunnel's harness), else this checkout's release build. */
 export function executorBinary(): string {
+    if (process.env.EXECUTOR_PATH) return path.resolve(process.env.EXECUTOR_PATH);
     return path.resolve(__dirname, '..', '..', '..', 'target', 'release', 'ad4m-executor');
 }
 
