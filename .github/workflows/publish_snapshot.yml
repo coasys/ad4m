@@ -18,9 +18,11 @@ on:
       - dev
   pull_request:
 
-# A newer commit on the same branch or PR supersedes a run still in progress.
+# On a pull request, a newer commit supersedes a run still in progress. Each push to `dev` gets a
+# group of its own, so every `dev` commit gets a snapshot: with one group per ref, a merge landing
+# while the previous one publishes would cancel it, and a third would drop the queued second.
 concurrency:
-  group: publish-snapshot-${{ github.ref }}
+  group: publish-snapshot-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
