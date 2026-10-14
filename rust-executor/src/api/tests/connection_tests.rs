@@ -60,11 +60,12 @@ impl Socket {
         let ctx = Arc::new((*ctx).clone().on_connection(&connection_id));
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        // The socket holds every capability, so it can approve apps.
+        // The socket holds every capability, so it can approve apps and receive SFU events.
         let events = build_event_stream_for(
             unending(),
             Some(did.into()),
             false,
+            true,
             true,
             Some(connection_id.clone()),
         )

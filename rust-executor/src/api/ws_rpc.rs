@@ -169,6 +169,7 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
             ctx.session.clone(),
             ctx.is_operator(),
             can_approve_apps,
+            super::events_ws::sfu_events_allowed(&ctx),
             ctx.connection_id.clone(),
         )
         .await
