@@ -829,6 +829,16 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       expect(page.nextCursor).toBe("c2");
     });
 
+    it("paginate() pages by offset and drops a cursor from the starting query", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], totalCount: 0 });
+
+      await Recipe.paginate(mockPerspective, 10, 3, { after: "c1" } as any);
+
+      const q = sentQuery();
+      expect(q.after).toBeUndefined();
+      expect(q.offset).toBe(20);
+    });
+
     it("findAll forwards `after` and executeModelQuery returns nextCursor", async () => {
       mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c3" });
 

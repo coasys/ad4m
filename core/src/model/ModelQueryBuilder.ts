@@ -586,7 +586,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    // Page numbers page by offset; a cursor from the starting query has no meaning here.
+    const { after: _after, ...base } = this.queryParams || {};
+    const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.execute(paginationQuery);
     return { results, totalCount, pageSize, pageNumber };
   }

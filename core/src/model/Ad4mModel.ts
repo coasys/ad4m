@@ -1537,7 +1537,9 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    // Page numbers page by offset; a cursor from the starting query has no meaning here.
+    const { after: _after, ...base } = (query ?? {}) as Query;
+    const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
     return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
   }
