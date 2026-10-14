@@ -1716,13 +1716,29 @@ export class Ad4mModel {
       return;
     }
 
-    // New instance → create path
-    let batchCreatedHere = false;
-    if(!batchId) {
-      batchId = await this.perspective.createBatch()
-      batchCreatedHere = true;
+    // New instance → create path. With a caller's batch, the caller commits;
+    // take a snapshot so a later save() in the same batch updates instead of
+    // creating again (two competing "title" values).
+    if (batchId) {
+      await this.createIn(batchId);
+      this.takeSnapshot();
+      return;
     }
 
+    // Otherwise the create gets its own batch, discarded if any step fails.
+    const ownBatch = await this.perspective.createBatch();
+    try {
+      await this.createIn(ownBatch);
+      await this.perspective.commitBatch(ownBatch);
+    } catch (e) {
+      await this.perspective.discardBatch(ownBatch).catch(() => {});
+      throw e;
+    }
+    await this.refresh();
+  }
+
+  /** Stage the writes that create this instance in `batchId`. */
+  private async createIn(batchId: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
 
     // Track properties resolved through expression_create — a signed literal
@@ -1769,19 +1785,6 @@ export class Ad4mModel {
       if (value !== undefined && value !== null) {
         await this.setProperty(key, value, batchId);
       }
-    }
-
-    // If we got a batchId passed in, we let the caller decide when to commit.
-    // We can't call getData() since the instance won't exist in the perspective
-    // until the batch is committed.
-    if (batchCreatedHere) {
-      await this.perspective.commitBatch(batchId)
-      await this.refresh();
-    } else {
-      // Take a snapshot so that a subsequent save() within the same batch
-      // routes through the UPDATE path instead of CREATE, avoiding duplicate
-      // links (e.g. two competing "title" values).
-      this.takeSnapshot();
     }
   }
 

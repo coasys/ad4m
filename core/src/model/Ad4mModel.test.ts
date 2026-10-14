@@ -4165,6 +4165,45 @@ describe("delete() and incoming links", () => {
   });
 });
 
+describe("save() create path and its own batch", () => {
+  @Model({ name: "SaveBatchCard" })
+  class SaveBatchCard extends Ad4mModel {
+    @Flag({ through: "sb://kind", value: "sb://card" })
+    kind: string = "";
+  }
+
+  it("discards the batch it opened and rethrows when createSubject fails", async () => {
+    const failure = new Error("createSubject failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => { throw failure; }),
+    } as any;
+
+    await expect(new SaveBatchCard(perspective).save()).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.commitBatch).not.toHaveBeenCalled();
+  });
+
+  it("leaves a caller's batch open when createSubject fails", async () => {
+    const failure = new Error("createSubject failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "own"),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => { throw failure; }),
+    } as any;
+
+    await expect(new SaveBatchCard(perspective).save("caller-batch")).rejects.toBe(failure);
+    expect(perspective.createBatch).not.toHaveBeenCalled();
+    expect(perspective.discardBatch).not.toHaveBeenCalled();
+  });
+});
+
 describe("get() and update() on a missing instance", () => {
   @Model({ name: "MissCard" })
   class MissCard extends Ad4mModel {
