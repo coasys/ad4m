@@ -350,6 +350,23 @@ describe('PerspectiveProxy.getAllShacl reads shapes in one RPC', () => {
     })
 })
 
+describe('PerspectiveProxy.flowFired reads many instances in one RPC (P9)', () => {
+    beforeEach(() => {
+        mockCall.mockReset()
+        mockOn.mockReset().mockReturnValue(() => {})
+    })
+
+    it('the fired marks of 20 runs take one perspective.flowFired RPC', async () => {
+        const runs = Array.from({ length: 20 }, (_, i) => `flow://run/${i}`)
+        const entries = runs.map((instance, i) => ({ instance, fired: i % 2 ? [`${instance}/p`] : [] }))
+        mockCall.mockResolvedValue(entries)
+        const proxy = new PerspectiveProxy(makeHandle('uuid-flow', 'F'), new PerspectiveClient('http://localhost:12000', 'token'))
+
+        expect(await proxy.flowFired(runs)).toEqual(entries)
+        expect(mockCall.mock.calls).toEqual([['perspective.flowFired', { uuid: 'uuid-flow', instances: runs }]])
+    })
+})
+
 /**
  * Unit tests for PerspectiveProxy utility functions.
  */

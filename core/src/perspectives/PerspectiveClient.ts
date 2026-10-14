@@ -17,6 +17,7 @@ import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -408,11 +409,11 @@ export class PerspectiveClient {
         )
     }
 
-    /** The proposals of `instance` the calling agent's replica recorded as
-     *  fired, sorted. */
-    async flowFired(uuid: string, instance: string): Promise<string[]> {
+    /** For each of `instances`, in order, the proposals the calling agent's
+     *  replica recorded as fired, sorted. One call for all of them. */
+    async flowFired(uuid: string, instances: string[]): Promise<FlowFiredEntry[]> {
         return this.#apiClient.call(
-            'perspective.flowFired', { uuid, instance },
+            'perspective.flowFired', { uuid, instances },
         )
     }
 

@@ -1,5 +1,6 @@
 import { PerspectiveClient } from "./PerspectiveClient";
 import type { EventMap, ScopedEventName } from "../generated/api/Events";
+import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
     FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
@@ -573,12 +574,13 @@ export class PerspectiveProxy {
     }
 
     /**
-     * The proposals of `instance` whose votes settled an edge, as this
-     * agent's executor recorded them — the flow's history, sorted by URI.
+     * For each of `instances`, in order, the proposals whose votes settled an
+     * edge, as this agent's executor recorded them — the flow's history,
+     * sorted by URI (`fired: []` when none). One call for all of them.
      * Replaces the `resolvedAs` property proposals used to carry.
      */
-    async flowFired(instance: string): Promise<string[]> {
-        return await this.#client.flowFired(this.#handle.uuid, instance)
+    async flowFired(instances: string[]): Promise<FlowFiredEntry[]> {
+        return await this.#client.flowFired(this.#handle.uuid, instances)
     }
 
     /**

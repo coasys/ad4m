@@ -1521,21 +1521,26 @@ impl Ad4mDb {
         Ok(fired)
     }
 
-    /// Every proposal of `instance` that `agent_did` has marked fired, sorted.
-    pub fn get_flow_fired_for_instance(
+    /// For each of `instances`, in order, every proposal `agent_did` has
+    /// marked fired, sorted.
+    pub fn get_flow_fired_for_instances(
         &self,
         perspective: &str,
         agent_did: &str,
-        instance: &str,
-    ) -> Ad4mDbResult<Vec<String>> {
+        instances: &[String],
+    ) -> Ad4mDbResult<Vec<Vec<String>>> {
         let mut stmt = self.conn.prepare(
             "SELECT proposal FROM flow_fired_mark
              WHERE perspective = ?1 AND agent_did = ?2 AND instance = ?3 ORDER BY proposal",
         )?;
-        let proposals = stmt
-            .query_map(params![perspective, agent_did, instance], |row| row.get(0))?
-            .collect::<Result<Vec<String>, _>>()?;
-        Ok(proposals)
+        instances
+            .iter()
+            .map(|instance| {
+                stmt.query_map(params![perspective, agent_did, instance], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()
+                    .map_err(Into::into)
+            })
+            .collect()
     }
 
     /// Helper function to normalize predicate values from the database.

@@ -42,6 +42,7 @@ import type { ExpressionManyRequest } from "./ExpressionManyRequest";
 import type { ExpressionRendered } from "./ExpressionRendered";
 import type { ExpressionUrlRequest } from "./ExpressionUrlRequest";
 import type { FireOutcome } from "./FireOutcome";
+import type { FlowFiredEntry } from "./FlowFiredEntry";
 import type { FlowStateEntry } from "./FlowStateEntry";
 import type { FriendsListRequest } from "./FriendsListRequest";
 import type { GenerateAgentRequest } from "./GenerateAgentRequest";
@@ -251,7 +252,7 @@ export interface RpcMethods {
   "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
   "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
-  "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<string> };
+  "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<FlowFiredEntry> };
   "perspective.flowStates": { params: PerspectiveFlowStatesParams; result: Array<FlowStateEntry> };
   "perspective.flowValidOutputs": { params: PerspectiveFlowValidOutputsParams; result: Array<ValidOutput> };
   "perspective.get": { params: PerspectiveUuidParams; result: PerspectiveHandle | null };
