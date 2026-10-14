@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use tar::{Archive, Builder};
 
 use crate::config::Ad4mConfig;
+use crate::perspectives::sparql_store::SparqlStore;
 
 // ── Path helpers ───────────────────────────────────────────────────────────────
 
@@ -209,10 +210,30 @@ fn download(url: &str) -> Result<Vec<u8>, AnyError> {
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
+/// Checkpoint each store into `staging/perspectives/{uuid}/sparql_store`, the
+/// layout `create_snapshot` archives and `restore_snapshot` restores. Returns
+/// the `staging/perspectives` directory.
+pub fn checkpoint_stores(
+    stores: &[(String, std::sync::Arc<SparqlStore>)],
+    staging: &Path,
+) -> Result<PathBuf, AnyError> {
+    let persp_dir = staging.join("perspectives");
+    std::fs::create_dir_all(&persp_dir)
+        .map_err(|e| anyhow!("Failed to create {:?}: {}", persp_dir, e))?;
+    for (uuid, store) in stores {
+        let uuid_dir = persp_dir.join(uuid);
+        std::fs::create_dir_all(&uuid_dir)
+            .map_err(|e| anyhow!("Failed to create {:?}: {}", uuid_dir, e))?;
+        store.backup(&uuid_dir.join("sparql_store"))?;
+    }
+    Ok(persp_dir)
+}
+
 /// Backup all perspective data to the platform backend.
 ///
-/// 1. Flush all SPARQL stores (caller must ensure perspectives exist).
-/// 2. Create tar.gz of the `perspectives/` directory.
+/// 1. Checkpoint every open SPARQL store into a staging directory next to
+///    `perspectives/` (same filesystem, so the checkpoints hard-link).
+/// 2. Create tar.gz of the checkpoints, then remove the staging directory.
 /// 3. Presign a PUT URL from the platform backend.
 /// 4. Upload the archive.
 pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
@@ -224,10 +245,20 @@ pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
         return Ok(());
     }
 
-    // Flush all open SPARQL stores before snapshotting.
-    flush_all_stores();
-
-    let data = create_snapshot(&persp_dir)?;
+    let stores: Vec<_> = crate::perspectives::all_perspectives()
+        .into_iter()
+        .map(|p| (p.uuid.clone(), p.sparql_store.clone()))
+        .collect();
+    // A unique name, so a shutdown backup and a periodic one cannot collide.
+    let staging = persp_dir
+        .parent()
+        .unwrap_or(&persp_dir)
+        .join(format!(".snapshot-{}", uuid::Uuid::new_v4()));
+    let data = checkpoint_stores(&stores, &staging).and_then(|dir| create_snapshot(&dir));
+    if let Err(e) = std::fs::remove_dir_all(&staging) {
+        log::warn!("Failed to remove snapshot staging {:?}: {}", staging, e);
+    }
+    let data = data?;
     log::info!("Snapshot created: {} bytes", data.len());
 
     let presign_resp = presign(config, "put", &did)?;
@@ -264,18 +295,6 @@ pub fn restore_perspectives(config: &Ad4mConfig) -> Result<bool, AnyError> {
     );
     restore_snapshot(Path::new(data_path), &data)?;
     Ok(true)
-}
-
-/// Flush all registered perspective SPARQL stores.
-///
-/// Iterates the global PERSPECTIVES map and calls `flush()` on each store.
-fn flush_all_stores() {
-    let perspectives = crate::perspectives::all_perspectives();
-    for instance in &perspectives {
-        if let Err(e) = instance.sparql_store.flush() {
-            log::warn!("Failed to flush SPARQL store for {}: {}", instance.uuid, e);
-        }
-    }
 }
 
 /// Spawn a background task that periodically backs up perspectives to the platform backend.
@@ -350,6 +369,57 @@ mod tests {
             .join("perspectives/test-uuid-1234/sparql_store/wal.log");
         assert!(restored_wal.exists());
         assert_eq!(fs::read(&restored_wal).unwrap(), b"write-ahead-log");
+    }
+
+    /// Checkpointed stores round-trip through the archive: each restored store
+    /// opens with its links.
+    #[test]
+    fn checkpointed_stores_restore_with_their_links() {
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        use std::sync::Arc;
+
+        let signer = TestSigner::generate();
+        let link = |i: usize| {
+            let signed = signer.sign(
+                Link {
+                    source: format!("ad4m://s/{i}"),
+                    predicate: Some("ad4m://p".to_string()),
+                    target: format!("ad4m://t/{i}"),
+                }
+                .normalize(),
+            );
+            LinkExpression {
+                author: signed.author,
+                timestamp: signed.timestamp,
+                data: signed.data,
+                proof: signed.proof,
+                status: Some(LinkStatus::Shared),
+            }
+        };
+
+        let live = TempDir::new().unwrap();
+        let mut stores = Vec::new();
+        for (uuid, count) in [("uuid-a", 3), ("uuid-b", 5)] {
+            let dir = live.path().join("perspectives").join(uuid);
+            let store = Arc::new(SparqlStore::new(Some(dir.to_str().unwrap())).unwrap());
+            for i in 0..count {
+                store.add_link(&link(i)).unwrap();
+            }
+            stores.push((uuid.to_string(), store));
+        }
+
+        let staging = live.path().join(".snapshot-test");
+        let persp_dir = checkpoint_stores(&stores, &staging).unwrap();
+        let data = create_snapshot(&persp_dir).unwrap();
+
+        let restored = TempDir::new().unwrap();
+        restore_snapshot(restored.path(), &data).unwrap();
+        for (uuid, count) in [("uuid-a", 3), ("uuid-b", 5)] {
+            let dir = restored.path().join("perspectives").join(uuid);
+            let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
+            assert_eq!(store.get_all_links().unwrap().len(), count, "{uuid}");
+        }
     }
 
     #[test]
