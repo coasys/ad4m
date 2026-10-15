@@ -1050,12 +1050,69 @@ A query over an abstract class is a [union query](#querying-several-classes-at-o
 | Aliases | `alias: { Readable: "text" }` on a property or relation. Read through `Readable`, the row carries `text`, read through this property's predicate, and `where` / `order` use `text`. Read as `Message`, it stays `body`. A class that already has a property named `text` cannot also alias another property to `text`: registering it fails. |
 | Rows | Each row is the record's real class: `__subjectClass` names it. |
 | Creating | Refused: `Readable.create(…)` and `createSubject("Readable", …)` throw. |
-| Writing | Dispatched to the record's own classes: the classes it is among those `Readable` reads. `save()` (and `Readable.update(…)`) runs, for each, that class's setter for the property answering to the name (`text` writes `Message.body`); a record that is a `Message` and a `Poll` gets both written. Two classes writing one predicate write it once. A relation's `addX`, `removeX` and `setX` run each such class's adder, remover or setter for it; a class with no setter for the relation gets the members set on its adder's predicate. `delete()` and `removeSubject("Readable", …)` run each such class's destructor; the record's other classes are untouched. Only `Readable`'s names can be written through it, and a record of none of its classes is an error. Values are not converted: if one class holds HTML and another Markdown, both get what you wrote. MCP: `instance_update` and `instance_remove` dispatch the same way; collection membership and the tools generated for `Readable` (its reads only) go through the record's own class. |
+| Writing | Dispatched to the record's own classes, like a virtual call. See [Writing Through an Abstract Class](#writing-through-an-abstract-class). |
 | No names | An abstract class with no property and no relation is refused at registration. One that arrives that way anyhow (a sync, raw links) reads no class. |
 | Classifying | An abstract class is never one of a record's classes (`subjectClassesOf`, polymorphic relations, union queries). |
 | Later classes | A subscription over an abstract class picks up a class installed after it was opened. |
 | Unions | An abstract class is queried on its own, not in `classNames` with other classes. |
 | `implements` | Checked when the class is declared: `Message implements Readable but has no property or alias named \`text\``. It is a check only: the executor matches by structure whether a class lists it or not. |
+
+#### Writing Through an Abstract Class
+
+A row read through an abstract class can be edited and deleted like any other instance. The write goes to the record's own class, the way a virtual method call goes to the object's real type, so code that only knows `Readable` can edit a Flux `Message` without knowing it is one:
+
+```typescript
+// Reads `Message.body` under the name `text`.
+const [row] = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
+
+row.text = "edited";
+await row.save();
+// `Message.body` is now "edited". Nothing is written at `app://text`,
+// the abstract class's own predicate.
+(await Message.findAll(perspective))[0].body; // "edited"
+
+await row.delete();
+// Runs `Message`'s destructor: the record is gone from `Message`, and so from `Readable`.
+
+// Creating is refused: there is no record yet, so there is no class to write to.
+await Readable.create(perspective, { text: "hi" });   // throws
+await new Readable(perspective).save();                // throws
+// "'Readable' is an abstract class and cannot be created. …"
+```
+
+Relations work the same way. `addX`, `removeX` and `setX` on the row run the record's own class's adder, remover or setter:
+
+```typescript
+@Model({ name: "Folderish", abstract: true })
+class Folderish extends Ad4mModel {
+  @HasMany({ through: "app://child" })
+  children: string[] = [];
+}
+
+// Stores its members as `items`, at its own predicate.
+@Model({ name: "Box", implements: [Folderish] })
+class Box extends Ad4mModel {
+  @HasMany({ through: "box://item", alias: { Folderish: "children" } })
+  items: string[] = [];
+}
+
+const [folder] = await Folderish.findAll(perspective);
+await folder.addChildren(["ad4m://c1", "ad4m://c2"]); // Box.items: c1, c2
+await folder.removeChildren("ad4m://c1");            // Box.items: c2
+await folder.setChildren(["ad4m://c3"]);              // Box.items: c3
+// Nothing is written at `app://child`.
+```
+
+The rules:
+
+- **Which classes get the write.** Every class the record belongs to among those `Readable` reads. A record that is both a `Message` and a `Poll`, each with a property answering to `text`, gets both written. A class the record also belongs to but that `Readable` does not read is untouched, by writes and by `delete()`.
+- **Properties.** `save()` and `Readable.update(perspective, id, { text })` run, for each class, its setter for the property answering to the name. Two classes that store the name at the same predicate write it once, so a collection does not get the member twice.
+- **Relations.** A class with no setter for the relation gets `setX`'s members set on its adder's predicate.
+- **Names.** Only the abstract class's own names can be written through it. Through `Readable` that is `text`; the record's other properties are written through its own class.
+- **Values are not converted.** If one class holds HTML and another Markdown, both get exactly what you wrote.
+- **No class.** Writing to a record that is none of `Readable`'s classes is an error.
+- **Raw API.** `perspective.updateSubject("Readable", id, { text })` and `perspective.removeSubject("Readable", id)` dispatch the same way; the model methods above call them.
+- **MCP.** `instance_update` and `instance_remove` dispatch the same way. Collection membership and the tools generated for `Readable` (its reads only) go through the record's own class.
 
 ### Unverified Links
 
