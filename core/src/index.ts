@@ -16,9 +16,11 @@ export * from "./Literal";
 export * from "./perspectives/Perspective";
 export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
+export * from "./perspectives/LiveQuery";
 export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
+export * from "./perspectives/TextContent";
 // Also exports FlowFireOutcome / FlowProposeResult, the result shapes of the
 // flow write API — they live beside the `proposeTransition()` surface.
 export * from "./perspectives/FlowInstance";
@@ -30,6 +32,11 @@ export * from "./SmartLiteral";
 export * from "./model";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./neighbourhood/NeighbourhoodProxy";
+export * from "./neighbourhood/SfuTypes";
+export type { SfuNeighbourhoodApi } from "./neighbourhood/SfuManager";
+export type { Session, SessionTopology, SessionState, SessionEvent, SessionEventCallback, SessionCreateOptions } from "./neighbourhood/Session";
+export { MeshManager, createTelepresenceChannel, parseCallMessage, CALL_PROTOCOL_VERSION, DEFAULT_ICE_SERVERS } from "./neighbourhood/MeshManager";
+export type { SignallingChannel, TelepresenceProxy, MeshManagerOptions, MeshEvent, MeshEventCallback, MeshParticipant, RecoveryRung, CallBody, CallMessage, CallEnvelope, CallGenerations } from "./neighbourhood/MeshManager";
 export * from "./typeDefs";
 export * from "./DID";
 export * from "./utils";

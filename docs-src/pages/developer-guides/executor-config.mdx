@@ -49,6 +49,10 @@ ignored, and the error names the key by its path, e.g.
 | `auto_permit_cap_requests` | bool | `false` with a config file, `true` without | `--auto-permit-cap-requests` / `AD4M_AUTO_PERMIT_CAP_REQUESTS` |
 | `mcp_enabled` | bool | `false` | `--enable-mcp` / `AD4M_ENABLE_MCP` |
 | `mcp_port` | number | `3001` | `--mcp-port` / `AD4M_MCP_PORT` |
+| `sfu_bind_addr` | string (IP) | `127.0.0.1`; the outbound interface with `localhost: false` | `--sfu-bind-addr` / `AD4M_SFU_BIND_ADDR` |
+| `sfu_udp_port` | number | a free port, new at each start | `--sfu-udp-port` / `AD4M_SFU_UDP_PORT` |
+| `sfu_public_addr` | string (IP) | the STUN probe's address | `--sfu-public-addr` / `AD4M_SFU_PUBLIC_ADDR` |
+| `sfu_stun_server` | string (`host:port`) | no probe | `--sfu-stun-server` / `AD4M_SFU_STUN_SERVER` |
 | `log_config` | object: crate → level | see below | `RUST_LOG` overrides it |
 | `multi_user_config.enabled` | bool | `false` | `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` |
 | `multi_user_config.tls_config` | object or `null` | no TLS | see below |
@@ -91,6 +95,22 @@ flag turns TLS on, and TLS without both a certificate and a key stops `run`.
 
 With `enabled: true`, `run` stops unless a password is set (see
 [Secrets](#secrets)).
+
+**The `sfu_*` keys** decide where callers send media. The SFU binds
+`sfu_bind_addr` on `sfu_udp_port` and offers that address to every caller.
+On a machine behind NAT, set `sfu_bind_addr` to its LAN address, fix
+`sfu_udp_port` and forward that UDP port on the router: the SFU then also
+offers its public address on that port, which callers outside the LAN reach.
+The public address is `sfu_public_addr` if set (it needs `sfu_udp_port`),
+otherwise the address the `sfu_stun_server` reports, asked once at startup. `sfu.status` reports
+`isPublic: true` once the STUN server sees the public address the SFU offers.
+A fixed port that is taken stops `run`. The public address is read at
+startup only: after the public IP changes, restart the executor.
+
+```json
+{ "sfu_bind_addr": "192.168.0.10", "sfu_udp_port": 40000,
+  "sfu_stun_server": "stun.l.google.com:19302" }
+```
 
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
 per crate over the defaults `rust_executor: info`, `holochain: warn`,

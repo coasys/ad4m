@@ -55,6 +55,12 @@ it in older docs.
   `core/src/generated/api/RpcMethods.ts`. After changing a method or a type it
   reaches, regenerate: `cd core && pnpm run generate:api-types`. A unit test fails
   when the committed files are stale.
+- **Events are typed and opt-in.** Every pushed event has a name in
+  `events_ws::events` and a payload type in `event_specs()` (generates
+  `Events.ts`); SDK code listens with `ApiClient.on(name, handler)`. A socket
+  gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
+  client must send the watch and wait for its reply before it triggers the
+  event (see `tests/js/helpers/sfu/events.ts`).
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
@@ -99,6 +105,76 @@ and agent-language of every executor at shared directories under
 between executors, the server-link suite (and, for p-diff-sync itself, the
 Holochain suite); such suites take a `LinkLangConfig` (`utils/linkLangConfig.ts`)
 so the same file runs on both link languages.
+
+### SFU wind tunnel
+
+| Suite | Languages | CI |
+|---|---|---|
+| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | every push, `integration-tests-sfu-e2e` |
+| `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
+
+- **E2E worlds use one executor without Holochain.** Users of one executor
+  share a neighbourhood's perspective as its owners, so links, the call
+  policy, presence and signals stay on the executor; the local link language
+  (a fresh `uid` per neighbourhood) only gives each neighbourhood its own
+  address. The world refuses to start on Holochain-prepared languages.
+- **E2E scenarios (`tests/js/helpers/sfu/e2e/`) call only through the SDK.**
+  Each participant is a managed user in its own Node process
+  (`participant-child.ts`) running `createSession` on `@roamhq/wrtc`, as WE's
+  adapter does. Test code must not use raw call RPCs, `ensureMembership` or
+  `WebRtcPeer`; the first test in `sfu-e2e.test.ts` fails if it does (E11's
+  outsider is the one exemption). The admin client only builds the world.
+- Each user sends its own tone (`toneFor(i)`) and a video of known size, so
+  receivers check *who* they hear and at which simulcast layer.
+- E6 shapes the loopback with `tc netem`, only for its world's ports
+  (`setNetemOnPorts`: executor API and SFU UDP), and skips without
+  passwordless `sudo -n tc`. Never impair the whole of `lo` in a PR job:
+  machine runners on one host share it, and every other job's localhost
+  RPC times out (seen as `executeCommands`/`otherAgents` 30 s timeouts).
+- E14 runs the SFU behind a simulated NAT: the executor binds 127.0.0.1 on a
+  fixed port and advertises 127.0.0.2 (`executorEnv` in the world spec);
+  `reachOnlyThrough` DNATs 127.0.0.2:P to 127.0.0.1:P and drops direct UDP
+  to 127.0.0.1:P, for that port only. It asserts each caller's selected
+  candidate pair (`Snapshot.selectedRemotes`, from WebRTC stats) is the
+  advertised address. Skips without passwordless `sudo -n iptables -t nat`.
+- A participant process killed by a signal nobody sent (the libwebrtc binding
+  crashes rarely while closing) reruns the scenario once; an assertion failure
+  never does.
+- Set `E2E_DEBUG=1` to trace each description (connection, SDP version,
+  DTLS role, refusals), tracks, sent simulcast layers, peer states and
+  recoveries per participant, and world phase timings. `E2E_DEBUG=stack`
+  adds the caller of each local description.
+
+SFU behaviour the scenarios pin: the executor publishes `sfu-room-roster`
+(only to the listed DIDs) after every join and departure, and the SDK keys
+participants by DID from it; tracks are attributed only by the `trackMapping`
+mids; `sfu-data` never echoes to its sender; room capacity comes from the
+space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
+per-node capacity only drives redirects; the server drops a peer only after
+10 s of ICE `Disconnected`; the SDK rebuilds a failed connection and retries
+the join for 120 s.
+
+SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
+binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
+that is taken stops startup), runs the STUN probe on that same socket before
+the event loop owns it, and `assess` decides the advertised address
+(`sfu_public_addr`, else the probe's reflexive IP on the fixed port) and the
+reachability (`public` once STUN sees the advertised IP). Answers carry the
+host candidate and, when advertised, a srflx candidate on the same socket;
+str0m matches inbound STUN to the host candidate by destination, so the
+event loop's `destination: local_addr` stays right. Cascade pipes offer the
+host candidate only. The public address is read at startup: an IP change
+needs a restart. The four `sfu_*` keys live in the config file too; a build
+without them refuses them as unknown keys.
+
+Mesh signalling rules the scenarios pin (`core/src/neighbourhood/MeshManager.ts`):
+offers are numbered per connection and answers name theirs, so a late answer
+or an overtaken offer is dropped; `onnegotiationneeded` only ever offers and
+the answering path only ever answers (an implicit description picked from the
+state swaps them during a rollback); the answerer holds its own first offer
+until the pair connects; `join` waits for the channel to listen before the
+session announces presence; the buffer for not-yet-listed peers never drops a
+description.
 
 ### Port Conflicts
 

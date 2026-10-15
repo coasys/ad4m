@@ -475,9 +475,10 @@ impl Ad4mMcpHandler {
                      server (config `dynamicClassTools` is false). Use the generic instance \
                      tools instead: describe_perspective, instance_create, instance_query, \
                      instance_get, instance_update, instance_add_to_collection, \
-                     instance_remove_from_collection, instance_remove, instance_transcript \
-                     — pass the class name as `class_name`; add_child / get_children for \
-                     the raw ad4m://has_child tree. To re-enable per-class tools start the \
+                     instance_remove_from_collection, instance_remove — pass the class \
+                     name as `class_name`; instance_transcript to read a node's children \
+                     that carry text; add_child / get_children for the raw \
+                     ad4m://has_child tree. To re-enable per-class tools start the \
                      executor with `--dynamic-class-tools true`.",
                     tool_name
                 ),
