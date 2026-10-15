@@ -2316,7 +2316,13 @@ async fn abstract_setup() -> (Ad4mMcpHandler, String, PerspectiveGuard) {
     .await
 }
 
-async fn create_in(handler: &Ad4mMcpHandler, uuid: &str, class: &str, base: Option<&str>, values: &[(&str, Value)]) -> String {
+async fn create_in(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class: &str,
+    base: Option<&str>,
+    values: &[(&str, Value)],
+) -> String {
     let created = parse(
         &handler
             .instance_create(Parameters(InstanceCreateParams {
@@ -2346,7 +2352,12 @@ async fn get_in(handler: &Ad4mMcpHandler, uuid: &str, class: &str, base: &str) -
     )
 }
 
-async fn links_of(uuid: &str, source: Option<&str>, predicate: Option<&str>, target: Option<&str>) -> Vec<String> {
+async fn links_of(
+    uuid: &str,
+    source: Option<&str>,
+    predicate: Option<&str>,
+    target: Option<&str>,
+) -> Vec<String> {
     crate::perspectives::get_perspective(uuid)
         .unwrap()
         .get_links(&LinkQuery {
@@ -2358,7 +2369,14 @@ async fn links_of(uuid: &str, source: Option<&str>, predicate: Option<&str>, tar
         .await
         .unwrap()
         .into_iter()
-        .map(|l| format!("{} {} {}", l.data.source, l.data.predicate.unwrap_or_default(), l.data.target))
+        .map(|l| {
+            format!(
+                "{} {} {}",
+                l.data.source,
+                l.data.predicate.unwrap_or_default(),
+                l.data.target
+            )
+        })
         .collect()
 }
 
@@ -2393,7 +2411,10 @@ async fn instance_writes_through_an_abstract_class_dispatch() {
             .await,
     );
     assert_eq!(update["success"], true, "{update}");
-    assert_eq!(get_in(&handler, &uuid, "Thread", &thread).await["body"], "edited");
+    assert_eq!(
+        get_in(&handler, &uuid, "Thread", &thread).await["body"],
+        "edited"
+    );
 
     let collection = |item: &str| InstanceAddToCollectionParams {
         perspective_id: uuid.clone(),
@@ -2402,12 +2423,22 @@ async fn instance_writes_through_an_abstract_class_dispatch() {
         collection: "replies".into(),
         item_uri: item.into(),
     };
-    let added = parse(&handler.instance_add_to_collection(Parameters(collection("ad4m://obj/r1"))).await);
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(collection("ad4m://obj/r1")))
+            .await,
+    );
     assert_eq!(added["links_added"], 1, "{added}");
-    let again = parse(&handler.instance_add_to_collection(Parameters(collection("ad4m://obj/r1"))).await);
+    let again = parse(
+        &handler
+            .instance_add_to_collection(Parameters(collection("ad4m://obj/r1")))
+            .await,
+    );
     assert_eq!(again["already_member"], true, "{again}");
     assert_eq!(
-        links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None).await.len(),
+        links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None)
+            .await
+            .len(),
         1
     );
 
@@ -2423,10 +2454,19 @@ async fn instance_writes_through_an_abstract_class_dispatch() {
             .await,
     );
     assert_eq!(removed["links_removed"], 1, "{removed}");
-    assert!(links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None).await.is_empty());
+    assert!(
+        links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None)
+            .await
+            .is_empty()
+    );
 
     for predicate in ["flux://text", "flux://reply"] {
-        assert!(links_of(&uuid, Some(&thread), Some(predicate), None).await.is_empty(), "{predicate}");
+        assert!(
+            links_of(&uuid, Some(&thread), Some(predicate), None)
+                .await
+                .is_empty(),
+            "{predicate}"
+        );
     }
 }
 
@@ -2462,21 +2502,46 @@ async fn generated_tools_of_an_abstract_class_dispatch() {
         args.extend(extra.iter().cloned());
         args
     };
-    let set = call_tool(&handler, "readable_set_body", &at(&[("value", json!("edited"))])).await;
+    let set = call_tool(
+        &handler,
+        "readable_set_body",
+        &at(&[("value", json!("edited"))]),
+    )
+    .await;
     assert!(set.contains("\"success\": true"), "{set}");
-    assert_eq!(get_in(&handler, &uuid, "Thread", &thread).await["body"], "edited");
+    assert_eq!(
+        get_in(&handler, &uuid, "Thread", &thread).await["body"],
+        "edited"
+    );
 
-    let add = call_tool(&handler, "readable_add_replies", &at(&[("value", json!("ad4m://obj/r1"))])).await;
+    let add = call_tool(
+        &handler,
+        "readable_add_replies",
+        &at(&[("value", json!("ad4m://obj/r1"))]),
+    )
+    .await;
     assert!(add.contains("\"success\": true"), "{add}");
     assert_eq!(
-        links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None).await.len(),
+        links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None)
+            .await
+            .len(),
         1
     );
-    let remove = call_tool(&handler, "readable_remove_replies", &at(&[("value", json!("ad4m://obj/r1"))])).await;
+    let remove = call_tool(
+        &handler,
+        "readable_remove_replies",
+        &at(&[("value", json!("ad4m://obj/r1"))]),
+    )
+    .await;
     assert!(remove.contains("\"links_removed\": 1"), "{remove}");
 
     for predicate in ["flux://text", "flux://reply"] {
-        assert!(links_of(&uuid, Some(&thread), Some(predicate), None).await.is_empty(), "{predicate}");
+        assert!(
+            links_of(&uuid, Some(&thread), Some(predicate), None)
+                .await
+                .is_empty(),
+            "{predicate}"
+        );
     }
 
     let delete = call_tool(&handler, "readable_delete", &at(&[])).await;
@@ -2493,7 +2558,14 @@ async fn generated_tools_of_an_abstract_class_dispatch() {
 async fn a_delete_through_an_abstract_class_keeps_the_records_other_classes() {
     let (handler, uuid, _guard) = abstract_setup().await;
     let both = create_in(&handler, &uuid, "Thread", None, &[("body", json!("hello"))]).await;
-    create_in(&handler, &uuid, "Tagged", Some(&both), &[("label", json!("kept"))]).await;
+    create_in(
+        &handler,
+        &uuid,
+        "Tagged",
+        Some(&both),
+        &[("label", json!("kept"))],
+    )
+    .await;
     let only = create_in(&handler, &uuid, "Thread", None, &[("body", json!("bye"))]).await;
     for child in [&both, &only] {
         let linked = parse(
@@ -2517,10 +2589,27 @@ async fn a_delete_through_an_abstract_class_keeps_the_records_other_classes() {
     let removed = parse(&handler.instance_remove(Parameters(remove(&both))).await);
     assert_eq!(removed["success"], true, "{removed}");
     let gone = get_in(&handler, &uuid, "Thread", &both).await;
-    assert!(gone["error"].as_str().unwrap_or("").contains("No Thread instance"), "{gone}");
-    assert!(links_of(&uuid, Some(&both), Some("flux://thread_body"), None).await.is_empty());
-    assert_eq!(get_in(&handler, &uuid, "Tagged", &both).await["label"], "kept");
-    assert_eq!(links_of(&uuid, None, None, Some(&both)).await.len(), 1, "the record is still a child");
+    assert!(
+        gone["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("No Thread instance"),
+        "{gone}"
+    );
+    assert!(
+        links_of(&uuid, Some(&both), Some("flux://thread_body"), None)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        get_in(&handler, &uuid, "Tagged", &both).await["label"],
+        "kept"
+    );
+    assert_eq!(
+        links_of(&uuid, None, None, Some(&both)).await.len(),
+        1,
+        "the record is still a child"
+    );
 
     let removed = parse(&handler.instance_remove(Parameters(remove(&only))).await);
     assert_eq!(removed["success"], true, "{removed}");

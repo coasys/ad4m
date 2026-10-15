@@ -64,8 +64,8 @@ pub use create::InstanceCreateParams;
 pub use describe::DescribePerspectiveParams;
 pub use query::{InstanceGetParams, InstanceQueryParams};
 pub use transcript::InstanceTranscriptParams;
-pub use update::{InstanceRemoveParams, InstanceUpdateParams};
 pub(crate) use update::update_in_batch;
+pub use update::{InstanceRemoveParams, InstanceUpdateParams};
 pub(crate) use validate::{
     coerce_scalar, describe_value, normalize_filter, validate_properties, validation_failure,
     ValidationError, WriteMode,

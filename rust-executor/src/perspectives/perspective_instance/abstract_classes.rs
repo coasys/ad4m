@@ -202,7 +202,11 @@ impl PerspectiveInstance {
 
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads. Never empty.
-    pub(super) fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
+    pub(super) fn write_targets(
+        &self,
+        abstract_class: &str,
+        base: &str,
+    ) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
         let own = self
             .subject_classes_of(&[base.to_string()])?

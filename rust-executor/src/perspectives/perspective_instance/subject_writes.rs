@@ -177,7 +177,8 @@ impl PerspectiveInstance {
                 if kept.as_ref().is_some_and(|k| k.contains(&predicate)) {
                     continue;
                 }
-                let described = format!("{} -[{predicate}]-> {}", link.data.source, link.data.target);
+                let described =
+                    format!("{} -[{predicate}]-> {}", link.data.source, link.data.target);
                 self.remove_link(link.into(), None)
                     .await
                     .map_err(|e| CascadeFailure {

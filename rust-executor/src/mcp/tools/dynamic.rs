@@ -1008,7 +1008,9 @@ impl Ad4mMcpHandler {
             Ok(v) => v.to_string(),
             Err(e) => return e,
         };
-        let values = [(property_name.to_string(), json!(value))].into_iter().collect();
+        let values = [(property_name.to_string(), json!(value))]
+            .into_iter()
+            .collect();
         match self
             .set_properties(perspective_id, class_name, &expression_address, values)
             .await
@@ -1033,7 +1035,8 @@ impl Ad4mMcpHandler {
         expression_address: &str,
         values: serde_json::Map<String, serde_json::Value>,
     ) -> Result<String, String> {
-        let (mut perspective, agent_context) = self.get_writable_perspective(perspective_id).await?;
+        let (mut perspective, agent_context) =
+            self.get_writable_perspective(perspective_id).await?;
         let shape = perspective
             .get_shape(class_name)
             .map_err(|e| format!("Error reading class '{class_name}': {e:#}"))?;
@@ -1053,7 +1056,10 @@ impl Ad4mMcpHandler {
         }
         let read_only = instances::check_setters(&perspective, &shape, &typed).await;
         if let Some(e) = read_only.first() {
-            return Err(format!("Error setting property '{}': {}", e.property, e.problem));
+            return Err(format!(
+                "Error setting property '{}': {}",
+                e.property, e.problem
+            ));
         }
         instances::update_in_batch(
             &mut perspective,
