@@ -24,7 +24,7 @@ import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunIn
 // would otherwise be a cycle).
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
-    FlowReceiptVerdict, FlowValidOutput,
+    FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
 } from "./FlowInstance";
 
 
@@ -387,6 +387,22 @@ export class PerspectiveClient {
         )
     }
 
+    /** The calling agent's recorded state of each flow instance it has
+     *  derived, optionally narrowed to `instances`. */
+    async flowStates(uuid: string, instances?: string[]): Promise<FlowStateEntry[]> {
+        return this.#apiClient.call(
+            'perspective.flowStates', { uuid, instances },
+        )
+    }
+
+    /** The proposals of `instance` the calling agent's replica recorded as
+     *  fired, sorted. */
+    async flowFired(uuid: string, instance: string): Promise<string[]> {
+        return this.#apiClient.call(
+            'perspective.flowFired', { uuid, instance },
+        )
+    }
+
     /** Mint and store the receipt for a completed flow run. Fails while the
      *  run has not settled into a terminal state, and when an output's
      *  content no longer matches what the quorum committed to. */
@@ -440,6 +456,19 @@ export class PerspectiveClient {
     async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
         return this.#apiClient.call(
             'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
+        )
+    }
+
+    /** Through an abstract class (#1435), the executor writes to the record's own classes. */
+    async updateSubject(uuid: string, subjectClass: string, expressionAddress: string, values: string, batchId?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.updateSubject', { uuid, subjectClass, expressionAddress, values, batchId }
+        )
+    }
+
+    async removeSubject(uuid: string, subjectClass: string, expressionAddress: string, batchId?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.removeSubject', { uuid, subjectClass, expressionAddress, batchId }
         )
     }
 

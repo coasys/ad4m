@@ -31,6 +31,11 @@
 //! | `query-subscription-update`   | (inline)      | own connection         | Live query update (`/api/v1/ws` only)|
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
+//! | `sfu-call-renegotiation-offer` | (inline)    | `targetDid`            | SFU server-pushed SDP offer          |
+//! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere (`acceptRedirect` joins only) |
+//! | `sfu-data`                    | (inline)      | participant of the room | SFU data channel message            |
+//! | `sfu-room-roster`             | (inline)      | participant of the room | Who is in a call room now           |
+//! | `flow-state-changed`          | (inline)      | agent DID, strict      | A flow instance's state moved on that agent's replica (#1424) |
 //!
 //! ## Client → Server messages
 //!
@@ -96,12 +101,14 @@ impl LazyDid {
 use crate::pubsub::{
     get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
     AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
-    AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC,
+    AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC, FLOW_STATE_CHANGED_TOPIC,
     HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
     PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
     PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    SFU_CALL_RENEGOTIATION_OFFER_TOPIC, SFU_DATA_CHANNEL_TOPIC, SFU_MIGRATE_TOPIC,
+    SFU_ROOM_ROSTER_TOPIC,
 };
 
 use super::auth::{AppState, AuthContext};
@@ -139,9 +146,14 @@ pub mod events {
     pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
     pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
     pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
+    pub const SFU_CALL_RENEGOTIATION_OFFER: &str = "sfu-call-renegotiation-offer";
+    pub const SFU_MIGRATE: &str = "sfu-migrate";
+    pub const SFU_DATA: &str = "sfu-data";
+    pub const SFU_ROOM_ROSTER: &str = "sfu-room-roster";
+    pub const FLOW_STATE_CHANGED: &str = "flow-state-changed";
 
     /// Every name above, in stream-builder order.
-    pub const ALL: [&str; 20] = [
+    pub const ALL: [&str; 25] = [
         AGENT_STATUS_CHANGED,
         AGENT_UPDATED,
         APPS_CHANGED_EVENT,
@@ -161,7 +173,12 @@ pub mod events {
         MODEL_LOADING_STATUS,
         QUERY_SUBSCRIPTION_UPDATE,
         AUTO_PROCESSOR_EVENT,
+        SFU_CALL_RENEGOTIATION_OFFER,
         AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
+        SFU_MIGRATE,
+        SFU_DATA,
+        SFU_ROOM_ROSTER,
+        FLOW_STATE_CHANGED,
     ];
 }
 
@@ -213,6 +230,8 @@ pub fn event_specs() -> Vec<EventSpec> {
     use crate::perspectives::auto_processor::events::{
         AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     };
+    use crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent;
+    use crate::sfu::{SfuCallRenegotiationOffer, SfuDataMessage, SfuMigrateEvent, SfuRoomRoster};
     use events::*;
     vec![
         EventSpec::of::<AgentStatusChangedEvent>(AGENT_STATUS_CHANGED, false),
@@ -235,6 +254,11 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<QuerySubscriptionUpdateEvent>(QUERY_SUBSCRIPTION_UPDATE, true),
         EventSpec::of::<AutoProcessorEvent>(AUTO_PROCESSOR_EVENT, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, true),
+        EventSpec::of::<SfuCallRenegotiationOffer>(SFU_CALL_RENEGOTIATION_OFFER, false),
+        EventSpec::of::<SfuMigrateEvent>(SFU_MIGRATE, false),
+        EventSpec::of::<SfuDataMessage>(SFU_DATA, false),
+        EventSpec::of::<SfuRoomRoster>(SFU_ROOM_ROSTER, false),
+        EventSpec::of::<FlowStateChangedEvent>(FLOW_STATE_CHANGED, true),
     ]
 }
 
@@ -260,11 +284,30 @@ pub async fn events_ws(
     let is_admin = context.is_admin_credential;
     let can_approve_apps =
         check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
+    let sfu_events = sfu_events_allowed(&context);
     let token_check = TokenCheck::new(&context.auth_token, is_admin);
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_events_ws(socket, token_check, user_email, is_admin, can_approve_apps)
+        handle_events_ws(
+            socket,
+            token_check,
+            user_email,
+            is_admin,
+            can_approve_apps,
+            sfu_events,
+        )
     }))
+}
+
+/// The SFU streams describe calls in neighbourhoods, so they need what the
+/// `sfu.*` reads need: `NEIGHBOURHOOD_READ`, not just the `AGENT_READ` that
+/// opens the event socket.
+pub(crate) fn sfu_events_allowed(ctx: &crate::types::RequestContext) -> bool {
+    check_capability(
+        &ctx.capabilities,
+        &crate::agent::capabilities::NEIGHBOURHOOD_READ_CAPABILITY,
+    )
+    .is_ok()
 }
 
 /// Build the merged event stream for a given user.
@@ -278,6 +321,7 @@ pub(crate) async fn build_event_stream(
     user_email: Option<String>,
     is_admin: bool,
     can_approve_apps: bool,
+    sfu_events: bool,
     connection_id: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     // The session's own agent, taken from the session: a token that stops decoding cannot
@@ -292,6 +336,7 @@ pub(crate) async fn build_event_stream(
         user_email,
         is_admin,
         can_approve_apps,
+        sfu_events,
         connection_id,
     )
     .await
@@ -305,6 +350,7 @@ pub(crate) async fn build_event_stream_for(
     user_email: Option<String>,
     is_admin: bool,
     can_approve_apps: bool,
+    sfu_events: bool,
     connection_id: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
@@ -331,11 +377,13 @@ pub(crate) async fn build_event_stream_for(
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
-    // #881: "Resolve the DID after it becomes available"). The auto-processor
-    // and notification streams share one lazy cell.
+    // #881: "Resolve the DID after it becomes available"). The auto-processor,
+    // notification and SFU streams share one lazy cell.
     let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
     let d_notif = d_auto_processor.clone();
+    let d_sfu = d_auto_processor.clone();
+    let d_flow_state = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -627,6 +675,34 @@ pub(crate) async fn build_event_stream_for(
             })
     };
 
+    // ── SFU server-initiated renegotiation offers ──
+    // Targeted at one specific participant via the `targetDid` field on
+    // the published `SfuCallRenegotiationOffer` JSON.  Clients subscribe
+    // to this single topic and apply the offer as a fresh remote
+    // description, then post the answer via `sfu.callAnswerServerOffer`.
+    let s_sfu_reneg = {
+        let rx = pubsub.subscribe(&SFU_CALL_RENEGOTIATION_OFFER_TOPIC).await;
+        let did_cell = d_sfu.clone();
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = did_cell.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) => {
+                            let did = did_cell.get();
+                            if sfu_events && matches_sfu_target(msg, did.as_deref()) {
+                                Some(wrap_event(events::SFU_CALL_RENEGOTIATION_OFFER, msg))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
+
     // ── Auto-processor neighbourhood-state (Nico 2026-08-19 follow-up) ──
     // Perspective-scoped observability: anyone with perspective read access
     // sees "someone is auto-processing this" without seeing the batch
@@ -658,6 +734,110 @@ pub(crate) async fn build_event_stream_for(
             })
     };
 
+    // ── SFU cascade rebalance migration events ──
+    // Same pattern as renegotiation offers — targeted at one specific
+    // participant via `targetDid`, and only one that joined with
+    // `acceptRedirect` (it can reach the indicated node): it leaves and
+    // rejoins there.
+    let s_sfu_migrate = {
+        let rx = pubsub.subscribe(&SFU_MIGRATE_TOPIC).await;
+        let did_cell = d_sfu.clone();
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = did_cell.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) => {
+                            let did = did_cell.get();
+                            if sfu_events && matches_sfu_target(msg, did.as_deref()) {
+                                Some(wrap_event(events::SFU_MIGRATE, msg))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
+
+    // SFU data channel relay — fan out only to the message's room: the
+    // caller's DID must be a participant of that call on this node, an
+    // in-memory lookup. Admin credentials bypass the filter.
+    let s_sfu_data = {
+        let rx = pubsub.subscribe(&SFU_DATA_CHANNEL_TOPIC).await;
+        let did_cell = d_sfu.clone();
+        let admin = is_admin;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = did_cell.clone();
+                async move {
+                    let msg = result.ok()?;
+                    if !sfu_events {
+                        return None;
+                    }
+                    if admin {
+                        return Some(wrap_event(events::SFU_DATA, &msg));
+                    }
+                    let did = did_cell.get()?;
+                    let data: crate::sfu::SfuDataMessage = serde_json::from_str(&msg).ok()?;
+                    // The sender already has what it sent.
+                    if data.sender_did == did {
+                        return None;
+                    }
+                    let in_room = crate::sfu::get_sfu_service()?
+                        .is_participant(&data.neighbourhood_url, &data.room_name, &did)
+                        .await;
+                    in_room.then(|| wrap_event(events::SFU_DATA, &msg))
+                }
+            })
+    };
+
+    // SFU room roster — to the participants it lists.
+    let s_sfu_roster = {
+        let rx = pubsub.subscribe(&SFU_ROOM_ROSTER_TOPIC).await;
+        let did_cell = d_sfu.clone();
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = did_cell.clone();
+                async move {
+                    let msg = result.ok()?;
+                    if !sfu_events {
+                        return None;
+                    }
+                    let did = did_cell.get()?;
+                    let roster: crate::sfu::SfuRoomRoster = serde_json::from_str(&msg).ok()?;
+                    roster
+                        .participants
+                        .contains(&did)
+                        .then(|| wrap_event(events::SFU_ROOM_ROSTER, &msg))
+                }
+            })
+    };
+
+    // ── Flow state changed (#1424) ──
+    // Per-agent bookkeeping: delivered to the sockets of the agent whose pass
+    // derived it, and to nobody else — not an admin credential either, which
+    // resolves to the main agent and so gets the main agent's events. An
+    // unresolved DID fails closed. See [`matches_flow_state_agent`].
+    let s_flow_state = {
+        let rx = pubsub.subscribe(&FLOW_STATE_CHANGED_TOPIC).await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let did_cell = d_flow_state.clone();
+                async move {
+                    let current_did = did_cell.get();
+                    let msg = result.ok()?;
+                    matches_flow_state_agent(&msg, current_did.as_deref())
+                        .then(|| wrap_event(events::FLOW_STATE_CHANGED, &msg))
+                }
+            })
+    };
+
     // ── Merge all streams ──
     let agent = stream::select(
         stream::select(s_status, s_apps),
@@ -675,14 +855,24 @@ pub(crate) async fn build_event_stream_for(
             s_loading,
             stream::select(
                 s_query_sub,
-                stream::select(s_auto_processor, s_auto_processor_state),
+                stream::select(
+                    s_auto_processor,
+                    stream::select(s_auto_processor_state, s_flow_state),
+                ),
             ),
         ),
+    );
+    let sfu = stream::select(
+        stream::select(s_sfu_reneg, s_sfu_migrate),
+        stream::select(s_sfu_data, s_sfu_roster),
     );
 
     let top = stream::select(
         stream::select(agent, persp),
-        stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
+        stream::select(
+            stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
+            sfu,
+        ),
     );
 
     // Events end with the token: expiry and revokeToken() stop them as they stop requests.
@@ -695,12 +885,20 @@ async fn handle_events_ws(
     user_email: Option<String>,
     is_admin: bool,
     can_approve_apps: bool,
+    sfu_events: bool,
 ) {
     log::info!("Events WebSocket connected");
 
     let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream =
-        build_event_stream(token_check, user_email, is_admin, can_approve_apps, None).await;
+    let event_stream = build_event_stream(
+        token_check,
+        user_email,
+        is_admin,
+        can_approve_apps,
+        sfu_events,
+        None,
+    )
+    .await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
         event_stream,
         interest.clone(),
@@ -819,6 +1017,21 @@ pub(crate) fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
             true
         }
     }
+}
+
+/// SFU renegotiation offers carry the addressee in `targetDid`.
+/// Filter so only the named participant's WS receives the event.
+pub(crate) fn matches_sfu_target(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        // No resolved DID — drop, this is a per-user event.
+        return false;
+    };
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+        if let Some(serde_json::Value::String(target)) = map.get("targetDid") {
+            return target == did;
+        }
+    }
+    false
 }
 
 pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {
@@ -1087,6 +1300,73 @@ fn matches_auto_processor_pass_owner_with(
         // No `agentDid` on the event → malformed or executor-side pass with
         // no attribution; fail closed rather than leak to every observer.
         _ => false,
+    }
+}
+
+/// `flow-state-changed`: only for the agent whose replica derived it. The
+/// payload names that agent (`agentDid`) and the perspective; a message
+/// missing either, or a socket whose DID has not resolved, gets nothing.
+///
+/// No ownership lookup: the pass runs only as an owner of the perspective,
+/// so `agentDid == did` already implies it, and the bookkeeping is that
+/// agent's own whatever the perspective's ownership becomes later.
+pub(crate) fn matches_flow_state_agent(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return false;
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(msg) else {
+        return false;
+    };
+    if !matches!(
+        map.get("perspectiveUuid"),
+        Some(serde_json::Value::String(_))
+    ) {
+        return false;
+    }
+    matches!(map.get("agentDid"), Some(serde_json::Value::String(agent)) if agent == did)
+}
+
+#[cfg(test)]
+mod flow_state_filter_tests {
+    use super::matches_flow_state_agent;
+
+    const ALICE: &str = "did:key:alice";
+    const BOB: &str = "did:key:bob";
+
+    fn event(agent: &str) -> String {
+        serde_json::json!({
+            "perspectiveUuid": "p",
+            "agentDid": agent,
+            "instance": "i",
+            "from": "a",
+            "to": "b",
+            "firedProposals": [],
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_deriving_agent_gets_it() {
+        assert!(matches_flow_state_agent(&event(ALICE), Some(ALICE)));
+    }
+
+    #[test]
+    fn another_agent_on_the_same_node_does_not() {
+        assert!(!matches_flow_state_agent(&event(ALICE), Some(BOB)));
+    }
+
+    #[test]
+    fn an_unresolved_socket_gets_nothing() {
+        assert!(!matches_flow_state_agent(&event(ALICE), None));
+    }
+
+    #[test]
+    fn a_message_without_agent_or_perspective_is_dropped() {
+        let no_agent = serde_json::json!({ "perspectiveUuid": "p" }).to_string();
+        let no_perspective = serde_json::json!({ "agentDid": ALICE }).to_string();
+        assert!(!matches_flow_state_agent(&no_agent, Some(ALICE)));
+        assert!(!matches_flow_state_agent(&no_perspective, Some(ALICE)));
+        assert!(!matches_flow_state_agent("not json", Some(ALICE)));
     }
 }
 
@@ -1642,9 +1922,9 @@ mod app_approval_event_tests {
         crate::test_utils::setup_agent();
         let pubsub = get_global_pubsub().await;
         let mut other =
-            build_event_stream(TokenCheck::new("", false), None, false, false, None).await;
+            build_event_stream(TokenCheck::new("", false), None, false, false, false, None).await;
         let mut approver =
-            build_event_stream(TokenCheck::new("", false), None, false, true, None).await;
+            build_event_stream(TokenCheck::new("", false), None, false, true, false, None).await;
 
         pubsub
             .publish(&APPS_CHANGED, &"{\"requestId\":\"request-1\"}".to_string())
@@ -1702,7 +1982,7 @@ mod app_approval_event_tests {
             .expect("the test agent has a DID");
         crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
         let mut stream =
-            build_event_stream(TokenCheck::new("", false), None, false, false, None).await;
+            build_event_stream(TokenCheck::new("", false), None, false, false, false, None).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -1755,6 +2035,7 @@ mod token_expiry_tests {
         let mut stream = build_event_stream(
             token_check,
             Some("events.user@example.org".to_string()),
+            false,
             false,
             false,
             None,
@@ -1870,6 +2151,74 @@ mod event_spec_tests {
         let _: super::AgentUpdatedEvent = serde_json::from_value(v).unwrap();
     }
 
+    /// The SFU publishes these structs; the wrapped event must carry its
+    /// declared name and read back as the declared payload type.
+    #[test]
+    fn sfu_events_match_their_specs() {
+        use crate::sfu::{SfuCallRenegotiationOffer, SfuDataMessage, SfuMigrateEvent};
+
+        let text = SfuDataMessage::new(
+            "did:a".into(),
+            "n".into(),
+            "r".into(),
+            "chat".into(),
+            false,
+            "hi".as_bytes(),
+        );
+        assert_eq!(text.data, "hi");
+        let binary = SfuDataMessage::new(
+            "did:a".into(),
+            "n".into(),
+            "r".into(),
+            "file".into(),
+            true,
+            &[0, 255],
+        );
+        assert_eq!(binary.data, "AP8=");
+
+        let wire = super::wrap_event(events::SFU_DATA, &serde_json::to_string(&text).unwrap());
+        let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(v["type"], events::SFU_DATA);
+        assert_eq!(v["senderDid"], "did:a");
+        assert_eq!(v["channelLabel"], "chat");
+        let _: SfuDataMessage = serde_json::from_value(v).unwrap();
+
+        let offer = SfuCallRenegotiationOffer {
+            target_did: "did:a".into(),
+            neighbourhood_url: "n".into(),
+            room_name: "r".into(),
+            sdp_offer: "{}".into(),
+            track_mapping: vec![],
+        };
+        let raw = serde_json::to_string(&offer).unwrap();
+        assert!(super::matches_sfu_target(&raw, Some("did:a")));
+        assert!(!super::matches_sfu_target(&raw, Some("did:b")));
+        let wire = super::wrap_event(events::SFU_CALL_RENEGOTIATION_OFFER, &raw);
+        let _: SfuCallRenegotiationOffer = serde_json::from_str(&wire).unwrap();
+
+        let migrate = SfuMigrateEvent {
+            target_did: "did:a".into(),
+            neighbourhood_url: "n".into(),
+            room_name: "r".into(),
+            migrate_to_did: "did:node".into(),
+        };
+        let wire = super::wrap_event(
+            events::SFU_MIGRATE,
+            &serde_json::to_string(&migrate).unwrap(),
+        );
+        let _: SfuMigrateEvent = serde_json::from_str(&wire).unwrap();
+
+        let specs = event_specs();
+        for name in [
+            events::SFU_CALL_RENEGOTIATION_OFFER,
+            events::SFU_MIGRATE,
+            events::SFU_DATA,
+        ] {
+            let spec = specs.iter().find(|s| s.name == name).expect("declared");
+            assert!(!spec.scoped, "{name} is filtered by DID, not perspective");
+        }
+    }
+
     /// Serializes a scoped payload's publish struct and checks the flat
     /// `perspectiveUuid` that `events.watch` narrows by.
     fn uuid_of(payload: impl serde::Serialize) -> String {
@@ -1945,6 +2294,17 @@ mod event_spec_tests {
                 "k",
                 NeighbourhoodPhase::Claimed,
             )),
+            uuid_of(
+                crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent {
+                    perspective_uuid: p(),
+                    agent_did: "did:x".into(),
+                    instance: "i".into(),
+                    from: Some("a".into()),
+                    to: "b".into(),
+                    fired_proposals: vec![],
+                    caught_up: false,
+                },
+            ),
         ];
         assert!(scoped.iter().all(|u| u == "p"));
     }

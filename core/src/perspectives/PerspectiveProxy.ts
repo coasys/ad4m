@@ -2,7 +2,7 @@ import { PerspectiveClient } from "./PerspectiveClient";
 import type { EventMap, ScopedEventName } from "../generated/api/Events";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
-    FlowReceiptVerdict, FlowValidOutput,
+    FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
 } from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
@@ -557,6 +557,49 @@ export class PerspectiveProxy {
      */
     async flowValidOutputs(flow: string, state?: string): Promise<FlowValidOutput[]> {
         return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
+    }
+
+    /**
+     * The state each flow instance is in, as **this agent's** executor last
+     * derived it — one entry per instance it has derived, optionally narrowed
+     * to `instances`. An instance missing from the answer has not been
+     * derived here yet; it stands at its flow's first state.
+     *
+     * The state is not stored on the graph: the engine derives it from the
+     * signed proposals and keeps what it derived per agent, outside the
+     * perspective. So no other agent — a co-owner on the same node included —
+     * can read or write your entries, and a link query never sees them.
+     * `FlowInstance.findAll` / `start` call this for you.
+     */
+    async flowStates(instances?: string[]): Promise<FlowStateEntry[]> {
+        return await this.#client.flowStates(this.#handle.uuid, instances)
+    }
+
+    /**
+     * The proposals of `instance` whose votes settled an edge, as this
+     * agent's executor recorded them — the flow's history, sorted by URI.
+     * Replaces the `resolvedAs` property proposals used to carry.
+     */
+    async flowFired(instance: string): Promise<string[]> {
+        return await this.#client.flowFired(this.#handle.uuid, instance)
+    }
+
+    /**
+     * Called whenever a flow instance on this perspective changes state on
+     * this agent's executor, or an edge settles: `{ instance, from, to,
+     * firedProposals, caughtUp }`. Only this agent's sockets receive it.
+     *
+     * When the executor first derives an instance that already has history
+     * (it synced in, or the executor was upgraded) it is called once with
+     * `caughtUp: true`, `from: null` and no `firedProposals`: the settles
+     * before that are history, but `to` is the state to show for a run that
+     * read as not derived (`FlowInstance.currentStateName === undefined`).
+     *
+     * Returns a function that removes the handler; {@link dispose} removes
+     * it too.
+     */
+    onFlowStateChanged(handler: (event: EventMap["flow-state-changed"]) => void): () => void {
+        return this.on("flow-state-changed", handler)
     }
 
     /** Mint and store the receipt for a completed flow run. */
@@ -1531,6 +1574,14 @@ export class PerspectiveProxy {
         return exprAddr as unknown as B extends undefined ? T : string;
     }
 
+    /** Sets properties of an existing instance in the executor. Through an
+     *  abstract class (#1435), each value is written by every class of the
+     *  record that the abstract class reads, under its own name. */
+    async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
+        await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
+        invalidatePerspectiveCache(this.#handle.uuid);
+    }
+
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
         if (typeof subjectClass === "string") {
             return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
@@ -1589,6 +1640,16 @@ export class PerspectiveProxy {
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
+
+        // An abstract class (#1435) is never a record's class: the executor
+        // runs the destructors of the record's classes it reads.
+        const shapePattern = new RegExp(`[/:#]${this.escapeRegExp(className)}Shape$`);
+        const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
+        if (markers.some((link) => shapePattern.test(link.data.source))) {
+            await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
+            return;
+        }
 
         // Get destructor actions from SHACL links (Prolog-free)
         let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");

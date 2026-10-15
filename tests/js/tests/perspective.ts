@@ -285,7 +285,7 @@ export default function perspectiveTests(testContext: TestContext) {
                     await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
 
                     await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
-                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'] }]])
+                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'], ancestors: [] }]])
                 } finally {
                     manager.disposeAll()
                     await ad4mClient.perspective.remove(p.uuid)
