@@ -74,6 +74,8 @@ export interface RelationMetadataEntry {
      * memoized registry copy.
      */
     interpretationHint?: string;
+    /** Names for abstract classes — see `RelationOptions.alias`. */
+    alias?: Record<string, string>;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -216,6 +218,8 @@ export function setRelationRegistryEntry(
 export interface Ad4mModelLike {
     new (...args: any[]): any;
     className?: string;
+    /** Set by `@Model({ abstract: true })`. */
+    isAbstract?: boolean;
     generateSDNA?: () => any;
     generateSHACL?: () => any;
 }
@@ -401,6 +405,26 @@ export interface PropertyOptions {
      * (e.g. `"xsd://string"`) and enables the hydration decode gate.
      */
     datatype?: string;
+
+    /**
+     * The name this property answers to when its class is read through an
+     * abstract class, keyed by the abstract class's name. A query over the
+     * abstract class reads the property under that name, through this
+     * property's predicate; a query over this class keeps its own name.
+     *
+     * Registering the class fails if the alias is a name the class already
+     * uses.
+     *
+     * @example
+     * ```typescript
+     * @Model({ name: "Message", implements: [TextContent] })
+     * class Message extends Ad4mModel {
+     *   @Property({ through: "flux://body", alias: { TextContent: "text" } })
+     *   body: string = "";
+     * }
+     * ```
+     */
+    alias?: Record<string, string>;
 }
 
 
@@ -574,12 +598,69 @@ export interface ModelConfig {
     name: string;
 
     /**
+     * An abstract class: it names properties a record has, not what the
+     * record is. Querying it (`findAll`, `query`, `modelQuery`,
+     * subscriptions) reads every installed concrete class that has all of its
+     * property and relation names, or aliases for them. Each row keeps its
+     * real class (`__subjectClass`). It cannot be created, and the executor
+     * never picks it as a record's class.
+     *
+     * Its properties' `through` predicates are never compared: matching is
+     * by name.
+     */
+    abstract?: boolean;
+
+    /**
+     * Abstract classes this class is meant to be read through. Checked when
+     * the class is declared: every property and relation name of each listed
+     * class must be a name or an alias here. Only a check — the executor
+     * matches by structure, listed or not.
+     */
+    implements?: Ad4mModelLike[];
+
+    /**
      * Natural-language hint that steers the generic LLM extractor when
      * turning a transcript into instances of this class.  Emitted as an
      * `ad4m://interpretation_hint` link on the SHACL shape node and surfaced
      * on `ModelShape.interpretation_hint` by the Rust model query.
      */
     interpretationHint?: string;
+}
+
+/**
+ * `@Model({ implements })`: every property and relation name of
+ * `abstractClass` must be a name or an alias (for it) on `target`.
+ */
+function checkImplements(name: string, target: any, abstractClass: any) {
+    const abstractName: string | undefined = abstractClass?.className ?? abstractClass?.prototype?.className;
+    if (!abstractName || !abstractClass.isAbstract) {
+        throw new Error(
+            `${name} implements ${abstractName ?? abstractClass?.name ?? String(abstractClass)}, ` +
+            `which is not an abstract class: declare it with @Model({ abstract: true })`
+        );
+    }
+    const names = (ctor: any) => {
+        const relations = getRelationsMetadata(ctor);
+        const properties = Object.keys(getPropertiesMetadata(ctor)).filter(p => !relations[p]);
+        return { properties, relations: Object.keys(relations) };
+    };
+    const answersTo = (entries: Record<string, { alias?: Record<string, string> }>, keys: string[]) =>
+        new Set(keys.map(k => entries[k]?.alias?.[abstractName] ?? k));
+
+    const wanted = names(abstractClass);
+    const own = names(target);
+    const ownProperties = answersTo(getPropertiesMetadata(target), own.properties);
+    const ownRelations = answersTo(getRelationsMetadata(target), own.relations);
+    for (const p of wanted.properties) {
+        if (!ownProperties.has(p)) {
+            throw new Error(`${name} implements ${abstractName} but has no property or alias named \`${p}\``);
+        }
+    }
+    for (const r of wanted.relations) {
+        if (!ownRelations.has(r)) {
+            throw new Error(`${name} implements ${abstractName} but has no relation or alias named \`${r}\``);
+        }
+    }
 }
 
 /**
@@ -642,6 +723,10 @@ export function Model(opts: ModelConfig) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
+        target.isAbstract = !!opts.abstract;
+        for (const abstractClass of opts.implements ?? []) {
+            checkImplements(opts.name, target, abstractClass);
+        }
 
         target.generateSDNA = function() {
             return buildSDNA(
@@ -661,6 +746,7 @@ export function Model(opts: ModelConfig) {
                 buildConformanceFilter,
                 seed,
                 opts.interpretationHint,
+                !!opts.abstract,
             ));
         }
 
@@ -1018,6 +1104,13 @@ export interface RelationOptions {
      * ```
      */
     interpretationHint?: string;
+
+    /**
+     * The name this relation answers to when its class is read through an
+     * abstract class, keyed by the abstract class's name. See
+     * `PropertyOptions.alias`.
+     */
+    alias?: Record<string, string>;
 }
 
 /**
@@ -1187,6 +1280,7 @@ export function HasMany(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
             ...(opts.readOnly && { readOnly: true }),
         };
 
@@ -1265,6 +1359,7 @@ export function HasOne(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
             ...(opts.readOnly && { readOnly: true }),
         };
 
@@ -1355,6 +1450,7 @@ export function BelongsToOne(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
         };
 
         if (opts.through) {
@@ -1418,6 +1514,7 @@ export function BelongsToMany(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.alias && { alias: opts.alias }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*

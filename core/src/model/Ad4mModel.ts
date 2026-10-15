@@ -1719,7 +1719,15 @@ export class Ad4mModel {
       return;
     }
 
-    // New instance → create path
+    // New instance → create path. The executor refuses an abstract class too;
+    // refusing here keeps the error ahead of the batch.
+    const ctor = this.constructor as { isAbstract?: boolean; className?: string };
+    if (ctor.isAbstract) {
+      throw new Error(
+        `'${ctor.className}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${ctor.className}' reads it.`
+      );
+    }
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
