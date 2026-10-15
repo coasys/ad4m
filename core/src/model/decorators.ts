@@ -603,7 +603,9 @@ export interface ModelConfig {
      * subscriptions) reads every installed concrete class that has all of its
      * property and relation names, or aliases for them. Each row keeps its
      * real class (`__subjectClass`). It cannot be created, and the executor
-     * never picks it as a record's class.
+     * never picks it as a record's class. `save()` and `delete()` on a row
+     * read through it run the setters and destructors of the record's own
+     * classes; values are not converted between them.
      *
      * Its properties' `through` predicates are never compared: matching is
      * by name.
