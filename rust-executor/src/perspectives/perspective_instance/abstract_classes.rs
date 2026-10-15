@@ -20,6 +20,7 @@ use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
     self, AbstractIndex, Resolution, ViewResolver,
 };
+use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
@@ -201,7 +202,7 @@ impl PerspectiveInstance {
 
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads. Never empty.
-    fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
+    pub(super) fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
         let own = self
             .subject_classes_of(&[base.to_string()])?
@@ -262,13 +263,7 @@ impl PerspectiveInstance {
                 names.join(", ")
             ));
         }
-        let memberships: HashSet<&str> = shape
-            .properties
-            .iter()
-            .filter(|p| p.is_collection)
-            .map(|p| p.name.as_str())
-            .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
-            .collect();
+        let memberships = super::subject_writes::membership_names(&shape);
         let index = self.abstract_index()?;
         let targets = self.write_targets(abstract_class, base)?;
         let mut commands = Vec::new();
@@ -383,8 +378,10 @@ impl PerspectiveInstance {
     }
 
     /// The members `value` names for `own` of `class`, each encoded as that
-    /// property stores it: an array's elements, or a single value. `null`
-    /// is refused: it names no members, and read as `[]` it would clear.
+    /// property stores it: an array's elements, or a single value. A member
+    /// that is already an IRI (an id, a stored expression address) is taken
+    /// as is. `null` is refused: it names no members, and read as `[]` it
+    /// would clear.
     pub(super) async fn members(
         &self,
         class: &str,
@@ -403,10 +400,13 @@ impl PerspectiveInstance {
         };
         let mut members = Vec::with_capacity(items.len());
         for item in &items {
-            members.push(
-                self.resolve_property_value(class, own, item, context)
-                    .await?,
-            );
+            members.push(match item {
+                Value::String(iri) if is_safe_iri_target(iri) => iri.clone(),
+                _ => {
+                    self.resolve_property_value(class, own, item, context)
+                        .await?
+                }
+            });
         }
         Ok(members)
     }
@@ -594,9 +594,9 @@ pub(super) struct Run {
     pub(super) parameters: Vec<Parameter>,
 }
 
-/// What an update through an abstract class does to one name.
+/// What an update does to a relation or collection name.
 #[derive(Clone, Copy, PartialEq)]
-enum Op {
+pub(super) enum Op {
     Set,
     Add,
     Remove,
@@ -605,7 +605,7 @@ enum Op {
 impl Op {
     /// `{"action": "adder" | "remover" | "setter", "value": v}` is that op
     /// with `v`; anything else is a value to set.
-    fn of(value: &Value) -> (Op, &Value) {
+    pub(super) fn of(value: &Value) -> (Op, &Value) {
         let Value::Object(fields) = value else {
             return (Op::Set, value);
         };
@@ -622,7 +622,7 @@ impl Op {
         }
     }
 
-    fn what(self) -> &'static str {
+    pub(super) fn what(self) -> &'static str {
         match self {
             Op::Set => "a setter",
             Op::Add => "an adder",
