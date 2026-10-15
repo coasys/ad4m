@@ -335,7 +335,7 @@ pub async fn try_claim(
 /// `Processed`. Eight seconds covers that gap plus a short sync. A smaller
 /// DID that becomes visible ends the wait immediately.
 pub const CLAIM_SETTLE_MS: u64 = 8_000;
-const CLAIM_SETTLE_POLL_MS: u64 = 500;
+pub(crate) const CLAIM_SETTLE_POLL_MS: u64 = 500;
 
 /// Min-DID decision over an already-loaded holder list. An empty list is a
 /// win: the caller just wrote its own claim, and a failed read must not
@@ -364,29 +364,35 @@ pub async fn confirm_claim(
     Ok(decide_claim(&me, &holders))
 }
 
-/// Poll until another claimant is visible or `settle_ms` elapses, then apply
-/// the min-DID rule. `settle_ms == 0` re-reads once and returns, so a
-/// single-process caller does not sleep.
+/// Poll until a smaller DID is visible or `settle_ms` elapses, then apply
+/// the min-DID rule. A larger peer does not end the wait: the smaller claim
+/// may still be in flight. `settle_ms == 0` re-reads once and does not sleep.
+/// Each read uses `now()`, so a claim that expired during the wait is gone.
 pub async fn settle_claim(
     perspective: &PerspectiveInstance,
     processor: &str,
     item_ids: &[String],
-    now_ms: i64,
     context: &AgentContext,
     settle_ms: u64,
+    poll_ms: u64,
+    mut now: impl FnMut() -> i64,
 ) -> anyhow::Result<ClaimOutcome> {
     let me = did_for_context(context).map_err(|e| anyhow::anyhow!("did_for_context: {e:#}"))?;
     let key = batch_key(item_ids);
+    let read = |now_ms: i64| active_claimants(perspective, processor, &key, now_ms);
     if settle_ms == 0 {
-        let holders = active_claimants(perspective, processor, &key, now_ms).await?;
-        return Ok(decide_claim(&me, &holders));
+        return Ok(decide_claim(&me, &read(now()).await?));
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(settle_ms);
-    let poll = std::time::Duration::from_millis(CLAIM_SETTLE_POLL_MS);
+    let poll = std::time::Duration::from_millis(poll_ms.max(1));
     loop {
-        let holders = active_claimants(perspective, processor, &key, now_ms).await?;
-        if holders.iter().any(|holder| holder != &me) || std::time::Instant::now() >= deadline {
-            return Ok(decide_claim(&me, &holders));
+        let outcome = decide_claim(&me, &read(now()).await?);
+        // Only a smaller DID ends the wait early. A larger peer is not the
+        // winner; the claim that beats us may not have synced yet.
+        if matches!(outcome, ClaimOutcome::BackedOff { .. })
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(outcome);
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         tokio::time::sleep(remaining.min(poll)).await;
@@ -396,6 +402,7 @@ pub async fn settle_claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{did_for_context, AgentContext};
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::LinkQuery;
 
@@ -518,13 +525,78 @@ mod tests {
             .await
             .expect("late claim");
 
-        let settled = settle_claim(&p, "proc", &items, 1_000, &ctx, 0)
+        let settled = settle_claim(&p, "proc", &items, &ctx, 0, 1, || 1_000)
             .await
             .expect("settle_claim");
         assert_eq!(
             settled,
             ClaimOutcome::BackedOff {
                 holder: other.to_string()
+            }
+        );
+    }
+
+    /// A larger peer must not end the wait. The smaller claim can still be
+    /// in flight. Lal, #1445.
+    #[tokio::test]
+    async fn settle_waits_out_a_larger_peer_for_a_smaller_one() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string(), "i2".to_string()];
+        let key = batch_key(&items);
+        let won = try_claim(&mut p, "proc", &items, 60_000, 1_000, &ctx)
+            .await
+            .expect("try_claim");
+        assert_eq!(won, ClaimOutcome::Won);
+
+        let polling = p.clone();
+        let ctx_poll = AgentContext {
+            user_email: ctx.user_email.clone(),
+            is_main_agent: ctx.is_main_agent,
+        };
+        let items_poll = items.clone();
+        let settled = tokio::spawn(async move {
+            settle_claim(&polling, "proc", &items_poll, &ctx_poll, 250, 40, || 1_000).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        write_claim(&mut p, "proc", &key, "zzz:larger-peer", 60_000, &ctx)
+            .await
+            .expect("larger claim");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        write_claim(&mut p, "proc", &key, "aaa:smaller-peer", 60_000, &ctx)
+            .await
+            .expect("smaller claim");
+
+        let settled = settled.await.expect("settle task").expect("settle_claim");
+        assert_eq!(
+            settled,
+            ClaimOutcome::BackedOff {
+                holder: "aaa:smaller-peer".to_string()
+            }
+        );
+    }
+
+    /// Expiry is judged by the clock the caller passes, not by the timestamp
+    /// the claim was written against. Past our own expiry, a larger peer who
+    /// still holds the batch wins.
+    #[tokio::test]
+    async fn settle_uses_the_clock_so_an_expired_own_claim_loses() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let items = vec!["i1".to_string()];
+        let key = batch_key(&items);
+        let me = did_for_context(&ctx).expect("did");
+        write_claim(&mut p, "proc", &key, &me, 1_500, &ctx)
+            .await
+            .expect("own claim");
+        write_claim(&mut p, "proc", &key, "zzz:later-peer", 9_000, &ctx)
+            .await
+            .expect("later peer");
+        let outcome = settle_claim(&p, "proc", &items, &ctx, 0, 1, || 2_000)
+            .await
+            .expect("settle_claim");
+        assert_eq!(
+            outcome,
+            ClaimOutcome::BackedOff {
+                holder: "zzz:later-peer".to_string()
             }
         );
     }
