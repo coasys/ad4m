@@ -36,7 +36,14 @@ pub(super) struct ReadTargets {
     pub(super) views: HashMap<String, Arc<ModelShape>>,
     /// Set when the caller named an abstract class.
     pub(super) resolution: Option<Arc<Resolution>>,
+    /// The classes could not be resolved (a store error): a subscription
+    /// tries again on its next pass rather than keeping this answer.
+    pub(super) unresolved: bool,
 }
+
+/// The generation a subscription that could not be resolved records: never a
+/// real one, so the next pass resolves it again.
+pub(super) const UNRESOLVED: u64 = u64::MAX;
 
 impl PerspectiveInstance {
     /// Drop every cached shape, and what was derived from them.
@@ -64,6 +71,10 @@ impl PerspectiveInstance {
 
     /// The abstract classes and aliases installed here, cached.
     pub(super) fn abstract_index(&self) -> Result<Arc<AbstractIndex>, AnyError> {
+        #[cfg(test)]
+        if faults::take(&self.uuid) {
+            return Err(anyhow!("injected store error"));
+        }
         let generation = {
             let cache = self.abstract_cache.read().unwrap();
             if let Some(index) = &cache.index {
@@ -141,16 +152,40 @@ impl PerspectiveInstance {
             classes: QueryClasses::union(resolution.classes.clone()),
             views: resolution.views.clone(),
             resolution: Some(resolution),
+            unresolved: false,
         })
     }
 
     /// [`Self::read_targets`] for a subscription's trigger, which is built
     /// from shapes alone: a query that does not parse is answered by the
     /// query run, not here.
+    ///
+    /// On an error the classes are watched as named and the targets are
+    /// marked `unresolved`, so the subscription records [`UNRESOLVED`] and
+    /// is resolved again on its next pass: one transient store error must
+    /// not leave it watching predicates no class writes.
     pub(super) fn trigger_targets(&self, classes: &QueryClasses, query_json: &str) -> ReadTargets {
         let query: ModelQueryInput = serde_json::from_str(query_json).unwrap_or_default();
-        self.read_targets(classes, &query)
-            .unwrap_or_else(|_| ReadTargets::named(classes))
+        self.read_targets(classes, &query).unwrap_or_else(|e| {
+            log::warn!(
+                "subscription over {:?}: its classes did not resolve, trying again on the \
+                 next pass: {e}",
+                classes.names()
+            );
+            ReadTargets {
+                unresolved: true,
+                ..ReadTargets::named(classes)
+            }
+        })
+    }
+
+    /// What a subscription over `targets` records as read (see
+    /// `ModelSubscriptionParams::abstract_read`).
+    pub(super) fn abstract_read(targets: &ReadTargets, generation: u64) -> Option<u64> {
+        if targets.unresolved {
+            return Some(UNRESOLVED);
+        }
+        targets.resolution.as_ref().map(|_| generation)
     }
 
     /// Whether `class_name` is an abstract class here.
@@ -185,10 +220,13 @@ impl PerspectiveInstance {
     }
 
     /// Resolve every subscription over an abstract class (#1435) again whose
-    /// classes were resolved before the installed shapes last changed.
-    /// Returns the ids whose class list changed: those re-run this pass
-    /// whatever was written, because their old trigger knows nothing of the
-    /// new classes.
+    /// classes were resolved before the installed shapes last changed, and
+    /// rebuild its trigger. Returns their ids: those re-run this pass
+    /// whatever was written. A change can move the classes, or only a view
+    /// (an alias moved from `body` to `content`, same class list); either
+    /// way the old trigger watches the wrong predicates and the last result
+    /// may read the wrong ones. One still unresolved is left for the next
+    /// pass.
     pub(super) async fn refresh_abstract_subscriptions(&self) -> HashSet<String> {
         let generation = self.shapes_generation();
         let stale: Vec<(String, QueryClasses, String)> = {
@@ -198,7 +236,7 @@ impl PerspectiveInstance {
                 .filter_map(|(id, q)| {
                     let params = q.model_query_params.as_ref()?;
                     match &params.abstract_read {
-                        Some((at, _)) if *at != generation => Some((
+                        Some(at) if *at != generation => Some((
                             id.clone(),
                             params.classes.clone(),
                             params.query_json.clone(),
@@ -211,50 +249,25 @@ impl PerspectiveInstance {
         let mut changed = HashSet::new();
         for (id, classes, query_json) in stale {
             let targets = self.trigger_targets(&classes, &query_json);
-            let Some(resolution) = targets.resolution.as_ref() else {
-                // No longer abstract (re-registered as a concrete class): the
-                // re-run reads it as named; watch it as named.
-                let (trigger_sparql, predicates) = self.model_trigger_query(&targets, &query_json);
-                let mut queries = self.subscribed_queries.lock().await;
-                let Some(query) = queries.get_mut(&id) else {
-                    continue;
-                };
-                let trigger =
-                    self.build_model_trigger_for(&targets, &query_json, &query.last_result);
-                if let Some(params) = query.model_query_params.as_mut() {
-                    params.abstract_read = None;
-                    params.trigger = trigger;
-                }
-                query.query = trigger_sparql;
-                query.predicates = predicates;
-                changed.insert(id);
+            if targets.unresolved {
                 continue;
-            };
+            }
+            // No resolution: no longer abstract (re-registered as a concrete
+            // class). The re-run reads it as named; watch it as named.
+            let (trigger_sparql, predicates) = self.model_trigger_query(&targets, &query_json);
             let mut queries = self.subscribed_queries.lock().await;
             let Some(query) = queries.get_mut(&id) else {
                 continue;
             };
-            let same = query
-                .model_query_params
-                .as_ref()
-                .and_then(|p| p.abstract_read.as_ref())
-                .is_some_and(|(_, read)| *read == resolution.classes);
-            let rebuilt = (!same).then(|| {
-                (
-                    self.model_trigger_query(&targets, &query_json),
-                    self.build_model_trigger_for(&targets, &query_json, &query.last_result),
-                )
-            });
+            let trigger = self.build_model_trigger_for(&targets, &query_json, &query.last_result);
             let Some(params) = query.model_query_params.as_mut() else {
                 continue;
             };
-            params.abstract_read = Some((generation, resolution.classes.clone()));
-            if let Some(((trigger_sparql, predicates), trigger)) = rebuilt {
-                params.trigger = trigger;
-                query.query = trigger_sparql;
-                query.predicates = predicates;
-                changed.insert(id);
-            }
+            params.abstract_read = Self::abstract_read(&targets, generation);
+            params.trigger = trigger;
+            query.query = trigger_sparql;
+            query.predicates = predicates;
+            changed.insert(id);
         }
         changed
     }
@@ -302,6 +315,28 @@ impl ReadTargets {
             classes: classes.clone(),
             views: HashMap::new(),
             resolution: None,
+            unresolved: false,
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod faults {
+    //! Test hook: fail the next `abstract_index` read of a perspective, as a
+    //! store error would.
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+
+    static FAIL_NEXT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+    pub(in crate::perspectives) fn fail_next_index(perspective_uuid: &str) {
+        FAIL_NEXT
+            .lock()
+            .unwrap()
+            .insert(perspective_uuid.to_string());
+    }
+
+    pub(super) fn take(perspective_uuid: &str) -> bool {
+        FAIL_NEXT.lock().unwrap().remove(perspective_uuid)
     }
 }

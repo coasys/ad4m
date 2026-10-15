@@ -514,3 +514,167 @@ async fn installing_a_class_pushes_records_that_were_already_there() {
         "{update}"
     );
 }
+
+/// Message with its alias moved from `body` to `content`: the same class
+/// list, read through other predicates.
+const MESSAGE_MOVED_SDNA: &str = r#"{
+  "target_class":"ns://Message",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://entry_type","target":"ns://message"}],
+  "properties":[
+    {"path":"ns://entry_type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","min_count":0,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]},
+    {"path":"ns://content","name":"content","min_count":0,"max_count":1,"alias":{"TextContent":"text"},"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://content","target":"value"}]}
+  ]
+}"#;
+
+/// Drain whatever updates `id` gets within the wait.
+async fn drain(rx: &mut broadcast::Receiver<String>, perspective_uuid: &str, id: &str) {
+    while next_update_for(rx, perspective_uuid, id).await.is_some() {}
+}
+
+/// A change of the installed shapes that moves only a view (the alias, from
+/// `body` to `content`) rebuilds the trigger too: the class list is the same,
+/// but the trigger built over `body` would never see a write to `content`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_follows_an_alias_that_moved() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("TextContent", TEXT_CONTENT_SDNA),
+        ("Message", MESSAGE_SDNA),
+    ])
+    .await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Message",
+        "ad4m://message/1",
+        serde_json::json!({"body": "old"}),
+    )
+    .await
+    .unwrap();
+    let (id, _, initial) = perspective
+        .model_subscribe_and_query(one("TextContent"), ALL.into(), "c".into())
+        .await
+        .expect("subscribe");
+    assert!(initial.contains("\"text\":\"old\""), "{initial}");
+    let mut rx = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    install(&mut perspective, &ctx, "Message", MESSAGE_MOVED_SDNA).await;
+    assert_eq!(
+        perspective.resolve_abstract("TextContent").unwrap().classes,
+        vec!["Message".to_string()],
+        "the class list did not change"
+    );
+    perspective
+        .check_subscribed_queries(writes(&[(
+            "ns://MessageShape",
+            "sh://property",
+            "ns://Message.content",
+        )]))
+        .await;
+    drain(&mut rx, &perspective.uuid, &id).await;
+
+    // The write under test, alone: `content`, which only the new view reads.
+    perspective
+        .add_links(
+            vec![Link {
+                source: "ad4m://message/1".into(),
+                predicate: Some("ns://content".into()),
+                target: "literal:string:moved".into(),
+            }],
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    perspective
+        .check_subscribed_queries(writes(&[(
+            "ad4m://message/1",
+            "ns://content",
+            "literal:string:moved",
+        )]))
+        .await;
+    let update = next_update_for(&mut rx, &perspective.uuid, &id)
+        .await
+        .expect("a write to the moved alias must be pushed")
+        .to_string();
+    assert!(update.contains("\"text\":\"moved\""), "{update}");
+}
+
+/// A store error while a subscription's classes resolve, at subscribe time
+/// or on a later pass, is not its final answer: the next pass resolves it
+/// again. Kept, it would watch the abstract class's own predicates, which no
+/// class writes, and never update again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_resolution_is_tried_again_on_the_next_pass() {
+    use super::abstract_classes::faults::fail_next_index;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("TextContent", TEXT_CONTENT_SDNA), ("Chat", CHAT_SDNA)]).await;
+    let mut rx = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    // At subscribe time.
+    fail_next_index(&perspective.uuid);
+    let (id, _, initial) = perspective
+        .model_subscribe_and_query(one("TextContent"), ALL.into(), "c".into())
+        .await
+        .expect("subscribe");
+    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+    create(
+        &mut perspective,
+        &ctx,
+        "Chat",
+        "ad4m://chat/1",
+        serde_json::json!({"text": "first"}),
+    )
+    .await
+    .unwrap();
+    perspective
+        .check_subscribed_queries(writes(&[
+            ("ad4m://chat/1", "ns://type", "ns://chat"),
+            ("ad4m://chat/1", "ns://message", "literal://string:first"),
+        ]))
+        .await;
+    let update = next_update_for(&mut rx, &perspective.uuid, &id)
+        .await
+        .expect("resolved again on the next pass")
+        .to_string();
+    assert!(update.contains("ad4m://chat/1"), "{update}");
+
+    // On a later pass: a class is installed and the re-resolution fails.
+    install(&mut perspective, &ctx, "Message", MESSAGE_SDNA).await;
+    fail_next_index(&perspective.uuid);
+    perspective
+        .check_subscribed_queries(writes(&[(
+            "ns://MessageShape",
+            "sh://property",
+            "ns://Message.body",
+        )]))
+        .await;
+    drain(&mut rx, &perspective.uuid, &id).await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Message",
+        "ad4m://message/1",
+        serde_json::json!({"body": "second"}),
+    )
+    .await
+    .unwrap();
+    perspective
+        .check_subscribed_queries(writes(&[
+            ("ad4m://message/1", "ns://entry_type", "ns://message"),
+            ("ad4m://message/1", "ns://body", "literal://string:second"),
+        ]))
+        .await;
+    let update = next_update_for(&mut rx, &perspective.uuid, &id)
+        .await
+        .expect("the class installed during the failure must be picked up")
+        .to_string();
+    assert!(update.contains("ad4m://message/1"), "{update}");
+}

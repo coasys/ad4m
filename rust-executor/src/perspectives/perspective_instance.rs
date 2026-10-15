@@ -487,10 +487,10 @@ pub struct PerspectiveMemoryStats {
 #[derive(Clone)]
 struct ModelSubscriptionParams {
     classes: super::model_query::QueryClasses,
-    /// When `classes` is an abstract class (#1435): the shapes generation it
-    /// was resolved at and the classes it resolved to, which the trigger
-    /// watches. See `refresh_abstract_subscriptions`.
-    abstract_read: Option<(u64, Vec<String>)>,
+    /// When `classes` is an abstract class (#1435): the shapes generation its
+    /// classes were resolved at, or `abstract_classes::UNRESOLVED`. See
+    /// `refresh_abstract_subscriptions`.
+    abstract_read: Option<u64>,
     query_json: String,
     /// Which writes re-run it; holds the nodes of `last_result`.
     trigger: subscription_triggers::ModelTrigger,
@@ -5934,10 +5934,7 @@ impl PerspectiveInstance {
         // No result yet: `open_subscription` points the trigger at the
         // nodes of the first result when it stores it.
         let trigger = self.build_model_trigger_for(&targets, &query_json, "");
-        let abstract_read = targets
-            .resolution
-            .as_ref()
-            .map(|r| (generation, r.classes.clone()));
+        let abstract_read = Self::abstract_read(&targets, generation);
 
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
@@ -6028,9 +6025,8 @@ impl PerspectiveInstance {
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
             if reresolved.contains(&id) {
-                // A subscription over an abstract class whose classes just
-                // changed: its old trigger knew nothing of the new classes,
-                // so it runs.
+                // A subscription over an abstract class resolved again this
+                // pass: what it reads moved, so it runs whatever was written.
             }
             // Model subscriptions match each written link against their
             // trigger (see `subscription_triggers`), not the predicate alone.
