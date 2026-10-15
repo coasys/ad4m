@@ -75,9 +75,7 @@ use super::Ad4mMcpHandler;
 use crate::mcp::shacl;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
-use crate::perspectives::perspective_instance::{
-    AbstractWrite, PerspectiveInstance, SubjectClassOption,
-};
+use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkQuery;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -393,18 +391,25 @@ pub(crate) async fn resolve_class(
     )))
 }
 
-/// [`resolve_class`] for a tool that writes links itself rather than through
-/// `create_subject` / `update_subject`, which refuse an abstract class
-/// (#1435) on their own: refuse it here instead.
+/// [`resolve_class`] for the collection tools. They write membership links
+/// at one class's predicate, so through an abstract class (#1435), which
+/// has no predicate of its own, they are refused.
 pub(crate) async fn resolve_writable_class(
     perspective: &PerspectiveInstance,
     class_name: &str,
-    write: AbstractWrite,
 ) -> Result<(String, Arc<ModelShape>), String> {
     let (class_name, shape) = resolve_class(perspective, class_name).await?;
-    perspective
-        .refuse_abstract_write(&class_name, write)
-        .map_err(|e| error_json(format!("{e:#}")))?;
+    if perspective
+        .is_abstract_class(&class_name)
+        .map_err(|e| error_json(format!("{e:#}")))?
+    {
+        return Err(error_json(format!(
+            "'{class_name}' is an abstract class: collection membership is written through the \
+             record's own class, the `__subjectClass` a query on '{class_name}' returns. \
+             Through '{class_name}', instance_update sets its properties and instance_remove \
+             deletes the record."
+        )));
+    }
     Ok((class_name, shape))
 }
 

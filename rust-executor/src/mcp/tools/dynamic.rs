@@ -6,7 +6,7 @@
 
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl::{self, ShaclProperty};
-use crate::perspectives::perspective_instance::{AbstractWrite, SubjectClassOption};
+use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::perspectives::{all_perspectives, get_perspective};
 use crate::types::Link;
 use crate::types::{LinkQuery, LinkStatus};
@@ -44,10 +44,9 @@ impl Ad4mMcpHandler {
                     continue;
                 }
 
-                // An abstract class (#1435) is read, never written: a record
-                // is written through its own class. Offer only the reads; the
-                // dispatch refuses a write tool called by name anyway. If the
-                // index does not load, the writes are listed and refused there.
+                // An abstract class (#1435): only its reads (see
+                // `handle_dynamic_tool`). If the index does not load, the
+                // writes are listed and refused when called.
                 let writable = !perspective.is_abstract_class(&class.name).unwrap_or(false);
                 if writable {
                     tools.push(Self::make_create_tool(&class.name, &class.properties));
@@ -361,19 +360,25 @@ impl Ad4mMcpHandler {
                     ))]));
                 }
             };
-            // `remove_{collection}` takes a member out: an update of the record.
-            let write = match operation {
-                "create" => Some(AbstractWrite::Create),
-                "update" | "set" | "add" | "remove" => Some(AbstractWrite::Update),
-                "delete" => Some(AbstractWrite::Delete),
+            // The generated tools of an abstract class (#1435) only read: the
+            // write tools write links at one class's predicates.
+            let writes = matches!(
+                operation,
+                "create" | "update" | "set" | "add" | "remove" | "delete"
+            );
+            let refusal = match writes.then(|| perspective.is_abstract_class(&name)) {
+                Some(Ok(true)) => Some(format!(
+                    "'{name}' is an abstract class: its generated tools only read, and it \
+                     cannot be created. instance_update and instance_remove write a record \
+                     through it, to the record's own classes."
+                )),
+                Some(Err(e)) => Some(e.to_string()),
                 _ => None,
             };
-            if let Some(write) = write {
-                if let Err(e) = perspective.refuse_abstract_write(&name, write) {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error: {e}"
-                    ))]));
-                }
+            if let Some(refusal) = refusal {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Error: {refusal}"
+                ))]));
             }
             name
         };

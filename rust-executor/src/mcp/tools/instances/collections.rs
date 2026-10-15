@@ -7,7 +7,6 @@ use super::{
     validation_failure, Ad4mMcpHandler, PropView, ValidationError,
 };
 use crate::mcp::shacl;
-use crate::perspectives::perspective_instance::AbstractWrite;
 use crate::types::{Link, LinkQuery, LinkStatus};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -131,13 +130,7 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_writable_class(
-            &perspective,
-            &p.class_name,
-            AbstractWrite::Update,
-        )
-        .await
-        {
+        let (class_name, shape) = match resolve_writable_class(&perspective, &p.class_name).await {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -273,13 +266,7 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_writable_class(
-            &perspective,
-            &p.class_name,
-            AbstractWrite::Update,
-        )
-        .await
-        {
+        let (class_name, shape) = match resolve_writable_class(&perspective, &p.class_name).await {
             Ok(v) => v,
             Err(e) => return e,
         };

@@ -1,7 +1,7 @@
 /**
  * Abstract classes and aliases (#1435): what `@Model({ abstract })`,
- * `@Property({ alias })` and `@Model({ implements })` put into the SHACL the
- * executor stores, and the `implements` check at declaration time.
+ * `@Property({ alias })` and `@Model({ implements })` put into the SHACL, the
+ * `implements` check, and where writes through an abstract class go.
  */
 import { Ad4mModel } from "./Ad4mModel";
 import { Model, Property, HasMany } from "./decorators";
@@ -127,28 +127,26 @@ describe("abstract classes", () => {
     await expect(instance.save()).rejects.toThrow("'Readable' is an abstract class and cannot be created");
   });
 
-  it("save() and delete() refuse a record read through an abstract class", async () => {
-    const touched: string[] = [];
+  it("save() and delete() through an abstract class go to the executor's dispatch", async () => {
+    const calls: any[][] = [];
     const perspective: any = new Proxy({}, {
-      get: (_t, key) => {
+      get: (_t, key) => async (...args: any[]) => {
+        calls.push([key, ...args]);
         if (key === "modelQuery") {
-          return async () => ({
-            instances: [{ id: "ad4m://m/1", __subjectClass: "Message", text: "hi" }],
-            totalCount: 1,
-          });
+          return { instances: [{ id: "ad4m://m/1", __subjectClass: "Message", text: "hi" }], totalCount: 1 };
         }
-        return () => { touched.push(String(key)); throw new Error(`the perspective was touched: ${String(key)}`); };
+        return [];
       },
     });
     const [row] = await Readable.findAll(perspective);
-    expect(row.id).toBe("ad4m://m/1");
     row.text = "edited";
-    await expect(row.save()).rejects.toThrow(
-      "'Readable' is an abstract class: a record cannot be updated through it. Write it through its own class, 'Message'.",
-    );
-    await expect(row.delete()).rejects.toThrow(
-      "'Readable' is an abstract class: a record cannot be deleted through it.",
-    );
-    expect(touched).toEqual([]);
+    calls.length = 0;
+    await row.save("batch");
+    expect(calls).toEqual([["updateSubject", "Readable", "ad4m://m/1", { text: "edited" }, "batch"]]);
+
+    calls.length = 0;
+    await row.delete("batch");
+    expect(calls[0][0]).toBe("removeSubject");
+    expect(calls[0][2]).toBe("ad4m://m/1");
   });
 });

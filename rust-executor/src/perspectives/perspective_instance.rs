@@ -66,7 +66,6 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
-pub(crate) use abstract_classes::AbstractWrite;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
@@ -5530,7 +5529,7 @@ impl PerspectiveInstance {
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
-        self.refuse_abstract_write(&class_name, AbstractWrite::Create)?;
+        self.refuse_abstract_create(&class_name)?;
 
         //let constructor_start = std::time::Instant::now();
         let mut commands = self.get_constructor_actions(&class_name).await?;
@@ -5679,7 +5678,19 @@ impl PerspectiveInstance {
         let class_name = self
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
-        self.refuse_abstract_write(&class_name, AbstractWrite::Update)?;
+        // Through an abstract class (#1435): each of the record's classes it
+        // reads writes the value with its own setter.
+        if self.is_abstract_class(&class_name)? {
+            let commands = self
+                .update_through_abstract(&class_name, &expression_address, &values, context)
+                .await?;
+            if commands.is_empty() {
+                return Ok(());
+            }
+            return self
+                .execute_commands(commands, expression_address, vec![], batch_id, context)
+                .await;
+        }
 
         let mut commands: Vec<Command> = Vec::new();
         if let serde_json::Value::Object(obj) = values {
@@ -5698,26 +5709,10 @@ impl PerspectiveInstance {
                     );
                     continue;
                 };
-                // Same collection expansion as `create_subject`: an array on an
-                // all-`addLink` setter appends one link per element; any other
-                // array stays a single `literal:json:` value.
-                let expand_collection = matches!(value, serde_json::Value::Array(_))
-                    && setter_commands.iter().all(|c| c.action == Action::AddLink);
-                let elements: Vec<serde_json::Value> = match (expand_collection, value) {
-                    (true, serde_json::Value::Array(items)) => items.clone(),
-                    _ => vec![value.clone()],
-                };
-                for element in &elements {
-                    let target_value = self
-                        .resolve_property_value(&class_name, prop, element, context)
-                        .await?;
-                    for setter_cmd in setter_commands.iter() {
-                        commands.push(Command {
-                            target: Some(target_value.clone()),
-                            ..setter_cmd.clone()
-                        });
-                    }
-                }
+                commands.extend(
+                    self.setter_commands(&class_name, prop, &setter_commands, value, context)
+                        .await?,
+                );
             }
         }
 
@@ -5727,6 +5722,39 @@ impl PerspectiveInstance {
 
         self.execute_commands(commands, expression_address, vec![], batch_id, context)
             .await
+    }
+
+    /// The commands `setter` runs to write `value` to `prop` of `class_name`.
+    /// Same collection expansion as `create_subject`: an array on an
+    /// all-`addLink` setter appends one link per element; any other array
+    /// stays a single `literal:json:` value.
+    async fn setter_commands(
+        &self,
+        class_name: &str,
+        prop: &str,
+        setter: &[Command],
+        value: &serde_json::Value,
+        context: &AgentContext,
+    ) -> Result<Vec<Command>, AnyError> {
+        let expand_collection = matches!(value, serde_json::Value::Array(_))
+            && setter.iter().all(|c| c.action == Action::AddLink);
+        let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+            (true, serde_json::Value::Array(items)) => items.clone(),
+            _ => vec![value.clone()],
+        };
+        let mut commands = Vec::new();
+        for element in &elements {
+            let target_value = self
+                .resolve_property_value(class_name, prop, element, context)
+                .await?;
+            for setter_cmd in setter {
+                commands.push(Command {
+                    target: Some(target_value.clone()),
+                    ..setter_cmd.clone()
+                });
+            }
+        }
+        Ok(commands)
     }
 
     pub async fn get_subject_data(

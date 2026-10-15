@@ -1716,12 +1716,14 @@ export class Ad4mModel {
    * ```
    */
   async save(batchId?: string) {
-    // The executor refuses an abstract class too; refusing here keeps the
-    // error ahead of the batch.
-    this.refuseAbstractWrite(this._snapshot ? 'updated' : 'created');
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
-      await this.innerUpdate(true, batchId);
+      const abstractName = this.abstractName();
+      if (abstractName) {
+        await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValues(), batchId);
+      } else {
+        await this.innerUpdate(true, batchId);
+      }
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
         // and overwrite in-memory values. Just refresh the snapshot so further
@@ -1733,7 +1735,15 @@ export class Ad4mModel {
       return;
     }
 
-    // New instance → create path.
+    // New instance → create path. The executor refuses an abstract class
+    // too; refusing here keeps the error ahead of the batch.
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      throw new Error(
+        `'${abstractName}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${abstractName}' reads it.`
+      );
+    }
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
@@ -1802,29 +1812,15 @@ export class Ad4mModel {
     }
   }
 
-  /**
-   * An abstract class (#1435) names what records have, not what they are. A
-   * record read through it is written through its own class: the abstract
-   * class's predicates are not the ones that class reads, and its delete
-   * would miss the record's own links. Throws before the perspective is
-   * touched.
-   */
-  private refuseAbstractWrite(done: 'created' | 'updated' | 'deleted') {
+  /** The class's name when it is abstract (#1435). Through an abstract
+   *  class, the executor writes to the record's own classes. */
+  private abstractName(): string | undefined {
     const ctor = this.constructor as { isAbstract?: boolean; className?: string };
-    if (!ctor.isAbstract) return;
-    if (done === 'created') {
-      throw new Error(
-        `'${ctor.className}' is an abstract class and cannot be created. Create an instance of ` +
-        `a class that has its properties; querying '${ctor.className}' reads it.`
-      );
-    }
-    const own = (this as any)[SUBJECT_CLASS_KEY];
-    throw new Error(
-      `'${ctor.className}' is an abstract class: a record cannot be ${done} through it. ` +
-      (own
-        ? `Write it through its own class, '${own}'.`
-        : `Write it through its own class, the \`__subjectClass\` a query on '${ctor.className}' returns.`)
-    );
+    return ctor.isAbstract ? ctor.className : undefined;
+  }
+
+  private changedValues(): Record<string, any> {
+    return Object.fromEntries(this.changedFields().map((key) => [key, (this as any)[key]]));
   }
 
   private cleanCopy() {
@@ -2086,9 +2082,10 @@ export class Ad4mModel {
    * ```
    */
   async delete(batchId?: string) {
-    this.refuseAbstractWrite('deleted');
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasDestructor = Object.values(metadata.properties).some(
+    // Through an abstract class (#1435), `removeSubject` runs the destructors
+    // of the record's own classes.
+    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
 

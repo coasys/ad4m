@@ -407,22 +407,10 @@ export interface PropertyOptions {
     datatype?: string;
 
     /**
-     * The name this property answers to when its class is read through an
-     * abstract class, keyed by the abstract class's name. A query over the
-     * abstract class reads the property under that name, through this
-     * property's predicate; a query over this class keeps its own name.
-     *
-     * Registering the class fails if the alias is a name the class already
-     * uses.
-     *
-     * @example
-     * ```typescript
-     * @Model({ name: "Message", implements: [TextContent] })
-     * class Message extends Ad4mModel {
-     *   @Property({ through: "flux://body", alias: { TextContent: "text" } })
-     *   body: string = "";
-     * }
-     * ```
+     * The name this property answers to through an abstract class, keyed by
+     * its name: `alias: { TextContent: "text" }` reads (and writes) `body` as
+     * `text` through `TextContent`. Registering fails if the class already
+     * uses that name.
      */
     alias?: Record<string, string>;
 }
@@ -598,23 +586,19 @@ export interface ModelConfig {
     name: string;
 
     /**
-     * An abstract class: it names properties a record has, not what the
-     * record is. Querying it (`findAll`, `query`, `modelQuery`,
-     * subscriptions) reads every installed concrete class that has all of its
-     * property and relation names, or aliases for them. Each row keeps its
-     * real class (`__subjectClass`). It cannot be created, and the executor
-     * never picks it as a record's class.
-     *
-     * Its properties' `through` predicates are never compared: matching is
-     * by name.
+     * An abstract class names properties a record has, not what it is.
+     * Querying it reads every installed class that has all of its names (or
+     * aliases for them), matched by name, never by `through`; rows keep
+     * their `__subjectClass`. It cannot be created. `save()` and `delete()`
+     * on a row read through it run the setters and destructors of the
+     * record's own classes; values are not converted between them.
      */
     abstract?: boolean;
 
     /**
-     * Abstract classes this class is meant to be read through. Checked when
-     * the class is declared: every property and relation name of each listed
-     * class must be a name or an alias here. Only a check — the executor
-     * matches by structure, listed or not.
+     * Abstract classes this class is meant to be read through: checked at
+     * declaration (every name of each must be a name or alias here). The
+     * executor matches by structure, listed or not.
      */
     implements?: Ad4mModelLike[];
 
