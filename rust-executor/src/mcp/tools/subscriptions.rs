@@ -259,7 +259,7 @@ impl Ad4mMcpHandler {
         };
 
         if text_predicates.is_empty() {
-            log::warn!("get_mention_waker_config: no class conforms to TextContent and no Message class has a body, falling back to unscoped (but ontology-excluded) query");
+            log::warn!("get_mention_waker_config: no Message class has a body, falling back to unscoped (but ontology-excluded) query");
         }
         let query = build_mention_query(&names, &did, &text_predicates);
 
@@ -293,12 +293,48 @@ impl Ad4mMcpHandler {
     }
 }
 
+/// The predicates a mention can be written under (#1446): every class's
+/// `text` read through the built-in `TextContent`, whatever the class calls
+/// it, together with the `body` of a class named `Message`, as before.
+///
+/// TextContent only adds to the old lookup, it never narrows it. Until Flux
+/// and We declare their alias, `Message.body` conforms to nothing; a class
+/// that has a `text` of its own (Flux's poll `Answer`, We's `TextBlock`) must
+/// not turn the chat scan off. Without a `Message.body` the scan stays
+/// unscoped (empty list), as before: scoping it to whichever classes conform
+/// would drop every text property that does not. Only predicates that can be
+/// embedded in the query are kept.
+pub(crate) async fn mention_text_predicates(perspective: &PerspectiveInstance) -> Vec<String> {
+    let message_body: Option<String> = shacl::load_class_properties(perspective, "Message")
+        .await
+        .iter()
+        .find(|prop| prop.name.to_lowercase() == "body")
+        .and_then(|prop| prop.predicate.clone());
+    let Some(message_body) = message_body else {
+        return vec![];
+    };
+    let mut predicates = perspective
+        .predicates_through(TEXT_CONTENT_URI, "text")
+        .unwrap_or_else(|e| {
+            log::warn!("mention scan: reading through TextContent failed: {e}");
+            vec![]
+        });
+    predicates.push(message_body);
+    predicates.sort();
+    predicates.dedup();
+    predicates
+        .into_iter()
+        .filter(|p| validate_sparql_iri(p).is_ok())
+        .collect()
+}
+
 /// Build the SPARQL mention-detection query for the waker.
 ///
 /// CONTAINS does case-insensitive substring matching on the parsed literal
 /// target, so a message body containing any profile name or the agent DID
-/// matches. `body_predicate` scopes the scan to the message-body predicate when
-/// SHACL resolves it (much faster on large perspectives).
+/// matches. `text_predicates` (see [`mention_text_predicates`]) scope the scan
+/// when there are any (much faster on large perspectives); empty means every
+/// predicate but the ontology's.
 ///
 /// Both the scoped and the unscoped-fallback query exclude `ad4m://ontology/*`
 /// predicates (author DID, timestamp, proofKey — see `sparql_store`). Without
@@ -311,38 +347,6 @@ impl Ad4mMcpHandler {
 /// otherwise break out of the CONTAINS literal and could inject query syntax.
 ///
 /// Pure over its inputs, so it unit-tests without an agent or perspective.
-/// The predicates a mention can be written under (#1446): every class's
-/// `text` read through the built-in `TextContent`, whatever the class calls
-/// it. Until Flux and We declare their alias, no class may conform; then the
-/// `body` of a class named `Message`, as before. Only predicates that can be
-/// embedded in the query are kept.
-pub(crate) async fn mention_text_predicates(perspective: &PerspectiveInstance) -> Vec<String> {
-    let through_text_content = perspective
-        .predicates_through(TEXT_CONTENT_URI, "text")
-        .unwrap_or_else(|e| {
-            log::warn!("mention scan: reading through TextContent failed: {e}");
-            vec![]
-        });
-    let predicates: Vec<String> = if !through_text_content.is_empty() {
-        through_text_content
-    } else {
-        shacl::load_class_properties(perspective, "Message")
-            .await
-            .iter()
-            .find(|prop| prop.name.to_lowercase() == "body")
-            .and_then(|prop| prop.predicate.clone())
-            .into_iter()
-            .collect()
-    };
-    predicates
-        .into_iter()
-        .filter(|p| validate_sparql_iri(p).is_ok())
-        .collect()
-}
-
-/// The mention query: a link whose target names the agent or its DID. Scoped
-/// to `text_predicates` when there are any, else to every predicate but the
-/// ontology's.
 pub fn build_mention_query(names: &[String], did: &str, text_predicates: &[String]) -> String {
     let all_terms: Vec<String> = names
         .iter()

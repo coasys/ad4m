@@ -11,9 +11,11 @@
 //!
 //! Without a class it reads every class's `text` through the built-in
 //! abstract class `TextContent` (#1446), whatever the app calls its class or
-//! property. Until Flux and We declare their alias no class may conform, and
-//! it reads `Message.body` as it did before. HTML in the text is turned into
-//! plain text for the model reading it (`plain_text`).
+//! property, and `Message.body` as it did before, merged into one chronology.
+//! TextContent only adds: until Flux declares its alias, `Message` conforms
+//! to nothing, and a class with a `text` of its own (a poll's `Answer`) must
+//! not hide the chat. HTML in the text is turned into plain text for the
+//! model reading it (`plain_text`).
 
 use super::plain_text::to_plain_text;
 use super::{
@@ -105,14 +107,16 @@ struct Source {
     text_property: String,
 }
 
-/// Every class's `text` through TextContent; until a class conforms, the
-/// `body` of a class named `Message`, as before.
-async fn text_content_source(perspective: &PerspectiveInstance) -> Result<Source, String> {
+/// Every class's `text` through TextContent, and the `body` of a class named
+/// `Message` unless it already conforms (its alias reads it through
+/// TextContent). One of them, or both.
+async fn text_content_sources(perspective: &PerspectiveInstance) -> Result<Vec<Source>, String> {
     let conforming = perspective
         .resolve_abstract(TEXT_CONTENT_URI)
         .map_err(|e| error_json(format!("Error reading through TextContent: {e}")))?;
+    let mut sources = Vec::new();
     if !conforming.classes.is_empty() {
-        return Ok(Source {
+        sources.push(Source {
             query_as: TEXT_CONTENT_URI.to_string(),
             label: "TextContent".to_string(),
             text_property: "text".to_string(),
@@ -125,18 +129,29 @@ async fn text_content_source(perspective: &PerspectiveInstance) -> Result<Source
             None => None,
         },
     };
-    let Some((class_name, shape)) = message else {
+    match message {
+        Some((class_name, _)) if conforming.classes.contains(&class_name) => {}
+        Some((class_name, shape)) => {
+            match text_property_for(perspective, &class_name, &shape, Some("body")) {
+                Ok(text_property) => sources.push(Source {
+                    query_as: class_name.clone(),
+                    label: class_name,
+                    text_property,
+                }),
+                // A Message without a body: TextContent alone, if anything.
+                Err(e) if sources.is_empty() => return Err(e),
+                Err(_) => {}
+            }
+        }
+        None => {}
+    }
+    if sources.is_empty() {
         return Err(error_json(
             "No class has text: none conforms to TextContent (a `text` property, or an alias \
              for it) and there is no Message class. Pass class_name.",
         ));
-    };
-    let text_property = text_property_for(perspective, &class_name, &shape, Some("body"))?;
-    Ok(Source {
-        query_as: class_name.clone(),
-        label: class_name,
-        text_property,
-    })
+    }
+    Ok(sources)
 }
 
 /// Which property of `class_name` to print: `requested`, else the one that
@@ -225,7 +240,7 @@ impl Ad4mMcpHandler {
             .as_deref()
             .map(str::trim)
             .filter(|c| !c.is_empty());
-        let source = match class_name {
+        let sources = match class_name {
             Some(class_name) => {
                 let (class_name, shape) = match resolve_class(&perspective, class_name).await {
                     Ok(v) => v,
@@ -237,11 +252,11 @@ impl Ad4mMcpHandler {
                     &shape,
                     p.text_property.as_deref(),
                 ) {
-                    Ok(text_property) => Source {
+                    Ok(text_property) => vec![Source {
                         query_as: class_name.clone(),
                         label: class_name,
                         text_property,
-                    },
+                    }],
                     Err(e) => return e,
                 }
             }
@@ -251,8 +266,8 @@ impl Ad4mMcpHandler {
                      class's text through TextContent",
                 )
             }
-            None => match text_content_source(&perspective).await {
-                Ok(source) => source,
+            None => match text_content_sources(&perspective).await {
+                Ok(sources) => sources,
                 Err(e) => return e,
             },
         };
@@ -266,24 +281,56 @@ impl Ad4mMcpHandler {
             "order": [["timestamp", "desc"]],
             "limit": limit,
         });
-        let Source {
-            query_as,
-            label,
-            text_property,
-        } = source;
-        let (mut instances, total) = match run_model_query(&perspective, &query_as, &query).await {
-            Ok(v) => v,
-            Err(e) => return error_json(format!("Error reading {label} instances: {e}")),
+        // Each source newest-first with the same limit, merged newest-first
+        // and cut to `limit`, so the most recent of all of them stay. A
+        // record two sources both read is shown once.
+        let label = sources
+            .iter()
+            .map(|s| s.label.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let mut rows: Vec<(Value, &str)> = Vec::new();
+        let mut total = 0;
+        for source in &sources {
+            let (instances, count) =
+                match run_model_query(&perspective, &source.query_as, &query).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return error_json(format!("Error reading {} instances: {e}", source.label))
+                    }
+                };
+            total += count;
+            rows.extend(
+                instances
+                    .into_iter()
+                    .map(|inst| (inst, source.text_property.as_str())),
+            );
+        }
+        let timestamp = |inst: &Value| {
+            inst.get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
         };
-        if instances.is_empty() {
+        rows.sort_by_key(|(inst, _)| std::cmp::Reverse(timestamp(inst)));
+        let fetched = rows.len();
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|(inst, _)| {
+            inst.get("id")
+                .and_then(Value::as_str)
+                .is_none_or(|id| seen.insert(id.to_string()))
+        });
+        total = total.saturating_sub(fetched - rows.len());
+        rows.truncate(limit);
+        if rows.is_empty() {
             return format!("(no {label} instances under {parent})");
         }
-        // Newest-first from the query so `limit` keeps the most recent;
-        // present oldest-first like a conversation reads.
-        instances.reverse();
+        // Newest-first so `limit` keeps the most recent; present
+        // oldest-first like a conversation reads.
+        rows.reverse();
 
         let mut names: HashMap<String, String> = HashMap::new();
-        for inst in &instances {
+        for (inst, _) in &rows {
             if let Some(did) = inst.get("author").and_then(Value::as_str) {
                 if !names.contains_key(did) {
                     let name = display_name_for(did).await;
@@ -292,17 +339,17 @@ impl Ad4mMcpHandler {
             }
         }
 
-        let mut lines: Vec<String> = Vec::with_capacity(instances.len() + 1);
-        if total > instances.len() {
+        let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
+        if total > rows.len() {
             lines.push(format!(
                 "(showing last {} of {} {} instances under {})",
-                instances.len(),
+                rows.len(),
                 total,
                 label,
                 parent
             ));
         }
-        for inst in &instances {
+        for (inst, text_property) in &rows {
             let did = inst.get("author").and_then(Value::as_str).unwrap_or("");
             let name = names.get(did).cloned().unwrap_or_else(|| did.to_string());
             let timestamp = inst.get("timestamp").and_then(Value::as_str).unwrap_or("");
@@ -311,7 +358,7 @@ impl Ad4mMcpHandler {
                 timestamp,
                 name,
                 did,
-                render_text(inst, &text_property)
+                render_text(inst, text_property)
             ));
         }
         lines.join("\n\n")
