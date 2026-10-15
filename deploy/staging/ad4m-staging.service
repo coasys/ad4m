@@ -1,6 +1,6 @@
 # AD4M staging executor: the build of origin/staging that update.sh deployed
 # last. Every listener is on 127.0.0.1 (RPC 12400, Holochain 12401/12402,
-# MCP 3003); nginx publishes 12400 as https://staging.ad4m.dev.
+# MCP 12403); nginx publishes 12400 as https://staging.ad4m.dev.
 # Setup, update and rollback: deploy/staging/README.md. The general guide
 # for a headless executor is docs-src/headless-executor.md.
 [Unit]

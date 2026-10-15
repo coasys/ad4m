@@ -82,7 +82,11 @@
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 //! | [`union`] | One query over several classes: per-class rows, one classification, one sort and page over the union |
+//! | [`abstract_classes`] | Abstract classes: the concrete classes one reads, and the views it reads them through |
+//! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`), addressed by URI and never stored |
 
+pub(crate) mod abstract_classes;
+pub(crate) mod builtin_classes;
 #[cfg(test)]
 mod collection_provenance_tests;
 mod eval_transform;
@@ -136,5 +140,6 @@ pub use types::{
 /// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
 /// storage on the same rule the SPARQL query builder uses.  See
 /// [`utils::is_safe_iri_target`] for the full contract.
-pub use union::{execute_union_query, QueryClasses};
+pub(crate) use union::refuse_union_reads;
+pub use union::{execute_union_query, execute_union_query_with_views, QueryClasses};
 pub use utils::is_safe_iri_target;
