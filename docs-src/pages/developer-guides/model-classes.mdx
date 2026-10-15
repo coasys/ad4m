@@ -1050,6 +1050,8 @@ A query over an abstract class is a [union query](#querying-several-classes-at-o
 | Aliases | `alias: { Readable: "text" }` on a property or relation. Read through `Readable`, the row carries `text`, read through this property's predicate, and `where` / `order` use `text`. Read as `Message`, it stays `body`. A class that already has a property named `text` cannot also alias another property to `text`: registering it fails. |
 | Rows | Each row is the record's real class: `__subjectClass` names it. |
 | Creating | Refused: `Readable.create(…)` and `createSubject("Readable", …)` throw. |
+| Writing | A row read through `Readable` is written through its own class, the one `__subjectClass` names. `save()`, `delete()`, `Readable.update(…)` and `removeSubject("Readable", …)` throw, as do the MCP write tools; the MCP tools generated for an abstract class are its reads only. Through `Readable` a write would use `Readable`'s predicates, which the record's class does not read. |
+| No names | An abstract class with no property and no relation is refused at registration. One that arrives that way anyhow (a sync, raw links) reads no class. |
 | Classifying | An abstract class is never one of a record's classes (`subjectClassesOf`, polymorphic relations, union queries). |
 | Later classes | A subscription over an abstract class picks up a class installed after it was opened. |
 | Unions | An abstract class is queried on its own, not in `classNames` with other classes. |
