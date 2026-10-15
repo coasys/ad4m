@@ -7,9 +7,12 @@
 //! is already plain text a model reads well.
 //!
 //! Deliberately small and without dependencies: this is not an HTML parser,
-//! only enough to read editor output. Text that does not look like HTML (no
-//! `<` followed by a tag name, `/` or `!`) is returned unchanged, so `a < b`
-//! stays `a < b`.
+//! only enough to read editor output. Only the HTML elements listed here are
+//! tags; any other `<…>` is text, so a Markdown autolink
+//! (`<https://example.org>`), a generic (`Vec<String>`) or `a < b` stays as
+//! written. Text with no such tag is returned unchanged. Line and paragraph
+//! breaks in the text are kept; other runs of whitespace collapse to one
+//! space, as a browser shows them.
 
 /// Elements whose start and end separate paragraphs.
 const PARAGRAPH: &[&str] = &[
@@ -38,6 +41,60 @@ const LINE: &[&str] = &["br", "li", "tr"];
 
 /// Elements whose content is not text.
 const SKIPPED: &[&str] = &["script", "style", "head", "template"];
+
+/// Elements that only mark up text: dropped, their content kept.
+const INLINE: &[&str] = &[
+    "a",
+    "abbr",
+    "b",
+    "body",
+    "caption",
+    "cite",
+    "code",
+    "dd",
+    "del",
+    "details",
+    "dl",
+    "dt",
+    "em",
+    "figcaption",
+    "figure",
+    "font",
+    "html",
+    "i",
+    "img",
+    "ins",
+    "kbd",
+    "label",
+    "main",
+    "mark",
+    "nav",
+    "q",
+    "s",
+    "samp",
+    "small",
+    "span",
+    "strike",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "time",
+    "u",
+    "var",
+];
+
+/// Whether `name` is an element this converter reads as a tag.
+fn is_element(name: &str) -> bool {
+    [PARAGRAPH, LINE, SKIPPED, INLINE]
+        .iter()
+        .any(|names| names.contains(&name))
+}
 
 /// `input` as plain text: HTML converted, anything else unchanged.
 pub(crate) fn to_plain_text(input: &str) -> String {
@@ -89,13 +146,10 @@ pub(crate) fn to_plain_text(input: &str) -> String {
     out.finish()
 }
 
-/// A `<` followed by a letter, `/` or `!`, with a `>` after it.
+/// At least one tag of a known element, or a comment.
 fn looks_like_html(s: &str) -> bool {
-    s.match_indices('<').any(|(i, _)| {
-        let next = s[i + 1..].chars().next();
-        next.is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!')
-            && s[i..].contains('>')
-    })
+    s.match_indices('<')
+        .any(|(i, _)| Tag::parse(&s[i..]).is_some())
 }
 
 struct Tag {
@@ -108,7 +162,8 @@ struct Tag {
 
 impl Tag {
     /// The tag at the start of `s` (which starts with `<`), or `None` when
-    /// it opens no tag.
+    /// it opens no tag of a known element: `<https://…>` and `Vec<String>`
+    /// are text.
     fn parse(s: &str) -> Option<Tag> {
         if let Some(comment) = s.strip_prefix("<!--") {
             let end = comment.find("-->")? + "<!--".len() + "-->".len();
@@ -121,8 +176,19 @@ impl Tag {
         let body = &s[1..];
         let closing = body.starts_with('/');
         let name_start = if closing { &body[1..] } else { body };
-        let first = name_start.chars().next()?;
-        if !(first.is_ascii_alphabetic() || first == '!') {
+        let name: String = name_start
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        // The name ends at whitespace, `/` or `>`: `<a href=…>`, `<br/>`.
+        // `<!DOCTYPE …>` is a tag without a name.
+        let after_name = name_start[name.len()..].chars().next();
+        let doctype = name_start.starts_with('!');
+        if !doctype
+            && (!is_element(&name)
+                || !after_name.is_some_and(|c| c.is_ascii_whitespace() || c == '/' || c == '>'))
+        {
             return None;
         }
         // The `>` that ends the tag, outside quoted attribute values.
@@ -141,11 +207,6 @@ impl Tag {
             }
         }
         let end = end?;
-        let name: String = name_start
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_ascii_lowercase();
         Some(Tag {
             name,
             closing,
@@ -154,12 +215,15 @@ impl Tag {
     }
 }
 
-/// Plain text being built: runs of whitespace collapse to one space, as a
-/// browser renders them, except inside `<pre>`.
+/// Plain text being built: runs of whitespace collapse to one space, except
+/// inside `<pre>`. A newline in the text is kept as a line break, two or more
+/// as a paragraph break: Markdown mixed with a tag keeps its lines.
 #[derive(Default)]
 struct Text {
     out: String,
     pending_space: bool,
+    /// Newlines in the current run of whitespace.
+    pending_newlines: usize,
     preformatted: bool,
 }
 
@@ -168,13 +232,22 @@ impl Text {
         for c in text.chars() {
             if self.preformatted {
                 self.out.push(c);
+            } else if c == '\n' {
+                self.pending_newlines += 1;
             } else if c.is_whitespace() {
                 self.pending_space = true;
             } else {
-                if self.pending_space && !self.out.is_empty() && !self.out.ends_with('\n') {
-                    self.out.push(' ');
+                match self.pending_newlines {
+                    0 => {
+                        if self.pending_space && !self.out.is_empty() && !self.out.ends_with('\n') {
+                            self.out.push(' ');
+                        }
+                    }
+                    1 => self.break_line(),
+                    _ => self.break_paragraph(),
                 }
                 self.pending_space = false;
+                self.pending_newlines = 0;
                 self.out.push(c);
             }
         }
@@ -186,6 +259,7 @@ impl Text {
             self.out.push('\n');
         }
         self.pending_space = false;
+        self.pending_newlines = 0;
     }
 
     fn break_paragraph(&mut self) {
@@ -287,11 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_collapses_outside_pre() {
+    fn whitespace_collapses_outside_pre_and_newlines_stay() {
         assert_eq!(
-            to_plain_text("<p>  lots \n  of\tspace  </p>"),
+            to_plain_text("<p>  lots   of\tspace  </p>"),
             "lots of space"
         );
+        assert_eq!(to_plain_text("<p>  one \n  two  </p>"), "one\ntwo");
+        // Newlines between block tags add no extra break.
+        assert_eq!(to_plain_text("<p>a</p>\n<p>b</p>\n"), "a\n\nb");
         assert_eq!(
             to_plain_text("<pre>fn main() {\n    x\n}</pre>"),
             "fn main() {\n    x\n}"
@@ -304,6 +381,7 @@ mod tests {
             to_plain_text("<style>p { color: red }</style><p>visible</p><script>alert('x')</script><!-- note -->"),
             "visible"
         );
+        assert_eq!(to_plain_text("<!DOCTYPE html><p>page</p>"), "page");
     }
 
     #[test]
@@ -329,5 +407,37 @@ mod tests {
     #[test]
     fn a_stray_less_than_inside_html_is_text() {
         assert_eq!(to_plain_text("<p>1 < 2</p>"), "1 < 2");
+    }
+
+    #[test]
+    fn angle_brackets_that_are_not_html_tags_stay() {
+        // No tag at all: unchanged.
+        for text in [
+            "See <https://example.org/x> for details",
+            "Use Vec<String> here",
+            "mail <data@example.org> or <a@b.c>",
+            "multi\nline <https://example.org/x>\n\nnext paragraph",
+        ] {
+            assert_eq!(to_plain_text(text), text);
+        }
+        // Next to a real tag: only the tag goes.
+        assert_eq!(
+            to_plain_text("See <https://example.org/x> and <b>this</b>"),
+            "See <https://example.org/x> and this"
+        );
+        assert_eq!(
+            to_plain_text("<p>Use Vec<String> or Option<T></p>"),
+            "Use Vec<String> or Option<T>"
+        );
+        // An element name must end the name: `<bold>` is not `<b>`.
+        assert_eq!(to_plain_text("<bold>x</bold> <b>y</b>"), "<bold>x</bold> y");
+    }
+
+    #[test]
+    fn markdown_with_one_tag_keeps_its_lines_and_paragraphs() {
+        assert_eq!(
+            to_plain_text("line one\nline two with <b>bold</b>\n\n- item\n- item"),
+            "line one\nline two with bold\n\n- item\n- item"
+        );
     }
 }
