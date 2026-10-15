@@ -153,16 +153,35 @@ impl PerspectiveInstance {
             .unwrap_or_else(|_| ReadTargets::named(classes))
     }
 
-    /// `create_subject` on an abstract class: refused, it names what records
-    /// have, not what they are.
-    pub(super) fn refuse_abstract_create(&self, class_name: &str) -> Result<(), AnyError> {
-        if self.abstract_index()?.is_abstract(class_name) {
-            return Err(anyhow!(
+    /// Whether `class_name` is an abstract class here.
+    pub(crate) fn is_abstract_class(&self, class_name: &str) -> Result<bool, AnyError> {
+        Ok(self.abstract_index()?.is_abstract(class_name))
+    }
+
+    /// A write through an abstract class: refused, it names what records
+    /// have, not what they are. Its predicates are not the ones a record's
+    /// own class writes, so a write through it lands where no read looks.
+    /// Every subject write (create, update, delete) checks here first.
+    pub(crate) fn refuse_abstract_write(
+        &self,
+        class_name: &str,
+        write: AbstractWrite,
+    ) -> Result<(), AnyError> {
+        if !self.is_abstract_class(class_name)? {
+            return Ok(());
+        }
+        Err(match write {
+            AbstractWrite::Create => anyhow!(
                 "'{class_name}' is an abstract class and cannot be created. Create an instance \
                  of a class that has its properties; querying '{class_name}' reads it."
-            ));
-        }
-        Ok(())
+            ),
+            AbstractWrite::Update | AbstractWrite::Delete => anyhow!(
+                "'{class_name}' is an abstract class: a record cannot be {} through it. Write \
+                 it through its own class, the `__subjectClass` a query on '{class_name}' \
+                 returns.",
+                write.done()
+            ),
+        })
     }
 
     /// Resolve every subscription over an abstract class (#1435) again whose
@@ -256,6 +275,24 @@ impl PerspectiveInstance {
             query_json,
             result,
         )
+    }
+}
+
+/// The subject write [`PerspectiveInstance::refuse_abstract_write`] checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbstractWrite {
+    Create,
+    Update,
+    Delete,
+}
+
+impl AbstractWrite {
+    fn done(self) -> &'static str {
+        match self {
+            AbstractWrite::Create => "created",
+            AbstractWrite::Update => "updated",
+            AbstractWrite::Delete => "deleted",
+        }
     }
 }
 

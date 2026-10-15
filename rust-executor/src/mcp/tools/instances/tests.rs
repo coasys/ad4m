@@ -2252,3 +2252,228 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
         "a failed add_to_collection must not leave the item linked: {got}"
     );
 }
+
+/// Abstract (#1435): anything with `body`. Setters and an adder as the SDK
+/// writes them, so each write through it would land on predicates no
+/// concrete class here reads, and a test without the refusal fails.
+const READABLE_SDNA: &str = r#"{
+  "target_class": "flux://Readable",
+  "abstract": true,
+  "properties": [
+    {"path":"flux://text","name":"body","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://text","target":"value"}]},
+    {"path":"flux://reply","name":"replies","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"flux://reply","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"flux://reply","target":"value"}]}
+  ]
+}"#;
+
+/// Concrete, conforms to Readable with predicates of its own.
+const THREAD_SDNA: &str = r#"{
+  "target_class": "flux://Thread",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"flux://Thread"}
+  ],
+  "properties": [
+    {"path":"rdf://type","name":"type","has_value":"flux://Thread","min_count":1,"max_count":1},
+    {"path":"flux://thread_body","name":"body","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://thread_body","target":"value"}]},
+    {"path":"flux://thread_reply","name":"replies","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"flux://thread_reply","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"flux://thread_reply","target":"value"}]}
+  ]
+}"#;
+
+fn tool_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// No write goes through an abstract class: the dynamic tools offer only its
+/// reads and refuse a write called by name, and the `instance_*` writes
+/// refuse it. The Thread read through it is left exactly as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_write_goes_through_an_abstract_class() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("Channel", CHANNEL_SDNA),
+            ("Thread", THREAD_SDNA),
+            ("Readable", READABLE_SDNA),
+        ],
+        true,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                properties: Some(props(&[("body", json!("hello"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let message = created["base_uri"].as_str().unwrap().to_string();
+    // Read through Readable, it is there.
+    let read = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                filter: None,
+                parent: None,
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    );
+    assert_eq!(read["total_count"], 1, "{read}");
+
+    let names: Vec<String> = handler
+        .exposed_tools()
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    for read in [
+        "readable_query",
+        "readable_list",
+        "readable_get",
+        "readable_get_replies",
+    ] {
+        assert!(names.iter().any(|n| n == read), "missing {read}: {names:?}");
+    }
+    for write in [
+        "readable_create",
+        "readable_delete",
+        "readable_set_body",
+        "readable_add_replies",
+        "readable_remove_replies",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == write),
+            "{write} offered: {names:?}"
+        );
+    }
+    assert!(names.iter().any(|n| n == "thread_set_body"), "{names:?}");
+
+    for (tool, verb) in [
+        ("readable_create", "cannot be created"),
+        ("readable_set_body", "cannot be updated"),
+        ("readable_add_replies", "cannot be updated"),
+        ("readable_remove_replies", "cannot be updated"),
+        ("readable_delete", "cannot be deleted"),
+    ] {
+        let refused = handler
+            .dispatch_non_router_tool(
+                tool,
+                Some(props(&[
+                    ("perspective_id", json!(uuid.clone())),
+                    ("expression_address", json!(message.clone())),
+                    ("value", json!("edited")),
+                    ("body", json!("new")),
+                ])),
+            )
+            .await
+            .expect("a tool result");
+        let text = tool_text(&refused);
+        assert!(
+            text.contains("'Readable' is an abstract class") && text.contains(verb),
+            "{tool}: {text}"
+        );
+    }
+
+    let update = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: message.clone(),
+                properties: props(&[("body", json!("edited"))]),
+            }))
+            .await,
+    );
+    assert!(
+        update["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cannot be updated"),
+        "{update}"
+    );
+    let remove = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: message.clone(),
+            }))
+            .await,
+    );
+    assert!(
+        remove["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cannot be deleted"),
+        "{remove}"
+    );
+    for add in [true, false] {
+        let out = if add {
+            handler
+                .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Readable".into(),
+                    base_uri: message.clone(),
+                    collection: "replies".into(),
+                    item_uri: "ad4m://obj/reply".into(),
+                }))
+                .await
+        } else {
+            handler
+                .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Readable".into(),
+                    base_uri: message.clone(),
+                    collection: "replies".into(),
+                    item_uri: "ad4m://obj/reply".into(),
+                }))
+                .await
+        };
+        let out = parse(&out);
+        assert!(
+            out["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cannot be updated"),
+            "add={add}: {out}"
+        );
+    }
+
+    // Untouched: the body, no abstract predicate written, still a Message.
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    for predicate in ["flux://text", "flux://reply"] {
+        assert!(perspective
+            .get_links(&LinkQuery {
+                source: Some(message.clone()),
+                predicate: Some(predicate.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                base_uri: message.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(got["body"], "hello", "{got}");
+}

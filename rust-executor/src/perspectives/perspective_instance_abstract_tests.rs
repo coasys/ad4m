@@ -14,11 +14,13 @@ use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// Anything with `text`.
+/// Anything with `text`. With a setter, as the SDK writes one for every
+/// property: a write through it would land on `ns://text`, which no
+/// concrete class here reads.
 const TEXT_CONTENT_SDNA: &str = r#"{
   "target_class":"ns://TextContent",
   "abstract":true,
-  "properties":[{"path":"ns://text","name":"text","max_count":1}]
+  "properties":[{"path":"ns://text","name":"text","max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://text","target":"value"}]}]
 }"#;
 
 /// A chat message: `text` through `ns://message`.
@@ -196,6 +198,80 @@ async fn an_abstract_class_is_queried_through_the_ordinary_api_and_never_created
         .subject_classes_of(&["ad4m://chat/1".to_string()])
         .unwrap();
     assert_eq!(classes["ad4m://chat/1"], vec!["Chat".to_string()]);
+}
+
+/// A record read through an abstract class is updated through its own
+/// class. Through the abstract one, the setter would write the abstract
+/// predicate (`ns://text`) onto a Message whose text is `ns://body`: refused,
+/// and nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_is_never_updated_through_an_abstract_class() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("TextContent", TEXT_CONTENT_SDNA),
+        ("Message", MESSAGE_SDNA),
+    ])
+    .await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Message",
+        "ad4m://message/1",
+        serde_json::json!({"body": "hello"}),
+    )
+    .await
+    .unwrap();
+
+    let refused = perspective
+        .update_subject(
+            SubjectClassOption {
+                class_name: Some("TextContent".into()),
+                query: None,
+            },
+            "ad4m://message/1".into(),
+            serde_json::json!({"text": "edited"}),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("'TextContent' is an abstract class")
+            && refused.contains("cannot be updated through it")
+            && refused.contains("__subjectClass"),
+        "{refused}"
+    );
+    assert!(perspective
+        .get_links_local(&LinkQuery {
+            source: Some("ad4m://message/1".into()),
+            predicate: Some("ns://text".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .is_empty());
+
+    // Through its own class it goes through.
+    perspective
+        .update_subject(
+            SubjectClassOption {
+                class_name: Some("Message".into()),
+                query: None,
+            },
+            "ad4m://message/1".into(),
+            serde_json::json!({"body": "edited"}),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let json = perspective
+        .model_query_classes(&one("TextContent"), ALL)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&json),
+        vec![("ad4m://message/1".into(), "Message".into(), "edited".into())]
+    );
 }
 
 /// Read on its own: in a union of several classes, refused. No conforming

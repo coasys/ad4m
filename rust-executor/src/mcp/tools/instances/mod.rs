@@ -74,7 +74,9 @@ use super::Ad4mMcpHandler;
 use crate::mcp::shacl;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
-use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::perspectives::perspective_instance::{
+    AbstractWrite, PerspectiveInstance, SubjectClassOption,
+};
 use crate::types::LinkQuery;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -388,6 +390,21 @@ pub(crate) async fn resolve_class(
             registered.join(", ")
         }
     )))
+}
+
+/// [`resolve_class`] for a tool that writes links itself rather than through
+/// `create_subject` / `update_subject`, which refuse an abstract class
+/// (#1435) on their own: refuse it here instead.
+pub(crate) async fn resolve_writable_class(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    write: AbstractWrite,
+) -> Result<(String, Arc<ModelShape>), String> {
+    let (class_name, shape) = resolve_class(perspective, class_name).await?;
+    perspective
+        .refuse_abstract_write(&class_name, write)
+        .map_err(|e| error_json(format!("{e:#}")))?;
+    Ok((class_name, shape))
 }
 
 /// Run a model query for `class_name` and return `(instances, total_count)`.

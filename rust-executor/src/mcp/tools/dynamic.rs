@@ -6,7 +6,7 @@
 
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl::{self, ShaclProperty};
-use crate::perspectives::perspective_instance::SubjectClassOption;
+use crate::perspectives::perspective_instance::{AbstractWrite, SubjectClassOption};
 use crate::perspectives::{all_perspectives, get_perspective};
 use crate::types::Link;
 use crate::types::{LinkQuery, LinkStatus};
@@ -44,18 +44,29 @@ impl Ad4mMcpHandler {
                     continue;
                 }
 
-                tools.push(Self::make_create_tool(&class.name, &class.properties));
+                // An abstract class (#1435) is read, never written: a record
+                // is written through its own class. Offer only the reads; the
+                // dispatch refuses a write tool called by name anyway. If the
+                // index does not load, the writes are listed and refused there.
+                let writable = !perspective.is_abstract_class(&class.name).unwrap_or(false);
+                if writable {
+                    tools.push(Self::make_create_tool(&class.name, &class.properties));
+                }
                 tools.push(Self::make_query_tool(&class.name));
                 tools.push(Self::make_list_tool(&class.name));
                 tools.push(Self::make_get_tool(&class.name));
-                tools.push(Self::make_delete_tool(&class.name));
+                if writable {
+                    tools.push(Self::make_delete_tool(&class.name));
+                }
                 // Per-property set tools and collection tools
                 for prop in &class.properties {
                     if prop.is_collection {
                         tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
-                    } else {
+                        if writable {
+                            tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
+                            tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
+                        }
+                    } else if writable {
                         tools.push(Self::make_set_property_tool(&class.name, &prop.name));
                     }
                 }
@@ -341,7 +352,7 @@ impl Ad4mMcpHandler {
                     ))]));
                 }
             };
-            match shacl::find_class_name(&perspective, class_name_lower).await {
+            let name = match shacl::find_class_name(&perspective, class_name_lower).await {
                 Some(name) => name,
                 None => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -349,7 +360,22 @@ impl Ad4mMcpHandler {
                         class_name_lower, perspective_id
                     ))]));
                 }
+            };
+            // `remove_{collection}` takes a member out: an update of the record.
+            let write = match operation {
+                "create" => Some(AbstractWrite::Create),
+                "update" | "set" | "add" | "remove" => Some(AbstractWrite::Update),
+                "delete" => Some(AbstractWrite::Delete),
+                _ => None,
+            };
+            if let Some(write) = write {
+                if let Err(e) = perspective.refuse_abstract_write(&name, write) {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Error: {e}"
+                    ))]));
+                }
             }
+            name
         };
 
         let result = match operation {

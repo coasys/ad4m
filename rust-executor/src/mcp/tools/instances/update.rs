@@ -3,9 +3,10 @@
 
 use super::{
     check_setters, error_json, fetch_instance, instance_uri, not_found, pretty,
-    remove_all_links_of, resolve_class, subject_class, validate_properties, validation_failure,
-    Ad4mMcpHandler, WriteMode,
+    remove_all_links_of, resolve_class, resolve_writable_class, subject_class, validate_properties,
+    validation_failure, Ad4mMcpHandler, WriteMode,
 };
+use crate::perspectives::perspective_instance::AbstractWrite;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -117,7 +118,14 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, _shape) = match resolve_class(&perspective, &p.class_name).await {
+        // The cascade below is class-blind, so the refusal has to be here.
+        let (class_name, _shape) = match resolve_writable_class(
+            &perspective,
+            &p.class_name,
+            AbstractWrite::Delete,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => return e,
         };

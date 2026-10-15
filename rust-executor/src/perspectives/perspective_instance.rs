@@ -66,6 +66,7 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+pub(crate) use abstract_classes::AbstractWrite;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
@@ -5525,7 +5526,7 @@ impl PerspectiveInstance {
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
-        self.refuse_abstract_create(&class_name)?;
+        self.refuse_abstract_write(&class_name, AbstractWrite::Create)?;
 
         //let constructor_start = std::time::Instant::now();
         let mut commands = self.get_constructor_actions(&class_name).await?;
@@ -5674,6 +5675,7 @@ impl PerspectiveInstance {
         let class_name = self
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
+        self.refuse_abstract_write(&class_name, AbstractWrite::Update)?;
 
         let mut commands: Vec<Command> = Vec::new();
         if let serde_json::Value::Object(obj) = values {
