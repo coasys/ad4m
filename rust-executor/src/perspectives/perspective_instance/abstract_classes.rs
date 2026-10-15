@@ -94,6 +94,19 @@ impl PerspectiveInstance {
         Ok(index)
     }
 
+    /// The name aliases key `abstract_class` by, and its shape. A built-in
+    /// by its URI, from `builtin_classes`, never from the store: an app class
+    /// of the same name does not change what it reads or writes.
+    fn abstract_shape<'a>(
+        &self,
+        abstract_class: &'a str,
+    ) -> Result<(&'a str, Arc<ModelShape>), AnyError> {
+        Ok(match builtin(abstract_class) {
+            Some(b) => (b.name, b.shape.clone()),
+            None => (abstract_class, self.get_shape(abstract_class)?),
+        })
+    }
+
     /// Every installed concrete class `abstract_class` reads, with its view.
     /// Cached until the installed shapes change. `abstract_class` is a stored
     /// abstract class's name or a built-in's URI (`ad4m://TextContent`).
@@ -106,12 +119,7 @@ impl PerspectiveInstance {
             cache.generation
         };
         let index = self.abstract_index()?;
-        // A built-in by its URI, from `builtin_classes`, never from the store:
-        // an app class of the same name does not change what it reads.
-        let (alias_key, shape) = match builtin(abstract_class) {
-            Some(b) => (b.name, b.shape.clone()),
-            None => (abstract_class, self.get_shape(abstract_class)?),
-        };
+        let (alias_key, shape) = self.abstract_shape(abstract_class)?;
         let resolution = Arc::new(abstract_classes::resolve(
             &self.sparql_store,
             &self.shape_resolver(),
@@ -246,7 +254,7 @@ impl PerspectiveInstance {
         let Value::Object(values) = values else {
             return Ok(vec![]);
         };
-        let shape = self.get_shape(abstract_class)?;
+        let (alias_key, shape) = self.abstract_shape(abstract_class)?;
         let names: HashSet<&str> = shape
             .properties
             .iter()
@@ -270,7 +278,7 @@ impl PerspectiveInstance {
             let mut has_setter = false;
             for class in &targets {
                 let own_shape = self.get_shape(class)?;
-                let Some(own) = index.own_name(class, &own_shape, name, abstract_class) else {
+                let Some(own) = index.own_name(class, &own_shape, name, alias_key) else {
                     continue;
                 };
                 let Some(setter) = self.get_property_setter_actions(class, own).await? else {
