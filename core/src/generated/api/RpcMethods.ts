@@ -11,6 +11,7 @@ import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
+import type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 import type { AiAddModelParams } from "./AiAddModelParams";
 import type { AiAddTaskParams } from "./AiAddTaskParams";
 import type { AiDiscoverModelsParams } from "./AiDiscoverModelsParams";
@@ -24,6 +25,7 @@ import type { AiUpdateModelParams } from "./AiUpdateModelParams";
 import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
+import type { CallSessionInfo } from "./CallSessionInfo";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
@@ -41,6 +43,7 @@ import type { ExpressionManyRequest } from "./ExpressionManyRequest";
 import type { ExpressionRendered } from "./ExpressionRendered";
 import type { ExpressionUrlRequest } from "./ExpressionUrlRequest";
 import type { FireOutcome } from "./FireOutcome";
+import type { FlowStateEntry } from "./FlowStateEntry";
 import type { FriendsListRequest } from "./FriendsListRequest";
 import type { GenerateAgentRequest } from "./GenerateAgentRequest";
 import type { GenerateJwtRequest } from "./GenerateJwtRequest";
@@ -80,12 +83,16 @@ import type { PerspectiveAddSdnaParams } from "./PerspectiveAddSdnaParams";
 import type { PerspectiveAddSdnaResult } from "./PerspectiveAddSdnaResult";
 import type { PerspectiveCommitBatchParams } from "./PerspectiveCommitBatchParams";
 import type { PerspectiveCreateSubjectParams } from "./PerspectiveCreateSubjectParams";
+import type { PerspectiveDiscardBatchParams } from "./PerspectiveDiscardBatchParams";
 import type { PerspectiveEvaluateGettersParams } from "./PerspectiveEvaluateGettersParams";
 import type { PerspectiveExecuteCommandsParams } from "./PerspectiveExecuteCommandsParams";
 import type { PerspectiveExpression } from "./PerspectiveExpression";
+import type { PerspectiveFlowFiredParams } from "./PerspectiveFlowFiredParams";
 import type { PerspectiveFlowProposalParams } from "./PerspectiveFlowProposalParams";
 import type { PerspectiveFlowReceiptVerdict } from "./PerspectiveFlowReceiptVerdict";
+import type { PerspectiveFlowStatesParams } from "./PerspectiveFlowStatesParams";
 import type { PerspectiveFlowValidOutputsParams } from "./PerspectiveFlowValidOutputsParams";
+import type { PerspectiveGetAllShaclParams } from "./PerspectiveGetAllShaclParams";
 import type { PerspectiveGetSubjectDataParams } from "./PerspectiveGetSubjectDataParams";
 import type { PerspectiveHandle } from "./PerspectiveHandle";
 import type { PerspectiveLinkDiff } from "./PerspectiveLinkDiff";
@@ -93,7 +100,6 @@ import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsP
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
-import type { PerspectiveModelSubscribeResult } from "./PerspectiveModelSubscribeResult";
 import type { PerspectiveNamedShacl } from "./PerspectiveNamedShacl";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
@@ -102,15 +108,18 @@ import type { PerspectiveRejectFlowProposalResult } from "./PerspectiveRejectFlo
 import type { PerspectiveRemoveAutoProcessorParams } from "./PerspectiveRemoveAutoProcessorParams";
 import type { PerspectiveRemoveLinkParams } from "./PerspectiveRemoveLinkParams";
 import type { PerspectiveRemoveLinksParams } from "./PerspectiveRemoveLinksParams";
+import type { PerspectiveRemoveSubjectParams } from "./PerspectiveRemoveSubjectParams";
 import type { PerspectiveResolveInterpretationParams } from "./PerspectiveResolveInterpretationParams";
+import type { PerspectiveResynced } from "./PerspectiveResynced";
 import type { PerspectiveShacl } from "./PerspectiveShacl";
 import type { PerspectiveShaclNameParams } from "./PerspectiveShaclNameParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
-import type { PerspectiveSubscribeQueryResult } from "./PerspectiveSubscribeQueryResult";
+import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
 import type { PerspectiveUpdateParams } from "./PerspectiveUpdateParams";
+import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectParams";
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
 import type { PromptRequest } from "./PromptRequest";
@@ -139,6 +148,21 @@ import type { SetMultiUserRequest } from "./SetMultiUserRequest";
 import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
+import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
+import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
+import type { SfuCallJoinParams } from "./SfuCallJoinParams";
+import type { SfuCascadeStatus } from "./SfuCascadeStatus";
+import type { SfuConfig } from "./SfuConfig";
+import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
+import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
+import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
+import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
+import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
+import type { SfuRoomInfo } from "./SfuRoomInfo";
+import type { SfuRoomParams } from "./SfuRoomParams";
+import type { SfuSendDataParams } from "./SfuSendDataParams";
+import type { SfuSetConfigParams } from "./SfuSetConfigParams";
+import type { SfuStatus } from "./SfuStatus";
 import type { SignMessageRequest } from "./SignMessageRequest";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
@@ -161,6 +185,7 @@ import type { VerifySignatureRequest } from "./VerifySignatureRequest";
 export interface RpcMethods {
   "agent.addEntanglementProofs": { params: AgentAddEntanglementProofsParams; result: Array<EntanglementProof> };
   "agent.addTrustedAgents": { params: TrustedAgentsWrapper; result: Array<string> };
+  "agent.byDIDs": { params: AgentsByDidsRequest; result: Array<Agent | null> };
   "agent.byDid": { params: AgentByDidParams; result: Agent | null };
   "agent.deleteEntanglementProofs": { params: EntanglementProofsWrapper; result: Array<EntanglementProof> };
   "agent.deleteTrustedAgents": { params: TrustedAgentsWrapper; result: Array<string> };
@@ -223,6 +248,7 @@ export interface RpcMethods {
   "neighbourhood.join": { params: JoinNeighbourhoodRequest; result: PerspectiveHandle };
   "neighbourhood.onlineAgents": { params: NeighbourhoodUuidParams; result: Array<OnlineAgent> };
   "neighbourhood.otherAgents": { params: NeighbourhoodUuidParams; result: Array<string> };
+  "neighbourhood.ownOnlineStatus": { params: NeighbourhoodUuidParams; result: PerspectiveExpression | null };
   "neighbourhood.publish": { params: PublishNeighbourhoodRequest; result: string };
   "neighbourhood.sendBroadcast": { params: NeighbourhoodBroadcastParams; result: boolean };
   "neighbourhood.sendSignal": { params: NeighbourhoodSignalParams; result: boolean };
@@ -239,24 +265,25 @@ export interface RpcMethods {
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };
   "perspective.createBatch": { params: PerspectiveUuidParams; result: string };
   "perspective.createSubject": { params: PerspectiveCreateSubjectParams; result: boolean };
+  "perspective.discardBatch": { params: PerspectiveDiscardBatchParams; result: boolean };
   "perspective.disposeQuery": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
   "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
+  "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<string> };
+  "perspective.flowStates": { params: PerspectiveFlowStatesParams; result: Array<FlowStateEntry> };
   "perspective.flowValidOutputs": { params: PerspectiveFlowValidOutputsParams; result: Array<ValidOutput> };
   "perspective.get": { params: PerspectiveUuidParams; result: PerspectiveHandle | null };
-  "perspective.getAllShacl": { params: PerspectiveUuidParams; result: Array<PerspectiveNamedShacl> };
+  "perspective.getAllShacl": { params: PerspectiveGetAllShaclParams; result: Array<PerspectiveNamedShacl> };
   "perspective.getShacl": { params: PerspectiveShaclNameParams; result: PerspectiveShacl | null };
   "perspective.getShaclNames": { params: PerspectiveUuidParams; result: Array<string> };
   "perspective.getShaclTargetClass": { params: PerspectiveShaclNameParams; result: string | null };
   "perspective.getSubjectData": { params: PerspectiveGetSubjectDataParams; result: string };
   "perspective.interpretationOverlays": { params: PerspectiveUuidParams; result: Array<OverlayView> };
-  "perspective.keepAliveQuery": { params: PerspectiveSubscriptionParams; result: boolean };
-  "perspective.keepAliveSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
-  "perspective.modelSubscribe": { params: PerspectiveModelQueryParams; result: PerspectiveModelSubscribeResult };
+  "perspective.modelSubscribe": { params: PerspectiveModelQueryParams; result: PerspectiveSubscribed };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -268,14 +295,17 @@ export interface RpcMethods {
   "perspective.removeAutoProcessor": { params: PerspectiveRemoveAutoProcessorParams; result: boolean };
   "perspective.removeLink": { params: PerspectiveRemoveLinkParams; result: boolean };
   "perspective.removeLinks": { params: PerspectiveRemoveLinksParams; result: Array<DecoratedLinkExpression> };
+  "perspective.removeSubject": { params: PerspectiveRemoveSubjectParams; result: boolean };
+  "perspective.resyncSubscription": { params: PerspectiveSubscriptionParams; result: PerspectiveResynced };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
-  "perspective.subscribeQuery": { params: PerspectiveQueryParams; result: PerspectiveSubscribeQueryResult };
-  "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribeQueryResult };
+  "perspective.subscribeQuery": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
+  "perspective.updateSubject": { params: PerspectiveUpdateSubjectParams; result: boolean };
   "perspective.verifyFlowReceipt": { params: PerspectiveVerifyFlowReceiptParams; result: PerspectiveFlowReceiptVerdict };
   "runtime.addFriends": { params: FriendsListRequest; result: Array<string> };
   "runtime.addHcAgentInfos": { params: AddAgentInfosRequest; result: boolean };
@@ -317,6 +347,24 @@ export interface RpcMethods {
   "runtime.unytWalletHistory": { params: RuntimeUnytWalletHistoryParams; result: null };
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
   "runtime.verifySignature": { params: VerifySignatureRequest; result: boolean };
+  "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
+  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
+  "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
+  "sfu.callLeave": { params: SfuRoomParams; result: boolean };
+  "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
+  "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
+  "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
+  "sfu.getConfig": { params: SfuNeighbourhoodParams; result: SfuConfig };
+  "sfu.listRooms": { params: Record<string, never>; result: Array<SfuRoomInfo> };
+  "sfu.qualityPreferences": { params: Record<string, never>; result: Array<SfuParticipantQualityPreference> };
+  "sfu.sendData": { params: SfuSendDataParams; result: boolean };
+  "sfu.servesAllMembers": { params: SfuPerspectiveParams; result: boolean };
+  "sfu.setConfig": { params: SfuSetConfigParams; result: boolean };
+  "sfu.sfuPeerForNeighbourhood": { params: SfuNeighbourhoodParams; result: string | null };
+  "sfu.sfuPeersForNeighbourhood": { params: SfuNeighbourhoodParams; result: Array<string> };
+  "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
+  "sfu.status": { params: Record<string, never>; result: SfuStatus };
+  "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
   "user.create": { params: CreateUserRequest; result: UserCreationResult };
   "user.credits": { params: UsersSetCreditsParams; result: boolean };
   "user.emailTest": { params: UsersEmailTestParams; result: UsersEmailTestResult };
@@ -334,6 +382,7 @@ export type RpcMethod = keyof RpcMethods;
 
 /** Idempotent reads: the client resends one once after a reconnect. */
 export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "agent.byDIDs",
   "agent.byDid",
   "agent.entanglementProofPreflight",
   "agent.get",
@@ -361,8 +410,11 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "neighbourhood.hasTelepresence",
   "neighbourhood.onlineAgents",
   "neighbourhood.otherAgents",
+  "neighbourhood.ownOnlineStatus",
   "perspective.all",
   "perspective.evaluateGetters",
+  "perspective.flowFired",
+  "perspective.flowStates",
   "perspective.flowValidOutputs",
   "perspective.get",
   "perspective.getAllShacl",
@@ -397,6 +449,14 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.unytWalletBalance",
   "runtime.unytWalletHistory",
   "runtime.verifySignature",
+  "sfu.cascadeStatus",
+  "sfu.getConfig",
+  "sfu.listRooms",
+  "sfu.qualityPreferences",
+  "sfu.servesAllMembers",
+  "sfu.sfuPeerForNeighbourhood",
+  "sfu.sfuPeersForNeighbourhood",
+  "sfu.status",
   "user.list",
   "user.multiUserEnabled",
   "user.wallet",

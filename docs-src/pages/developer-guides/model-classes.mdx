@@ -1014,11 +1014,105 @@ Each result is an instance of the class it was read as, and carries `__subjectCl
 | `order` on a property a class does not declare, or a record with no value | Those rows sort last in both directions. Ties are broken by id. |
 | `limit` / `offset` | Applied once, over the union, after `where` and `order`. `count()` and `totalCount` count the union after `where`. Without `order`, paging uses `createdAt` ascending, then id. |
 | `include` or a `$` projection over a relation a class does not declare | Skipped for that class's rows. |
-| `subscribe()` | One subscription. It re-runs when a write touches a predicate of any of the classes. The same classes in another order share one subscription. |
+| `subscribe()` | One subscription for the builder, over all the classes. It re-runs when a write could change the record of any of the classes, and sends the change as an update. The same classes in another order give the same result; each builder still holds its own subscription. |
 
 These are refused with an error rather than approximated: a `parent` scope with `limitPerAnchor` or `levels` (each class would slice its own rows per anchor), and an `order` key on a related record (`"author.name"`), which needs every class to declare the relation. A `parent` given as a model class must resolve to the same predicate for every class; otherwise pass the predicate itself. Likewise a `$` projection that two classes declare over relations to different target classes is refused; query those classes separately.
 
 The raw RPC takes the classes as an array: `perspective.modelQuery(["Placement", "EdgeRoute"], JSON.stringify({ limit: 50 }))`.
+
+### Abstract Classes
+
+An abstract class names what a record has, not which class it is. Querying it reads every installed class that has all of its property and relation names, so a view or an agent can ask for "anything with `text`" without knowing which app wrote the record or what that app called its class.
+
+```typescript
+@Model({ name: "Readable", abstract: true })
+class Readable extends Ad4mModel {
+  @Property({ through: "app://text" })
+  text: string = "";
+}
+
+// Another app calls it `body`: an alias makes it answer to `text` too.
+@Model({ name: "Message", implements: [Readable] })
+class Message extends Ad4mModel {
+  @Property({ through: "flux://body", alias: { Readable: "text" } })
+  body: string = "";
+}
+
+const everything = await Readable.findAll(perspective);
+const mentions = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
+```
+
+A query over an abstract class is a [union query](#querying-several-classes-at-once) over the classes it matches, with the same rules and limits. `modelQuery("Readable", …)` and `modelSubscribe("Readable", …)` work the same way.
+
+| Rule | Detail |
+|---|---|
+| Matching | By name only. A class matches when, for every property of the abstract class, it has a property with that name or an alias for it, and the same for relations. Predicates (`through`), datatypes and directions are not compared, so the abstract class's own `through` values are never used. |
+| Aliases | `alias: { Readable: "text" }` on a property or relation. Read through `Readable`, the row carries `text`, read through this property's predicate, and `where` / `order` use `text`. Read as `Message`, it stays `body`. A class that already has a property named `text` cannot also alias another property to `text`: registering it fails. |
+| Rows | Each row is the record's real class: `__subjectClass` names it. |
+| Creating | Refused: `Readable.create(…)` and `createSubject("Readable", …)` throw. |
+| Writing | Dispatched to the record's own classes, like a virtual call. See [Writing Through an Abstract Class](#writing-through-an-abstract-class). |
+| No names | An abstract class with no property and no relation is refused at registration. One that arrives that way anyhow (a sync, raw links) reads no class. |
+| Classifying | An abstract class is never one of a record's classes (`subjectClassesOf`, polymorphic relations, union queries). |
+| Later classes | A subscription over an abstract class picks up a class installed after it was opened. |
+| Unions | An abstract class is queried on its own, not in `classNames` with other classes. |
+| `implements` | Checked when the class is declared: `Message implements Readable but has no property or alias named \`text\``. It is a check only: the executor matches by structure whether a class lists it or not. |
+
+#### Writing Through an Abstract Class
+
+A row read through an abstract class can be edited and deleted like any other instance. The write goes to the record's own class, the way a virtual method call goes to the object's real type, so code that only knows `Readable` can edit a Flux `Message` without knowing it is one:
+
+```typescript
+// Reads `Message.body` under the name `text`.
+const [row] = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
+
+row.text = "edited";
+await row.save();
+// `Message.body` is now "edited". Nothing is written at `app://text`,
+// the abstract class's own predicate.
+(await Message.findAll(perspective))[0].body; // "edited"
+
+await row.delete();
+// Runs `Message`'s destructor: the record is gone from `Message`, and so from `Readable`.
+
+// Creating is refused: there is no record yet, so there is no class to write to.
+await Readable.create(perspective, { text: "hi" });   // throws
+await new Readable(perspective).save();                // throws
+// "'Readable' is an abstract class and cannot be created. …"
+```
+
+Relations work the same way. `addX`, `removeX` and `setX` on the row run the record's own class's adder, remover or setter:
+
+```typescript
+@Model({ name: "Folderish", abstract: true })
+class Folderish extends Ad4mModel {
+  @HasMany({ through: "app://child" })
+  children: string[] = [];
+}
+
+// Stores its members as `items`, at its own predicate.
+@Model({ name: "Box", implements: [Folderish] })
+class Box extends Ad4mModel {
+  @HasMany({ through: "box://item", alias: { Folderish: "children" } })
+  items: string[] = [];
+}
+
+const [folder] = await Folderish.findAll(perspective);
+await folder.addChildren(["ad4m://c1", "ad4m://c2"]); // Box.items: c1, c2
+await folder.removeChildren("ad4m://c1");            // Box.items: c2
+await folder.setChildren(["ad4m://c3"]);              // Box.items: c3
+// Nothing is written at `app://child`.
+```
+
+The rules:
+
+- **Which classes get the write.** Every class the record belongs to among those `Readable` reads. A record that is both a `Message` and a `Poll`, each with a property answering to `text`, gets both written. A class the record also belongs to but that `Readable` does not read is untouched, by writes and by `delete()`.
+- **Properties.** `save()` and `Readable.update(perspective, id, { text })` run, for each class, its setter for the property answering to the name. Two classes that store the name at the same predicate write it once, so a collection does not get the member twice.
+- **Relations.** A class with no setter for the relation gets `setX`'s members set on its adder's predicate.
+- **Names.** Only the abstract class's own names can be written through it. Through `Readable` that is `text`; the record's other properties are written through its own class.
+- **Values are not converted.** If one class holds HTML and another Markdown, both get exactly what you wrote.
+- **No class.** Writing to a record that is none of `Readable`'s classes is an error.
+- **Raw API.** `perspective.updateSubject("Readable", id, { text })` and `perspective.removeSubject("Readable", id)` dispatch the same way; the model methods above call them.
+- **MCP.** `instance_update` and `instance_remove` dispatch the same way. Collection membership and the tools generated for `Readable` (its reads only) go through the record's own class.
 
 ### Unverified Links
 
@@ -1155,23 +1249,32 @@ builder.dispose();
 
 Always call `dispose()` when you're done with a subscription to prevent memory leaks.
 
-#### Subscription sharing and `dispose()`
+#### What re-runs a subscription
 
-The executor keeps one live subscription per distinct query and agent. Two
-builders that subscribe to the same query (two components showing the same
-list, for example) share that subscription: the executor re-evaluates the
-query once per change and pushes one update that both builders receive.
+The executor re-runs a subscribed query when a write can change its result.
+That covers the records the query reads beyond its own class: an edit to an
+`include`d record (a comment's text under `include: { comments: true }`), and a
+linked record that starts or stops matching a typed relation (`@HasMany(() =>
+Comment)` lists only targets that carry `Comment`'s flag and required
+properties, so `post.comments` updates when one does, with or without
+`include`). It does not cover a record of another class: creating a `Note` does
+not re-run a `Post` subscription, even when both classes use the same flag
+predicate. A query over several classes (`Ad4mModel.queryOf`) is one
+subscription that re-runs on a write any of its classes would re-run on. When
+the result changes, the executor sends only the change (the records added,
+updated and removed, with the new `totalCount`), and the builder applies it to
+the result it holds before calling your callback.
 
-`dispose()` releases only the calling builder's hold. Other subscribers of the
-same query keep receiving updates, and the executor drops the subscription
-when the last holder disposes, or when no holder has sent a keepalive for a
-while (a page that was closed without disposing).
+#### Subscriptions and `dispose()`
 
-The local cleanup, stopping the keepalive and the update listener, happens
-synchronously, so a plain `builder.dispose()` is sufficient. The method also
-returns a promise that resolves once the executor has acknowledged the release;
-await it when a following step depends on that, as `subscribe()` itself does
-before registering a replacement subscription.
+Each builder holds its own executor subscription, tied to its connection. Two
+builders on the same query (two components showing the same list, for example)
+get two subscriptions, so disposing one never stops the other's updates.
+
+A builder holds one subscription at a time: `subscribe()`, `countSubscribe()`
+and `paginateSubscribe()` end the previous one first. `dispose()` ends it on the
+client at once and tells the executor. The executor also ends every subscription
+of a connection when the connection closes.
 
 ## Transactions
 

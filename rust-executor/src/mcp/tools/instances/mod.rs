@@ -38,7 +38,8 @@
 //! - [`children`] — class-agnostic `add_child` / `get_children` on the
 //!   `ad4m://has_child` tree
 //! - [`transcript`] — `instance_transcript`, a compact chronological reading
-//!   of one class's children under a node
+//!   of the children under a node that carry text, through the built-in
+//!   TextContent
 //! - [`commands`] — `execute_commands`, raw SDNA actions on an instance
 //! - [`validate`] — SHACL-derived property validation shared by every write
 //! - this file — the borrowed [`PropView`] over a class shape, class
@@ -388,6 +389,28 @@ pub(crate) async fn resolve_class(
             registered.join(", ")
         }
     )))
+}
+
+/// [`resolve_class`] for the collection tools. They write membership links
+/// at one class's predicate, so through an abstract class (#1435), which
+/// has no predicate of its own, they are refused.
+pub(crate) async fn resolve_writable_class(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+) -> Result<(String, Arc<ModelShape>), String> {
+    let (class_name, shape) = resolve_class(perspective, class_name).await?;
+    if perspective
+        .is_abstract_class(&class_name)
+        .map_err(|e| error_json(format!("{e:#}")))?
+    {
+        return Err(error_json(format!(
+            "'{class_name}' is an abstract class: collection membership is written through the \
+             record's own class, the `__subjectClass` a query on '{class_name}' returns. \
+             Through '{class_name}', instance_update sets its properties and instance_remove \
+             deletes the record."
+        )));
+    }
+    Ok((class_name, shape))
 }
 
 /// Run a model query for `class_name` and return `(instances, total_count)`.

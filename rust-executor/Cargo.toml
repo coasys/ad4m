@@ -58,12 +58,18 @@ generate_snapshot = []  # Feature flag for snapshot generation mode
 # PR #907 simdutf thread). Instead, the coasys/rusty_v8 release workflow
 # publishes the simdutf variant of the prebuilt V8 artifacts
 # (librusty_v8_simdutf_release_* + src_binding_simdutf_release_*), which
-# RUSTY_V8_MIRROR (.cargo/config.toml) points the build at. As of tag
-# v150.4.0-coasys only the x86_64-unknown-linux-gnu simdutf variant is
-# published — before cutting a release build for macOS / Windows /
-# aarch64-linux, the simdutf artifacts for those targets must be added to
-# the coasys/rusty_v8 release, or those builds fall back to a 2-3h V8
-# source build (or 404, depending on rusty_v8's build.rs fallback).
+# RUSTY_V8_MIRROR (.cargo/config.toml) points the build at. Releases
+# v150.4.0 / v150.4.0-coasys carry the simdutf variant for all five CI
+# targets (x86_64/aarch64 linux, x86_64/aarch64 macOS, x86_64 windows),
+# built by coasys/rusty_v8's coasys-release workflow (ubuntu-22.04 /
+# macos-15 / windows-2022 runners). Do NOT hand-upload simdutf libs built
+# elsewhere: a lib built on a newer glibc (e.g. 2.41) references
+# __isoc23_strtol/sscanf and fails to link in the ad4m-ci-linux container
+# (staging release v0.13.1-staging.1, 2026-10-12). If a target's simdutf
+# pair is missing, re-run that workflow via workflow_dispatch
+# (release_tags=<tag>, variants=simdutf) instead; without it the build
+# falls back to a 2-3h V8 source build (or 404, depending on rusty_v8's
+# build.rs fallback).
 # Direct dep on deno_v8 (real crate name, not aliased) with v8 feature
 # explicitly enabled. Aliasing as `v8` locally competed with deno's own
 # workspace-alias and broke feature chaining through deno_core::v8 = ["v8/v8"].
@@ -82,6 +88,9 @@ deno_snapshots = { version = "0.72.0", git = "https://github.com/coasys/deno.git
 sys_traits = "0.1.28"
 # deno_runtime = {version = "0.162.0", path = "../../deno/runtime"}
 tokio = { version = "1.25.0", features = ["full"] }
+# WebRTC SFU — str0m is a pure-Rust sans-I/O WebRTC stack. We drive the
+# event loop ourselves over a UDP socket in `rust-executor/src/sfu`.
+str0m = "0.9"
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"

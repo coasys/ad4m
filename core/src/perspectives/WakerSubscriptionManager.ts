@@ -22,6 +22,12 @@ export interface MentionMessage {
   address: string;
   /** All parent addresses this message belongs to (channels, conversations, etc.). */
   parents: string[];
+  /**
+   * Everything above the parents, nearest first: their parents, theirs, and so on up to the
+   * manager's `ancestorDepth`. Each address once, however many paths reach it. Empty when the
+   * parents have none, or the walk could not be made.
+   */
+  ancestors: string[];
 }
 
 export interface WakerLogger {
@@ -38,6 +44,12 @@ export interface WakerSubscriptionManagerOptions {
   logger: WakerLogger;
   /** Debounce interval in ms before firing the wake callback (default 2000) */
   debounceMs?: number;
+  /**
+   * How many levels above a mentioned item's parents to report as `ancestors` (default 3).
+   * Each level is one batched query, so the walk is bounded by this depth and by
+   * what the levels hold. 0 reports parents only.
+   */
+  ancestorDepth?: number;
   /** Called when a subscription fires (after debounce). Return value is ignored.
    *  For mention subs, `mentions` contains per-message parent info. */
   onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
@@ -108,6 +120,7 @@ export class WakerSubscriptionManager {
   private perspectiveClient: any;
   private logger: WakerLogger;
   private debounceMs: number;
+  private ancestorDepth: number;
   private onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
   private onPersist?: (subscriptions: WakerSubscription[], seenMessages: Record<string, string[]>) => void;
   private QuerySubscriptionProxyCtor: any;
@@ -141,6 +154,7 @@ export class WakerSubscriptionManager {
     this.perspectiveClient = options.perspectiveClient;
     this.logger = options.logger;
     this.debounceMs = options.debounceMs ?? 2000;
+    this.ancestorDepth = options.ancestorDepth ?? 3;
     this.onWake = options.onWake;
     this.onPersist = options.onPersist;
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
@@ -185,7 +199,6 @@ export class WakerSubscriptionManager {
       sub.query,
       this.perspectiveClient,
     );
-    proxy.isSPARQL = true;
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
     // it before the next microtask it crashes the process.
@@ -291,27 +304,17 @@ export class WakerSubscriptionManager {
           `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${result.length} total`,
         );
 
-        // Resolve parents per new message
+        // Resolve parents, and the chain above them, per new message
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
-          const parents: string[] = [];
-          try {
-            const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
-            this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-            if (Array.isArray(rows)) {
-              // A row omits a variable left unbound in its solution.
-              parents.push(...rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"));
-            }
-          } catch (err: any) {
-            this.logger.warn(
-              `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
-            );
-          }
+          this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
+          const parents = await this.parentsOf(sub, [msgAddr]);
+          const ancestors = await this.ancestorsOf(sub, msgAddr, parents);
           this.logger.info(
-            `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}`,
+            `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
+              (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
-          mentions.push({ address: msgAddr, parents });
+          mentions.push({ address: msgAddr, parents, ancestors });
         }
 
         // Mark all new messages as seen
@@ -462,6 +465,54 @@ export class WakerSubscriptionManager {
   /** Check if a subscription exists. */
   has(id: string): boolean {
     return this.activeSubscriptions.has(id);
+  }
+
+  /** Resolve one containment level in one query; skip unsafe IRI tokens and treat failures as none. */
+  private async parentsOf(sub: WakerSubscription, addresses: string[]): Promise<string[]> {
+    const safe = [...new Set(addresses)].filter((address) => {
+      if (/[<>"{}|^`\\\s\x00-\x20]/.test(address)) {
+        this.logger.warn(`[waker] ${sub.id}: skipping parent lookup for unsafe address ${JSON.stringify(address)}`);
+        return false;
+      }
+      return true;
+    });
+    if (!safe.length) return [];
+    try {
+      const query = safe.length === 1
+        ? `SELECT ?source WHERE { ?source <ad4m://has_child> <${safe[0]}> . }`
+        : `SELECT ?source WHERE { VALUES ?child { ${safe.map((address) => `<${address}>`).join(" ")} } ?source <ad4m://has_child> ?child . }`;
+      const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, query);
+      if (!Array.isArray(rows)) return [];
+      // A row omits a variable left unbound in its solution.
+      return rows.map((row) => row?.source).filter((source): source is string => typeof source === "string");
+    } catch (err: any) {
+      this.logger.warn(`[waker] ${sub.id}: parent resolution failed for ${JSON.stringify(safe)} — ${err?.message ?? err}`);
+      return [];
+    }
+  }
+
+  /**
+   * The chain above an item's parents, a level at a time, nearest first, up to `ancestorDepth`.
+   *
+   * Breadth-first with a visited set: containment is a graph, not a tree — an item can sit in two
+   * places, and nothing stops a cycle — so each address is reported once and the walk always ends.
+   * Each level uses one batched parent lookup, bounded by the depth.
+   */
+  private async ancestorsOf(sub: WakerSubscription, address: string, parents: string[]): Promise<string[]> {
+    const seen = new Set<string>([address, ...parents]);
+    const ancestors: string[] = [];
+    let level = parents;
+    for (let depth = 0; depth < this.ancestorDepth && level.length; depth++) {
+      const next: string[] = [];
+      for (const parent of await this.parentsOf(sub, level)) {
+        if (seen.has(parent)) continue;
+        seen.add(parent);
+        next.push(parent);
+      }
+      ancestors.push(...next);
+      level = next;
+    }
+    return ancestors;
   }
 
   private persist(): void {
