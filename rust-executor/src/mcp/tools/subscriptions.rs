@@ -424,7 +424,11 @@ mod tests {
         assert!(q.contains("Alice"), "first name included");
         assert!(q.contains("Bob"), "second name included");
         assert!(q.contains("did:key:zABC"), "DID included");
-        assert_eq!(q.matches(", \"i\")").count(), 3, "every term case-insensitive");
+        assert_eq!(
+            q.matches(", \"i\")").count(),
+            3,
+            "every term case-insensitive"
+        );
         assert!(q.contains("parse_literal"), "decodes literal targets");
     }
 
@@ -434,7 +438,10 @@ mod tests {
         // REGEX string literal (SPARQL injection guard). `regex::escape` doubles
         // the backslash, then the SPARQL literal escape doubles both again.
         let q = build_mention_query(&["a\"b\\c".to_string()], "did:key:zX", None);
-        assert!(q.contains("a\\\"b\\\\\\\\c"), "quote + backslash escaped: {q}");
+        assert!(
+            q.contains("a\\\"b\\\\\\\\c"),
+            "quote + backslash escaped: {q}"
+        );
         assert!(
             !q.contains("\"a\"b"),
             "raw unescaped quote must not appear: {q}"
@@ -513,7 +520,13 @@ mod tests {
         );
         assert_eq!(
             matched,
-            vec!["ad4m://m1", "ad4m://m3", "ad4m://m5", "ad4m://m6", "ad4m://m7"]
+            vec![
+                "ad4m://m1",
+                "ad4m://m3",
+                "ad4m://m5",
+                "ad4m://m6",
+                "ad4m://m7"
+            ]
         );
     }
 
