@@ -142,7 +142,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-191 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 65.
+193 methods: Cap 72, Executor 33, Open 5, Operator 16, Owns 67.
 
 | Method | Guard |
 |---|---|
