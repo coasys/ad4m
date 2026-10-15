@@ -355,12 +355,12 @@ from a STUN server at startup.
    the LAN address of the interface the router reaches (`<LAN IP>`).
 
 2. **Deploy a build with the SFU settings first.** A build from before
-   coasys/ad4m#<this PR> refuses the `sfu_*` keys ("unknown key") and does
-   not start, so add them only once `status.json`'s `deployed_sha` is a
-   commit that contains this change (see "Update"):
+   coasys/ad4m#1448 refuses the `sfu_*` keys ("unknown key") and does not
+   start, so add them only once the deployed build knows them (see
+   "Update"):
 
    ```bash
-   git -C ~/ad4m-staging-src merge-base --is-ancestor <merge commit of this PR> "$(jq -r .deployed_sha ~/.local/share/ad4m-staging/status.json)" && echo ready
+   ~/.local/share/ad4m-staging/current/ad4m-executor run --help | grep -q -- --sfu-udp-port && echo ready
    ```
 
    Expected: `ready`. Before a rollback to an older build, take the four
