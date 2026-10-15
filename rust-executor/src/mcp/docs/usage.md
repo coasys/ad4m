@@ -100,7 +100,10 @@ instance_query(perspective_id, class_name="Message", parent="<channel-id>", limi
 instance_transcript(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
   → the NEWEST N instances under parent, presented oldest-to-newest as a
     plain-text transcript: timestamp, author display name and DID, and the text
-    property (body by default; override with text_property).
+    (the class's `text`, or the property it aliases to `text`, else body;
+    override with text_property). HTML in the text comes back as plain text.
+    Omit class_name to read every class under parent that has text, whatever
+    the app calls it (the built-in abstract class TextContent).
     One call, no id juggling — read channels with this, not with instance_query.
     limit defaults to 50 and is capped at 500.
 

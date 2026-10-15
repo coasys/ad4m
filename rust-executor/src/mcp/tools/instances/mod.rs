@@ -49,6 +49,7 @@ pub mod collections;
 pub mod commands;
 pub mod create;
 pub mod describe;
+mod plain_text;
 pub mod query;
 pub mod transcript;
 pub mod update;

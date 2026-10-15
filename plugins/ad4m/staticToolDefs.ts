@@ -610,11 +610,11 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text with any HTML turned into plain text. Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
-      "description": "Parameters for reading a transcript of one class's children under a node",
+      "description": "Parameters for reading a transcript of the children under a node that\ncarry text",
       "type": "object",
       "properties": {
         "perspective_id": {
@@ -622,8 +622,9 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "type": "string"
         },
         "class_name": {
-          "description": "Subject class of the children to read (e.g. \"Message\"), as listed by\ndescribe_perspective",
-          "type": "string"
+          "description": "Subject class of the children to read (e.g. \"Message\"), as listed by\ndescribe_perspective. Omit it to read every class that has text,\nwhatever the app calls it (the built-in TextContent).",
+          "type": "string",
+          "nullable": true
         },
         "parent": {
           "description": "Parent node URI whose ad4m://has_child children are read (e.g. a\nChannel's id). A bare string is wrapped as a literal URI.",
@@ -637,14 +638,13 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "nullable": true
         },
         "text_property": {
-          "description": "Which property holds the text shown per entry. Defaults to `body`,\nfalling back to the class's identity property.",
+          "description": "Which property holds the text shown per entry, with class_name.\nDefaults to the class's text (its `text`, or the property it aliases\nto `text`), then `body`, then the class's identity property.",
           "type": "string",
           "nullable": true
         }
       },
       "required": [
         "perspective_id",
-        "class_name",
         "parent"
       ]
     }

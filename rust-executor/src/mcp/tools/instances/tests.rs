@@ -1671,7 +1671,7 @@ async fn instance_transcript_reads_children_chronologically() {
     let all = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
             perspective_id: uuid.clone(),
-            class_name: "message".into(), // case-insensitive class name
+            class_name: Some("message".into()), // case-insensitive class name
             parent: channel.clone(),
             limit: None,
             text_property: None,
@@ -1693,7 +1693,7 @@ async fn instance_transcript_reads_children_chronologically() {
     let last_two = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
             perspective_id: uuid.clone(),
-            class_name: "Message".into(),
+            class_name: Some("Message".into()),
             parent: channel.clone(),
             limit: Some(2),
             text_property: None,
@@ -1710,7 +1710,7 @@ async fn instance_transcript_reads_children_chronologically() {
     let channels = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
             perspective_id: uuid.clone(),
-            class_name: "Channel".into(),
+            class_name: Some("Channel".into()),
             parent: "ad4m://self".into(),
             limit: None,
             text_property: Some("name".into()),
@@ -1722,7 +1722,7 @@ async fn instance_transcript_reads_children_chronologically() {
         &handler
             .instance_transcript(Parameters(InstanceTranscriptParams {
                 perspective_id: uuid.clone(),
-                class_name: "Message".into(),
+                class_name: Some("Message".into()),
                 parent: channel.clone(),
                 limit: None,
                 text_property: Some("subject".into()),
@@ -1738,7 +1738,7 @@ async fn instance_transcript_reads_children_chronologically() {
         &handler
             .instance_transcript(Parameters(InstanceTranscriptParams {
                 perspective_id: uuid.clone(),
-                class_name: "Channel".into(),
+                class_name: Some("Channel".into()),
                 parent: "ad4m://self".into(),
                 limit: None,
                 text_property: Some("messages".into()),
@@ -1765,7 +1765,7 @@ async fn instance_transcript_reads_children_chronologically() {
     let empty = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
             perspective_id: uuid.clone(),
-            class_name: "Message".into(),
+            class_name: Some("Message".into()),
             parent: "ad4m://obj/emptyroom".into(),
             limit: None,
             text_property: None,
@@ -2476,4 +2476,194 @@ async fn no_write_goes_through_an_abstract_class() {
             .await,
     );
     assert_eq!(got["body"], "hello", "{got}");
+}
+
+// ── Reading through TextContent (#1446) ─────────────────────────────────────
+
+/// Flux's Message once Flux declares its alias: `body` answers to `text`.
+const ALIASED_MESSAGE_SDNA: &str = r#"{
+  "target_class": "flux://Message",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"flux://entry_type","target":"flux://has_message"}
+  ],
+  "properties": [
+    {"path":"flux://entry_type","name":"type","has_value":"flux://has_message","min_count":1,"max_count":1},
+    {"path":"flux://body","name":"body","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "resolve_language":"literal","alias":{"TextContent":"text"},
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://body","target":"value"}]}
+  ]
+}"#;
+
+/// Another app's block, with its own `text` and an identity property that is
+/// not the text.
+const BLOCK_SDNA: &str = r#"{
+  "target_class": "we://Block",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"we://kind","target":"we://block"}
+  ],
+  "properties": [
+    {"path":"we://kind","name":"kind","has_value":"we://block","min_count":1,"max_count":1},
+    {"path":"we://title","name":"title","datatype":"xsd:string","max_count":1,"identity":true,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://title","target":"value"}]},
+    {"path":"we://text","name":"text","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://text","target":"value"}]}
+  ]
+}"#;
+
+async fn create_under(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class_name: &str,
+    properties: Map<String, Value>,
+    parent: &str,
+) -> String {
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: class_name.into(),
+                properties: Some(properties),
+                base_uri: None,
+                parent: Some(parent.to_string()),
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    // Distinct reifier timestamps so the chronological order is defined.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    created["base_uri"].as_str().unwrap().to_string()
+}
+
+fn transcript(uuid: &str, class_name: Option<&str>, parent: &str) -> InstanceTranscriptParams {
+    InstanceTranscriptParams {
+        perspective_id: uuid.to_string(),
+        class_name: class_name.map(str::to_string),
+        parent: parent.to_string(),
+        limit: None,
+        text_property: None,
+    }
+}
+
+/// Without a class, a transcript reads every class's text under the parent
+/// through TextContent: Flux's aliased `body` and another app's `text`, in
+/// one chronology, with HTML turned into plain text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transcript_without_a_class_reads_every_class_with_text() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("Channel", CHANNEL_SDNA),
+            ("Message", ALIASED_MESSAGE_SDNA),
+            ("Block", BLOCK_SDNA),
+        ],
+        false,
+    )
+    .await;
+    let channel = "ad4m://test/channel-tc";
+    create_under(
+        &handler,
+        &uuid,
+        "Message",
+        props(&[(
+            "body",
+            json!(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#),
+        )]),
+        channel,
+    )
+    .await;
+    create_under(
+        &handler,
+        &uuid,
+        "Block",
+        props(&[
+            ("title", json!("notes")),
+            ("text", json!("<ul><li>one</li><li>two</li></ul>")),
+        ]),
+        channel,
+    )
+    .await;
+
+    let all = handler
+        .instance_transcript(Parameters(transcript(&uuid, None, channel)))
+        .await;
+    let hey = all
+        .find("Hey @data, look & see")
+        .unwrap_or_else(|| panic!("the message's text, as plain text:\n{all}"));
+    let list = all
+        .find("- one\n- two")
+        .unwrap_or_else(|| panic!("the block's text, as plain text:\n{all}"));
+    assert!(hey < list, "oldest first:\n{all}");
+    assert!(!all.contains("<p>") && !all.contains("&amp;"), "{all}");
+
+    // A class named: its own text — the aliased `body`, and `text` over the
+    // identity property.
+    let message = handler
+        .instance_transcript(Parameters(transcript(&uuid, Some("Message"), channel)))
+        .await;
+    assert!(
+        message.contains("Hey @data") && !message.contains("- one"),
+        "{message}"
+    );
+    let block = handler
+        .instance_transcript(Parameters(transcript(&uuid, Some("Block"), channel)))
+        .await;
+    assert!(
+        block.contains("- one") && !block.contains("notes"),
+        "{block}"
+    );
+
+    // text_property is per class.
+    let err = parse(
+        &handler
+            .instance_transcript(Parameters(InstanceTranscriptParams {
+                text_property: Some("body".into()),
+                ..transcript(&uuid, None, channel)
+            }))
+            .await,
+    );
+    assert!(
+        err["error"].as_str().unwrap().contains("needs class_name"),
+        "{err}"
+    );
+
+    // The mention scan watches both classes' text predicates.
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    assert_eq!(
+        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
+        vec!["flux://body".to_string(), "we://text".to_string()]
+    );
+}
+
+/// Until Flux declares its alias no class conforms: a transcript without a
+/// class reads `Message.body`, and the mention scan watches its predicate, as
+/// before.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_conforming_class_the_old_message_body_lookup_applies() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = "ad4m://test/channel-old";
+    create_under(
+        &handler,
+        &uuid,
+        "Message",
+        props(&[("body", json!("<p>plain old body</p>"))]),
+        channel,
+    )
+    .await;
+    let all = handler
+        .instance_transcript(Parameters(transcript(&uuid, None, channel)))
+        .await;
+    assert!(
+        all.contains("plain old body") && !all.contains("<p>"),
+        "{all}"
+    );
+
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    assert_eq!(
+        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
+        vec!["flux://body".to_string()]
+    );
+
+    let empty = handler
+        .instance_transcript(Parameters(transcript(&uuid, None, "ad4m://obj/empty")))
+        .await;
+    assert_eq!(empty, "(no Message instances under ad4m://obj/empty)");
 }
