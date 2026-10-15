@@ -173,4 +173,24 @@ describe("abstract classes", () => {
       ["updateSubject", "Folderish", "ad4m://folder/1", { children: { action: "setter", value: ["ad4m://child/2", "ad4m://child/3"] } }, "batch"],
     ]);
   });
+
+  it("save() through an abstract class sends a changed relation's members as IDs", async () => {
+    const calls: any[][] = [];
+    const perspective: any = new Proxy({}, {
+      get: (_t, key) => async (...args: any[]) => {
+        calls.push([key, ...args]);
+        if (key === "modelQuery") {
+          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "Folder", children: [] }], totalCount: 1 };
+        }
+        return [];
+      },
+    });
+    const [row]: any[] = await Folderish.findAll(perspective);
+    row.children = [{ id: "ad4m://child/2" }, "ad4m://child/3"];
+    calls.length = 0;
+    await row.save("batch");
+    expect(calls).toEqual([
+      ["updateSubject", "Folderish", "ad4m://folder/1", { children: ["ad4m://child/2", "ad4m://child/3"] }, "batch"],
+    ]);
+  });
 });
