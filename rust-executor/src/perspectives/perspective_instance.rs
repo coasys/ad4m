@@ -2101,11 +2101,12 @@ impl PerspectiveInstance {
         // `status` applies to the additions. A removal keeps the status of the
         // link as stored, so removing a Local link never reaches the link
         // language, and it commits the stored expression, as `remove_link`
-        // does. A removal that matches no stored link counts as Local: the
-        // lookup is exact on author and timestamp, so a Local link sent back
-        // with its timestamp spelled differently would otherwise go out under
-        // the call's status. `remove_links` skips such a removal the same way.
-        let removals = mutations
+        // does. A removal that matches no stored link is dropped, as
+        // `remove_links` drops it: nothing is removed, so nothing is
+        // persisted, published, committed or returned. The lookup is exact on
+        // author and timestamp, so a Local link sent back with its timestamp
+        // spelled differently must not go out under the call's status.
+        let removals: Vec<LinkExpression> = mutations
             .removals
             .into_iter()
             .map(|removal| {
@@ -2117,20 +2118,17 @@ impl PerspectiveInstance {
                     &link.author,
                     &link.timestamp,
                 )?;
-                Ok(match stored {
-                    Some(stored) => {
-                        let link_status = stored.status.clone().unwrap_or(LinkStatus::Local);
-                        let mut stored = LinkExpression::from(stored);
-                        stored.status = Some(link_status);
-                        stored
-                    }
-                    None => LinkExpression {
-                        status: Some(LinkStatus::Local),
-                        ..link
-                    },
-                })
+                Ok(stored.map(|stored| {
+                    let link_status = stored.status.clone().unwrap_or(LinkStatus::Local);
+                    let mut stored = LinkExpression::from(stored);
+                    stored.status = Some(link_status);
+                    stored
+                }))
             })
-            .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+            .collect::<Result<Vec<Option<LinkExpression>>, AnyError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         let additions: Vec<LinkExpression> = additions
             .into_iter()
             .map(|mut l| {
@@ -6915,7 +6913,7 @@ mod tests {
         assert_ne!(timestamp, local.timestamp);
         respelled["timestamp"] = serde_json::Value::String(timestamp);
 
-        perspective
+        let diff = perspective
             .link_mutations(
                 LinkMutations {
                     additions: vec![],
@@ -6929,6 +6927,9 @@ mod tests {
             )
             .await
             .unwrap();
+        // The unmatched removal removed nothing, so it is not returned either.
+        let returned: Vec<_> = diff.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(returned, vec![shared.data.clone()]);
 
         // The Shared removal is committed in the same diff, so once it is
         // queued the unmatched one would be too.
