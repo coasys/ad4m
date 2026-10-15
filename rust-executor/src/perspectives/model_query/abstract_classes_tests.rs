@@ -1,7 +1,7 @@
-//! Abstract classes (#1435): which concrete classes one reads, the views it
-//! reads them through, and a union query over them. Classes are written
-//! through the real SHACL writer and read back through the real shape loader,
-//! so the rule is tested on the shapes a perspective actually holds.
+//! Abstract classes (#1435): which concrete classes one reads, its views, and
+//! a union query over them, on shapes written by the real SHACL writer and
+//! read back by the real loader. The links the writer emits for the marker
+//! and an alias are pinned by `fixtures/shacl_writer_golden.json`.
 
 use super::*;
 use crate::perspectives::model_query::shape::load_shape_from_store;
@@ -12,23 +12,17 @@ use crate::perspectives::subject_classes_of::subject_classes_of;
 use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
 
 /// The abstract class: anything with `text`. Its path is never compared.
-const TEXT_CONTENT: &str = r#"{
-  "target_class":"app://TextContent",
-  "abstract":true,
-  "properties":[
-    {"path":"app://text","name":"text","datatype":"xsd://string","min_count":1,"max_count":1}
-  ]
-}"#;
+const TEXT_CONTENT: &str = r#"{"target_class":"app://TextContent","abstract":true,"properties":[
+  {"path":"app://text","name":"text","datatype":"xsd://string","min_count":1,"max_count":1}]}"#;
 
-/// Has `text`, through its own predicate.
-const POST: &str = r#"{
-  "target_class":"app://Post",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"app://kind","target":"app://post"}],
-  "properties":[
-    {"path":"app://kind","name":"kind","has_value":"app://post","min_count":1,"max_count":1},
-    {"path":"app://content","name":"text","max_count":1}
-  ]
-}"#;
+/// A second abstract class with `text`: abstract classes never conform to
+/// one another.
+const READABLE: &str = r#"{"target_class":"app://Readable","abstract":true,"properties":[
+  {"path":"app://readable_text","name":"text","min_count":1,"max_count":1}]}"#;
+
+/// Relations by name: a container has `children`.
+const CONTAINER: &str = r#"{"target_class":"app://Container","abstract":true,"properties":[
+  {"path":"ad4m://has_child","name":"children","relation_kind":"hasMany"}]}"#;
 
 /// Flux-like: `body`, aliased `text` for TextContent.
 const MESSAGE: &str = r#"{
@@ -41,70 +35,63 @@ const MESSAGE: &str = r#"{
   ]
 }"#;
 
-/// `body` aliased for another abstract class only.
-const NOTE: &str = r#"{
-  "target_class":"app://Note",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"app://kind","target":"app://note"}],
-  "properties":[
-    {"path":"app://kind","name":"kind","has_value":"app://note","min_count":1,"max_count":1},
-    {"path":"app://body","name":"body","max_count":1,"alias":{"Readable":"text"}}
-  ]
-}"#;
+/// `app://<Class>`, flagged `app://kind` → `app://<class>`, with `property`.
+fn concrete_shacl(class: &str, property: &str) -> String {
+    let kind = format!("app://{}", class.to_lowercase());
+    format!(
+        r#"{{"target_class":"app://{class}",
+        "constructor_actions":[{{"action":"addLink","source":"this","predicate":"app://kind","target":"{kind}"}}],
+        "properties":[{{"path":"app://kind","name":"kind","has_value":"{kind}","min_count":1,"max_count":1}},{property}]}}"#
+    )
+}
 
-/// No `text`.
-const POLL: &str = r#"{
-  "target_class":"app://Poll",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"app://kind","target":"app://poll"}],
-  "properties":[
-    {"path":"app://kind","name":"kind","has_value":"app://poll","min_count":1,"max_count":1},
-    {"path":"app://title","name":"title","max_count":1}
-  ]
-}"#;
-
-/// `text` is a relation here, not a property.
-const ARTICLE: &str = r#"{
-  "target_class":"app://Article",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"app://kind","target":"app://article"}],
-  "properties":[
-    {"path":"app://kind","name":"kind","has_value":"app://article","min_count":1,"max_count":1},
-    {"path":"app://paragraphs","name":"text","relation_kind":"hasMany","target_class_name":"Paragraph"}
-  ]
-}"#;
-
-/// A second abstract class with `text`: abstract classes never conform to
-/// one another.
-const READABLE: &str = r#"{
-  "target_class":"app://Readable",
-  "abstract":true,
-  "properties":[{"path":"app://readable_text","name":"text","min_count":1,"max_count":1}]
-}"#;
-
-/// Relations by name: a container has `children`.
-const CONTAINER: &str = r#"{
-  "target_class":"app://Container",
-  "abstract":true,
-  "properties":[{"path":"ad4m://has_child","name":"children","relation_kind":"hasMany"}]
-}"#;
-
-/// `children` through its own predicate, in the other direction even.
-const FOLDER: &str = r#"{
-  "target_class":"app://Folder",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"app://kind","target":"app://folder"}],
-  "properties":[
-    {"path":"app://kind","name":"kind","has_value":"app://folder","min_count":1,"max_count":1},
-    {"path":"app://contains","name":"children","relation_kind":"belongsToMany"}
-  ]
-}"#;
-
-/// `children` as a plain property: not a relation.
-const LIST: &str = r#"{
-  "target_class":"app://List",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"app://kind","target":"app://list"}],
-  "properties":[
-    {"path":"app://kind","name":"kind","has_value":"app://list","min_count":1,"max_count":1},
-    {"path":"app://items","name":"children","max_count":1}
-  ]
-}"#;
+fn all_classes() -> SparqlStore {
+    let concrete = [
+        // Has `text`, through its own predicate.
+        (
+            "Post",
+            r#"{"path":"app://content","name":"text","max_count":1}"#,
+        ),
+        // `body` aliased for another abstract class only.
+        (
+            "Note",
+            r#"{"path":"app://body","name":"body","max_count":1,"alias":{"Readable":"text"}}"#,
+        ),
+        // No `text`.
+        (
+            "Poll",
+            r#"{"path":"app://title","name":"title","max_count":1}"#,
+        ),
+        // `text` is a relation here, not a property.
+        (
+            "Article",
+            r#"{"path":"app://paragraphs","name":"text","relation_kind":"hasMany","target_class_name":"Paragraph"}"#,
+        ),
+        // `children` through its own predicate, in the other direction even.
+        (
+            "Folder",
+            r#"{"path":"app://contains","name":"children","relation_kind":"belongsToMany"}"#,
+        ),
+        // `children` as a plain property: not a relation.
+        (
+            "List",
+            r#"{"path":"app://items","name":"children","max_count":1}"#,
+        ),
+    ];
+    let store = SparqlStore::new(None).unwrap();
+    for (name, shacl) in [
+        ("TextContent", TEXT_CONTENT),
+        ("Readable", READABLE),
+        ("Container", CONTAINER),
+        ("Message", MESSAGE),
+    ] {
+        install_class(&store, name, shacl);
+    }
+    for (name, property) in concrete {
+        install_class(&store, name, &concrete_shacl(name, property));
+    }
+    store
+}
 
 fn link_expression(link: Link, ts: &str) -> LinkExpression {
     LinkExpression {
@@ -119,17 +106,18 @@ fn link_expression(link: Link, ts: &str) -> LinkExpression {
     }
 }
 
-fn add(store: &SparqlStore, source: &str, predicate: &str, target: &str, ts: &str) {
-    store
-        .add_link(&link_expression(
-            Link {
-                source: source.to_string(),
-                predicate: Some(predicate.to_string()),
-                target: target.to_string(),
-            },
-            ts,
-        ))
-        .unwrap();
+/// Raw links, past the SHACL writer's checks; timestamps in order.
+fn add(store: &SparqlStore, links: &[(&str, &str, &str)]) {
+    for (i, (source, predicate, target)) in links.iter().enumerate() {
+        let link = Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        };
+        store
+            .add_link(&link_expression(link, &(i + 1).to_string()))
+            .unwrap();
+    }
 }
 
 fn install_class(store: &SparqlStore, name: &str, shacl: &str) {
@@ -146,29 +134,6 @@ impl ShapeResolver for StoreResolver<'_> {
     fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, Error> {
         load_shape_from_store(self.0, class_name).map(Arc::new)
     }
-}
-
-fn store_with(classes: &[(&str, &str)]) -> SparqlStore {
-    let store = SparqlStore::new(None).unwrap();
-    for (name, shacl) in classes {
-        install_class(&store, name, shacl);
-    }
-    store
-}
-
-fn all_classes() -> SparqlStore {
-    store_with(&[
-        ("TextContent", TEXT_CONTENT),
-        ("Readable", READABLE),
-        ("Post", POST),
-        ("Message", MESSAGE),
-        ("Note", NOTE),
-        ("Poll", POLL),
-        ("Article", ARTICLE),
-        ("Container", CONTAINER),
-        ("Folder", FOLDER),
-        ("List", LIST),
-    ])
 }
 
 fn resolved(store: &SparqlStore, abstract_class: &str) -> Resolution {
@@ -192,6 +157,10 @@ fn the_index_reads_abstract_markers_and_aliases() {
     assert_eq!(index.name_through("Message", "body", "Readable"), "body");
     assert_eq!(index.name_through("Note", "body", "Readable"), "text");
     assert_eq!(index.name_through("Post", "text", "TextContent"), "text");
+    // And back, for a write through the abstract class.
+    let message = load_shape_from_store(&store, "Message").unwrap();
+    let own = |name| index.own_name("Message", &message, name, "TextContent");
+    assert_eq!((own("text"), own("body")), (Some("body"), None));
 }
 
 /// By name: Post has `text`; Message answers to `text` through its alias.
@@ -275,31 +244,18 @@ fn the_view_carries_the_abstract_names_through_the_concrete_predicates() {
 #[test]
 fn a_class_with_two_properties_answering_to_one_name_is_left_out() {
     let store = all_classes();
-    // Raw links, past `parse_shacl_to_links`'s clash check.
-    add(
-        &store,
-        "app://PostShape",
-        "sh://property",
-        "app://Post.body",
-        "0",
-    );
-    add(&store, "app://Post.body", "sh://path", "app://body", "0");
-    add(
-        &store,
-        "app://Post.body",
-        "rdf://type",
-        "sh://PropertyShape",
-        "0",
+    let alias = format!(
+        "literal:string:{}",
+        urlencoding::encode(r#"{"TextContent":"text"}"#)
     );
     add(
         &store,
-        "app://Post.body",
-        ALIAS_PREDICATE,
-        &format!(
-            "literal:string:{}",
-            urlencoding::encode(r#"{"TextContent":"text"}"#)
-        ),
-        "0",
+        &[
+            ("app://PostShape", "sh://property", "app://Post.body"),
+            ("app://Post.body", "sh://path", "app://body"),
+            ("app://Post.body", "rdf://type", "sh://PropertyShape"),
+            ("app://Post.body", ALIAS_PREDICATE, &alias),
+        ],
     );
     assert_eq!(resolved(&store, "TextContent").classes, vec!["Message"]);
 }
@@ -312,12 +268,11 @@ fn an_abstract_class_is_never_a_records_class() {
     let store = all_classes();
     add(
         &store,
-        "app://r1",
-        "app://text",
-        "literal:string:hello",
-        "1",
+        &[
+            ("app://r1", "app://text", "literal:string:hello"),
+            ("app://r2", "app://kind", "app://post"),
+        ],
     );
-    add(&store, "app://r2", "app://kind", "app://post", "1");
     let classes = subject_classes_of(
         &store,
         &StoreResolver(&store),
@@ -362,35 +317,16 @@ async fn run(store: &SparqlStore, resolution: &Resolution, query: &str) -> Model
 #[tokio::test]
 async fn a_query_through_the_abstract_class_reads_aliases_as_its_names() {
     let store = all_classes();
-    add(&store, "app://p1", "app://kind", "app://post", "1");
     add(
         &store,
-        "app://p1",
-        "app://content",
-        "literal:string:post%20one",
-        "2",
-    );
-    add(
-        &store,
-        "flux://m1",
-        "flux://entry_type",
-        "flux://has_message",
-        "3",
-    );
-    add(
-        &store,
-        "flux://m1",
-        "flux://body",
-        "literal:string:hello%20data",
-        "4",
-    );
-    add(&store, "app://n1", "app://kind", "app://note", "5");
-    add(
-        &store,
-        "app://n1",
-        "app://body",
-        "literal:string:a%20note",
-        "6",
+        &[
+            ("app://p1", "app://kind", "app://post"),
+            ("app://p1", "app://content", "literal:string:post%20one"),
+            ("flux://m1", "flux://entry_type", "flux://has_message"),
+            ("flux://m1", "flux://body", "literal:string:hello%20data"),
+            ("app://n1", "app://kind", "app://note"),
+            ("app://n1", "app://body", "literal:string:a%20note"),
+        ],
     );
 
     let resolution = resolved(&store, "TextContent");
@@ -416,45 +352,41 @@ async fn a_query_through_the_abstract_class_reads_aliases_as_its_names() {
     );
 }
 
-fn shacl_error(json: &str) -> String {
-    parse_shacl_to_links(json, "Clash").unwrap_err().to_string()
-}
-
 #[test]
 fn an_alias_that_clashes_is_refused_at_registration() {
-    // A real `text` and an alias `text`.
-    let err = shacl_error(
-        r#"{"target_class":"app://Clash","properties":[
-            {"path":"app://text","name":"text"},
-            {"path":"app://body","name":"body","alias":{"TextContent":"text"}}]}"#,
-    );
-    assert!(err.contains("already has a property named 'text'"), "{err}");
-
-    // Two aliases `text` for the same abstract class.
-    let err = shacl_error(
-        r#"{"target_class":"app://Clash","properties":[
-            {"path":"app://a","name":"a","alias":{"TextContent":"text"}},
-            {"path":"app://b","name":"b","alias":{"TextContent":"text"}}]}"#,
-    );
-    assert!(err.contains("both have alias 'text'"), "{err}");
-
-    // A reserved name.
-    let err = shacl_error(
-        r#"{"target_class":"app://Clash","properties":[
-            {"path":"app://a","name":"a","alias":{"TextContent":"author"}}]}"#,
-    );
-    assert!(err.contains("alias 'author'"), "{err}");
-
-    // An empty alias.
-    let err = shacl_error(
-        r#"{"target_class":"app://Clash","properties":[
-            {"path":"app://a","name":"a","alias":{"TextContent":""}}]}"#,
-    );
-    assert!(err.contains("empty alias"), "{err}");
-
-    // An abstract class with nothing to match on.
-    let err = shacl_error(r#"{"target_class":"app://Clash","abstract":true,"properties":[]}"#);
-    assert!(err.contains("would match every class"), "{err}");
+    let p = |a: &str, b: &str| format!(r#"{{"path":"app://{a}","name":"{a}","alias":{b}}}"#);
+    for (properties, error) in [
+        (
+            // A real `text` and an alias `text`.
+            format!(
+                r#"{{"path":"app://text","name":"text"}},{}"#,
+                p("body", r#"{"TextContent":"text"}"#)
+            ),
+            "already has a property named 'text'",
+        ),
+        (
+            format!(
+                "{},{}",
+                p("a", r#"{"TextContent":"text"}"#),
+                p("b", r#"{"TextContent":"text"}"#)
+            ),
+            "both have alias 'text'",
+        ),
+        (p("a", r#"{"TextContent":"author"}"#), "alias 'author'"),
+        (p("a", r#"{"TextContent":""}"#), "empty alias"),
+    ] {
+        let json = format!(r#"{{"target_class":"app://Clash","properties":[{properties}]}}"#);
+        let err = parse_shacl_to_links(&json, "Clash")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(error), "{err}");
+    }
+    let err = parse_shacl_to_links(
+        r#"{"target_class":"app://Clash","abstract":true,"properties":[]}"#,
+        "Clash",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("would match every class"), "{err}");
 
     // The same alias for two different abstract classes, and a property
     // aliased to its own name, are fine.
@@ -466,27 +398,4 @@ fn an_alias_that_clashes_is_refused_at_registration() {
         "Fine",
     )
     .expect("no clash");
-}
-
-/// One marker on the shape node, one alias link on the property shape.
-#[test]
-fn the_writer_emits_one_marker_and_one_alias_link() {
-    let links = parse_shacl_to_links(TEXT_CONTENT, "TextContent").unwrap();
-    let markers: Vec<_> = links
-        .iter()
-        .filter(|l| l.predicate.as_deref() == Some(ABSTRACT_PREDICATE))
-        .collect();
-    assert_eq!(markers.len(), 1);
-    assert_eq!(markers[0].source, "app://TextContentShape");
-
-    let links = parse_shacl_to_links(MESSAGE, "Message").unwrap();
-    let aliases: Vec<_> = links
-        .iter()
-        .filter(|l| l.predicate.as_deref() == Some(ALIAS_PREDICATE))
-        .collect();
-    assert_eq!(aliases.len(), 1);
-    assert_eq!(aliases[0].source, "flux://Message.body");
-    assert!(links
-        .iter()
-        .all(|l| l.predicate.as_deref() != Some(ABSTRACT_PREDICATE)));
 }
