@@ -15,10 +15,8 @@
 //! property, and `Message.body` as it did before, merged into one chronology.
 //! TextContent only adds: until Flux declares its alias, `Message` conforms
 //! to nothing, and a class with a `text` of its own (a poll's `Answer`) must
-//! not hide the chat. HTML in the text is turned into plain text for the
-//! model reading it (`plain_text`).
+//! not hide the chat.
 
-use super::plain_text::to_plain_text;
 use super::{
     class_properties, containment_predicates, error_json, find_property, link_target,
     resolve_class, run_model_query, Ad4mMcpHandler, PropView, MAX_QUERY_LIMIT,
@@ -97,7 +95,7 @@ pub(super) async fn display_name_for(did: &str) -> String {
 fn render_text(instance: &Value, text_property: &str) -> String {
     match instance.get(text_property) {
         None | Some(Value::Null) => format!("(no {text_property})"),
-        Some(Value::String(s)) => to_plain_text(s),
+        Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
     }
 }
@@ -223,7 +221,7 @@ impl Ad4mMcpHandler {
     /// Read the most recent children under a node that carry text, as a
     /// transcript: of one class, or through TextContent.
     #[tool(
-        description = "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text with any HTML turned into plain text. Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,
