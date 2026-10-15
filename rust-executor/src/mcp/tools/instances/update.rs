@@ -62,7 +62,10 @@ impl Ad4mMcpHandler {
         };
         // Through an abstract class (#1435) the record's own classes' setters
         // write; `update_subject` checks those.
-        let is_abstract = perspective.is_abstract_class(&class_name).unwrap_or(false);
+        let is_abstract = match perspective.is_abstract_class(&class_name) {
+            Ok(is_abstract) => is_abstract,
+            Err(e) => return error_json(format!("Error reading {class_name}'s shape: {e:#}")),
+        };
         let setter_errors = match is_abstract {
             true => vec![],
             false => check_setters(&perspective, &shape, &validated.scalars).await,

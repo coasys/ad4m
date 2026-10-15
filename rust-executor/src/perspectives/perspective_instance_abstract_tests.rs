@@ -266,6 +266,162 @@ async fn writes_through_an_abstract_class_that_cannot_dispatch_are_refused() {
     assert_eq!(links_on(&p, "ad4m://x", "ns://text"), 0);
 }
 
+/// Anything with `children`. Its adder and remover write `ns://children`,
+/// which no concrete class reads.
+const FOLDERISH_SDNA: &str = r#"{
+  "target_class":"ns://Folderish",
+  "abstract":true,
+  "properties":[{"path":"ns://children","name":"children","relation_kind":"hasMany",
+    "adder":[{"action":"addLink","source":"this","predicate":"ns://children","target":"value"}],
+    "remover":[{"action":"removeLink","source":"this","predicate":"ns://children","target":"value"}]}]
+}"#;
+
+/// `children` with an explicit `collectionSetter`.
+const FOLDER_SDNA: &str = r#"{
+  "target_class":"ns://Folder",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://folder","target":"ns://open"}],
+  "properties":[
+    {"path":"ns://folder","name":"state","has_value":"ns://open","min_count":1,"max_count":1},
+    {"path":"ns://folder_child","name":"children","relation_kind":"hasMany",
+     "setter":[{"action":"collectionSetter","source":"this","predicate":"ns://folder_child","target":"value"}],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://folder_child","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://folder_child","target":"value"}]}
+  ]
+}"#;
+
+/// `children` as the SDK writes a relation: an adder and a remover, no setter.
+const BOX_SDNA: &str = r#"{
+  "target_class":"ns://Box",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://box","target":"ns://open"}],
+  "properties":[
+    {"path":"ns://box","name":"state","has_value":"ns://open","min_count":1,"max_count":1},
+    {"path":"ns://box_child","name":"children","relation_kind":"hasMany",
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://box_child","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://box_child","target":"value"}]}
+  ]
+}"#;
+
+/// `f1` is a Folder; `fb` a Folder and a Box.
+async fn relation_setup() -> (PerspectiveInstance, AgentContext) {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("Folderish", FOLDERISH_SDNA),
+        ("Folder", FOLDER_SDNA),
+        ("Box", BOX_SDNA),
+    ])
+    .await;
+    for (class, base) in [
+        ("Folder", "ad4m://f1"),
+        ("Folder", "ad4m://fb"),
+        ("Box", "ad4m://fb"),
+    ] {
+        create(&mut p, &ctx, class, base, json!({})).await.unwrap();
+    }
+    (p, ctx)
+}
+
+/// The targets of `source`'s links at `predicate`, sorted.
+fn targets_on(p: &PerspectiveInstance, source: &str, predicate: &str) -> Vec<String> {
+    let mut targets: Vec<String> = p
+        .get_links_local(&LinkQuery {
+            source: Some(source.into()),
+            predicate: Some(predicate.into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .into_iter()
+        .map(|(l, _status)| l.data.target)
+        .collect();
+    targets.sort();
+    targets
+}
+
+/// A class whose setter is a `collectionSetter` gets the members written
+/// through the abstract class, not an empty set: the member it had goes,
+/// the new ones are added.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collection_setter_through_an_abstract_class_sets_the_members() {
+    let (mut p, ctx) = relation_setup().await;
+    let old = vec![link("ad4m://f1", "ns://folder_child", "ad4m://c0")];
+    p.add_links(old, LinkStatus::Shared, None, &ctx)
+        .await
+        .unwrap();
+    let children = json!({"children": ["ad4m://c1", "ad4m://c2"]});
+    update(&mut p, &ctx, "Folderish", "ad4m://f1", children)
+        .await
+        .unwrap();
+    assert_eq!(
+        targets_on(&p, "ad4m://f1", "ns://folder_child"),
+        ["ad4m://c1", "ad4m://c2"]
+    );
+    assert!(targets_on(&p, "ad4m://f1", "ns://children").is_empty());
+}
+
+/// The same on the concrete class, which `perspective.updateSubject`
+/// reaches: an update sets exactly the members given, and so does a create.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collection_setter_on_a_concrete_class_sets_the_members() {
+    let (mut p, ctx) = relation_setup().await;
+    let old = vec![link("ad4m://f1", "ns://folder_child", "ad4m://c0")];
+    p.add_links(old, LinkStatus::Shared, None, &ctx)
+        .await
+        .unwrap();
+    let children = json!({"children": ["ad4m://c1", "ad4m://c2"]});
+    update(&mut p, &ctx, "Folder", "ad4m://f1", children.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        targets_on(&p, "ad4m://f1", "ns://folder_child"),
+        ["ad4m://c1", "ad4m://c2"]
+    );
+
+    create(&mut p, &ctx, "Folder", "ad4m://f2", children)
+        .await
+        .unwrap();
+    assert_eq!(
+        targets_on(&p, "ad4m://f2", "ns://folder_child"),
+        ["ad4m://c1", "ad4m://c2"]
+    );
+}
+
+/// `addX` / `removeX` / `setX` through an abstract class (the SDK sends
+/// `{"action", "value"}`) run each of the record's classes' adder, remover
+/// or setter, at its own predicate. Box has no setter: its members are set
+/// on its adder's predicate. Nothing lands at the abstract predicate.
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_writes_through_an_abstract_class_run_each_classs_actions() {
+    let (mut p, ctx) = relation_setup().await;
+    let op =
+        |action: &str, members: &[&str]| json!({"children": {"action": action, "value": members}});
+    let children = |p: &PerspectiveInstance| {
+        [
+            targets_on(p, "ad4m://fb", "ns://folder_child"),
+            targets_on(p, "ad4m://fb", "ns://box_child"),
+        ]
+    };
+
+    let added = op("adder", &["ad4m://c1", "ad4m://c2"]);
+    update(&mut p, &ctx, "Folderish", "ad4m://fb", added)
+        .await
+        .unwrap();
+    assert_eq!(
+        children(&p),
+        [["ad4m://c1", "ad4m://c2"], ["ad4m://c1", "ad4m://c2"]]
+    );
+
+    let removed = op("remover", &["ad4m://c1"]);
+    update(&mut p, &ctx, "Folderish", "ad4m://fb", removed)
+        .await
+        .unwrap();
+    assert_eq!(children(&p), [["ad4m://c2"], ["ad4m://c2"]]);
+
+    let set = op("setter", &["ad4m://c3"]);
+    update(&mut p, &ctx, "Folderish", "ad4m://fb", set)
+        .await
+        .unwrap();
+    assert_eq!(children(&p), [["ad4m://c3"], ["ad4m://c3"]]);
+    assert!(targets_on(&p, "ad4m://fb", "ns://children").is_empty());
+}
+
 /// Read on its own: in a union of several classes, refused. No conforming
 /// class is an empty result; what a union refuses is refused even then.
 #[tokio::test(flavor = "multi_thread")]

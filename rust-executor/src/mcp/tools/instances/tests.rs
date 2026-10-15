@@ -2800,3 +2800,55 @@ async fn a_record_two_sources_read_is_shown_once() {
         "one record, counted once: {all}"
     );
 }
+
+/// A store error while `instance_update` asks whether the class is abstract
+/// is returned. Read as "not abstract", the update would go on.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_update_returns_the_store_error_of_the_abstract_check() {
+    let (handler, uuid, _guard) = setup_with(
+        &[("Thread", THREAD_SDNA), ("Readable", READABLE_SDNA)],
+        true,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                properties: Some(props(&[("body", json!("hello"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let thread = created["base_uri"].as_str().unwrap().to_string();
+
+    crate::perspectives::perspective_instance::fail_next_index(&uuid);
+    let update = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+                properties: props(&[("body", json!("edited"))]),
+            }))
+            .await,
+    );
+    assert!(
+        update["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("injected store error"),
+        "{update}"
+    );
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                base_uri: thread,
+            }))
+            .await,
+    );
+    assert_eq!(got["body"], "hello", "{got}");
+}

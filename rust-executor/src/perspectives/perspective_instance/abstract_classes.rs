@@ -15,7 +15,7 @@ use deno_core::error::AnyError;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Action, Command, PerspectiveInstance};
+use super::{Action, Command, Parameter, PerspectiveInstance};
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
     self, AbstractIndex, Resolution, ViewResolver,
@@ -244,13 +244,21 @@ impl PerspectiveInstance {
     /// A command another class already wrote for this name (same action,
     /// source and predicate) is dropped, so a shared predicate is written,
     /// or a shared collection appended to, once.
+    ///
+    /// A relation or collection name also takes `{"action": "adder" |
+    /// "remover" | "setter", "value": [...]}` (the SDK's `addX` / `removeX`
+    /// / `setX`): each class's adder or remover runs once per member, a
+    /// setter as for a plain value. A class with no setter for it sets the
+    /// members with a `collectionSetter` on its adder's predicate, as the
+    /// SDK does for a concrete class. A `collectionSetter` gets the members
+    /// as its parameters, in a run of its own.
     pub(super) async fn update_through_abstract(
         &self,
         abstract_class: &str,
         base: &str,
         values: &Value,
         context: &AgentContext,
-    ) -> Result<Vec<Command>, AnyError> {
+    ) -> Result<Vec<Run>, AnyError> {
         let Value::Object(values) = values else {
             return Ok(vec![]);
         };
@@ -270,22 +278,35 @@ impl PerspectiveInstance {
                 names.join(", ")
             ));
         }
+        let memberships: HashSet<&str> = shape
+            .properties
+            .iter()
+            .filter(|p| p.is_collection)
+            .map(|p| p.name.as_str())
+            .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
+            .collect();
         let index = self.abstract_index()?;
         let targets = self.write_targets(abstract_class, base)?;
         let mut commands = Vec::new();
+        let mut runs = Vec::new();
         for (name, value) in values {
+            let membership = memberships.contains(name.as_str());
+            let (op, value) = match membership {
+                true => Op::of(value),
+                false => (Op::Set, value),
+            };
             let mut written: Vec<(Action, Option<String>, Option<String>)> = Vec::new();
-            let mut has_setter = false;
+            let mut has_action = false;
             for class in &targets {
                 let own_shape = self.get_shape(class)?;
                 let Some(own) = index.own_name(class, &own_shape, name, alias_key) else {
                     continue;
                 };
-                let Some(setter) = self.get_property_setter_actions(class, own).await? else {
+                let Some(actions) = self.actions_for(class, own, op, membership).await? else {
                     continue;
                 };
-                has_setter = true;
-                let setter: Vec<Command> = setter
+                has_action = true;
+                let actions: Vec<Command> = actions
                     .into_iter()
                     .filter(|c| {
                         let key = (c.action.clone(), c.source.clone(), c.predicate.clone());
@@ -295,20 +316,183 @@ impl PerspectiveInstance {
                         }
                     })
                     .collect();
-                commands.extend(
-                    self.setter_commands(class, own, &setter, value, context)
-                        .await?,
-                );
+                if op != Op::Set {
+                    for member in self.members(class, own, value, context).await? {
+                        commands.extend(actions.iter().map(|c| Command {
+                            target: Some(member.clone()),
+                            ..c.clone()
+                        }));
+                    }
+                    continue;
+                }
+                let (collection, setter): (Vec<_>, Vec<_>) = actions
+                    .into_iter()
+                    .partition(|c| c.action == Action::CollectionSetter);
+                if !setter.is_empty() {
+                    commands.extend(
+                        self.setter_commands(class, own, &setter, value, context)
+                            .await?,
+                    );
+                }
+                if !collection.is_empty() {
+                    runs.extend(
+                        self.collection_setter_runs(class, own, collection, value, context)
+                            .await?,
+                    );
+                }
             }
-            if !has_setter {
+            if !has_action {
                 return Err(anyhow!(
                     "'{name}' cannot be written through '{abstract_class}': none of the \
-                     record's classes ({}) has a setter for it.",
-                    targets.join(", ")
+                     record's classes ({}) has {} for it.",
+                    targets.join(", "),
+                    op.what()
                 ));
             }
         }
-        Ok(commands)
+        if !commands.is_empty() {
+            runs.insert(
+                0,
+                Run {
+                    commands,
+                    parameters: vec![],
+                },
+            );
+        }
+        Ok(runs)
+    }
+
+    /// The actions of `class` that do `op` to its property `own`. Setting a
+    /// relation or collection (`membership`) with no setter falls back to
+    /// a `collectionSetter` on each predicate its adder appends to.
+    async fn actions_for(
+        &self,
+        class: &str,
+        own: &str,
+        op: Op,
+        membership: bool,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        let predicate = match op {
+            Op::Set => "ad4m://setter",
+            Op::Add => "ad4m://adder",
+            Op::Remove => "ad4m://remover",
+        };
+        let actions = self
+            .get_property_actions_from_shacl(class, own, predicate)
+            .await?;
+        if actions.is_some() || op != Op::Set || !membership {
+            return Ok(actions);
+        }
+        let adder = self
+            .get_property_actions_from_shacl(class, own, "ad4m://adder")
+            .await?
+            .filter(|a| !a.is_empty() && a.iter().all(|c| c.action == Action::AddLink));
+        Ok(adder.map(|adder| {
+            adder
+                .into_iter()
+                .map(|c| Command {
+                    action: Action::CollectionSetter,
+                    ..c
+                })
+                .collect()
+        }))
+    }
+
+    /// The members `value` names for `own` of `class`, each encoded as that
+    /// property stores it: an array's elements, or a single value. `null`
+    /// is refused: it names no members, and read as `[]` it would clear.
+    pub(super) async fn members(
+        &self,
+        class: &str,
+        own: &str,
+        value: &Value,
+        context: &AgentContext,
+    ) -> Result<Vec<String>, AnyError> {
+        let items = match value {
+            Value::Array(items) => items.clone(),
+            Value::Null => {
+                return Err(anyhow!(
+                    "'{own}' of '{class}': null names no members. Pass [] to clear it."
+                ))
+            }
+            single => vec![single.clone()],
+        };
+        let mut members = Vec::with_capacity(items.len());
+        for item in &items {
+            members.push(
+                self.resolve_property_value(class, own, item, context)
+                    .await?,
+            );
+        }
+        Ok(members)
+    }
+
+    /// One run per `collectionSetter` in `collection`, with the members
+    /// `value` names for `own` of `class` as its parameters. They have no
+    /// name: nothing in the commands is replaced by a member;
+    /// `collectionSetter` reads only their values.
+    pub(super) async fn collection_setter_runs(
+        &self,
+        class: &str,
+        own: &str,
+        collection: Vec<Command>,
+        value: &Value,
+        context: &AgentContext,
+    ) -> Result<Vec<Run>, AnyError> {
+        let parameters: Vec<Parameter> = self
+            .members(class, own, value, context)
+            .await?
+            .into_iter()
+            .map(|m| Parameter {
+                name: String::new(),
+                value: Value::String(m),
+            })
+            .collect();
+        Ok(collection
+            .into_iter()
+            .map(|c| Run {
+                commands: vec![c],
+                parameters: parameters.clone(),
+            })
+            .collect())
+    }
+
+    /// Run what [`Self::update_through_abstract`] (or a write on a concrete
+    /// class with a `collectionSetter`) returned, in one batch: the
+    /// caller's, or one made here when there are several runs.
+    pub(super) async fn execute_runs(
+        &mut self,
+        runs: Vec<Run>,
+        base: String,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let own_batch = match (&batch_id, runs.len()) {
+            (None, n) if n > 1 => Some(self.create_batch().await),
+            _ => None,
+        };
+        let batch = own_batch.clone().or(batch_id);
+        for run in runs {
+            let ran = self
+                .execute_commands(
+                    run.commands,
+                    base.clone(),
+                    run.parameters,
+                    batch.clone(),
+                    context,
+                )
+                .await;
+            if let Err(e) = ran {
+                if let Some(own) = &own_batch {
+                    self.discard_batch(own).await;
+                }
+                return Err(e);
+            }
+        }
+        if let Some(own) = own_batch {
+            self.commit_batch(own, context).await?;
+        }
+        Ok(())
     }
 
     /// Delete the instance of `subject_class` at `base`: run the class's
@@ -464,6 +648,51 @@ impl PerspectiveInstance {
     }
 }
 
+/// One `execute_commands` run of a write that sets a collection: a
+/// `collectionSetter` gets its members as parameters, in a run of its own.
+pub(super) struct Run {
+    pub(super) commands: Vec<Command>,
+    /// The members a `collectionSetter` sets; empty otherwise.
+    pub(super) parameters: Vec<Parameter>,
+}
+
+/// What an update through an abstract class does to one name.
+#[derive(Clone, Copy, PartialEq)]
+enum Op {
+    Set,
+    Add,
+    Remove,
+}
+
+impl Op {
+    /// `{"action": "adder" | "remover" | "setter", "value": v}` is that op
+    /// with `v`; anything else is a value to set.
+    fn of(value: &Value) -> (Op, &Value) {
+        let Value::Object(fields) = value else {
+            return (Op::Set, value);
+        };
+        let (Some(Value::String(action)), Some(inner), 2) =
+            (fields.get("action"), fields.get("value"), fields.len())
+        else {
+            return (Op::Set, value);
+        };
+        match action.as_str() {
+            "adder" => (Op::Add, inner),
+            "remover" => (Op::Remove, inner),
+            "setter" => (Op::Set, inner),
+            _ => (Op::Set, value),
+        }
+    }
+
+    fn what(self) -> &'static str {
+        match self {
+            Op::Set => "a setter",
+            Op::Add => "an adder",
+            Op::Remove => "a remover",
+        }
+    }
+}
+
 impl ReadTargets {
     fn named(classes: &QueryClasses) -> Self {
         ReadTargets {
@@ -484,7 +713,7 @@ pub(super) mod faults {
 
     static FAIL_NEXT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
-    pub(in crate::perspectives) fn fail_next_index(perspective_uuid: &str) {
+    pub(crate) fn fail_next_index(perspective_uuid: &str) {
         FAIL_NEXT
             .lock()
             .unwrap()

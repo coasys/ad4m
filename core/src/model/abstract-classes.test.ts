@@ -149,4 +149,48 @@ describe("abstract classes", () => {
     expect(calls[0][0]).toBe("removeSubject");
     expect(calls[0][2]).toBe("ad4m://m/1");
   });
+
+  it("add/remove/set of a relation through an abstract class go to the executor's dispatch", async () => {
+    const calls: any[][] = [];
+    const perspective: any = new Proxy({}, {
+      get: (_t, key) => async (...args: any[]) => {
+        calls.push([key, ...args]);
+        if (key === "modelQuery") {
+          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "Folder", children: [] }], totalCount: 1 };
+        }
+        return [];
+      },
+    });
+    const [row]: any[] = await Folderish.findAll(perspective);
+    calls.length = 0;
+    await row.addChildren("ad4m://child/1", "batch");
+    await row.removeChildren(["ad4m://child/1"], "batch");
+    await row.setChildren([{ id: "ad4m://child/2" }, "ad4m://child/3"], "batch");
+    // No link at the abstract predicate (test://child): only the dispatch.
+    expect(calls).toEqual([
+      ["updateSubject", "Folderish", "ad4m://folder/1", { children: { action: "adder", value: ["ad4m://child/1"] } }, "batch"],
+      ["updateSubject", "Folderish", "ad4m://folder/1", { children: { action: "remover", value: ["ad4m://child/1"] } }, "batch"],
+      ["updateSubject", "Folderish", "ad4m://folder/1", { children: { action: "setter", value: ["ad4m://child/2", "ad4m://child/3"] } }, "batch"],
+    ]);
+  });
+
+  it("save() through an abstract class sends a changed relation's members as IDs", async () => {
+    const calls: any[][] = [];
+    const perspective: any = new Proxy({}, {
+      get: (_t, key) => async (...args: any[]) => {
+        calls.push([key, ...args]);
+        if (key === "modelQuery") {
+          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "Folder", children: [] }], totalCount: 1 };
+        }
+        return [];
+      },
+    });
+    const [row]: any[] = await Folderish.findAll(perspective);
+    row.children = [{ id: "ad4m://child/2" }, "ad4m://child/3"];
+    calls.length = 0;
+    await row.save("batch");
+    expect(calls).toEqual([
+      ["updateSubject", "Folderish", "ad4m://folder/1", { children: ["ad4m://child/2", "ad4m://child/3"] }, "batch"],
+    ]);
+  });
 });

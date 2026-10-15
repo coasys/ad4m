@@ -1581,6 +1581,7 @@ export class PerspectiveProxy {
      *  record that the abstract class reads, under its own name. */
     async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
         await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
+        invalidatePerspectiveCache(this.#handle.uuid);
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
@@ -1655,6 +1656,7 @@ export class PerspectiveProxy {
         const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
         if (markers.some((link) => shapePattern.test(link.data.source))) {
             await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
             return;
         }
 
