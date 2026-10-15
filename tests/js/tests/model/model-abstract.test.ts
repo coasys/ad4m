@@ -1,8 +1,9 @@
 /**
  * Abstract model classes (#1435), end to end through the SDK: `findAll` over
  * `@Model({ abstract: true })` reads every class with its names (aliases
- * under the abstract name), and `save()` / `delete()` on a row read through
- * it reach the record's own class. The executor's rules (conformance,
+ * under the abstract name), and `save()` / `delete()` and a relation's
+ * `addX` / `removeX` / `setX` on a row read through it reach the record's
+ * own class. The executor's rules (conformance,
  * views, dispatch, refusals, subscriptions) are tested in
  * `rust-executor/src/perspectives/{model_query/abstract_classes_tests.rs,
  * perspective_instance_abstract_tests.rs}`.
@@ -13,7 +14,7 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, Ad4mModel, Flag, LinkQuery, Model, PerspectiveProxy, Property } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, Flag, HasMany, LinkQuery, Model, PerspectiveProxy, Property } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective } from "../../utils/utils.js";
@@ -54,6 +55,22 @@ class AbsPoll extends Ad4mModel {
   title: string = "";
 }
 
+@Model({ name: "AbsFolder", abstract: true })
+class AbsFolder extends Ad4mModel {
+  @HasMany({ through: "test://abs/children" })
+  children: string[] = [];
+}
+
+// Calls it `items`, aliased `children`: an adder and a remover, no setter.
+@Model({ name: "AbsBox", implements: [AbsFolder] })
+class AbsBox extends Ad4mModel {
+  @Flag({ through: "test://abs/kind", value: "test://abs/box" })
+  kind = "test://abs/box";
+
+  @HasMany({ through: "test://abs/item", alias: { AbsFolder: "children" } })
+  items: string[] = [];
+}
+
 const byId = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
 
 describe("Abstract model classes", function () {
@@ -68,6 +85,8 @@ describe("Abstract model classes", function () {
     await AbsBlock.register(perspective);
     await AbsMessage.register(perspective);
     await AbsPoll.register(perspective);
+    await AbsFolder.register(perspective);
+    await AbsBox.register(perspective);
   };
 
   before(async () => {
@@ -123,5 +142,20 @@ describe("Abstract model classes", function () {
     await row.delete();
     expect(await AbsMessage.findAll(perspective)).to.have.length(0);
     expect((await AbsText.findAll(perspective)).map((i) => i.id)).to.deep.equal([block.id]);
+  });
+
+  it("addX / removeX / setX through the abstract class write the record's own relation", async () => {
+    const box = await AbsBox.create(perspective, {});
+    const [row] = (await AbsFolder.findAll(perspective)) as any[];
+    expect(row.id).to.equal(box.id);
+    const items = async () => ((await AbsBox.findAll(perspective))[0].items as string[]).slice().sort();
+
+    await row.addChildren(["test://abs/c1", "test://abs/c2"]);
+    expect(await items()).to.deep.equal(["test://abs/c1", "test://abs/c2"]);
+    await row.removeChildren("test://abs/c1");
+    expect(await items()).to.deep.equal(["test://abs/c2"]);
+    await row.setChildren(["test://abs/c3"]);
+    expect(await items()).to.deep.equal(["test://abs/c3"]);
+    expect(await perspective.get(new LinkQuery({ source: box.id, predicate: "test://abs/children" }))).to.have.length(0);
   });
 });
