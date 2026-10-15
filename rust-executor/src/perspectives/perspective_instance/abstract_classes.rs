@@ -35,20 +35,18 @@ pub(super) struct AbstractCache {
     resolved: HashMap<String, Arc<Resolution>>,
 }
 
-/// The concrete classes a model query or subscription reads: the classes it
-/// names, or those an abstract class resolves to, with their views.
+/// The classes a model query or subscription reads: those it names, or an
+/// abstract class's, with their views.
 pub(super) struct ReadTargets {
     pub(super) classes: QueryClasses,
     pub(super) views: HashMap<String, Arc<ModelShape>>,
     /// Set when the caller named an abstract class.
     pub(super) resolution: Option<Arc<Resolution>>,
-    /// The classes could not be resolved (a store error): a subscription
-    /// tries again on its next pass rather than keeping this answer.
+    /// Not resolved (a store error): a subscription tries again next pass.
     pub(super) unresolved: bool,
 }
 
-/// The generation a subscription that could not be resolved records: never a
-/// real one, so the next pass resolves it again.
+/// The generation an unresolved subscription records: never a real one.
 pub(super) const UNRESOLVED: u64 = u64::MAX;
 
 impl PerspectiveInstance {
@@ -58,9 +56,8 @@ impl PerspectiveInstance {
         self.forget_derived_shapes();
     }
 
-    /// The installed shapes changed: a class was added, refreshed or synced
-    /// in. Any of these can change which classes are abstract, which aliases
-    /// exist and which classes an abstract class reads.
+    /// The installed shapes changed (added, refreshed or synced in): which
+    /// classes are abstract, their aliases and resolutions may have too.
     pub(super) fn forget_derived_shapes(&self) {
         let mut cache = self.abstract_cache.write().unwrap();
         cache.generation += 1;
@@ -69,8 +66,7 @@ impl PerspectiveInstance {
     }
 
     /// How many times the installed shapes have changed. Read it *before*
-    /// resolving: a change that lands mid-resolution moves it, so the result
-    /// is never mistaken for current.
+    /// resolving, so a change landing mid-resolution is seen.
     pub(super) fn shapes_generation(&self) -> u64 {
         self.abstract_cache.read().unwrap().generation
     }
@@ -126,13 +122,9 @@ impl PerspectiveInstance {
         Ok(resolution)
     }
 
-    /// The concrete classes `classes` reads. An abstract class is read on
-    /// its own: in a union of several classes its views would have to
-    /// apply to some rows and not others.
-    ///
-    /// What a union refuses is refused for an abstract class too, before it
-    /// is resolved, so the answer does not depend on which classes are
-    /// installed.
+    /// The concrete classes `classes` reads. An abstract class is read on its
+    /// own (in a union its views would apply to some rows only), and what a
+    /// union refuses is refused before it resolves, whatever is installed.
     pub(super) fn read_targets(
         &self,
         classes: &QueryClasses,
@@ -162,14 +154,10 @@ impl PerspectiveInstance {
         })
     }
 
-    /// [`Self::read_targets`] for a subscription's trigger, which is built
-    /// from shapes alone: a query that does not parse is answered by the
-    /// query run, not here.
-    ///
-    /// On an error the classes are watched as named and the targets are
-    /// marked `unresolved`, so the subscription records [`UNRESOLVED`] and
-    /// is resolved again on its next pass: one transient store error must
-    /// not leave it watching predicates no class writes.
+    /// [`Self::read_targets`] for a subscription's trigger. On an error the
+    /// classes are watched as named and marked `unresolved`, so the next pass
+    /// resolves them again: a transient store error must not leave it
+    /// watching predicates no class writes.
     pub(super) fn trigger_targets(&self, classes: &QueryClasses, query_json: &str) -> ReadTargets {
         let query: ModelQueryInput = serde_json::from_str(query_json).unwrap_or_default();
         self.read_targets(classes, &query).unwrap_or_else(|e| {
@@ -345,14 +333,11 @@ impl PerspectiveInstance {
             .await
     }
 
-    /// Resolve every subscription over an abstract class (#1435) again whose
-    /// classes were resolved before the installed shapes last changed, and
-    /// rebuild its trigger. Returns their ids: those re-run this pass
-    /// whatever was written. A change can move the classes, or only a view
-    /// (an alias moved from `body` to `content`, same class list); either
-    /// way the old trigger watches the wrong predicates and the last result
-    /// may read the wrong ones. One still unresolved is left for the next
-    /// pass.
+    /// Resolve again every subscription over an abstract class resolved
+    /// before the installed shapes last changed, and rebuild its trigger: a
+    /// change can move its classes or only a view (an alias moved). Returns
+    /// their ids, which re-run this pass whatever was written. One still
+    /// unresolved waits for the next pass.
     pub(super) async fn refresh_abstract_subscriptions(&self) -> HashSet<String> {
         let generation = self.shapes_generation();
         let stale: Vec<(String, QueryClasses, String)> = {
