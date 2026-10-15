@@ -196,8 +196,9 @@ classes of your own.
 
 ## Reacting to changes
 
-The executor can wake an agent when links matching a SPARQL subscription
-appear (mentions, new children under a container). How you subscribe depends
+The executor can wake an agent when a live query's result changes: a model
+query over the built-in `TextContent` for mentions, a SPARQL query for new
+children under a container. How you subscribe depends
 on your host. Through the OpenClaw AD4M plugin, use its own wrapper tools —
 `ad4m_subscribe_to_mentions(perspective_id)`,
 `ad4m_subscribe_to_children(perspective_id, expression_address)` and
@@ -206,7 +207,8 @@ over the executor's WebSocket API and deliver wake events; joining or
 publishing a neighbourhood subscribes you to mentions automatically. Only
 when talking to the executor's MCP endpoint directly do you use the raw
 builders (`generate_waker_query`, `get_mention_waker_config`) and register
-the query over the WebSocket API yourself. When woken with a perspective UUID
+the query over the WebSocket API yourself (`perspective.modelSubscribe` on the
+returned `class` for mentions, `perspective.subscribeQuery` for children). When woken with a perspective UUID
 and a parent id, read that container with `instance_transcript` — using the
 item class `describe_perspective` reports, which need not be called `Message`
 — skip your own items (compare `author` with `get_my_did`), and reply into the
