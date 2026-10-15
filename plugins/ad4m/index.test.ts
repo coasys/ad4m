@@ -1550,8 +1550,8 @@ describe("buildWakeMessage", () => {
 
   it("builds a mention wake message with per-item parents", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"] },
-      { address: "msg-2", parents: ["channel-abc"] },
+      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"], ancestors: [] },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [] },
     ]);
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
@@ -1570,7 +1570,7 @@ describe("buildWakeMessage", () => {
    */
   it("labels a mentioned address class-agnostically", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "task-1", parents: ["board-abc"] },
+      { address: "task-1", parents: ["board-abc"], ancestors: [] },
     ]);
     expect(msg).toContain("Item: task-1");
     expect(msg).not.toContain("Message:");
@@ -1585,9 +1585,18 @@ describe("buildWakeMessage", () => {
     expect(msg).not.toContain("Mentioned items");
   });
 
+  it("lists the ancestors above the parents, and says nothing when there are none", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      { address: "msg-1", parents: ["thread-1"], ancestors: ["call-1", "space-1"] },
+      { address: "msg-2", parents: ["thread-2"], ancestors: [] },
+    ]);
+    expect(msg).toContain("Ancestors: call-1, space-1");
+    expect(msg.match(/Ancestors:/g)).toHaveLength(1);
+  });
+
   it("shows (unknown) parents when empty", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: [] },
+      { address: "msg-1", parents: [], ancestors: [] },
     ]);
     expect(msg).toContain("Parents: (unknown)");
   });
@@ -3666,7 +3675,8 @@ describe("WakerSubscriptionManager", () => {
     ]);
     await new Promise(r => setTimeout(r, 50));
 
-    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(2);
+    // One parent lookup per message, then one batched lookup per ancestor level.
+    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(4);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
@@ -3675,6 +3685,7 @@ describe("WakerSubscriptionManager", () => {
     // msg-2 has one parent
     expect(capturedMentions![1].address).toBe("msg-2");
     expect(capturedMentions![1].parents).toEqual(["channel-abc"]);
+    expect(capturedMentions![0].ancestors).toEqual([]);
 
     manager.disposeAll();
   });
