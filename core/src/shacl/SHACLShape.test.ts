@@ -5,7 +5,8 @@ import { join } from 'path';
 import { Parser } from 'n3';
 
 // Links the executor's parse_shacl_to_links writes for a shape that uses every
-// field (golden[0]) and one with empty action lists (golden[1]); its test
+// field (golden[0]), one with empty action lists (golden[1]) and an abstract
+// class (golden[2], #1435); its test
 // `parse_shacl_to_links_matches_the_golden_fixture` pins the same file.
 const goldenCases = JSON.parse(readFileSync(
   join(__dirname, '../../../rust-executor/src/perspectives/fixtures/shacl_writer_golden.json'), 'utf8'));
