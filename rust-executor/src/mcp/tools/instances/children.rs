@@ -108,7 +108,7 @@ impl Ad4mMcpHandler {
 
     /// List the children of a node, regardless of class (`child_links`).
     #[tool(
-        description = "List the children of a node, regardless of their class: those linked via ad4m://has_child and via the children relation of any class implementing the built-in Container (e.g. we://child): id, timestamp and author of each child link, oldest first. Class-agnostic — works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript."
+        description = "List the children of a node, regardless of their class: those linked via ad4m://has_child and via the children relation of any class implementing the built-in Container (e.g. we://child): id, timestamp and author of each child link, oldest first. Class-agnostic — works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent); to read the ones that carry text as a transcript, instance_transcript."
     )]
     pub async fn get_children(&self, params: Parameters<GetChildrenParams>) -> String {
         let p = &params.0;

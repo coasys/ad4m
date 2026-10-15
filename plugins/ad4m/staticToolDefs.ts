@@ -331,7 +331,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "describe_perspective",
-    "description": "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url \u2014 it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove / instance_transcript tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema.",
+    "description": "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url \u2014 it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "DescribePerspectiveParams",
@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it is one query on the built-in abstract class TextContent, which reads every class with a `text` property or a property aliased to `text`, whatever the app calls the class. Pass class_name (and optionally text_property) to read one class instead; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)', where M is an upper bound when the node holds children under several predicates. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It reads through the built-in abstract class TextContent: every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)', where M is an upper bound when the node holds children under several predicates. Use instance_query for one specific class, for the full property maps, or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -621,11 +621,6 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "description": "Perspective UUID",
           "type": "string"
         },
-        "class_name": {
-          "description": "Subject class of the children to read (e.g. \"Message\"), as listed by\ndescribe_perspective. Omit it to read through the built-in abstract\nclass TextContent: every class with a `text` property, or a property\naliased to `text`.",
-          "type": "string",
-          "nullable": true
-        },
         "parent": {
           "description": "Parent node URI whose children are read (e.g. a Channel's id): via\nad4m://has_child, and via the children relation of any class\nimplementing the built-in Container (e.g. we://child). A bare string\nis wrapped as a literal URI.",
           "type": "string"
@@ -635,11 +630,6 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "type": "integer",
           "format": "uint",
           "minimum": 0,
-          "nullable": true
-        },
-        "text_property": {
-          "description": "Which property holds the text shown per entry, with class_name.\nDefaults to the class's text (its `text`, or the property it aliases\nto `text`), then `body`, then the class's identity property.",
-          "type": "string",
           "nullable": true
         }
       },
@@ -680,7 +670,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_children",
-    "description": "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript.",
+    "description": "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent); to read the ones that carry text as a transcript, instance_transcript.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetChildrenParams",
