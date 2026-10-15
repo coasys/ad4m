@@ -2196,6 +2196,44 @@ mod event_spec_tests {
                 Topic::AiModelLoadingStatus,
                 serde_json::to_value(AIModelLoadingStatus::default()),
             ),
+            (
+                Topic::SfuCallRenegotiationOffer,
+                serde_json::to_value(crate::sfu::SfuCallRenegotiationOffer {
+                    target_did: "did:a".into(),
+                    neighbourhood_url: "n".into(),
+                    room_name: "r".into(),
+                    sdp_offer: "{}".into(),
+                    track_mapping: vec![],
+                }),
+            ),
+            (
+                Topic::SfuMigrate,
+                serde_json::to_value(crate::sfu::SfuMigrateEvent {
+                    target_did: "did:a".into(),
+                    neighbourhood_url: "n".into(),
+                    room_name: "r".into(),
+                    migrate_to_did: "did:b".into(),
+                }),
+            ),
+            (
+                Topic::SfuData,
+                serde_json::to_value(crate::sfu::SfuDataMessage {
+                    sender_did: "did:a".into(),
+                    neighbourhood_url: "n".into(),
+                    room_name: "r".into(),
+                    channel_label: "c".into(),
+                    binary: false,
+                    data: "x".into(),
+                }),
+            ),
+            (
+                Topic::SfuRoomRoster,
+                serde_json::to_value(crate::sfu::SfuRoomRoster {
+                    neighbourhood_url: "n".into(),
+                    room_name: "r".into(),
+                    participants: vec!["did:a".into()],
+                }),
+            ),
         ];
         let unscoped: BTreeSet<&str> = event_specs()
             .iter()
