@@ -68,6 +68,8 @@ mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
+// Registering this node's owners with the link language.
+mod local_agents;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
