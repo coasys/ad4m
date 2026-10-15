@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)', where M is an upper bound when several classes are read. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it is one query on the built-in abstract class TextContent, which reads every class with a `text` property or a property aliased to `text`, whatever the app calls the class. Pass class_name (and optionally text_property) to read one class instead; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -622,7 +622,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "type": "string"
         },
         "class_name": {
-          "description": "Subject class of the children to read (e.g. \"Message\"), as listed by\ndescribe_perspective. Omit it to read every class that has text,\nwhatever the app calls it (the built-in TextContent).",
+          "description": "Subject class of the children to read (e.g. \"Message\"), as listed by\ndescribe_perspective. Omit it to read through the built-in abstract\nclass TextContent: every class with a `text` property, or a property\naliased to `text`.",
           "type": "string",
           "nullable": true
         },

@@ -2417,21 +2417,24 @@ async fn writes_through_an_abstract_class() {
 
 // ── Reading through TextContent (#1446) ─────────────────────────────────────
 
-/// Flux's Message once Flux declares its alias: `body` answers to `text`.
-const ALIASED_MESSAGE_SDNA: &str = r#"{
-  "target_class": "flux://Message",
+/// A class that aliases a property of another name to TextContent's `text`,
+/// and has an identity property that is not the text.
+const ALIASED_NOTE_SDNA: &str = r#"{
+  "target_class": "app://Note",
   "constructor_actions": [
-    {"action":"addLink","source":"this","predicate":"flux://entry_type","target":"flux://has_message"}
+    {"action":"addLink","source":"this","predicate":"app://kind","target":"app://note"}
   ],
   "properties": [
-    {"path":"flux://entry_type","name":"type","has_value":"flux://has_message","min_count":1,"max_count":1},
-    {"path":"flux://body","name":"body","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+    {"path":"app://kind","name":"kind","has_value":"app://note","min_count":1,"max_count":1},
+    {"path":"app://title","name":"title","datatype":"xsd:string","max_count":1,"identity":true,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"app://title","target":"value"}]},
+    {"path":"app://content","name":"content","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
      "resolve_language":"literal","alias":{"TextContent":"text"},
-     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://body","target":"value"}]}
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"app://content","target":"value"}]}
   ]
 }"#;
 
-/// Another app's block, with its own `text` and an identity property that is
+/// A We-shaped block, with its own `text` and an identity property that is
 /// not the text.
 const BLOCK_SDNA: &str = r#"{
   "target_class": "we://Block",
@@ -2481,15 +2484,15 @@ fn transcript(uuid: &str, class_name: Option<&str>, parent: &str) -> InstanceTra
     }
 }
 
-/// Without a class, a transcript reads every class's text under the parent
-/// through TextContent: Flux's aliased `body` and another app's `text`, in
-/// one chronology, each text as stored (HTML here).
+/// Without a class, a transcript is a model query on TextContent: a class's
+/// aliased `content` and a We block's `text`, in one chronology, each text as
+/// stored (HTML here).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_transcript_without_a_class_reads_every_class_with_text() {
+async fn a_transcript_without_a_class_reads_through_text_content() {
     let (handler, uuid, _guard) = setup_with(
         &[
             ("Channel", CHANNEL_SDNA),
-            ("Message", ALIASED_MESSAGE_SDNA),
+            ("Note", ALIASED_NOTE_SDNA),
             ("Block", BLOCK_SDNA),
         ],
         false,
@@ -2499,11 +2502,14 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
     create_under(
         &handler,
         &uuid,
-        "Message",
-        props(&[(
-            "body",
-            json!(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#),
-        )]),
+        "Note",
+        props(&[
+            ("title", json!("a note")),
+            (
+                "content",
+                json!(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#),
+            ),
+        ]),
         channel,
     )
     .await;
@@ -2524,20 +2530,22 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
         .await;
     let hey = all
         .find(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#)
-        .unwrap_or_else(|| panic!("the message's text, as stored:\n{all}"));
+        .unwrap_or_else(|| panic!("the note's text, as stored:\n{all}"));
     let list = all
         .find("<ul><li>one</li><li>two</li></ul>")
         .unwrap_or_else(|| panic!("the block's text, as stored:\n{all}"));
     assert!(hey < list, "oldest first:\n{all}");
 
-    // A class named: its own text — the aliased `body`, and `text` over the
+    // A class named: the property it aliases to `text`, and `text` over the
     // identity property.
-    let message = handler
-        .instance_transcript(Parameters(transcript(&uuid, Some("Message"), channel)))
+    let note = handler
+        .instance_transcript(Parameters(transcript(&uuid, Some("Note"), channel)))
         .await;
     assert!(
-        message.contains("look &amp; see") && !message.contains("<li>one</li>"),
-        "{message}"
+        note.contains("look &amp; see")
+            && !note.contains("a note")
+            && !note.contains("<li>one</li>"),
+        "{note}"
     );
     let block = handler
         .instance_transcript(Parameters(transcript(&uuid, Some("Block"), channel)))
@@ -2560,244 +2568,32 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
         err["error"].as_str().unwrap().contains("needs class_name"),
         "{err}"
     );
-
-    // The mention scan watches both classes' text predicates.
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    assert_eq!(
-        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
-        vec!["flux://body".to_string(), "we://text".to_string()]
-    );
 }
 
-/// Until Flux declares its alias no class conforms: a transcript without a
-/// class reads `Message.body`, and the mention scan watches its predicate, as
-/// before.
+/// Without a class the transcript is TextContent's answer and nothing else:
+/// a `Message` with a `body` that is not aliased to `text` does not conform,
+/// so its messages are not in it.
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_conforming_class_the_old_message_body_lookup_applies() {
+async fn a_transcript_without_a_class_has_only_what_conforms_to_text_content() {
     let (handler, uuid, _guard) = setup(false).await;
-    let channel = "ad4m://test/channel-old";
+    let channel = "ad4m://test/channel-plain";
     create_under(
         &handler,
         &uuid,
         "Message",
-        props(&[("body", json!("<p>plain old body</p>"))]),
+        props(&[("body", json!("<p>plain body</p>"))]),
         channel,
     )
     .await;
     let all = handler
         .instance_transcript(Parameters(transcript(&uuid, None, channel)))
         .await;
-    assert!(all.contains("<p>plain old body</p>"), "{all}");
+    assert_eq!(all, format!("(no TextContent instances under {channel})"));
 
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    assert_eq!(
-        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
-        vec!["flux://body".to_string()]
-    );
-
-    let empty = handler
-        .instance_transcript(Parameters(transcript(&uuid, None, "ad4m://obj/empty")))
+    let message = handler
+        .instance_transcript(Parameters(transcript(&uuid, Some("Message"), channel)))
         .await;
-    assert_eq!(empty, "(no Message instances under ad4m://obj/empty)");
-}
-
-/// Flux's poll `Answer`: a `text` of its own (`rdf://text`), so it conforms
-/// to TextContent while Flux's `Message` does not yet.
-const ANSWER_SDNA: &str = r#"{
-  "target_class": "flux://Answer",
-  "constructor_actions": [
-    {"action":"addLink","source":"this","predicate":"flux://entry_type","target":"flux://poll_answer"}
-  ],
-  "properties": [
-    {"path":"flux://entry_type","name":"type","has_value":"flux://poll_answer","min_count":1,"max_count":1},
-    {"path":"rdf://text","name":"text","datatype":"xsd:string","max_count":1,"writable":true,
-     "setter":[{"action":"setSingleTarget","source":"this","predicate":"rdf://text","target":"value"}]}
-  ]
-}"#;
-
-/// A Flux community that has used a poll: `Answer` conforms to TextContent,
-/// `Message` (no alias yet) does not. TextContent only adds: the mention scan
-/// still watches `Message.body`, a body mention still matches, and a
-/// transcript of the channel still has the messages, merged with what reads
-/// through TextContent in one chronology.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_class_with_its_own_text_does_not_hide_the_message_body() {
-    let (handler, uuid, _guard) = setup_with(
-        &[
-            ("Channel", CHANNEL_SDNA),
-            ("Message", MESSAGE_SDNA),
-            ("Answer", ANSWER_SDNA),
-        ],
-        false,
-    )
-    .await;
-    let channel = "ad4m://test/channel-mixed";
-    let poll = "ad4m://test/poll-mixed";
-    let first = create_under(
-        &handler,
-        &uuid,
-        "Message",
-        props(&[("body", json!("<p>hey @data, lunch?</p>"))]),
-        channel,
-    )
-    .await;
-    create_under(
-        &handler,
-        &uuid,
-        "Answer",
-        props(&[("text", json!("pizza"))]),
-        poll,
-    )
-    .await;
-    create_under(
-        &handler,
-        &uuid,
-        "Answer",
-        props(&[("text", json!("an answer in the channel"))]),
-        channel,
-    )
-    .await;
-    create_under(
-        &handler,
-        &uuid,
-        "Message",
-        props(&[("body", json!("second message"))]),
-        channel,
-    )
-    .await;
-
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    let predicates = crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await;
-    assert_eq!(
-        predicates,
-        vec!["flux://body".to_string(), "rdf://text".to_string()]
-    );
-    let query = crate::mcp::tools::subscriptions::build_mention_query(
-        &["data".to_string()],
-        "did:key:zNobody",
-        &predicates,
-    );
-    let hits = perspective.sparql_query(query).unwrap();
-    assert!(hits.contains(&first), "the body mention wakes: {hits}");
-
-    let all = handler
-        .instance_transcript(Parameters(transcript(&uuid, None, channel)))
-        .await;
-    let pos = |needle: &str| {
-        all.find(needle)
-            .unwrap_or_else(|| panic!("{needle} missing in:\n{all}"))
-    };
-    assert!(
-        pos("hey @data, lunch?") < pos("an answer in the channel")
-            && pos("an answer in the channel") < pos("second message"),
-        "{all}"
-    );
-    assert!(
-        !all.contains("pizza") && all.contains("<p>hey @data, lunch?</p>"),
-        "{all}"
-    );
-
-    let last_two = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            limit: Some(2),
-            ..transcript(&uuid, None, channel)
-        }))
-        .await;
-    assert!(
-        last_two.starts_with(&format!(
-            "(showing last 2 of up to 3 TextContent and Message instances under {channel})"
-        )) && !last_two.contains("lunch")
-            && last_two.contains("an answer in the channel")
-            && last_two.contains("second message"),
-        "{last_two}"
-    );
-}
-
-/// Without a `Message` class (a We space), the mention scan stays unscoped
-/// even when classes conform to TextContent: scoped to them it would drop
-/// every text property that does not.
-#[tokio::test(flavor = "multi_thread")]
-async fn without_a_message_class_the_mention_scan_stays_unscoped() {
-    let (_handler, uuid, _guard) =
-        setup_with(&[("Channel", CHANNEL_SDNA), ("Block", BLOCK_SDNA)], false).await;
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    assert_eq!(
-        perspective
-            .predicates_through(
-                crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI,
-                "text"
-            )
-            .unwrap(),
-        vec!["we://text".to_string()]
-    );
-    assert!(
-        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective)
-            .await
-            .is_empty()
-    );
-}
-
-/// A record both an un-aliased `Message` and a class that conforms to
-/// TextContent (here also typed as an `Answer`) is read by both sources of a
-/// transcript: it is shown once, and counted once.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_record_two_sources_read_is_shown_once() {
-    let (handler, uuid, _guard) = setup_with(
-        &[
-            ("Channel", CHANNEL_SDNA),
-            ("Message", MESSAGE_SDNA),
-            ("Answer", ANSWER_SDNA),
-        ],
-        false,
-    )
-    .await;
-    let channel = "ad4m://test/channel-twice";
-    let both = create_under(
-        &handler,
-        &uuid,
-        "Message",
-        props(&[("body", json!("a message body"))]),
-        channel,
-    )
-    .await;
-    let mut perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    let ctx = crate::agent::AgentContext::main_agent();
-    perspective
-        .add_links(
-            vec![
-                crate::types::Link {
-                    source: both.clone(),
-                    predicate: Some("flux://entry_type".into()),
-                    target: "flux://poll_answer".into(),
-                },
-                crate::types::Link {
-                    source: both.clone(),
-                    predicate: Some("rdf://text".into()),
-                    target: "literal:string:also%20an%20answer".into(),
-                },
-            ],
-            crate::types::LinkStatus::Shared,
-            None,
-            &ctx,
-        )
-        .await
-        .unwrap();
-
-    let all = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            limit: Some(1),
-            ..transcript(&uuid, None, channel)
-        }))
-        .await;
-    assert_eq!(
-        all.matches("):\n").count() + all.matches("]:\n").count(),
-        1,
-        "{all}"
-    );
-    assert!(
-        !all.starts_with("(showing"),
-        "one record, counted once: {all}"
-    );
+    assert!(message.contains("<p>plain body</p>"), "{message}");
 }
 
 /// A store error while `instance_update` asks whether the class is abstract

@@ -97,13 +97,15 @@ instance_query(perspective_id, class_name="Message", parent="<channel-id>", limi
     ({"count": {"gt": 5}}, {"title": {"contains": "mcp"}}, {"owner": {"not": "…"}}),
     and OR / AND / NOT combinators; "id" filters on the instance URI.
 
-instance_transcript(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
+instance_transcript(perspective_id, parent="<channel-id>", limit=20)
   → the NEWEST N instances under parent, presented oldest-to-newest as a
-    plain-text transcript: timestamp, author display name and DID, and the text
-    (the class's `text`, or the property it aliases to `text`, else body;
-    override with text_property). The text comes back as stored (HTML or
-    Markdown). Omit class_name to read every class under parent that has
-    text, whatever the app calls it (the built-in abstract class TextContent).
+    plain-text transcript: timestamp, author display name and DID, and the
+    text as stored (HTML or Markdown). Without class_name it is one query on
+    the built-in abstract class TextContent: every class with a `text`
+    property, or a property aliased to `text`. A class that has neither is
+    not in it; pass class_name="<class>" to read that class (its `text`, or
+    the property it aliases to `text`, else body; override with
+    text_property).
     One call, no id juggling — read channels with this, not with instance_query.
     limit defaults to 50 and is capped at 500.
 
