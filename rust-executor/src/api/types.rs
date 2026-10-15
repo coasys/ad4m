@@ -734,6 +734,31 @@ pub struct CreateSubjectRequest {
     pub batch_id: Option<String>,
 }
 
+/// Through an abstract class (#1435), dispatched to the record's own classes.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+    /// A JSON object: property name → value.
+    pub values: String,
+    pub batch_id: Option<String>,
+}
+
+/// Runs the class's destructor; through an abstract class (#1435), that of
+/// each of the record's classes it reads.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemoveSubjectRequest {
+    pub subject_class: String,
+    pub expression_address: String,
+    pub batch_id: Option<String>,
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

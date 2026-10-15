@@ -511,6 +511,14 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.createSubject",
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
     ),
+    (
+        "perspective.updateSubject",
+        || json!({ "subjectClass": "C", "expressionAddress": "e", "values": "{}" }),
+    ),
+    (
+        "perspective.removeSubject",
+        || json!({ "subjectClass": "C", "expressionAddress": "e" }),
+    ),
     ("perspective.commitBatch", || json!({ "batchId": "b" })),
     ("perspective.discardBatch", || json!({ "batchId": "b" })),
     (

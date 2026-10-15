@@ -571,20 +571,26 @@ export default function ad4mPlugin(api: any) {
   }
 
   /**
-   * Helper: detect "user not found" errors from the executor.
+   * Whether a login error may mean "this user does not exist yet".
+   *
+   * The executor answers "Invalid credentials" both for an unknown email and
+   * for a wrong password, on purpose: login must not reveal which emails are
+   * registered (#989). So that answer alone cannot tell the plugin to sign up;
+   * it only says signup is worth one try. Other failures (executor locked,
+   * shared DB down) are not about the account and never trigger a signup.
    */
-  function isUserNotFoundError(error: string | undefined): boolean {
+  function mayBeUnknownUser(error: string | undefined): boolean {
     if (!error) return false;
     const lower = error.toLowerCase();
-    return lower.includes("user not found") || lower.includes("user does not exist") || lower.includes("account not found");
+    return lower.includes("invalid credentials") || lower.includes("user not found");
   }
 
   /**
    * Obtain a JWT token from a running executor.
    *
    * When email/password credentials are available, tries multi-user login first
-   * (login_email, with auto-signup on "user not found"). Falls back to the
-   * capability-request flow (6-digit code from launcher UI).
+   * (login_email, with one signup attempt when login fails on credentials).
+   * Falls back to the capability-request flow (6-digit code from launcher UI).
    *
    * Password is resolved from `AD4M_PASSWORD` env var (preferred, headless-safe)
    * or `providedConfig.password` (discouraged: plaintext-at-rest). At runtime we
@@ -625,9 +631,11 @@ export default function ad4mPlugin(api: any) {
           return loginData.token;
         }
 
-        // User doesn't exist — signup then retry login
-        if (isUserNotFoundError(loginData?.error)) {
-          logger.info("[ad4m] User not found. Attempting signup...");
+        // Maybe the user doesn't exist yet: try signup once, then log in again.
+        // If signup says the user exists, the password was wrong, and the login
+        // error below is the one to report.
+        if (mayBeUnknownUser(loginData?.error)) {
+          logger.info("[ad4m] Login failed; trying signup in case the user does not exist yet...");
           const signupResult = await mcpCallTool(
             endpoint,
             "signup",
@@ -635,7 +643,9 @@ export default function ad4mPlugin(api: any) {
             initResp.sessionId,
           );
           const signupData = extractMcpResultData(signupResult);
-          if (signupData?.did) {
+          if (!signupData?.did) {
+            logger.info(`[ad4m] Signup not possible: ${JSON.stringify(signupData?.error ?? signupData)}`);
+          } else {
             logger.info(`[ad4m] Signup successful! DID: ${signupData.did}`);
             const retryLogin = await mcpCallTool(
               endpoint,
