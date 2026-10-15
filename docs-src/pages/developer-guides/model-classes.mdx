@@ -1112,7 +1112,7 @@ The rules:
 - **Values are not converted.** If one class holds HTML and another Markdown, both get exactly what you wrote.
 - **No class.** Writing to a record that is none of `Readable`'s classes is an error.
 - **Raw API.** `perspective.updateSubject("Readable", id, { text })` and `perspective.removeSubject("Readable", id)` dispatch the same way; the model methods above call them.
-- **MCP.** `instance_update` and `instance_remove` dispatch the same way. Collection membership and the tools generated for `Readable` (its reads only) go through the record's own class.
+- **MCP.** Its write tools dispatch the same way: `instance_update`, `instance_add_to_collection`, `instance_remove_from_collection`, `instance_remove`, and the tools generated for `Readable` (no `readable_create` is generated). `instance_remove` also removes the links that point at the record, unless the record keeps other classes.
 
 ### Unverified Links
 
