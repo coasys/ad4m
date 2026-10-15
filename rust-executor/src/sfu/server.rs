@@ -1380,10 +1380,11 @@ mod tests {
     /// the public address is advertised on it.
     #[tokio::test]
     async fn a_fixed_port_is_bound_and_advertised_with_the_probes_ip() {
-        // Loopback is never probed, so bind another local address.
+        // Loopback is never probed, and a public address is not behind NAT:
+        // this needs a private, non-loopback interface.
         let ip = super::super::detect_outbound_ip();
-        if ip.is_loopback() {
-            return; // no interface but loopback on this machine
+        if ip.is_loopback() || !crate::sfu::reachability::is_private_ip(ip) {
+            return;
         }
         let stun = UdpSocket::bind(SocketAddr::new(ip, 0)).await.unwrap();
         let stun_addr = stun.local_addr().unwrap();

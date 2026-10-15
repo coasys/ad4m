@@ -108,11 +108,8 @@ export type SfuEventCallback = (...args: any[]) => void
 
 /** ICE server configuration for SFU peer connections. */
 export interface SfuIceConfig {
-    /** Used as given, before `sfuConfig.iceServers`: a server keeps all its
-     *  URLs and its credentials. */
+    /** Used as given, before `sfuConfig.iceServers`. */
     servers?: RTCIceServer[]
-    stun?: string[]
-    turn?: { urls: string; username: string; credential: string }[]
 }
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -235,8 +232,7 @@ export class SfuManager {
         // Resolution order for ICE servers:
         //   1. iceConfig.servers — the app's (Session's `iceServers`)
         //   2. sfuConfig.iceServers
-        //   3. iceConfig.stun / .turn — legacy form
-        //   4. DEFAULT_ICE_SERVERS — public STUN fallback
+        //   3. DEFAULT_ICE_SERVERS — public STUN fallback
         let servers: RTCIceServer[] = []
         if (iceConfig?.servers && iceConfig.servers.length > 0) {
             servers = iceConfig.servers
@@ -246,21 +242,6 @@ export class SfuManager {
                 username: s.username,
                 credential: s.credential,
             }))
-        } else if (iceConfig) {
-            if (iceConfig.stun) {
-                for (const url of iceConfig.stun) {
-                    servers.push({ urls: url })
-                }
-            }
-            if (iceConfig.turn) {
-                for (const t of iceConfig.turn) {
-                    servers.push({
-                        urls: t.urls,
-                        username: t.username,
-                        credential: t.credential,
-                    })
-                }
-            }
         }
         this.iceServers = servers.length > 0 ? servers : DEFAULT_ICE_SERVERS
     }

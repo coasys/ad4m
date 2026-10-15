@@ -247,12 +247,12 @@ export function natAvailable(): boolean {
   }
 }
 
-/** The two rules of {@link reachOnlyThrough}, as `iptables` arguments after the action. */
-function onlyThroughRules(published: string, local: string, port: number): [string, string] {
+/** The two rules of {@link reachOnlyThrough}: `iptables -t <table> <action> <rule>`. */
+function onlyThroughRules(published: string, local: string, port: number): [string, string][] {
   const tag = `-m comment --comment ad4m-e2e-only-through-${port}`;
   return [
-    `-t nat OUTPUT -p udp -d ${published} --dport ${port} ${tag} -j DNAT --to-destination ${local}:${port}`,
-    `OUTPUT -p udp -d ${local} --dport ${port} -m conntrack ! --ctstate DNAT ${tag} -j DROP`,
+    ["nat", `OUTPUT -p udp -d ${published} --dport ${port} ${tag} -j DNAT --to-destination ${local}:${port}`],
+    ["filter", `OUTPUT -p udp -d ${local} --dport ${port} -m conntrack ! --ctstate DNAT ${tag} -j DROP`],
   ];
 }
 
@@ -266,9 +266,8 @@ function onlyThroughRules(published: string, local: string, port: number): [stri
 export function reachOnlyThrough(published: string, local: string, port: number): boolean {
   clearReachOnlyThrough(published, local, port);
   try {
-    for (const rule of onlyThroughRules(published, local, port)) {
-      const [table, chain] = rule.startsWith("-t nat") ? ["-t nat", rule.slice(7)] : ["", rule];
-      execSync(`sudo -n iptables ${table} -A ${chain}`, { stdio: "pipe" });
+    for (const [table, rule] of onlyThroughRules(published, local, port)) {
+      execSync(`sudo -n iptables -t ${table} -A ${rule}`, { stdio: "pipe" });
     }
     return true;
   } catch {
@@ -279,10 +278,9 @@ export function reachOnlyThrough(published: string, local: string, port: number)
 
 /** Remove what {@link reachOnlyThrough} installed. */
 export function clearReachOnlyThrough(published: string, local: string, port: number): void {
-  for (const rule of onlyThroughRules(published, local, port)) {
-    const [table, chain] = rule.startsWith("-t nat") ? ["-t nat", rule.slice(7)] : ["", rule];
+  for (const [table, rule] of onlyThroughRules(published, local, port)) {
     try {
-      execSync(`sudo -n iptables ${table} -D ${chain}`, { stdio: "pipe" });
+      execSync(`sudo -n iptables -t ${table} -D ${rule}`, { stdio: "pipe" });
     } catch {
       /* not installed */
     }

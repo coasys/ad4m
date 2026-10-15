@@ -392,14 +392,13 @@ from a STUN server at startup.
    sudo ufw allow 40000/udp comment 'ad4m staging SFU'
    ```
 
-   (or `sudo nft add rule inet filter input udp dport 40000 accept`).
-   Expected: `Rule added`.
+   Expected: `Rule added` (and `Rule added (v6)`).
 
 6. **Restart and check:**
 
    ```bash
    systemctl --user restart ad4m-staging.service
-   journalctl --user -u ad4m-staging --since -5min | grep -i sfu
+   journalctl --user -u ad4m-staging --since -5min | grep 'SFU media:'
    ```
 
    Expected, one line: `SFU media: bind <LAN IP>:40000 (fixed port);

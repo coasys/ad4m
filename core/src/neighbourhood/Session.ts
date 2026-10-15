@@ -386,9 +386,6 @@ export function createSession(config: SessionImplConfig): Session {
             }
 
             // SFU path — this executor's SFU.
-            // Each server as given: splitting them into STUN and TURN lists
-            // lost the credentials of a server that lists both, and joined
-            // several URLs into one string.
             const iceConfig = iceServers && iceServers.length > 0
                 ? { servers: iceServers.map(s => ({ urls: s.urls, ...(s.username ? { username: s.username } : {}), ...(s.credential ? { credential: s.credential } : {}) })) }
                 : undefined

@@ -280,9 +280,9 @@ pub struct RunArgs {
     /// which interface accepts media from other machines.
     #[arg(long, env = "AD4M_SFU_BIND_ADDR", value_parser = non_empty(StringValueParser::new()))]
     pub sfu_bind_addr: Option<String>,
-    /// STUN server (`host:port`) the SFU asks once at startup whether a
-    /// public bind address is reachable. Unset: no probe, and a public
-    /// address reports reachability "unknown".
+    /// STUN server (`host:port`) the SFU asks once at startup for its public
+    /// address. Unset: no probe, and a public bind address reports
+    /// reachability "unknown".
     #[arg(
         long,
         env = "AD4M_SFU_STUN_SERVER",

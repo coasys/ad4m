@@ -142,10 +142,10 @@ pub struct Ad4mConfig {
     /// interface IP.  When unset, the SFU follows `localhost`: loopback
     /// by default, the machine's outbound IP with `localhost: false`.
     pub sfu_bind_addr: Option<String>,
-    /// STUN server (`host:port`) the SFU asks, once at startup, whether its
-    /// bind address is publicly reachable. Unset: no probe, and a public
-    /// bind address reports reachability "unknown". Only a public bind
-    /// address is ever probed.
+    /// STUN server (`host:port`) the SFU asks once at startup, from its own
+    /// socket, for its public address. Unset: no probe, and reachability is
+    /// "unknown" unless the bind address is private. A loopback bind is
+    /// never probed.
     pub sfu_stun_server: Option<String>,
     /// UDP port the SFU binds. Unset (or 0): a free port, chosen at each
     /// start. Fixed, a router can forward it; startup fails when it is taken.
