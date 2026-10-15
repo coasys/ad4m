@@ -481,6 +481,7 @@ mod tests {
                 data: e.data,
                 proof: e.proof,
                 status: Some(LinkStatus::Shared),
+                graph: None,
             }
         };
         let raw = "literal:string:Write the guide";
@@ -518,6 +519,7 @@ mod tests {
             data: serde_json::from_value(row["data"].clone()).unwrap(),
             proof: serde_json::from_value(row["proof"].clone()).unwrap(),
             status: None,
+            graph: None,
         };
         assert!(link.compute_proof_valid(), "the row verifies as returned");
     }

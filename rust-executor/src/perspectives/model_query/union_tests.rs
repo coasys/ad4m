@@ -22,6 +22,7 @@ fn link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression
             signature: "sig".to_string(),
         },
         status: Some(LinkStatus::Shared),
+        graph: None,
     }
 }
 
@@ -121,7 +122,7 @@ async fn union_pages_once_over_interleaved_sort_keys() {
     note(&store, "app://n6", Some(6), "15");
 
     let q = query(serde_json::json!({"order": {"rank": "ASC"}, "limit": 3, "offset": 1}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
         .await
         .unwrap();
 
@@ -138,7 +139,7 @@ async fn union_pages_once_over_interleaved_sort_keys() {
     assert_eq!(result.instances[1]["status"], "open");
 
     let desc = query(serde_json::json!({"order": {"rank": "DESC"}, "limit": 2}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &desc, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &desc, &resolver, None)
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://n6", "app://t5"]);
@@ -154,7 +155,7 @@ async fn union_where_on_a_property_one_class_declares_excludes_the_other() {
     note(&store, "app://n3", Some(3), "12");
 
     let q = query(serde_json::json!({"where": {"status": "open"}}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://t1"]);
@@ -178,14 +179,14 @@ async fn union_order_on_a_missing_property_sorts_nulls_last_both_ways() {
         ("DESC", ["app://t2", "app://t1", "app://n0", "app://n9"]),
     ] {
         let q = query(serde_json::json!({"order": {"status": dir}}));
-        let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+        let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
             .await
             .unwrap();
         // `status` ties for both tasks; the id breaks it.
         let got = ids(&result);
         assert_eq!(&got[2..], &expected[2..], "{dir}: Notes last, by id");
         let q = query(serde_json::json!({"order": {"rank": dir}}));
-        let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+        let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
             .await
             .unwrap();
         assert_eq!(ids(&result), expected.to_vec(), "{dir} on rank");
@@ -212,7 +213,7 @@ async fn union_returns_a_record_of_two_classes_once_with_both_classes() {
     note(&store, "app://n2", Some(2), "11");
 
     let q = query(serde_json::json!({}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://both", "app://n2"]);
@@ -229,7 +230,7 @@ async fn union_returns_a_record_of_two_classes_once_with_both_classes() {
     assert_eq!(all, vec!["Note", "Task"]);
 
     let q = query(serde_json::json!({"preferClasses": ["Task"]}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
         .await
         .unwrap();
     assert_eq!(result.instances[0]["__subjectClass"], "Task");
@@ -245,13 +246,13 @@ async fn union_pages_by_timestamp_when_no_order_is_given() {
     note(&store, "app://n3", None, "30");
 
     let q = query(serde_json::json!({"limit": 2}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://n1", "app://t2"]);
 
     let count = query(serde_json::json!({"limit": 0}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &count, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &count, &resolver, None)
         .await
         .unwrap();
     assert!(result.instances.is_empty());
@@ -266,12 +267,18 @@ async fn union_refuses_per_anchor_slicing_and_relation_order_keys() {
         serde_json::json!({"parent": {"ids": ["app://p"], "predicate": "app://has", "limitPerAnchor": 2}}),
         serde_json::json!({"order": {"owner.name": "ASC"}}),
     ] {
-        let err = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver)
-            .await
-            .unwrap_err();
+        let err = execute_union_query(
+            &store,
+            &classes(&["Task", "Note"]),
+            &query(q),
+            &resolver,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("classNames"), "{err}");
     }
-    let err = execute_union_query(&store, &[], &query(serde_json::json!({})), &resolver)
+    let err = execute_union_query(&store, &[], &query(serde_json::json!({})), &resolver, None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("at least one class"), "{err}");
@@ -291,9 +298,15 @@ async fn union_where_keeps_a_two_class_record_that_passes_as_one_of_them() {
         serde_json::json!({"where": {"status": "open"}}),
         serde_json::json!({"where": {"status": "open"}, "preferClasses": ["Note"]}),
     ] {
-        let result = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver)
-            .await
-            .unwrap();
+        let result = execute_union_query(
+            &store,
+            &classes(&["Task", "Note"]),
+            &query(q),
+            &resolver,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(ids(&result), vec!["app://both"]);
         assert_eq!(result.instances[0]["__subjectClass"], "Task");
     }
@@ -310,7 +323,7 @@ async fn union_a_local_flag_does_not_hide_a_shared_record_from_a_shared_read() {
     l.status = Some(LinkStatus::Local);
     store.add_link(&l).unwrap();
     let q = query(serde_json::json!({"linkStatus": "shared"}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://t1"]);
@@ -326,7 +339,7 @@ async fn union_breaks_order_ties_by_id_across_classes() {
     task(&store, "app://t9", Some(1), "open", "10");
     note(&store, "app://n1", Some(1), "11");
     let q = query(serde_json::json!({"order": {"rank": "ASC"}}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver, None)
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://n1", "app://t9"]);
@@ -340,9 +353,15 @@ async fn union_reads_a_class_named_twice_once() {
     task(&store, "app://t1", Some(1), "open", "10");
     note(&store, "app://n2", Some(2), "11");
     let q = query(serde_json::json!({}));
-    let result = execute_union_query(&store, &classes(&["Task", "Note", "Task"]), &q, &resolver)
-        .await
-        .unwrap();
+    let result = execute_union_query(
+        &store,
+        &classes(&["Task", "Note", "Task"]),
+        &q,
+        &resolver,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(ids(&result), vec!["app://t1", "app://n2"]);
     assert_eq!(result.total_count, 2);
 }

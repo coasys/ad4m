@@ -22,7 +22,6 @@ use crate::agent::AgentContext;
 use crate::perspectives::interpretation::replace_link;
 use crate::perspectives::model_query::utils::{emittable_iri, parse_literal_value};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::perspectives::sparql_store::decorated_links_query;
 use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use std::collections::BTreeMap;
 
@@ -140,9 +139,10 @@ pub(crate) async fn list_overlays(
         bases.into_iter().partition(|b| emittable_iri(b));
     let mut by_base: BTreeMap<String, Vec<DecoratedLinkExpression>> = BTreeMap::new();
     if !iri_bases.is_empty() {
+        let (source_constraint, filter) = overlay_links_query(&iri_bases);
         let rows = perspective
             .sparql_store
-            .query_decorated_links(&overlay_links_query(&iri_bases))?;
+            .query_decorated_links(&source_constraint, &filter)?;
         for l in rows {
             by_base.entry(l.data.source.clone()).or_default().push(l);
         }
@@ -165,17 +165,18 @@ pub(crate) async fn list_overlays(
 }
 
 /// The batched read behind [`list_overlays`]: every overlay link whose
-/// source is one of `bases`, in the row shape `get_links` decodes. Every base
-/// must pass [`emittable_iri`].
-fn overlay_links_query(bases: &[String]) -> String {
+/// source is one of `bases`, in the row shape `get_links` decodes, as the
+/// `(source_constraint, filter)` pair `query_decorated_links` takes. Every
+/// base must pass [`emittable_iri`].
+fn overlay_links_query(bases: &[String]) -> (String, String) {
     let values = bases
         .iter()
         .map(|b| format!("<{b}>"))
         .collect::<Vec<_>>()
         .join(" ");
-    decorated_links_query(
-        &format!("VALUES ?source {{ {values} }}"),
-        &format!(
+    (
+        format!("VALUES ?source {{ {values} }}"),
+        format!(
             r#"?predicate = <{OVERLAY_KIND_PRED}> || ?predicate = <{OVERLAY_RUN_PRED}> || STRSTARTS(STR(?predicate), "{INFERRED_PREFIX}")"#
         ),
     )
@@ -393,6 +394,7 @@ mod tests {
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("add_links");
@@ -519,6 +521,7 @@ mod tests {
             crate::types::LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .unwrap();
@@ -652,6 +655,7 @@ mod tests {
                     signature: "s".into(),
                 },
                 status: Some(LinkStatus::Shared),
+                graph: None,
             })
             .unwrap();
     }
@@ -933,7 +937,7 @@ mod tests {
                 );
             }
         }
-        p.add_links(links, LinkStatus::Local, None, ctx)
+        p.add_links(links, LinkStatus::Local, None, ctx, None)
             .await
             .unwrap();
     }
@@ -1029,7 +1033,7 @@ mod tests {
                 target: target.into(),
             });
         }
-        p.add_links(links, LinkStatus::Local, None, &ctx)
+        p.add_links(links, LinkStatus::Local, None, &ctx, None)
             .await
             .unwrap();
 
@@ -1039,21 +1043,26 @@ mod tests {
         assert_eq!(inferred_of(&new, flux), vec!["soa://title"]);
 
         // The scan the non-IRI group used to run.
-        let scan = decorated_links_query(
+        let scan = (
             "",
-            &format!(
+            format!(
                 r#"STR(?source) IN ("{flux}") && (?predicate = <{OVERLAY_KIND_PRED}> || ?predicate = <{OVERLAY_RUN_PRED}> || STRSTARTS(STR(?predicate), "{INFERRED_PREFIX}"))"#
             ),
         );
         assert_eq!(
-            p.sparql_store.query_decorated_links(&scan).unwrap().len(),
+            p.sparql_store
+                .query_decorated_links(scan.0, &scan.1)
+                .unwrap()
+                .len(),
             3
         );
 
         let reps = 5;
         let t = std::time::Instant::now();
         for _ in 0..reps {
-            p.sparql_store.query_decorated_links(&scan).unwrap();
+            p.sparql_store
+                .query_decorated_links(scan.0, &scan.1)
+                .unwrap();
         }
         let scan_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
         let t = std::time::Instant::now();

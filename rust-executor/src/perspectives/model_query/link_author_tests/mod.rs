@@ -76,6 +76,7 @@ fn link(author: &str, source: &str, predicate: &str, target: &str, ts: &str) -> 
             signature: "sig".to_string(),
         },
         status: Some(LinkStatus::Shared),
+        graph: None,
     }
 }
 
@@ -147,7 +148,7 @@ async fn try_run(
     resolver: &StaticShapeResolver,
     query: Value,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query(store, shape, &input(query), resolver).await
+    execute_model_query(store, shape, &input(query), resolver, None).await
 }
 
 async fn run(store: &SparqlStore, query: Value) -> ModelQueryResult {

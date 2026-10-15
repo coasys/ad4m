@@ -126,6 +126,7 @@ export class QuerySubscriptionProxy {
 /** Link status argument. The executor accepts either case and returns links
  *  with the upper-case form (`LinkExpression.status`). */
 export type LinkStatus = "shared" | "local" | "SHARED" | "LOCAL"
+
 interface Parameter {
     name: string
     value: string
@@ -308,10 +309,26 @@ export class PerspectiveProxy {
      * @param parameters - Optional parameters that replace "value" in actions
      * @param batchId - Optional batch ID to group this operation with others
      */
-    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
+    async executeAction(actions, expression, parameters: Parameter[], batchId?: string, graph?: string) {
+        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result
+    }
+
+    /**
+     * List all named graph IRIs in this perspective.
+     */
+    async graphs(): Promise<string[]> {
+        return await this.#client.namedGraphs(this.#handle.uuid);
+    }
+
+    /**
+     * Remove a named graph and all its quads.
+     */
+    async removeGraph(graphIri: string): Promise<boolean> {
+        const result = await this.#client.removeNamedGraph(this.#handle.uuid, graphIri);
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -656,11 +673,12 @@ export class PerspectiveProxy {
      * @param options - Optional call options (e.g. AbortSignal for cancellation)
      * @returns Query results as parsed JSON
      */
-    async querySparql<T = any>(query: string, options?: CallOptions): Promise<T> {
-        const cached = getCachedResult(this.#handle.uuid, query);
+    async querySparql<T = any>(query: string, graphs?: string[], options?: CallOptions): Promise<T> {
+        const cacheKey = graphs && graphs.length > 0 ? `${query}|${graphs.join(',')}` : query;
+        const cached = getCachedResult(this.#handle.uuid, cacheKey);
         if (cached !== undefined) return cached as T;
-        const result = await this.#client.querySparql(this.#handle.uuid, query, options);
-        setCachedResult(this.#handle.uuid, query, result);
+        const result = await this.#client.querySparql(this.#handle.uuid, query, graphs, options);
+        setCachedResult(this.#handle.uuid, cacheKey, result);
         return result as T;
     }
 
@@ -677,8 +695,8 @@ export class PerspectiveProxy {
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
-        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
+    async modelQuery(className: string | string[], queryJson: string, graphIris?: string[], options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, graphIris, options);
     }
 
     /** Resolve each URI to the names of every subject class it is an instance of.
@@ -748,8 +766,8 @@ export class PerspectiveProxy {
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
      * @returns `subscriptionId`, initial `result` and `revision` (0)
      */
-    async modelSubscribe(className: string | string[], queryJson: string): Promise<Subscribed> {
-        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
+    async modelSubscribe(className: string | string[], queryJson: string, graphIris?: string[]): Promise<Subscribed> {
+        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson, graphIris);
     }
 
     /**
@@ -777,8 +795,8 @@ export class PerspectiveProxy {
      * }, "local");
      * ```
      */
-    async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId)
+    async add(link: Link, status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression> {
+        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -792,8 +810,8 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      * @returns Array of created LinkExpressions
      */
-    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
+    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression[]> {
+        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -1529,7 +1547,8 @@ export class PerspectiveProxy {
         subjectClass: T, 
         exprAddr: string,
         initialValues?: Record<string, any>,
-        batchId?: B
+        batchId?: B,
+        graph?: string
     ): Promise<B extends undefined ? T : string> {
         let className: string;
 
@@ -1543,7 +1562,8 @@ export class PerspectiveProxy {
                 }), 
                 exprAddr,
                 initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
+                batchId,
+                graph
             );
         } else {
             const obj = subjectClass as any;
@@ -1560,7 +1580,8 @@ export class PerspectiveProxy {
                 }), 
                 exprAddr,
                 initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
+                batchId,
+                graph
             );
         }
 

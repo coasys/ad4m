@@ -266,7 +266,7 @@ async fn link_status_applies_to_includes_and_reverse_relations() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
+            super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
                 .await
                 .unwrap()
                 .instances[0]

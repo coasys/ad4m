@@ -169,6 +169,7 @@ async fn reject_leaves_a_forged_link_claiming_our_did_alone() {
                     signature: "not-a-signature".to_string(),
                 },
                 status: Some(LinkStatus::Shared),
+                graph: None,
             },
             LinkStatus::Shared,
             None,

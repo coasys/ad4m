@@ -80,6 +80,7 @@ async fn a_forged_vote_claiming_our_authorship_does_not_suppress_our_own() {
                     signature: "not-a-signature".to_string(),
                 },
                 status: Some(LinkStatus::Shared),
+                graph: None,
             },
             LinkStatus::Shared,
             None,

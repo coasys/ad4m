@@ -1960,6 +1960,7 @@ async fn removing_from_a_custom_resolve_language_collection_is_not_a_silent_no_o
                 source: album_uri.clone(),
                 predicate: "flux://album_photo".into(),
                 target: stored.into(),
+                graph: None,
             }))
             .await,
     );
@@ -2024,6 +2025,7 @@ async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
                 Some(json!({ "name": format!("channel-{i}") })),
                 Some(batch_id.clone()),
                 &agent_context,
+                None,
             )
             .await
             .unwrap_or_else(|e| panic!("staging channel {i}: {e:#}"));

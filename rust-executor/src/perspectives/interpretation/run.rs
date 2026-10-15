@@ -117,9 +117,12 @@ pub async fn strip_noop_updates(
         // row for this base.
         let props: Vec<&str> = values.keys().map(String::as_str).collect();
         let query = serde_json::json!({ "properties": props }).to_string();
-        let result_json = perspective.model_query(class, &query).await.map_err(|e| {
-            anyhow::anyhow!("strip_noop_updates: model_query({class}) failed: {e:#}")
-        })?;
+        let result_json = perspective
+            .model_query(class, &query, None)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("strip_noop_updates: model_query({class}) failed: {e:#}")
+            })?;
         let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
             anyhow::anyhow!("strip_noop_updates: bad model_query result for {class}: {e:#}")
         })?;
@@ -343,6 +346,7 @@ pub async fn apply_interpretation_ops(
                     Some(serde_json::Value::Object(values.clone())),
                     Some(batch_id.clone()),
                     context,
+                    None,
                 )
                 .await
                 .map(|_| ())
@@ -386,6 +390,7 @@ pub async fn apply_interpretation_ops(
                         LinkStatus::Shared,
                         Some(batch_id.clone()),
                         context,
+                        None,
                     )
                     .await
                     .map(|_| ())

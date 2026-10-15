@@ -199,6 +199,7 @@ pub(crate) async fn mint_flow_instance(
             Some(values),
             batch_id.clone(),
             context,
+            None,
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_flow_instance: create_subject failed: {e:#}"))?;
@@ -356,6 +357,7 @@ pub(crate) async fn write_flow_transition_proposal(
             Some(values),
             batch_id.clone(),
             context,
+            None,
         )
         .await
         .map_err(|e| {
@@ -385,7 +387,7 @@ pub(crate) async fn write_flow_transition_proposal(
     }
     if !links.is_empty() {
         perspective
-            .add_links(links, LinkStatus::Shared, batch_id, context)
+            .add_links(links, LinkStatus::Shared, batch_id, context, None)
             .await
             .map_err(|e| {
                 anyhow::anyhow!("write_flow_transition_proposal: collection links: {e:#}")
@@ -743,7 +745,7 @@ mod tests {
 
         // Before add_sdna, both classes are absent — model_query must error.
         let before = perspective
-            .model_query("FlowTransitionProposal", "{}")
+            .model_query("FlowTransitionProposal", "{}", None)
             .await;
         assert!(
             before.is_err(),
@@ -764,7 +766,7 @@ mod tests {
 
         // After add_sdna the runtime classes are present: findAll returns [] not 500.
         let result_json = perspective
-            .model_query("FlowTransitionProposal", "{}")
+            .model_query("FlowTransitionProposal", "{}", None)
             .await
             .expect("FlowTransitionProposal.findAll must return Ok after add_flow (#1007)");
 
@@ -780,7 +782,7 @@ mod tests {
 
         // FlowInstance must also be queryable.
         let fi_json = perspective
-            .model_query("FlowInstance", "{}")
+            .model_query("FlowInstance", "{}", None)
             .await
             .expect("FlowInstance.findAll must return Ok after add_flow (#1007)");
         let fi: Value = serde_json::from_str(&fi_json).expect("FlowInstance result must be JSON");

@@ -9,7 +9,7 @@
 //! Classes share the flag predicate `ns://type` and differ in its value, as
 //! apps built on one base class do.
 
-use super::super::{ChangedPredicates, PerspectiveInstance};
+use super::super::{ChangedGraphs, ChangedPredicates, PerspectiveInstance};
 use super::{reruns, ModelTrigger, StoreLookups};
 use crate::agent::signatures::TestSigner;
 use crate::agent::AgentContext;
@@ -114,6 +114,7 @@ async fn add(
         LinkStatus::Local,
         None,
         &AgentContext::main_agent(),
+        None,
     )
     .await
     .expect("add_link")
@@ -142,7 +143,7 @@ async fn take_writes(p: &PerspectiveInstance) -> ChangedPredicates {
     tokio::time::sleep(Duration::from_millis(150)).await;
     p.trigger_subscription_check.store(false, Ordering::Release);
     std::mem::replace(
-        &mut *p.changed_predicates.lock().await,
+        &mut p.changed_predicates_and_graphs.lock().await.0,
         ChangedPredicates::NoneRecorded,
     )
 }
@@ -150,14 +151,15 @@ async fn take_writes(p: &PerspectiveInstance) -> ChangedPredicates {
 /// One subscription check over the writes since the last one.
 async fn check(p: &PerspectiveInstance) {
     let writes = take_writes(p).await;
-    p.check_subscribed_queries(writes).await;
+    p.check_subscribed_queries(writes, ChangedGraphs::NoneRecorded)
+        .await;
 }
 
 async fn subscribe(p: &PerspectiveInstance, class: &str, query: Value) -> (String, Value) {
     let mut query = query;
     query["includeUnverified"] = json!(true);
     let (id, _revision, result) = p
-        .model_subscribe_and_query(class.into(), query.to_string(), "c".into())
+        .model_subscribe_and_query(class.into(), query.to_string(), None, "c".into())
         .await
         .expect("model subscribe");
     (id, serde_json::from_str(&result).expect("result JSON"))
@@ -782,9 +784,11 @@ async fn a_batch_without_its_links_falls_back_to_predicates() {
     let (id, _) = subscribe(&p, "Post", json!({})).await;
 
     let only = |p: &str| ChangedPredicates::Specific(HashSet::from([p.to_string()]).into());
-    p.check_subscribed_queries(only("ns://unrelated")).await;
+    p.check_subscribed_queries(only("ns://unrelated"), ChangedGraphs::NoneRecorded)
+        .await;
     assert_eq!(reruns::count(&id), 0);
-    p.check_subscribed_queries(only("ns://title")).await;
+    p.check_subscribed_queries(only("ns://title"), ChangedGraphs::NoneRecorded)
+        .await;
     assert_eq!(reruns::count(&id), 1);
 }
 

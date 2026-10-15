@@ -105,7 +105,7 @@ pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str)
     let links = parse_flow_to_links(&flow_json.to_string(), name).expect("parse_flow_to_links");
     for link in links {
         perspective
-            .add_link(link, LinkStatus::Local, None, &ctx)
+            .add_link(link, LinkStatus::Local, None, &ctx, None)
             .await
             .expect("add_link(flow definition)");
     }
@@ -173,6 +173,7 @@ impl Fixture {
                 status,
                 None,
                 &self.ctx,
+                None,
             )
             .await
             .unwrap_or_else(|e| panic!("add_link({predicate}): {e:#}"));

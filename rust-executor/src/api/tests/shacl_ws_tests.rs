@@ -93,6 +93,7 @@ async fn seed_shape(
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed has_shacl");
@@ -108,6 +109,7 @@ async fn seed_shape(
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed shacl_shape_uri");
@@ -123,6 +125,7 @@ async fn seed_shape(
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed targetClass");
@@ -140,6 +143,7 @@ async fn seed_shape(
                 LinkStatus::Local,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://property");
@@ -155,6 +159,7 @@ async fn seed_shape(
                 LinkStatus::Local,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://path");
@@ -170,6 +175,7 @@ async fn seed_shape(
                 LinkStatus::Local,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://datatype");
@@ -185,6 +191,7 @@ async fn seed_shape(
                 LinkStatus::Local,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://minCount");
@@ -199,6 +206,7 @@ async fn seed_shape(
                 LinkStatus::Local,
                 None,
                 ctx,
+                None,
             )
             .await
             .expect("seed sh://maxCount");

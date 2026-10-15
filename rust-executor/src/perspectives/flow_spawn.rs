@@ -661,6 +661,7 @@ mod tests {
                 Some(serde_json::json!({ "title": "write the spawn pass" })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject(Task)");
@@ -796,6 +797,7 @@ mod tests {
                 Some(serde_json::json!({ "title": "spawn twice" })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject(Task)");
@@ -963,6 +965,7 @@ mod tests {
                 Some(serde_json::json!({ "title": "target the flow" })),
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("create_subject(Task)");

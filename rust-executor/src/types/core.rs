@@ -148,6 +148,8 @@ pub struct LinkExpression {
     pub data: Link,
     pub proof: ExpressionProof,
     pub status: Option<LinkStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
 }
 
 impl TryFrom<LinkExpressionInput> for LinkExpression {
@@ -168,6 +170,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
             },
             status: input.status,
+            graph: input.graph,
         })
     }
 }
@@ -186,6 +189,7 @@ impl LinkExpression {
             data,
             proof: ExpressionProof::default(),
             status: input.status,
+            graph: input.graph,
         }
     }
 
@@ -226,6 +230,7 @@ impl From<Expression<Link>> for LinkExpression {
             data: expr.data.normalize(),
             proof: expr.proof,
             status: None,
+            graph: None,
         }
     }
 }
@@ -240,6 +245,8 @@ pub struct DecoratedLinkExpression {
     pub proof: DecoratedExpressionProof,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<LinkStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
 }
 
 impl DecoratedLinkExpression {
@@ -276,6 +283,7 @@ impl DecoratedLinkExpression {
 
 impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     fn from((expr, status): (LinkExpression, LinkStatus)) -> Self {
+        let graph = expr.graph.clone();
         let mut expr: Expression<Link> = expr.into();
         expr.data = expr.data.normalize();
         let verified_expr: VerifiedExpression<Link> = expr.into();
@@ -285,6 +293,7 @@ impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
             data: verified_expr.data,
             proof: verified_expr.proof,
             status: Some(status),
+            graph,
         }
     }
 }
@@ -300,6 +309,7 @@ impl From<DecoratedLinkExpression> for LinkExpression {
                 signature: decorated.proof.signature,
             },
             status: decorated.status,
+            graph: decorated.graph,
         }
     }
 }

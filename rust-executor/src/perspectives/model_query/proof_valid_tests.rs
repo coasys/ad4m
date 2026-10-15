@@ -208,7 +208,7 @@ async fn proof_valid_applies_to_includes_and_reverse_relations() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
+            super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
                 .await
                 .unwrap()
                 .instances[0]
@@ -366,7 +366,7 @@ async fn pv_page(
     resolver: &StaticShapeResolver,
     query: ModelQueryInput,
 ) -> super::types::ModelQueryResult {
-    super::query::execute_model_query(store, shape, &query, resolver)
+    super::query::execute_model_query(store, shape, &query, resolver, None)
         .await
         .unwrap()
 }
@@ -926,4 +926,69 @@ async fn proof_valid_a_link_with_no_verdict_does_not_hydrate_by_default() {
 
     assert_eq!(name_of(None).await, None, "no verdict reads as unverified");
     assert_eq!(name_of(Some(true)).await, Some(json!("real")));
+}
+
+/// A typed relation lists each target once, even when the target's flag sits
+/// in two graphs. An unscoped read is the union of all graphs, so the same
+/// flag stored in the default graph and in a named graph comes back as one
+/// row per graph, and the generated conformance getter listed the target
+/// twice.
+#[tokio::test]
+async fn a_typed_relation_lists_a_target_once_when_its_flag_is_in_two_graphs() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let r = "pv://r/1";
+    store
+        .add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
+        .unwrap();
+    store
+        .add_link(&pv_signed(
+            &signer,
+            "pv://c/1",
+            "ad4m://type",
+            "pv://Comment",
+            1,
+        ))
+        .unwrap();
+    let mut named_flag = pv_signed(&signer, "pv://c/1", "ad4m://type", "pv://Comment", 2);
+    named_flag.graph = Some("ad4m://graph/g1".to_string());
+    store.add_link(&named_flag).unwrap();
+    store
+        .add_link(&pv_signed(&signer, r, "pv://comment", "pv://c/1", 3))
+        .unwrap();
+
+    let shape_json = json!({
+        "className": "Recipe",
+        "properties": {
+            "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"pv://Recipe"}
+        },
+        "relations": {
+            "comments": {
+                "predicate": "pv://comment",
+                "kind": "hasMany",
+                "targetClassName": "Comment",
+                "getter": "SELECT ?target WHERE { <Base> <pv://comment> ?target . ?target <ad4m://type> <pv://Comment> . }"
+            }
+        }
+    })
+    .to_string();
+    let (resolver, shape) = StaticShapeResolver::from_json("Recipe", &shape_json).unwrap();
+    let mut out = Vec::new();
+    // `limit` switches to the two-phase plan.
+    for limit in [None, Some(10)] {
+        let result = super::query::execute_model_query(
+            &store,
+            shape.as_ref(),
+            &ModelQueryInput {
+                limit,
+                ..Default::default()
+            },
+            &resolver,
+            None,
+        )
+        .await
+        .unwrap();
+        out.push(result.instances[0]["comments"].clone());
+    }
+    assert_eq!(out, vec![json!(["pv://c/1"]); 2]);
 }

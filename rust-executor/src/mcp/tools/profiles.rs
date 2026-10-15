@@ -160,6 +160,7 @@ fn make_profile_link(
         data: verified.data,
         proof: verified.proof,
         status: None,
+        graph: None,
     })
 }
 

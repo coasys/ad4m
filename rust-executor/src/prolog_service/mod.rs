@@ -690,6 +690,7 @@ mod prolog_test {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
             DecoratedLinkExpression {
                 author: "test_author".to_string(),
@@ -706,6 +707,7 @@ mod prolog_test {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             },
         ];
 

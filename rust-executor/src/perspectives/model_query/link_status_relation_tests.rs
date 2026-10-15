@@ -131,10 +131,15 @@ async fn link_status_applies_to_getter_backed_relations() {
                     }),
                     ..Default::default()
                 };
-                let result =
-                    super::query::execute_model_query(store, shape.as_ref(), &query, &resolver)
-                        .await
-                        .unwrap();
+                let result = super::query::execute_model_query(
+                    store,
+                    shape.as_ref(),
+                    &query,
+                    &resolver,
+                    None,
+                )
+                .await
+                .unwrap();
                 assert_eq!(result.instances.len(), 1, "limit {limit:?}");
                 out.push(ids(&result.instances[0]["comments"]));
             }
@@ -241,11 +246,12 @@ async fn link_status_applies_to_a_reverse_include() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            let inst = super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
-                .await
-                .unwrap()
-                .instances[0]
-                .clone();
+            let inst =
+                super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
+                    .await
+                    .unwrap()
+                    .instances[0]
+                    .clone();
             let marks = &inst["markedBy"];
             assert!(
                 marks
@@ -311,11 +317,12 @@ async fn link_status_applies_to_a_projection_target() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            let inst = super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
-                .await
-                .unwrap()
-                .instances[0]
-                .clone();
+            let inst =
+                super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
+                    .await
+                    .unwrap()
+                    .instances[0]
+                    .clone();
             let remark = inst["$remark"].clone();
             assert_eq!(remark["id"], json!("ls://r/1"), "hydrated: {inst}");
             remark

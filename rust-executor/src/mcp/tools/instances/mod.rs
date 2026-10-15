@@ -397,7 +397,7 @@ pub(super) async fn run_model_query(
     query: &Value,
 ) -> Result<(Vec<Value>, usize), String> {
     let raw = perspective
-        .model_query(class_name, &query.to_string())
+        .model_query(class_name, &query.to_string(), None)
         .await
         .map_err(|e| format!("{e:#}"))?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;

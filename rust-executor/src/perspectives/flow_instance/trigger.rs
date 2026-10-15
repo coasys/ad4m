@@ -603,6 +603,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         }
     }
 

@@ -332,6 +332,26 @@ const reactions = await perspective.querySparql(`
 `);
 ```
 
+## Scoping Queries to Named Graphs
+
+By default a SPARQL query runs against the **union of every named graph** in the perspective, plus the default graph — so `?s ?p ?o` sees all links regardless of how they are partitioned. If a perspective uses [Named Graphs](/developer-guides/named-graphs) to partition its store by domain boundary (e.g. one graph per channel), you can restrict a query to a subset of graphs by passing their IRIs as the second argument:
+
+```typescript
+// Only search links stored in the "general" channel's graph
+const results = await perspective.querySparql(
+  `SELECT ?s ?p ?o WHERE { ?s ?p ?o }`,
+  ["ad4m://graph/general-channel-base-expression"]
+);
+```
+
+The engine resolves which data a query sees in this priority order:
+
+1. **Explicit `FROM` / `GRAPH` clauses in the query** are always honoured as written.
+2. Otherwise, if you pass a **`graphs` argument**, the query is restricted to exactly those named graphs.
+3. Otherwise, the query runs against the **union of all named graphs** plus the default graph.
+
+Scoping a query to a single graph lets Oxigraph skip every other partition, which is dramatically faster on large stores. See the [Named Graphs guide](/developer-guides/named-graphs) for how graphs are created, how `@Model({ graph: true })` routes instances automatically, and when partitioning is worth it.
+
 ## SPARQL vs. the Model Query Engine
 
 For most application development, you won't write raw SPARQL. The **model query engine** (accessed via `Ad4mModel` or `perspective.modelQuery()`) handles query generation, hydration, filtering, sorting, and pagination automatically:
@@ -391,5 +411,6 @@ await perspective.remove({ source: "user://alice", predicate: "follows", target:
 ## Related Resources
 
 - [Model Classes Guide](/developer-guides/model-classes) — Using Ad4mModel with the SPARQL engine
+- [Named Graphs](/developer-guides/named-graphs) — Partition a perspective and scope queries to a subset of graphs
 - [Perspectives](/perspectives) — Understanding perspectives and links
 - [Social DNA](/social-dna) — Advanced query patterns with SDNA

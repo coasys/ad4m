@@ -64,6 +64,7 @@ pub(super) async fn resolve_projections(
     depth: u8,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -171,6 +172,7 @@ pub(super) async fn resolve_projections(
                 &where_patterns,
                 proj,
                 guard,
+                graph_iris,
             )?)
         } else {
             None
@@ -203,7 +205,7 @@ pub(super) async fn resolve_projections(
                 verified = verified,
             );
 
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_with_graphs(&sparql, graph_iris)?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
             let mut count_map: HashMap<String, u64> = HashMap::new();
@@ -255,7 +257,7 @@ pub(super) async fn resolve_projections(
                     .into_iter()
                     .map(|(parent, t)| serde_json::json!({ "parent": parent, "t": t }))
                     .collect(),
-                None => serde_json::from_str(&store.query(&sparql)?)?,
+                None => serde_json::from_str(&store.query_with_graphs(&sparql, graph_iris)?)?,
             };
 
             // Collapse duplicate targets per parent.
@@ -335,6 +337,7 @@ pub(super) async fn resolve_projections(
                                 &sub_query,
                                 resolver,
                                 depth + 1,
+                                graph_iris,
                             ))
                             .await
                             {
@@ -726,6 +729,7 @@ fn walk_guarded(
     where_patterns: &str,
     proj: &ProjectionInput,
     guard: LinkGuard,
+    graph_iris: Option<&[String]>,
 ) -> Result<Vec<(String, String)>, deno_core::anyhow::Error> {
     let mut pairs = super::query::guarded_reach(
         store,
@@ -733,6 +737,7 @@ fn walk_guarded(
         safe_pred,
         super::types::ScopeDirection::Out,
         guard,
+        graph_iris,
     )?;
 
     if !where_patterns.is_empty() && !pairs.is_empty() {
@@ -746,7 +751,8 @@ fn walk_guarded(
             "SELECT DISTINCT ?t WHERE {{\n    {}\n{where_patterns}}}",
             values_or_str_filter("t", &targets)
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let rows: Vec<Value> =
+            serde_json::from_str(&store.query_with_graphs(&sparql, graph_iris)?)?;
         let passing: HashSet<&str> = rows.iter().filter_map(|r| r["t"].as_str()).collect();
         pairs.retain(|(_, t)| passing.contains(t.as_str()));
     }

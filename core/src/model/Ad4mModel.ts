@@ -245,6 +245,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
   json: any,
   include?: IncludeMap,
   properties?: string[],
+  graphIris?: string[],
 ): T {
   const instance = new ModelClass(perspective, json.id || json.baseExpression) as any;
 
@@ -368,6 +369,17 @@ function jsonToModelInstance<T extends Ad4mModel>(
         }
       }
     }
+  }
+
+  // Recover the named graph this instance's own properties were queried
+  // from. Graph-rooted models don't need this — the `graphIri` getter
+  // already derives it from the instance's own base expression. Non-graph-
+  // rooted models only get a graph back here when the query was
+  // unambiguously scoped to a single graph: SPARQL result rows aren't
+  // graph-tagged, so a union (multi-graph) or unscoped query can't attribute
+  // a graph to any individual instance after the fact.
+  if (!(ModelClass as any)._graphRooted && graphIris && graphIris.length === 1) {
+    instance._resolvedGraphIri = graphIris[0];
   }
 
   return instance;
@@ -696,6 +708,7 @@ export class Ad4mModel {
       className,
       properties: propertiesMetadata,
       relations: relationsMetadata,
+      graph: !!(this as any)._graphRooted,
     };
   }
 
@@ -718,6 +731,13 @@ export class Ad4mModel {
    * const recipe = new Recipe(perspective, "ad4m://obj/existing-id");
    * ```
    */
+  /**
+   * The resolved named graph IRI for this instance.
+   * Set during `create()` to propagate parent graph context to child entities.
+   * @private
+   */
+  private _resolvedGraphIri?: string;
+
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
     // Use a dedicated `ad4m://obj/<id>` scheme for auto-generated
     // baseExpressions instead of `Literal.from(...).toUrl()`'s
@@ -745,6 +765,28 @@ export class Ad4mModel {
    */
   protected get perspective(): PerspectiveProxy {
     return this._perspective;
+  }
+
+  /**
+   * Returns the named graph IRI for this instance.
+   * Priority: explicit _resolvedGraphIri (set during create with parent context) >
+   * model-level graph: true > undefined (default graph).
+   */
+  get graphIri(): string | undefined {
+    if (this._resolvedGraphIri) return this._resolvedGraphIri;
+    const ctor = this.constructor as typeof Ad4mModel;
+    if ((ctor as any)._graphRooted) {
+      return `ad4m://graph/${this._baseExpression}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Compute the named graph IRI for a given base expression.
+   * Only meaningful for graph-rooted models.
+   */
+  static graphIriFor(baseExpression: string): string {
+    return `ad4m://graph/${baseExpression}`;
   }
 
   /**
@@ -1174,11 +1216,12 @@ export class Ad4mModel {
     raw: any,
     include?: IncludeMap,
     properties?: string[],
+    graphIris?: string[],
   ): T[] {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties, graphIris));
   }
 
 
@@ -1293,7 +1336,7 @@ export class Ad4mModel {
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<Ad4mModel>> {
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
-    const result = await perspective.modelQuery(classNames, queryJson, options);
+    const result = await perspective.modelQuery(classNames, queryJson, undefined, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
     const snapshotRelations = query.include
       ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
@@ -1384,12 +1427,30 @@ export class Ad4mModel {
       query, classNameOverride,
     );
 
-    const result = await perspective.modelQuery(className, queryJson, options);
+    // Resolve graph scoping from the parent's model metadata.
+    // If the parent model is graph-rooted, scope queries to the parent's graph.
+    // Graph-rooted children store their own data in their OWN graph
+    // (`ad4m://graph/${child.id}`), never the parent's — so only scope to the
+    // parent's graph when the queried model itself is NOT graph-rooted.
+    // Without a parent (or when the queried model is graph-rooted), queries
+    // stay unscoped (union across all graphs). A traversal scope names
+    // several anchors and walks below them, so it stays unscoped too.
+    const metadata = this.getModelMetadata();
+    let graphIris: string[] | undefined;
+    const parent = query.parent;
+    if (parent && 'id' in parent && 'model' in parent && parent.model && !metadata.graph) {
+      const parentMeta = (parent.model as typeof Ad4mModel).getModelMetadata?.();
+      if (parentMeta?.graph) {
+        graphIris = [`ad4m://graph/${parent.id}`];
+      }
+    }
+
+    const result = await perspective.modelQuery(className, queryJson, graphIris, options);
 
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.
     const instances: T[] = result.instances.map((json: any) => {
-      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
+      return jsonToModelInstance(this, perspective, json, query.include, query.properties, graphIris);
     });
 
     // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
@@ -1597,7 +1658,7 @@ export class Ad4mModel {
       value = valueToLiteralIri(value);
     }
 
-    await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
+    await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId, this.graphIri);
   }
 
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
@@ -1624,10 +1685,11 @@ export class Ad4mModel {
           actions,
           this._baseExpression,
           value.map((v) => ({ name: "value", value: this.resolveRelationId(v) })),
-          batchId
+          batchId,
+          this.graphIri
         );
       } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId, this.graphIri);
       }
     }
   }
@@ -1646,11 +1708,11 @@ export class Ad4mModel {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
+            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId, this.graphIri)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId, this.graphIri);
       }
     }
   }
@@ -1669,11 +1731,11 @@ export class Ad4mModel {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
+            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId, this.graphIri)
           )
         );
       } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
+        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId, this.graphIri);
       }
     }
   }
@@ -1761,7 +1823,8 @@ export class Ad4mModel {
       className,
       this._baseExpression,
       initialValues,
-      batchId
+      batchId,
+      this.graphIri
     );
 
     // Relations via innerUpdate; createSubject wrote the scalar properties.
@@ -2048,6 +2111,15 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+
+    // Fast path: graph-rooted models can drop the entire named graph.
+    // The executor's removeGraph handles cross-graph reference cleanup atomically
+    // (removes incoming links from other graphs that target subjects in this graph).
+    if (metadata.graph && this.graphIri) {
+      await this._perspective.removeGraph(this.graphIri);
+      return;
+    }
+
     const hasDestructor = Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
@@ -2145,6 +2217,41 @@ export class Ad4mModel {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
 
+    // Resolve the graph IRI for this instance's links.
+    // Priority: model is graph-rooted → own graph; parent is graph-rooted → parent's graph.
+    const metadata = (this as typeof Ad4mModel).getModelMetadata();
+    if (metadata.graph) {
+      // This model roots its own graph — use own base expression
+      instance._resolvedGraphIri = Ad4mModel.graphIriFor(instance._baseExpression);
+    } else if (options?.parent && 'model' in options.parent && 'id' in options.parent) {
+      // Check if the parent model is graph-rooted
+      const parentMeta = (options.parent.model as typeof Ad4mModel).getModelMetadata?.();
+      if (parentMeta?.graph) {
+        instance._resolvedGraphIri = Ad4mModel.graphIriFor(options.parent.id);
+      }
+    }
+
+    // Resolve the graph for the parent→child link (uses PARENT's graph, not child's).
+    let parentGraphIri: string | undefined;
+    if (options?.parent && 'model' in options.parent && 'id' in options.parent) {
+      const parentMeta = (options.parent.model as typeof Ad4mModel).getModelMetadata?.();
+      if (parentMeta?.graph) {
+        parentGraphIri = Ad4mModel.graphIriFor(options.parent.id);
+      }
+    } else if (options?.parent && 'id' in options.parent) {
+      // Raw parent scope (`{ id }` without `model`) — the parent's graph-rootedness
+      // can't be determined from an id alone, so `parentGraphIri` (and, unless this
+      // model is itself graph-rooted, `_resolvedGraphIri`) silently stay undefined
+      // and the parent→child link falls back to the default graph. Warn so a
+      // graph-rooted parent doesn't silently lose scoping.
+      console.warn(
+        `${this.name}.create(): 'options.parent' was provided without 'model' — graph ` +
+        `scoping can't be resolved from a raw id. If the parent model is graph-rooted, ` +
+        `pass { model, id } instead of { id } so the parent→child link resolves into ` +
+        `the parent's graph.`
+      );
+    }
+
     // When a parent scope is provided without a caller-supplied batch, open a
     // new batch ourselves so that the instance creation and the parent→child
     // link are committed atomically.  If either step throws, commitBatch is
@@ -2159,7 +2266,7 @@ export class Ad4mModel {
         predicate,
         target: instance.id,
       });
-      await perspective.add(link, 'shared', batchId);
+      await perspective.add(link, 'shared', batchId, parentGraphIri);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -2178,7 +2285,7 @@ export class Ad4mModel {
         predicate,
         target: instance.id,
       });
-      await perspective.add(link, 'shared', options?.batchId);
+      await perspective.add(link, 'shared', options?.batchId, parentGraphIri);
     }
 
     return instance;

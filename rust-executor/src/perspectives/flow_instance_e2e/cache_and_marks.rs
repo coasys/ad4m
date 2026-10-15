@@ -599,6 +599,7 @@ async fn a_client_minted_instance_is_seeded_for_its_minter() {
             })),
             None,
             &ctx,
+            None,
         )
         .await
         .expect("create the FlowInstance as a client would");

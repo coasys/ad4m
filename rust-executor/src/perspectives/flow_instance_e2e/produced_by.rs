@@ -46,7 +46,7 @@ async fn tasks_produced_by(f: &Fixture, query: serde_json::Value) -> (Vec<String
 async fn ids_of_class(f: &Fixture, class: &str, query: serde_json::Value) -> (Vec<String>, usize) {
     let json = f
         .perspective
-        .model_query(class, &query.to_string())
+        .model_query(class, &query.to_string(), None)
         .await
         .expect("model_query");
     let result: serde_json::Value = serde_json::from_str(&json).expect("result parses");
@@ -575,7 +575,7 @@ async fn an_unknown_flow_is_an_error_not_an_empty_answer() {
     let query = serde_json::json!({ "where": { "producedByFlow": { "flow": UNKNOWN } } });
     assert!(
         f.perspective
-            .model_query("ns://Task", &query.to_string())
+            .model_query("ns://Task", &query.to_string(), None)
             .await
             .is_err(),
         "the model-query filter surfaces the same error"
@@ -667,6 +667,7 @@ async fn a_receipt_flood_is_an_error_not_an_empty_answer() {
             LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("plant MAX - 1 junk candidates");
@@ -682,7 +683,13 @@ async fn a_receipt_flood_is_an_error_not_an_empty_answer() {
     assert_eq!(ids, vec![TASK.to_string()]);
 
     f.perspective
-        .add_links(junk(MAX_FLOW_RECEIPTS - 1), LinkStatus::Shared, None, &ctx)
+        .add_links(
+            junk(MAX_FLOW_RECEIPTS - 1),
+            LinkStatus::Shared,
+            None,
+            &ctx,
+            None,
+        )
         .await
         .expect("plant the MAX-th junk candidate");
 
@@ -705,7 +712,7 @@ async fn a_receipt_flood_is_an_error_not_an_empty_answer() {
 
     let err = f
         .perspective
-        .model_query("ns://Task", &filter.to_string())
+        .model_query("ns://Task", &filter.to_string(), None)
         .await
         .expect_err("the producedByFlow filter must refuse, not return an empty page");
     assert_eq!(over(&err), Some(expected), "filter: {err:#}");
@@ -775,7 +782,7 @@ async fn other_flows_receipts_do_not_spend_this_flows_budget() {
     );
     let ctx = f.ctx.clone();
     f.perspective
-        .add_links(links, LinkStatus::Shared, None, &ctx)
+        .add_links(links, LinkStatus::Shared, None, &ctx, None)
         .await
         .expect("plant the other flows' receipts and the strays");
 
@@ -827,6 +834,7 @@ async fn a_body_flood_under_one_indexed_receipt_is_over_budget() {
             LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("hang MAX - 1 junk bodies beside the honest one");
@@ -844,6 +852,7 @@ async fn a_body_flood_under_one_indexed_receipt_is_over_budget() {
             LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("hang the MAX-th junk body");
@@ -893,6 +902,7 @@ async fn an_index_flood_without_bodies_is_over_budget() {
             LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("file MAX body-less entries under the flow");

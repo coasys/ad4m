@@ -3,4 +3,4 @@ import type { DecoratedExpressionProof } from "./DecoratedExpressionProof";
 import type { Link } from "./Link";
 import type { LinkStatus } from "./LinkStatus";
 
-export type DecoratedLinkExpression = { author: string, timestamp: string, data: Link, proof: DecoratedExpressionProof, status: LinkStatus | null, };
+export type DecoratedLinkExpression = { author: string, timestamp: string, data: Link, proof: DecoratedExpressionProof, status: LinkStatus | null, graph?: string | null, };

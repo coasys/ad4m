@@ -542,7 +542,7 @@ async fn a_flow_definition_with_an_unreadable_role_gate_is_refused_before_it_is_
             .await
             .map(|_| ());
         let via_add_sdna = perspective
-            .add_links(links.clone(), LinkStatus::Local, None, &ctx)
+            .add_links(links.clone(), LinkStatus::Local, None, &ctx, None)
             .await
             .map(|_| ());
         for (path, result) in [

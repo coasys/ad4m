@@ -55,11 +55,11 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
     let query_json = r#"{"where":{"owner":"alice"}}"#;
 
     let (id1, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into())
+        .model_subscribe_and_query("Task".into(), query_json.into(), None, "c".into())
         .await
         .expect("first model subscribe");
     let (id2, _, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), "c".into())
+        .model_subscribe_and_query("Task".into(), query_json.into(), None, "c".into())
         .await
         .expect("second model subscribe");
     assert_ne!(id1, id2, "each subscriber gets its own subscription");
@@ -87,11 +87,12 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
             Some(serde_json::json!({ "title": "ship it", "owner": "alice" })),
             None,
             &ctx,
+            None,
         )
         .await
         .expect("create_subject(Task)");
     perspective
-        .check_subscribed_queries(ChangedPredicates::CheckAll)
+        .check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::NoneRecorded)
         .await;
 
     let update = next_update_for(&mut rx, &perspective.uuid, &id2).await;
@@ -143,13 +144,15 @@ async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes()
             LinkStatus::Local,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("add_link");
     perspective
-        .check_subscribed_queries(ChangedPredicates::Specific(
-            HashSet::from(["ns://title".to_string()]).into(),
-        ))
+        .check_subscribed_queries(
+            ChangedPredicates::Specific(HashSet::from(["ns://title".to_string()]).into()),
+            ChangedGraphs::NoneRecorded,
+        )
         .await;
 
     let update = next_update_for(&mut rx, &perspective.uuid, &id2).await;
@@ -184,7 +187,12 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
     let classes =
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, _, initial) = perspective
-        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), "c".into())
+        .model_subscribe_and_query(
+            classes,
+            r#"{"includeUnverified":true}"#.into(),
+            None,
+            "c".into(),
+        )
         .await
         .expect("union model subscribe");
     assert!(initial.contains("\"totalCount\":0"), "{initial}");
@@ -220,6 +228,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
                 Some(props),
                 None,
                 &ctx,
+                None,
             )
             .await
             .unwrap_or_else(|e| panic!("create_subject({class}): {e}"));
@@ -228,7 +237,10 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         let mut writes = subscription_triggers::Writes::new();
         writes.record(base, changed, "literal://string:edited");
         perspective
-            .check_subscribed_queries(ChangedPredicates::Specific(writes))
+            .check_subscribed_queries(
+                ChangedPredicates::Specific(writes),
+                ChangedGraphs::NoneRecorded,
+            )
             .await;
         let update = next_update_for(&mut rx, &perspective.uuid, &id)
             .await
@@ -252,7 +264,12 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
     let classes =
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, _, _) = perspective
-        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), "c".into())
+        .model_subscribe_and_query(
+            classes,
+            r#"{"includeUnverified":true}"#.into(),
+            None,
+            "c".into(),
+        )
         .await
         .expect("union model subscribe");
 
@@ -271,19 +288,23 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
             Some(serde_json::json!({ "title": "quiet", "owner": "bob" })),
             None,
             &ctx,
+            None,
         )
         .await
         .expect("create_subject(Task)");
     perspective
-        .check_subscribed_queries(ChangedPredicates::Specific({
-            let mut writes = subscription_triggers::Writes::new();
-            writes.record(
-                "ad4m://task/unrelated-diff",
-                "ns://unrelated",
-                "literal://string:x",
-            );
-            writes
-        }))
+        .check_subscribed_queries(
+            ChangedPredicates::Specific({
+                let mut writes = subscription_triggers::Writes::new();
+                writes.record(
+                    "ad4m://task/unrelated-diff",
+                    "ns://unrelated",
+                    "literal://string:x",
+                );
+                writes
+            }),
+            ChangedGraphs::NoneRecorded,
+        )
         .await;
 
     let quiet = tokio::time::timeout(
@@ -310,6 +331,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Task".into(), "Note".into()]),
             query_json.into(),
+            None,
             "c".into(),
         )
         .await
@@ -318,6 +340,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .model_subscribe_and_query(
             QueryClasses::union(vec!["Note".into(), "Task".into(), "Note".into()]),
             query_json.into(),
+            None,
             "c".into(),
         )
         .await

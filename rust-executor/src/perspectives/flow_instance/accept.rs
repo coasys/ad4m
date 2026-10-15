@@ -181,6 +181,7 @@ pub(crate) async fn accept_flow_proposal_locked(
                 LinkStatus::Shared,
                 None,
                 context,
+                None,
             )
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;

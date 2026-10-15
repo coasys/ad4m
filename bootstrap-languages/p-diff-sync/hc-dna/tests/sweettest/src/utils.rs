@@ -82,6 +82,7 @@ pub fn generate_link_expression(author: &str) -> LinkExpression {
             signature: format!("sig_{}", Uuid::new_v4()),
             key: format!("key_{}", author),
         },
+        graph: None,
     }
 }
 

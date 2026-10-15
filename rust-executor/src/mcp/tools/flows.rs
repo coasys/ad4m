@@ -574,7 +574,7 @@ mod tests {
                 .expect("parse_flow_to_links")
             {
                 perspective
-                    .add_link(link, LinkStatus::Local, None, &ctx)
+                    .add_link(link, LinkStatus::Local, None, &ctx, None)
                     .await
                     .expect("add_link(flow definition)");
             }
@@ -608,7 +608,7 @@ mod tests {
             parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
         {
             perspective
-                .add_link(link, LinkStatus::Local, None, &ctx)
+                .add_link(link, LinkStatus::Local, None, &ctx, None)
                 .await
                 .expect("add_link(flow definition)");
         }
@@ -701,7 +701,7 @@ mod tests {
             parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
         {
             perspective
-                .add_link(link, LinkStatus::Local, None, &ctx)
+                .add_link(link, LinkStatus::Local, None, &ctx, None)
                 .await
                 .expect("add_link(flow definition)");
         }

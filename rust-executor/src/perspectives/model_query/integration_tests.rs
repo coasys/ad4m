@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
     LinkExpression {
         author: "did:key:test123".to_string(),
+        graph: None,
         timestamp: ts.to_string(),
         data: Link {
             source: source.to_string(),
@@ -74,7 +75,7 @@ async fn fixture_query(
     query: &ModelQueryInput,
     resolver: &dyn super::types::ShapeResolver,
 ) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
-    super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
+    super::query::execute_model_query(store, shape, &with_unverified(query), resolver, None).await
 }
 
 async fn fixture_query_from_json(
@@ -841,6 +842,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     }
 }
@@ -896,6 +898,7 @@ async fn test_resolve_projections_count() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -952,6 +955,7 @@ async fn test_resolve_projections_list() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1007,6 +1011,7 @@ async fn test_resolve_projections_scalar() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1054,6 +1059,7 @@ async fn test_resolve_projections_count_zero_when_no_links() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1131,6 +1137,7 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1205,6 +1212,7 @@ async fn test_resolve_projections_where_filter_by_author() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1253,7 +1261,7 @@ async fn test_deep_query_flag_controls_property_getters() {
     let getter_props_deep: Vec<&ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| p.getter.is_some() && (true || p.is_collection || p.is_scalar_relation))
+        .filter(|p| p.getter.is_some())
         .collect();
     assert_eq!(
         getter_props_deep.len(),
@@ -1481,12 +1489,21 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result =
-        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
+    let eval_result = evaluate_getters(
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+        None,
+    );
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -2053,11 +2070,22 @@ async fn test_where_filter_signed_expression_string() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+        None,
+    )
+    .unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2132,11 +2160,22 @@ async fn test_where_filter_signed_expression_no_matches() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+        None,
+    )
+    .unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2259,11 +2298,22 @@ async fn test_where_filter_multiple_conditions() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+        None,
+    )
+    .unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2331,11 +2381,22 @@ async fn test_where_filter_missing_property_on_target() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+        None,
+    )
+    .unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2401,11 +2462,22 @@ async fn test_where_filter_plain_literal_string() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+        None,
+    )
+    .unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2494,11 +2566,22 @@ async fn test_where_filter_on_multiple_instances() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+        None,
+    )
+    .unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -2919,6 +3002,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: String::new(),
         properties: props,
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     }
 }
@@ -4445,6 +4529,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             ordering: None,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
     resolver.register("Signal", signal_shape);
@@ -4481,6 +4566,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
+        None,
     )
     .await
     .unwrap();
@@ -4516,6 +4602,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
+        None,
     )
     .await
     .unwrap();

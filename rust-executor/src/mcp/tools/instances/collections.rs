@@ -233,7 +233,7 @@ impl Ad4mMcpHandler {
             LinkStatus::Shared
         };
         match perspective
-            .add_link(link, status, None, &agent_context)
+            .add_link(link, status, None, &agent_context, None)
             .await
         {
             Ok(_) => pretty(&json!({

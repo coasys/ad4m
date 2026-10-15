@@ -179,11 +179,14 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
 /// `classes` are bare class names, each resolved through `resolver`; a missing
 /// shape surfaces as the resolver's error, so the caller's shape-wait loop
 /// treats it exactly as it treats a single class.
+///
+/// `graph_iris` scopes the instance reads, as for [`super::execute_model_query`].
 pub async fn execute_union_query(
     store: &SparqlStore,
     classes: &[String],
     query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
+    graph_iris: Option<&[String]>,
 ) -> Result<ModelQueryResult, Error> {
     refuse_unanswerable(classes, query)?;
     let mut requested: Vec<String> = Vec::new();
@@ -227,7 +230,8 @@ pub async fn execute_union_query(
     for class in &requested {
         let shape = resolver.get_shape(class)?;
         let mut result =
-            execute_model_query_inner(store, shape.as_ref(), &select, resolver, 0).await?;
+            execute_model_query_inner(store, shape.as_ref(), &select, resolver, 0, graph_iris)
+                .await?;
         if let Some(projs) = sort_projections.as_ref().filter(|p| !p.is_empty()) {
             resolve_projections(
                 store,
@@ -238,6 +242,7 @@ pub async fn execute_union_query(
                 0,
                 query.link_status.as_ref(),
                 query.include_unverified,
+                graph_iris,
             )
             .await?;
         }
@@ -362,7 +367,9 @@ pub async fn execute_union_query(
             count: None,
             ..query.clone()
         };
-        let result = execute_model_query_inner(store, shape.as_ref(), &fetch, resolver, 0).await?;
+        let result =
+            execute_model_query_inner(store, shape.as_ref(), &fetch, resolver, 0, graph_iris)
+                .await?;
         for mut row in result.instances {
             let Some(id) = row["id"].as_str().map(str::to_string) else {
                 continue;

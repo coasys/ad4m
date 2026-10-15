@@ -165,6 +165,7 @@ describe('PerspectiveClient RPC operations', () => {
             link: { source: 'a', target: 'b', predicate: 'c' },
             status: 'shared',
             batchId: undefined,
+            graph: undefined,
         })
     })
 
@@ -199,10 +200,10 @@ describe('PerspectiveClient RPC operations', () => {
         mockCall.mockResolvedValue(JSON.stringify([]))
         const client = new PerspectiveClient('http://localhost:12000', 'token')
         const controller = new AbortController()
-        await client.querySparql('uuid-q', 'SELECT * WHERE { ?s ?p ?o }', { signal: controller.signal })
+        await client.querySparql('uuid-q', 'SELECT * WHERE { ?s ?p ?o }', ['ad4m://graph/g1'], { signal: controller.signal })
         expect(mockCall).toHaveBeenCalledWith(
             'perspective.querySparql',
-            expect.objectContaining({ uuid: 'uuid-q', query: 'SELECT * WHERE { ?s ?p ?o }' }),
+            expect.objectContaining({ uuid: 'uuid-q', query: 'SELECT * WHERE { ?s ?p ?o }', graphs: ['ad4m://graph/g1'] }),
             { signal: controller.signal },
         )
     })
@@ -211,10 +212,10 @@ describe('PerspectiveClient RPC operations', () => {
         mockCall.mockResolvedValue(JSON.stringify({ instances: [], totalCount: 0 }))
         const client = new PerspectiveClient('http://localhost:12000', 'token')
         const controller = new AbortController()
-        await client.modelQuery('uuid-q', 'Recipe', '{}', { signal: controller.signal })
+        await client.modelQuery('uuid-q', 'Recipe', '{}', ['ad4m://graph/g1'], { signal: controller.signal })
         expect(mockCall).toHaveBeenCalledWith(
             'perspective.modelQuery',
-            expect.objectContaining({ uuid: 'uuid-q', class_name: 'Recipe' }),
+            expect.objectContaining({ uuid: 'uuid-q', class_name: 'Recipe', graph_iris: ['ad4m://graph/g1'] }),
             { signal: controller.signal },
         )
     })

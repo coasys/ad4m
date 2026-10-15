@@ -104,7 +104,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         .expect("parse_flow_to_links(Delivery)");
     for link in flow_links {
         perspective
-            .add_link(link, LinkStatus::Local, None, &ctx)
+            .add_link(link, LinkStatus::Local, None, &ctx, None)
             .await
             .expect("add_link(flow definition)");
     }
@@ -262,7 +262,7 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links");
     for link in flow_links {
         perspective
-            .add_link(link, LinkStatus::Local, None, &ctx)
+            .add_link(link, LinkStatus::Local, None, &ctx, None)
             .await
             .expect("add_link(flow definition)");
     }

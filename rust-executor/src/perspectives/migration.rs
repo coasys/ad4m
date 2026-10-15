@@ -307,6 +307,7 @@ mod tests {
                 signature: "sig".to_string(),
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -331,6 +332,7 @@ mod tests {
                 signature: "s".to_string(),
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -355,6 +357,7 @@ mod tests {
                 signature: "s".to_string(),
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -379,6 +382,7 @@ mod tests {
                 signature: "s".to_string(),
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -440,6 +444,7 @@ mod tests {
                 key: "key1".to_string(),
             },
             status: Some(LinkStatus::Local),
+            graph: None,
         };
 
         let link2 = LinkExpression {
@@ -455,6 +460,7 @@ mod tests {
                 key: "key2".to_string(),
             },
             status: Some(LinkStatus::Local),
+            graph: None,
         };
 
         Ad4mDb::with_global_instance(|db| {
@@ -523,6 +529,7 @@ mod tests {
                 key: "key".to_string(),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         };
 
         let link_already_canonical = LinkExpression {
@@ -538,6 +545,7 @@ mod tests {
                 key: "key2".to_string(),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         };
 
         Ad4mDb::with_global_instance(|db| {
@@ -608,6 +616,7 @@ mod tests {
                 key: "key".to_string(),
             },
             status: Some(LinkStatus::Local),
+            graph: None,
         };
 
         Ad4mDb::with_global_instance(|db| {
