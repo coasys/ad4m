@@ -2496,7 +2496,7 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
     )
     .await;
     let channel = "ad4m://test/channel-tc";
-    create_under(
+    let message_id = create_under(
         &handler,
         &uuid,
         "Message",
@@ -2507,7 +2507,7 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
         channel,
     )
     .await;
-    create_under(
+    let block_id = create_under(
         &handler,
         &uuid,
         "Block",
@@ -2561,17 +2561,33 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
         "{err}"
     );
 
-    // The mention scan watches both classes' text predicates.
+    // The waker's mention query reads both classes' text through
+    // TextContent: the DID in the message's mention, a name in the block.
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    assert_eq!(
-        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
-        vec!["flux://body".to_string(), "we://text".to_string()]
+    let mentions = crate::mcp::tools::subscriptions::build_mention_query(
+        &["TWO".to_string()],
+        "did:key:zData",
     );
+    let found = parse(
+        &perspective
+            .model_query(
+                crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI,
+                &mentions.to_string(),
+            )
+            .await
+            .unwrap(),
+    );
+    let ids: Vec<&str> = found["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![block_id.as_str(), message_id.as_str()], "{found}");
 }
 
 /// Until Flux declares its alias no class conforms: a transcript without a
-/// class reads `Message.body`, and the mention scan watches its predicate, as
-/// before.
+/// class reads `Message.body`, as before.
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_conforming_class_the_old_message_body_lookup_applies() {
     let (handler, uuid, _guard) = setup(false).await;
@@ -2588,12 +2604,6 @@ async fn without_a_conforming_class_the_old_message_body_lookup_applies() {
         .instance_transcript(Parameters(transcript(&uuid, None, channel)))
         .await;
     assert!(all.contains("<p>plain old body</p>"), "{all}");
-
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    assert_eq!(
-        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await,
-        vec!["flux://body".to_string()]
-    );
 
     let empty = handler
         .instance_transcript(Parameters(transcript(&uuid, None, "ad4m://obj/empty")))
@@ -2616,10 +2626,9 @@ const ANSWER_SDNA: &str = r#"{
 }"#;
 
 /// A Flux community that has used a poll: `Answer` conforms to TextContent,
-/// `Message` (no alias yet) does not. TextContent only adds: the mention scan
-/// still watches `Message.body`, a body mention still matches, and a
-/// transcript of the channel still has the messages, merged with what reads
-/// through TextContent in one chronology.
+/// `Message` (no alias yet) does not. TextContent only adds: a transcript of
+/// the channel still has the messages, merged with what reads through
+/// TextContent in one chronology.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_class_with_its_own_text_does_not_hide_the_message_body() {
     let (handler, uuid, _guard) = setup_with(
@@ -2633,7 +2642,7 @@ async fn a_class_with_its_own_text_does_not_hide_the_message_body() {
     .await;
     let channel = "ad4m://test/channel-mixed";
     let poll = "ad4m://test/poll-mixed";
-    let first = create_under(
+    create_under(
         &handler,
         &uuid,
         "Message",
@@ -2666,20 +2675,6 @@ async fn a_class_with_its_own_text_does_not_hide_the_message_body() {
     )
     .await;
 
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    let predicates = crate::mcp::tools::subscriptions::mention_text_predicates(&perspective).await;
-    assert_eq!(
-        predicates,
-        vec!["flux://body".to_string(), "rdf://text".to_string()]
-    );
-    let query = crate::mcp::tools::subscriptions::build_mention_query(
-        &["data".to_string()],
-        "did:key:zNobody",
-        &predicates,
-    );
-    let hits = perspective.sparql_query(query).unwrap();
-    assert!(hits.contains(&first), "the body mention wakes: {hits}");
-
     let all = handler
         .instance_transcript(Parameters(transcript(&uuid, None, channel)))
         .await;
@@ -2710,30 +2705,6 @@ async fn a_class_with_its_own_text_does_not_hide_the_message_body() {
             && last_two.contains("an answer in the channel")
             && last_two.contains("second message"),
         "{last_two}"
-    );
-}
-
-/// Without a `Message` class (a We space), the mention scan stays unscoped
-/// even when classes conform to TextContent: scoped to them it would drop
-/// every text property that does not.
-#[tokio::test(flavor = "multi_thread")]
-async fn without_a_message_class_the_mention_scan_stays_unscoped() {
-    let (_handler, uuid, _guard) =
-        setup_with(&[("Channel", CHANNEL_SDNA), ("Block", BLOCK_SDNA)], false).await;
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
-    assert_eq!(
-        perspective
-            .predicates_through(
-                crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI,
-                "text"
-            )
-            .unwrap(),
-        vec!["we://text".to_string()]
-    );
-    assert!(
-        crate::mcp::tools::subscriptions::mention_text_predicates(&perspective)
-            .await
-            .is_empty()
     );
 }
 
@@ -2956,4 +2927,86 @@ async fn a_we_calls_blocks_are_its_children() {
         transcript.contains("Hey @data, can you summarise?"),
         "{transcript}"
     );
+}
+
+/// The ids a model query returned, in its order.
+fn instance_ids(result: &str) -> Vec<String> {
+    parse(result)["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The waker's mention subscription is a model query over TextContent, so it
+/// reads We's `TextBlock.text` as it is: names case-insensitively and the
+/// DID, newest first, and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mention_query_finds_we_blocks_through_text_content() {
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    let (handler, uuid, _guard) = we_setup().await;
+    let (_, by_name) = we_call(&handler, &uuid, "Hey @Data, can you summarise?").await;
+    let _ = we_call(&handler, &uuid, "nothing for the bot here").await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (_, by_did) = we_call(&handler, &uuid, "cc did:key:zBot").await;
+
+    let query = crate::mcp::tools::subscriptions::build_mention_query(
+        &["data".to_string()],
+        "did:key:zBot",
+    );
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let found = perspective
+        .model_query(TEXT_CONTENT_URI, &query.to_string())
+        .await
+        .unwrap();
+    assert_eq!(instance_ids(&found), vec![by_did, by_name], "{found}");
+}
+
+/// The waker's parent walk is a model query over Container, `where children`
+/// any of the level's ids (`WakerSubscriptionManager.parentsOf`): a We
+/// block's call is found through `CollectionBlock.children` (`we://child`).
+/// A node no class describes is not a Container, so what holds the call only
+/// through `has_child` is not reached.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_parent_walk_finds_a_we_blocks_call_through_container() {
+    use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
+    let (handler, uuid, _guard) = we_setup().await;
+    let (call, block) = we_call(&handler, &uuid, "Hey @data").await;
+    let (other_call, other_block) = we_call(&handler, &uuid, "elsewhere").await;
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: "ad4m://self".into(),
+                predicate: "ad4m://has_child".into(),
+                target: call.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let parents = |ids: Vec<&str>| {
+        let query = json!({ "where": { "children": ids }, "properties": [] }).to_string();
+        let perspective = perspective.clone();
+        async move {
+            let mut ids = instance_ids(
+                &perspective
+                    .model_query(CONTAINER_URI, &query)
+                    .await
+                    .unwrap(),
+            );
+            ids.sort();
+            ids
+        }
+    };
+    assert_eq!(parents(vec![block.as_str()]).await, vec![call.clone()]);
+    let mut both = vec![call.clone(), other_call];
+    both.sort();
+    assert_eq!(
+        parents(vec![block.as_str(), other_block.as_str(), "x://none"]).await,
+        both
+    );
+    assert!(parents(vec![call.as_str()]).await.is_empty());
 }
