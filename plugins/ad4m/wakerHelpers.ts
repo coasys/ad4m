@@ -35,6 +35,11 @@ export function buildWakeMessage(
       } else {
         lines.push(`  Parents: (unknown)`);
       }
+      // Everything above the parents, nearest first — the context an item sits in, given rather
+      // than left for the agent to walk to one call at a time.
+      if (m.ancestors?.length) {
+        lines.push(`  Ancestors: ${m.ancestors.join(", ")}`);
+      }
     }
   }
 
