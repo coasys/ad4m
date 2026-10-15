@@ -690,13 +690,6 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
     .unwrap();
     assert_eq!(app["totalCount"], 0, "{app}");
 
-    assert_eq!(
-        perspective
-            .property_through(TEXT_CONTENT_URI, "Message", "text")
-            .unwrap(),
-        Some("body".to_string())
-    );
-
     let refused = create(
         &mut perspective,
         &ctx,

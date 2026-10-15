@@ -23,8 +23,9 @@ types instead of juggling triples.
 
 Use `instance_create` / `instance_query` / `instance_get` / `instance_update` /
 `instance_add_to_collection` / `instance_remove_from_collection` /
-`instance_remove`, plus `instance_transcript` for reading, all with a
-`class_name` parameter. That is your default vocabulary.
+`instance_remove`, all with a `class_name` parameter, plus
+`instance_transcript` for reading the children of a node that carry text (it
+takes no class). That is your default vocabulary.
 
 **Why classes over raw links:** `add_link` writes exactly the triple you give
 it — it has no concept of "this one particular message" versus "this text".
@@ -100,12 +101,10 @@ instance_query(perspective_id, class_name="Message", parent="<channel-id>", limi
 instance_transcript(perspective_id, parent="<channel-id>", limit=20)
   → the NEWEST N instances under parent, presented oldest-to-newest as a
     plain-text transcript: timestamp, author display name and DID, and the
-    text as stored (HTML or Markdown). Without class_name it is one query on
-    the built-in abstract class TextContent: every class with a `text`
-    property, or a property aliased to `text`. A class that has neither is
-    not in it; pass class_name="<class>" to read that class (its `text`, or
-    the property it aliases to `text`, else body; override with
-    text_property).
+    text as stored (HTML or Markdown). It is one query on the built-in
+    abstract class TextContent: every class with a `text` property, or a
+    property aliased to `text`. A class that has neither is not in it; read
+    that class with instance_query.
     One call, no id juggling — read channels with this, not with instance_query.
     limit defaults to 50 and is capped at 500.
 
@@ -199,4 +198,4 @@ is what you filter your own messages by.
 | A query or `describe_perspective` comes back empty right after joining a neighbourhood | SHACL schema and Holochain data are still gossiping in. | Wait 3–5 minutes and retry. Nothing to fix. |
 | A write is rejected naming a property, a type or a cardinality | The class schema says otherwise. | Do not guess — the rejection is precise. Re-read `describe_perspective` and fix exactly what it named. |
 | An instance you created looks "uninitialized" to other agents | You called `instance_update` right after `instance_create` and the remove+re-add raced gossip. | Pass every property in the `instance_create` call. |
-| `instance_query` keeps returning the same old messages when you wanted the newest | `instance_query` has no `order` and its `limit` keeps the *oldest* N. | Use `instance_transcript` to read the newest N. |
+| `instance_query` keeps returning the same old messages when you wanted the newest | `instance_query` has no `order` and its `limit` keeps the *oldest* N. | Use `instance_transcript` to read the newest N children that carry text; for one class, page `instance_query` with `offset` (`total_count` minus N). |

@@ -4,23 +4,17 @@
 //! as plain text an LLM can read in one go instead of N+1 tool calls.
 //!
 //! This is the static-surface replacement for the old
-//! `get_children_body_parsed`: same transcript shape, but the values come
-//! through `model_query` so signed literal envelopes and custom-language
+//! `get_children_body_parsed`, and it is one model query on the built-in
+//! abstract class `TextContent` (#1446): every class with a `text` property,
+//! or a property aliased to `text`, whatever the app calls its class. The
+//! tool looks up no class and no property; which children carry text, and
+//! under which name, is TextContent's answer. The values come through
+//! `model_query`, so signed literal envelopes and custom-language
 //! expressions resolve the same way `instance_query` resolves them.
-//!
-//! Without a class it is one model query on the built-in abstract class
-//! `TextContent` (#1446): every class with a `text` property, or a property
-//! aliased to `text`, whatever the app calls its class. With a class it is
-//! one model query on that class.
 
-use super::{
-    class_properties, error_json, find_property, link_target, resolve_class, run_model_query,
-    Ad4mMcpHandler, PropView, HAS_CHILD, MAX_QUERY_LIMIT,
-};
+use super::{error_json, link_target, run_model_query, Ad4mMcpHandler, HAS_CHILD, MAX_QUERY_LIMIT};
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
-use crate::perspectives::model_query::types::ModelShape;
-use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::Agent;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -37,20 +31,11 @@ pub(super) const DEFAULT_TRANSCRIPT_LIMIT: usize = 50;
 pub struct InstanceTranscriptParams {
     /// Perspective UUID
     pub perspective_id: String,
-    /// Subject class of the children to read (e.g. "Message"), as listed by
-    /// describe_perspective. Omit it to read through the built-in abstract
-    /// class TextContent: every class with a `text` property, or a property
-    /// aliased to `text`.
-    pub class_name: Option<String>,
     /// Parent node URI whose ad4m://has_child children are read (e.g. a
     /// Channel's id). A bare string is wrapped as a literal URI.
     pub parent: String,
     /// How many of the most recent instances to include (default 50, max 500)
     pub limit: Option<usize>,
-    /// Which property holds the text shown per entry, with class_name.
-    /// Defaults to the class's text (its `text`, or the property it aliases
-    /// to `text`), then `body`, then the class's identity property.
-    pub text_property: Option<String>,
 }
 
 /// Resolve a DID to a display name via the agent's public profile
@@ -87,81 +72,20 @@ pub(super) async fn display_name_for(did: &str) -> String {
     did.to_string()
 }
 
-fn render_text(instance: &Value, text_property: &str) -> String {
-    match instance.get(text_property) {
-        None | Some(Value::Null) => format!("(no {text_property})"),
+/// TextContent's `text` of one instance, as stored.
+fn render_text(instance: &Value) -> String {
+    match instance.get("text") {
+        None | Some(Value::Null) => "(no text)".to_string(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
     }
 }
 
-/// Which property of `class_name` to print: `requested`, else the one that
-/// answers to TextContent's `text`, else `body`, else the class's identity
-/// property — and a clear error if none applies. Only single-valued,
-/// non-flag properties qualify (a collection renders as an array, a flag is
-/// a class marker), so the lookup is restricted to exactly the set the error
-/// message offers.
-fn text_property_for(
-    perspective: &PerspectiveInstance,
-    class_name: &str,
-    shape: &ModelShape,
-    requested: Option<&str>,
-) -> Result<String, String> {
-    let infos = class_properties(shape);
-    let scalars: Vec<PropView<'_>> = infos
-        .iter()
-        .filter(|i| !i.flag() && !i.collection())
-        .copied()
-        .collect();
-    let scalar_names: Vec<&str> = scalars.iter().map(|i| i.name()).collect();
-    if let Some(name) = requested.map(str::trim).filter(|n| !n.is_empty()) {
-        if let Some(info) = find_property(&scalars, name) {
-            return Ok(info.name().to_string());
-        }
-        let problem = match find_property(&infos, name) {
-            Some(info) if info.collection() => format!(
-                "text_property '{}' on class '{}' is a collection, not a single-valued property",
-                info.name(),
-                class_name
-            ),
-            Some(info) => format!(
-                "text_property '{}' on class '{}' is a class marker, not a text property",
-                info.name(),
-                class_name
-            ),
-            None => format!("Unknown text_property '{}' on class '{}'", name, class_name),
-        };
-        return Err(error_json(format!(
-            "{}. Single-valued properties: {}",
-            problem,
-            scalar_names.join(", ")
-        )));
-    }
-    let through_text_content = perspective
-        .property_through(TEXT_CONTENT_URI, class_name, "text")
-        .ok()
-        .flatten();
-    let found = through_text_content
-        .as_deref()
-        .and_then(|name| find_property(&scalars, name))
-        .or_else(|| find_property(&scalars, "body"))
-        .or_else(|| scalars.iter().find(|i| i.identity()));
-    match found {
-        Some(info) => Ok(info.name().to_string()),
-        None => Err(error_json(format!(
-            "Class '{}' has no text (neither a `text` property, an alias for it, a `body` nor an \
-             identity property) — pass text_property. Single-valued properties: {}",
-            class_name,
-            scalar_names.join(", ")
-        ))),
-    }
-}
-
 impl Ad4mMcpHandler {
-    /// Read the most recent children under a node that carry text, as a
-    /// transcript: of one class, or through TextContent.
+    /// Read the most recent children under a node that carry text, through
+    /// TextContent, as a transcript.
     #[tool(
-        description = "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it is one query on the built-in abstract class TextContent, which reads every class with a `text` property or a property aliased to `text`, whatever the app calls the class. Pass class_name (and optionally text_property) to read one class instead; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for one specific class, for the full property maps, or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -176,41 +100,6 @@ impl Ad4mMcpHandler {
         if parent.is_empty() {
             return error_json("parent must be a non-empty URI");
         }
-        let class_name = p
-            .class_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|c| !c.is_empty());
-        // What to query, and which property holds the text.
-        let (query_as, text_property) = match class_name {
-            Some(class_name) => {
-                let (class_name, shape) = match resolve_class(&perspective, class_name).await {
-                    Ok(v) => v,
-                    Err(e) => return e,
-                };
-                match text_property_for(
-                    &perspective,
-                    &class_name,
-                    &shape,
-                    p.text_property.as_deref(),
-                ) {
-                    Ok(text_property) => (class_name, text_property),
-                    Err(e) => return e,
-                }
-            }
-            None if p.text_property.is_some() => {
-                return error_json(
-                    "text_property needs class_name: without it the transcript reads `text` \
-                     through TextContent",
-                )
-            }
-            None => (TEXT_CONTENT_URI.to_string(), "text".to_string()),
-        };
-        let label = if query_as == TEXT_CONTENT_URI {
-            "TextContent"
-        } else {
-            query_as.as_str()
-        };
 
         let limit = p
             .limit
@@ -221,12 +110,13 @@ impl Ad4mMcpHandler {
             "order": [["timestamp", "desc"]],
             "limit": limit,
         });
-        let (mut instances, total) = match run_model_query(&perspective, &query_as, &query).await {
-            Ok(v) => v,
-            Err(e) => return error_json(format!("Error reading {label} instances: {e}")),
-        };
+        let (mut instances, total) =
+            match run_model_query(&perspective, TEXT_CONTENT_URI, &query).await {
+                Ok(v) => v,
+                Err(e) => return error_json(format!("Error reading TextContent instances: {e}")),
+            };
         if instances.is_empty() {
-            return format!("(no {label} instances under {parent})");
+            return format!("(no TextContent instances under {parent})");
         }
         // Newest-first from the query so `limit` keeps the most recent;
         // present oldest-first like a conversation reads.
@@ -245,10 +135,9 @@ impl Ad4mMcpHandler {
         let mut lines: Vec<String> = Vec::with_capacity(instances.len() + 1);
         if total > instances.len() {
             lines.push(format!(
-                "(showing last {} of {} {} instances under {})",
+                "(showing last {} of {} TextContent instances under {})",
                 instances.len(),
                 total,
-                label,
                 parent
             ));
         }
@@ -261,7 +150,7 @@ impl Ad4mMcpHandler {
                 timestamp,
                 name,
                 did,
-                render_text(inst, &text_property)
+                render_text(inst)
             ));
         }
         lines.join("\n\n")

@@ -1637,45 +1637,22 @@ async fn add_child_and_get_children_are_class_agnostic() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn instance_transcript_reads_children_chronologically() {
-    let (handler, uuid, _guard) = setup(false).await;
-    let channel = parse(
-        &handler
-            .instance_create(Parameters(InstanceCreateParams {
-                perspective_id: uuid.clone(),
-                class_name: "Channel".into(),
-                properties: Some(props(&[("name", json!("general"))])),
-                base_uri: None,
-                parent: None,
-            }))
-            .await,
-    );
-    let channel = channel["base_uri"].as_str().unwrap().to_string();
-
-    for body in ["first words", "second words", "third words"] {
-        let m = parse(
-            &handler
-                .instance_create(Parameters(InstanceCreateParams {
-                    perspective_id: uuid.clone(),
-                    class_name: "Message".into(),
-                    properties: Some(props(&[("body", json!(body))])),
-                    base_uri: None,
-                    parent: Some(channel.clone()),
-                }))
-                .await,
-        );
-        assert_eq!(m["created"], true, "{m}");
-        // Distinct reifier timestamps so the chronological order is defined.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (handler, uuid, _guard) =
+        setup_with(&[("Channel", CHANNEL_SDNA), ("Block", BLOCK_SDNA)], false).await;
+    let channel = "ad4m://test/channel-chrono";
+    for text in ["first words", "second words", "third words"] {
+        create_under(
+            &handler,
+            &uuid,
+            "Block",
+            props(&[("title", json!("t")), ("text", json!(text))]),
+            channel,
+        )
+        .await;
     }
 
     let all = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: Some("message".into()), // case-insensitive class name
-            parent: channel.clone(),
-            limit: None,
-            text_property: None,
-        }))
+        .instance_transcript(Parameters(transcript(&uuid, channel)))
         .await;
     assert!(!all.starts_with("(showing"), "{all}");
     let pos = |needle: &str| {
@@ -1684,94 +1661,40 @@ async fn instance_transcript_reads_children_chronologically() {
     };
     assert!(pos("first words") < pos("second words") && pos("second words") < pos("third words"));
     assert!(all.contains("(did:key:"), "author DID per entry: {all}");
-    assert_eq!(
-        all.matches("]:\n").count() + all.matches("):\n").count(),
-        3,
-        "{all}"
-    );
+    assert_eq!(all.matches("):\n").count(), 3, "{all}");
 
     let last_two = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: Some("Message".into()),
-            parent: channel.clone(),
             limit: Some(2),
-            text_property: None,
+            ..transcript(&uuid, channel)
         }))
         .await;
     assert!(
-        last_two.starts_with("(showing last 2 of 3 Message instances"),
+        last_two.starts_with(&format!(
+            "(showing last 2 of 3 TextContent instances under {channel})"
+        )),
         "{last_two}"
     );
     assert!(!last_two.contains("first words"), "{last_two}");
     assert!(last_two.find("second words").unwrap() < last_two.find("third words").unwrap());
 
-    // Explicit text property on a class without `body`: the Channel's name.
-    let channels = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: Some("Channel".into()),
-            parent: "ad4m://self".into(),
-            limit: None,
-            text_property: Some("name".into()),
-        }))
-        .await;
-    assert!(channels.starts_with("(no Channel instances"), "{channels}");
-
-    let bad_prop = parse(
+    let blank = parse(
         &handler
-            .instance_transcript(Parameters(InstanceTranscriptParams {
-                perspective_id: uuid.clone(),
-                class_name: Some("Message".into()),
-                parent: channel.clone(),
-                limit: None,
-                text_property: Some("subject".into()),
-            }))
+            .instance_transcript(Parameters(transcript(&uuid, "  ")))
             .await,
     );
-    let err = bad_prop["error"].as_str().unwrap();
-    assert!(err.contains("subject") && err.contains("body"), "{err}");
-
-    // A collection is a property of the class but not a text property: the
-    // error says so and offers only the single-valued ones.
-    let collection_prop = parse(
-        &handler
-            .instance_transcript(Parameters(InstanceTranscriptParams {
-                perspective_id: uuid.clone(),
-                class_name: Some("Channel".into()),
-                parent: "ad4m://self".into(),
-                limit: None,
-                text_property: Some("messages".into()),
-            }))
-            .await,
-    );
-    let err = collection_prop["error"].as_str().unwrap();
     assert!(
-        err.contains("'messages'") && err.contains("collection"),
-        "{err}"
-    );
-    let (_, offered) = err
-        .split_once("Single-valued properties:")
-        .unwrap_or_else(|| panic!("no property list in: {err}"));
-    assert!(
-        offered.contains("name") && offered.contains("description"),
-        "{err}"
-    );
-    assert!(
-        !offered.contains("messages"),
-        "collections must not be offered as text properties: {err}"
+        blank["error"].as_str().unwrap_or("").contains("parent"),
+        "{blank}"
     );
 
     let empty = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: Some("Message".into()),
-            parent: "ad4m://obj/emptyroom".into(),
-            limit: None,
-            text_property: None,
-        }))
+        .instance_transcript(Parameters(transcript(&uuid, "ad4m://obj/emptyroom")))
         .await;
-    assert_eq!(empty, "(no Message instances under ad4m://obj/emptyroom)");
+    assert_eq!(
+        empty,
+        "(no TextContent instances under ad4m://obj/emptyroom)"
+    );
 }
 
 #[test]
@@ -2474,21 +2397,19 @@ async fn create_under(
     created["base_uri"].as_str().unwrap().to_string()
 }
 
-fn transcript(uuid: &str, class_name: Option<&str>, parent: &str) -> InstanceTranscriptParams {
+fn transcript(uuid: &str, parent: &str) -> InstanceTranscriptParams {
     InstanceTranscriptParams {
         perspective_id: uuid.to_string(),
-        class_name: class_name.map(str::to_string),
         parent: parent.to_string(),
         limit: None,
-        text_property: None,
     }
 }
 
-/// Without a class, a transcript is a model query on TextContent: a class's
-/// aliased `content` and a We block's `text`, in one chronology, each text as
-/// stored (HTML here).
+/// A transcript is a model query on TextContent: a class's aliased `content`
+/// and a We block's `text`, in one chronology, each text as stored (HTML
+/// here) — never the identity property (`title`) of either.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_transcript_without_a_class_reads_through_text_content() {
+async fn a_transcript_reads_through_text_content() {
     let (handler, uuid, _guard) = setup_with(
         &[
             ("Channel", CHANNEL_SDNA),
@@ -2526,7 +2447,7 @@ async fn a_transcript_without_a_class_reads_through_text_content() {
     .await;
 
     let all = handler
-        .instance_transcript(Parameters(transcript(&uuid, None, channel)))
+        .instance_transcript(Parameters(transcript(&uuid, channel)))
         .await;
     let hey = all
         .find(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#)
@@ -2536,46 +2457,26 @@ async fn a_transcript_without_a_class_reads_through_text_content() {
         .unwrap_or_else(|| panic!("the block's text, as stored:\n{all}"));
     assert!(hey < list, "oldest first:\n{all}");
 
-    // A class named: the property it aliases to `text`, and `text` over the
-    // identity property.
-    let note = handler
-        .instance_transcript(Parameters(transcript(&uuid, Some("Note"), channel)))
-        .await;
     assert!(
-        note.contains("look &amp; see")
-            && !note.contains("a note")
-            && !note.contains("<li>one</li>"),
-        "{note}"
-    );
-    let block = handler
-        .instance_transcript(Parameters(transcript(&uuid, Some("Block"), channel)))
-        .await;
-    assert!(
-        block.contains("<li>one</li>") && !block.contains("notes"),
-        "{block}"
-    );
-
-    // text_property is per class.
-    let err = parse(
-        &handler
-            .instance_transcript(Parameters(InstanceTranscriptParams {
-                text_property: Some("body".into()),
-                ..transcript(&uuid, None, channel)
-            }))
-            .await,
-    );
-    assert!(
-        err["error"].as_str().unwrap().contains("needs class_name"),
-        "{err}"
+        !all.contains("a note") && !all.contains("notes"),
+        "the text, not the identity property:\n{all}"
     );
 }
 
-/// Without a class the transcript is TextContent's answer and nothing else:
-/// a `Message` with a `body` that is not aliased to `text` does not conform,
-/// so its messages are not in it.
+/// The transcript is TextContent's answer and nothing else: a `Message` whose
+/// `body` is not aliased to `text` does not conform, so it is not shown next
+/// to a block that does, under the same parent.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_transcript_without_a_class_has_only_what_conforms_to_text_content() {
-    let (handler, uuid, _guard) = setup(false).await;
+async fn a_transcript_has_only_what_conforms_to_text_content() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("Channel", CHANNEL_SDNA),
+            ("Message", MESSAGE_SDNA),
+            ("Block", BLOCK_SDNA),
+        ],
+        false,
+    )
+    .await;
     let channel = "ad4m://test/channel-plain";
     create_under(
         &handler,
@@ -2585,15 +2486,20 @@ async fn a_transcript_without_a_class_has_only_what_conforms_to_text_content() {
         channel,
     )
     .await;
+    create_under(
+        &handler,
+        &uuid,
+        "Block",
+        props(&[("title", json!("b")), ("text", json!("<p>block text</p>"))]),
+        channel,
+    )
+    .await;
     let all = handler
-        .instance_transcript(Parameters(transcript(&uuid, None, channel)))
+        .instance_transcript(Parameters(transcript(&uuid, channel)))
         .await;
-    assert_eq!(all, format!("(no TextContent instances under {channel})"));
-
-    let message = handler
-        .instance_transcript(Parameters(transcript(&uuid, Some("Message"), channel)))
-        .await;
-    assert!(message.contains("<p>plain body</p>"), "{message}");
+    assert!(all.contains("<p>block text</p>"), "{all}");
+    assert!(!all.contains("plain body"), "{all}");
+    assert_eq!(all.matches("):\n").count(), 1, "{all}");
 }
 
 /// A store error while `instance_update` asks whether the class is abstract

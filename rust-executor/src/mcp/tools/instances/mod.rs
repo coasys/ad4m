@@ -38,7 +38,8 @@
 //! - [`children`] — class-agnostic `add_child` / `get_children` on the
 //!   `ad4m://has_child` tree
 //! - [`transcript`] — `instance_transcript`, a compact chronological reading
-//!   of one class's children under a node
+//!   of the children under a node that carry text, through the built-in
+//!   TextContent
 //! - [`commands`] — `execute_commands`, raw SDNA actions on an instance
 //! - [`validate`] — SHACL-derived property validation shared by every write
 //! - this file — the borrowed [`PropView`] over a class shape, class
