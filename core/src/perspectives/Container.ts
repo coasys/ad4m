@@ -16,9 +16,9 @@ import { HasMany, Model } from "../model/decorators";
  * }
  * ```
  *
- * The executor follows those predicates, beside `ad4m://has_child`, wherever
- * it reads a node's children: the waker's parent walk, `get_children` and
- * `instance_transcript`.
+ * The waker finds what holds a mentioned record with a model query on it
+ * (`where: { children: [id] }`); `get_children` and `instance_transcript`
+ * follow those predicates beside `ad4m://has_child`.
  *
  * Built in: the executor declares it (mirrors
  * `rust-executor/src/perspectives/hardwired_sdna/container.json`) and reads

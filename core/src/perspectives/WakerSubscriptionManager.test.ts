@@ -1,4 +1,6 @@
 import { WakerSubscriptionManager, WakerSubscription, hintFor } from './WakerSubscriptionManager';
+import { Container } from './Container';
+import { TextContent } from './TextContent';
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -17,7 +19,7 @@ describe('WakerSubscriptionManager', () => {
   });
 
   const perspectiveClient = {
-    querySparql: () => Promise.resolve([]),
+    modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
   };
 
   const sub = {
@@ -25,7 +27,8 @@ describe('WakerSubscriptionManager', () => {
     type: 'mention' as const,
     perspective: 'fake-uuid',
     channel: '',
-    query: 'SELECT * WHERE { ?s ?p ?o }',
+    className: TextContent.builtinUri,
+    query: '{"where":{"OR":[{"text":{"contains":"bot"}}]}}',
   };
 
   /** A QuerySubscriptionProxy stand-in whose registration the executor rejects. */
@@ -184,10 +187,16 @@ describe('WakerSubscriptionManager', () => {
     manager.disposeAll();
   });
 
-  /** Delivers one new mention and returns the parents it woke with, the parent query and any warnings. */
-  async function wakeWithParentRows(rows: unknown, ancestorDepth?: number, address = 'test://message', extra: Partial<WakerSubscription> = {}) {
+  /**
+   * Delivers model results to a mention subscription and returns what it woke with, the
+   * subscription's constructor arguments, the parent queries (class and parsed JSON) and warnings.
+   * `parents` answers each parent query: instances, or a function of the query.
+   */
+  async function wakeWith(parents: unknown, deliveries: any[] = [{ instances: [{ id: 'test://message' }] }], ancestorDepth?: number) {
     let deliver: ((result: any) => Promise<void>) | undefined;
-    const ProxyClass = function () {
+    const opened: any[][] = [];
+    const ProxyClass = function (...args: any[]) {
+      opened.push(args);
       return {
         initialized: Promise.resolve(true),
         subscribe: () => Promise.resolve(),
@@ -195,12 +204,13 @@ describe('WakerSubscriptionManager', () => {
         onResult: (cb: (result: any) => Promise<void>) => { deliver = cb; },
       };
     };
-    const queries: string[] = [];
+    const queries: { className: string; query: any }[] = [];
     const warnings: string[] = [];
     const client = {
-      querySparql: (_uuid: string, query: string) => {
-        queries.push(query);
-        return Promise.resolve(typeof rows === 'function' ? rows(query) : rows);
+      modelQuery: (_uuid: string, className: string, queryJson: string) => {
+        const query = JSON.parse(queryJson);
+        queries.push({ className, query });
+        return Promise.resolve(typeof parents === 'function' ? parents(query) : parents);
       },
     };
     const wakes: any[] = [];
@@ -214,57 +224,56 @@ describe('WakerSubscriptionManager', () => {
       onWake: (_sub, _result, mentions) => { wakes.push(mentions); },
     });
 
-    await manager.subscribe({ ...sub, ...extra, id: 'mention-parents' });
-    await deliver!([{ source: address }]);
-    await waitUntil(() => wakes.length > 0);
+    await manager.subscribe({ ...sub, id: 'mention-parents' });
+    for (const result of deliveries) {
+      await deliver!(result);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
     manager.disposeAll();
-    return { wakes, queries, warnings };
+    return { wakes, opened, queries, warnings };
   }
 
-  it('resolves the parents of a new mention from the flat rows querySparql returns', async () => {
-    const { wakes, queries } = await wakeWithParentRows([{ source: 'test://parent' }]);
-    expect(queries[0]).toContain('<ad4m://has_child> <test://message>');
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [] }]]);
+  /** Containment as a map of child → parents, answered per `where: { children }` query. */
+  const tree = (holders: Record<string, string[]>) => (query: any) => ({
+    instances: [...new Set((query.where.children as string[]).flatMap((child) => holders[child] ?? []))].map((id) => ({ id })),
   });
 
-  it('follows every containment predicate the subscription names, beside has_child', async () => {
-    const { wakes, queries } = await wakeWithParentRows(
-      // A We TextBlock held by a CollectionBlock through we://child, and through has_child too.
-      [{ source: 'test://call' }, { source: 'test://call' }],
-      0,
-      'test://message',
-      { containment: ['ad4m://has_child', 'we://child', 'bad> . ?s ?p ?o . #'] },
-    );
-    expect(queries[0]).toBe(
-      'SELECT ?source WHERE { VALUES ?containment { <ad4m://has_child> <we://child> } ?source ?containment <test://message> . }',
-    );
+  it('opens a mention subscription as a model query over its class', async () => {
+    const { opened } = await wakeWith({ instances: [] }, []);
+    expect(opened).toEqual([[sub.perspective, sub.query, expect.anything(), TextContent.builtinUri]]);
+  });
+
+  it('wakes once per new mentioned id in the model result', async () => {
+    const { wakes } = await wakeWith({ instances: [] }, [
+      { instances: [{ id: 'test://a' }], totalCount: 1 },
+      { instances: [{ id: 'test://b' }, { id: 'test://a' }], totalCount: 2 },
+      { instances: [{ id: 'test://b' }, { id: 'test://a' }], totalCount: 2 },
+      // SPARQL rows are not a model result.
+      [{ source: 'test://c' }],
+    ]);
+    expect(wakes.map((mentions) => mentions.map((m: any) => m.address))).toEqual([['test://a'], ['test://b']]);
+  });
+
+  it('resolves the parents of a new mention with a model query on Container', async () => {
+    const { wakes, queries } = await wakeWith({ instances: [{ id: 'test://call', children: ['test://message'] }] }, undefined, 0);
+    expect(queries).toEqual([
+      { className: Container.builtinUri, query: { where: { children: ['test://message'] }, properties: [] } },
+    ]);
     expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://call'], ancestors: [] }]]);
   });
 
-  it('keeps only string parents when a row leaves ?source unbound', async () => {
-    const { wakes } = await wakeWithParentRows([{ source: 'test://a' }, {}, { source: 'test://b' }]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://a', 'test://b'], ancestors: [] }]]);
+  it('keeps only string ids, and reports no parents without a warning when the result has no instances', async () => {
+    const some = await wakeWith({ instances: [{ id: 'test://a' }, {}, { id: 'test://b' }] }, undefined, 0);
+    expect(some.wakes[0][0].parents).toEqual(['test://a', 'test://b']);
+    const none = await wakeWith(true);
+    expect(none.wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [] }]]);
+    expect(none.warnings).toEqual([]);
   });
-
-  it('reports no parents, without a warning, when querySparql returns a non-array', async () => {
-    const { wakes, warnings } = await wakeWithParentRows(true);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [] }]]);
-    expect(warnings).toEqual([]);
-  });
-
-  /** Containment as a map of child → parents, answered per query the way querySparql would. */
-  const tree = (parents: Record<string, string[]>) => (query: string) => {
-    const values = /VALUES \?child \{([^}]+)\}/.exec(query)?.[1];
-    const children = values
-      ? Array.from(values.matchAll(/<([^>]+)>/g), (match) => match[1])
-      : [/<ad4m:\/\/has_child> <([^>]+)>/.exec(query)?.[1] ?? ''];
-    return children.flatMap((child) => (parents[child] ?? []).map((source) => ({ source })));
-  };
 
   it('reports the chain above the parents, nearest first, each address once', async () => {
     // A message in a thread in a call in a space — and the call is also in a second channel, so two
     // paths reach the space.
-    const { wakes } = await wakeWithParentRows(
+    const { wakes } = await wakeWith(
       tree({
         'test://message': ['test://thread'],
         'test://thread': ['test://call'],
@@ -284,53 +293,40 @@ describe('WakerSubscriptionManager', () => {
   });
 
   it('stops at its depth, and at a cycle, rather than walking forever', async () => {
-    const { wakes } = await wakeWithParentRows(
+    const { wakes } = await wakeWith(
       tree({
         'test://message': ['test://a'],
         'test://a': ['test://b'],
         'test://b': ['test://c'],
         'test://c': ['test://message'],
       }),
+      undefined,
       5,
     );
     // c leads back to the message: seen already, so the walk ends there rather than going round.
     expect(wakes[0][0].ancestors).toEqual(['test://b', 'test://c']);
-    const shallow = await wakeWithParentRows(tree({ 'test://message': ['test://a'], 'test://a': ['test://b'], 'test://b': ['test://c'] }), 1);
+    const shallow = await wakeWith(tree({ 'test://message': ['test://a'], 'test://a': ['test://b'], 'test://b': ['test://c'] }), undefined, 1);
     expect(shallow.wakes[0][0].ancestors).toEqual(['test://b']);
   });
 
   it('looks up a branching ancestor level in one query', async () => {
-    const { wakes, queries } = await wakeWithParentRows(tree({
+    const { wakes, queries } = await wakeWith(tree({
       'test://message': ['test://left', 'test://right'],
       'test://left': ['test://root'],
       'test://right': ['test://root'],
     }));
     expect(wakes[0][0].ancestors).toEqual(['test://root']);
     expect(queries).toHaveLength(3);
-    expect(queries[1]).toContain('VALUES ?child { <test://left> <test://right> }');
+    expect(queries[1].query.where.children).toEqual(['test://left', 'test://right']);
   });
 
-  it.each(['<', '>', '"', '{', '}', '|', '^', '`', '\\', ' ', '\t', '\n', '\u0000'])(
-    'does not query an unsafe mention address containing %p', async (character) => {
-      const address = `test://unsafe${character}address`;
-      const { wakes, queries, warnings } = await wakeWithParentRows([], 3, address);
-      expect(queries).toEqual([]);
-      expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [] });
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('unsafe address');
-    },
-  );
-
-  it('skips an unsafe ancestor lookup without dropping safe siblings', async () => {
-    const unsafe = 'test://bad> . ?s ?p ?o . #';
-    const { wakes, queries, warnings } = await wakeWithParentRows(tree({
-      'test://message': [unsafe, 'test://safe'],
-      'test://safe': ['test://root'],
-    }));
-    expect(wakes[0][0].ancestors).toEqual(['test://root']);
-    expect(queries).toHaveLength(3);
-    expect(queries.every((query) => !query.includes(unsafe))).toBe(true);
-    expect(warnings).toHaveLength(1);
+  it('hands any address to the executor as a value, not as query text', async () => {
+    // The model query escapes it; the waker no longer builds query text, so it has nothing to skip.
+    const address = 'test://bad> . ?s ?p ?o . #';
+    const { wakes, queries, warnings } = await wakeWith(tree({ [address]: ['test://call'] }), [{ instances: [{ id: address }] }], 0);
+    expect(queries[0].query.where.children).toEqual([address]);
+    expect(wakes[0][0]).toEqual({ address, parents: ['test://call'], ancestors: [] });
+    expect(warnings).toEqual([]);
   });
 
   it('names the operator as the fix for a locked executor, on both message shapes', () => {

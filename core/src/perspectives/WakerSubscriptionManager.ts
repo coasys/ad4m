@@ -12,28 +12,26 @@ export interface WakerSubscription {
   type: "mention" | "channel-messages";
   perspective: string;
   channel: string;
+  /** SPARQL, or with `className` a model query (JSON) over that class. */
   query: string;
-  neighbourhood?: string;
   /**
-   * The predicates a parent holds a mentioned item under, from the executor's
-   * `get_mention_waker_config` (`containment_predicates`): `ad4m://has_child`
-   * and the `children` predicate of every class conforming to the built-in
-   * `Container` (#1446), e.g. We's `we://child`. `ad4m://has_child` is always
-   * followed, with or without this.
+   * The class `query` reads, as a model query. A mention subscription has
+   * one, from the executor's `get_mention_waker_config`: the built-in
+   * `ad4m://TextContent` (#1446).
    */
-  containment?: string[];
+  className?: string;
+  neighbourhood?: string;
 }
 
-const HAS_CHILD = "ad4m://has_child";
-
-/** Whether `iri` cannot be embedded in a query as `<iri>`. */
-const unsafeIri = (iri: string) => /[<>"{}|^`\\\s\x00-\x20]/.test(iri);
+/** The built-in `Container` (`Container.builtinUri`; not imported, so the
+ *  plugin bundle does not pull in the model layer). */
+const CONTAINER = "ad4m://Container";
 
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
-  /** The message's expression address (source of the body link). */
+  /** The mentioned record's id. */
   address: string;
-  /** All parent addresses this message belongs to (channels, conversations, etc.). */
+  /** Every `Container` whose `children` hold it: channels, calls, threads. */
   parents: string[];
   /**
    * Everything above the parents, nearest first: their parents, theirs, and so on up to the
@@ -189,7 +187,7 @@ export class WakerSubscriptionManager {
   }
 
   /**
-   * Create a live SPARQL subscription.
+   * Create a live subscription: SPARQL, or a model query when `sub.className` is set.
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
@@ -205,12 +203,13 @@ export class WakerSubscriptionManager {
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
-    this.logger.info(`[waker] ${sub.id}: SPARQL query:\n${sub.query}`);
+    this.logger.info(`[waker] ${sub.id}: query${sub.className ? ` over ${sub.className}` : ""}:\n${sub.query}`);
 
     const proxy = new QuerySubscriptionProxy(
       sub.perspective,
       sub.query,
       this.perspectiveClient,
+      sub.className,
     );
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
@@ -286,35 +285,38 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: onResult fired — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
-      // Query engine can deliver non-array values (e.g. false) on disconnect/reconnect — ignore them
-      if (!Array.isArray(result)) {
+      // A mention subscription is a model query (`{ instances }`), a
+      // channel-messages one SPARQL rows. Anything else (e.g. `false` on a
+      // disconnect/reconnect) is ignored.
+      const items: unknown = sub.type === "mention" ? result?.instances : result;
+      if (!Array.isArray(items)) {
         this.logger.warn(
-          `[waker] ${sub.id}: ignoring non-array result: ${JSON.stringify(result)}`,
+          `[waker] ${sub.id}: ignoring result without ${sub.type === "mention" ? "instances" : "rows"}: ${JSON.stringify(result)}`,
         );
         return;
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen message addresses.
-        // Only wake for messages we haven't seen before.
+        // For mention subscriptions: track seen record ids.
+        // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
 
-        for (const item of result) {
-          if (item && item.source && !currentSeen.has(item.source)) {
-            newMessages.push(item.source);
+        for (const item of items) {
+          if (typeof item?.id === "string" && !currentSeen.has(item.id)) {
+            newMessages.push(item.id);
           }
         }
 
         if (newMessages.length === 0) {
           this.logger.info(
-            `[waker] ${sub.id}: all ${result.length} items already seen, skipping`,
+            `[waker] ${sub.id}: all ${items.length} items already seen, skipping`,
           );
           return;
         }
 
         this.logger.info(
-          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${result.length} total`,
+          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${items.length} total`,
         );
 
         // Resolve parents, and the chain above them, per new message
@@ -352,7 +354,7 @@ export class WakerSubscriptionManager {
         // For channel-messages: always notify the agent on every subscription push.
         // No deduplication — the agent reads recent messages itself.
         this.logger.info(
-          `[waker] ${sub.id}: channel update (${result.length} items)`,
+          `[waker] ${sub.id}: channel update (${items.length} items)`,
         );
 
         const existing = this.debounceTimers.get(sub.id);
@@ -480,32 +482,21 @@ export class WakerSubscriptionManager {
     return this.activeSubscriptions.has(id);
   }
 
-  /** Resolve one containment level in one query; skip unsafe IRI tokens and treat failures as none. */
+  /**
+   * One level up, in one model query: every `Container` whose `children` hold
+   * any of `addresses` (#1446). A node no class describes is not a Container
+   * and is not reached. Failures count as none.
+   */
   private async parentsOf(sub: WakerSubscription, addresses: string[]): Promise<string[]> {
-    const safe = [...new Set(addresses)].filter((address) => {
-      if (unsafeIri(address)) {
-        this.logger.warn(`[waker] ${sub.id}: skipping parent lookup for unsafe address ${JSON.stringify(address)}`);
-        return false;
-      }
-      return true;
-    });
-    if (!safe.length) return [];
-    // `has_child` and every predicate the subscription names as containment.
-    const predicates = [...new Set([HAS_CHILD, ...(sub.containment ?? []).filter((p) => !unsafeIri(p))])];
-    const [predicate, containment] = predicates.length === 1
-      ? [`<${HAS_CHILD}>`, ""]
-      : ["?containment", `VALUES ?containment { ${predicates.map((p) => `<${p}>`).join(" ")} } `];
+    if (!addresses.length) return [];
+    const query = JSON.stringify({ where: { children: [...new Set(addresses)] }, properties: [] });
     try {
-      const query = safe.length === 1
-        ? `SELECT ?source WHERE { ${containment}?source ${predicate} <${safe[0]}> . }`
-        : `SELECT ?source WHERE { VALUES ?child { ${safe.map((address) => `<${address}>`).join(" ")} } ${containment}?source ${predicate} ?child . }`;
-      const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, query);
-      if (!Array.isArray(rows)) return [];
-      // A row omits a variable left unbound in its solution; a parent holding
-      // the item through two predicates is one parent.
-      return [...new Set(rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"))];
+      const result = await this.perspectiveClient.modelQuery(sub.perspective, CONTAINER, query);
+      const instances: unknown = result?.instances;
+      if (!Array.isArray(instances)) return [];
+      return instances.map((instance) => instance?.id).filter((id): id is string => typeof id === "string");
     } catch (err: any) {
-      this.logger.warn(`[waker] ${sub.id}: parent resolution failed for ${JSON.stringify(safe)} — ${err?.message ?? err}`);
+      this.logger.warn(`[waker] ${sub.id}: parent resolution failed for ${JSON.stringify(addresses)} — ${err?.message ?? err}`);
       return [];
     }
   }
