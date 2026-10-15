@@ -214,16 +214,18 @@ pub fn view_through(
     conforms.then_some(view)
 }
 
-/// Every installed concrete class that conforms to `abstract_class`, with its
-/// view. A class whose shape does not load is skipped with a warning: one
-/// broken class must not hide every other app's rows.
+/// Every installed concrete class that conforms to `abstract_shape`, with its
+/// view. `abstract_class` is the name aliases key it by: the class's name, or
+/// a built-in's local name (`builtin_classes`). A class whose shape does not
+/// load is skipped with a warning: one broken class must not hide every other
+/// app's rows.
 pub fn resolve(
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     index: &AbstractIndex,
     abstract_class: &str,
+    abstract_shape: &ModelShape,
 ) -> Result<Resolution, Error> {
-    let abstract_shape = resolver.get_shape(abstract_class)?;
     let mut resolution = Resolution::default();
     // The classifier's list: an abstract class never conforms to another.
     for class in concrete_subject_class_names(store)? {
@@ -237,7 +239,7 @@ pub fn resolve(
                 continue;
             }
         };
-        if let Some(view) = view_through(index, abstract_class, &abstract_shape, &class, &shape) {
+        if let Some(view) = view_through(index, abstract_class, abstract_shape, &class, &shape) {
             resolution.views.insert(class.clone(), Arc::new(view));
             resolution.classes.push(class);
         }

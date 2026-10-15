@@ -1206,6 +1206,8 @@ export class PerspectiveProxy {
     async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
         const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
         for (const jsClass of jsClasses) {
+            // Built-in classes (`TextContent`) live in the executor, not here.
+            if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) continue;
             const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
             if (this.#ensuredSubjectClasses.has(className)) continue;
 
@@ -1639,6 +1641,14 @@ export class PerspectiveProxy {
      * and won't be executed until the batch is committed.
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
+        // A built-in abstract class (`TextContent`, #1446) is never stored,
+        // so it has no marker: the executor dispatches it by its URI.
+        const ctor = (subjectClass as any)?.constructor;
+        if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
+            await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
+            return;
+        }
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
 
         // An abstract class (#1435) is never a record's class: the executor
@@ -2000,6 +2010,9 @@ export class PerspectiveProxy {
 
     /** Takes a JS class (its constructor) and ensures the SHACL subject class exists. */
     async ensureSubjectClass(jsClass: any): Promise<void> {
+        // Built-in classes (`TextContent`) live in the executor, not here.
+        if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) return;
+
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
