@@ -765,6 +765,24 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
     .await
     .unwrap_err();
     assert!(refused.to_string().contains("abstract class"), "{refused}");
+    // Nor is a record written through it.
+    let refused = perspective
+        .update_subject(
+            SubjectClassOption {
+                class_name: Some(TEXT_CONTENT_URI.into()),
+                query: None,
+            },
+            "ad4m://message/b".into(),
+            serde_json::json!({"text": "edited"}),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("cannot be updated through it"),
+        "{refused}"
+    );
     let err = perspective
         .model_query_classes(
             &QueryClasses::union(vec![TEXT_CONTENT_URI.into(), "Chat".into()]),
