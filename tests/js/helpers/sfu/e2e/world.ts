@@ -108,11 +108,12 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
   try {
     executor = await startExecutor(
       path.join(TST_TMP, "agents", spec.id), BOOTSTRAP_SEED, port, hcAdmin, hcApp,
-      false, undefined, undefined, undefined, undefined, false, undefined, undefined,
+      // Multi-user mode needs an admin credential.
+      false, `${spec.id}-admin`, undefined, undefined, undefined, false, undefined, undefined,
       false, // runHolochain
     );
     phase("start the executor");
-    const admin = new Ad4mClient(baseUrl(port));
+    const admin = new Ad4mClient(baseUrl(port), `${spec.id}-admin`);
     clients.push(admin);
     await admin.agent.generate("passphrase");
     await admin.runtime.setMultiUserEnabled(true);

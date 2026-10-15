@@ -199,9 +199,10 @@ async function startEnvironment(diffSyncHash: string): Promise<{
       const [port, hcAdmin, hcApp] = ports.slice(n * 3, n * 3 + 3);
       procs.push(await startExecutor(
         path.join(TST_TMP, "agents", `t21-node${n + 1}`), BOOTSTRAP_SEED,
-        port, hcAdmin, hcApp, false, undefined, local.proxyUrl!, local.bootstrapUrl!,
+        // Multi-user mode needs an admin credential.
+        port, hcAdmin, hcApp, false, "t21-admin", local.proxyUrl!, local.bootstrapUrl!,
       ));
-      const admin = new Ad4mClient(baseUrl(port));
+      const admin = new Ad4mClient(baseUrl(port), "t21-admin");
       await admin.agent.generate("passphrase");
       await admin.runtime.setMultiUserEnabled(true);
       nodes.push({ port, admin });
