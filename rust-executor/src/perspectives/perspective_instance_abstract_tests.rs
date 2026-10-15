@@ -1,11 +1,8 @@
-//! Abstract classes on a perspective (#1435): queried through the ordinary
-//! model query and subscription, never created, resolved once per change of
-//! the installed shapes, and a subscription picks up a class installed after
-//! it subscribed.
-//!
-//! As in `perspective_instance_subscription_tests`, the background
+//! Abstract classes on a perspective (#1435): writes dispatched to the
+//! record's own classes, the resolution cache, reads on their own, and
+//! subscriptions that follow the installed shapes. The background
 //! `subscribed_queries_loop` is not running: `check_subscribed_queries` is
-//! driven directly, with the writes each step reports.
+//! driven directly with the writes each step reports.
 
 use super::*;
 use crate::perspectives::interpretation_test_support::{setup_perspective_no_llm, TASK_SDNA};
@@ -14,9 +11,8 @@ use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// Anything with `text`. With a setter, as the SDK writes one for every
-/// property: a write through it would land on `ns://text`, which no
-/// concrete class here reads.
+/// Anything with `text`. Its setter writes `ns://text`, which no concrete
+/// class reads: a write through it that is not dispatched lands there.
 const TEXT_CONTENT_SDNA: &str = r#"{
   "target_class":"ns://TextContent",
   "abstract":true,
@@ -33,16 +29,36 @@ const CHAT_SDNA: &str = r#"{
   ]
 }"#;
 
-/// Flux-like: `body`, aliased `text` for TextContent. Its flag and body
-/// predicates are its own, so a trigger built before it was installed cannot
-/// match its writes by accident.
+/// Flux-like: `body`, aliased `text` for TextContent. Its own predicates,
+/// so a trigger built before it was installed cannot match its writes.
 const MESSAGE_SDNA: &str = r#"{
   "target_class":"ns://Message",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://entry_type","target":"ns://message"}],
+  "destructor_actions":[{"action":"removeLink","source":"this","predicate":"ns://entry_type","target":"*"},{"action":"removeLink","source":"this","predicate":"ns://tag","target":"*"}],
   "properties":[
     {"path":"ns://entry_type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
-    {"path":"ns://body","name":"body","min_count":0,"max_count":1,"resolve_language":"literal","alias":{"TextContent":"text"},"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]}
+    {"path":"ns://body","name":"body","min_count":0,"max_count":1,"resolve_language":"literal","alias":{"TextContent":"text"},"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]},
+    {"path":"ns://tag","name":"tags","setter":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}]}
   ]
+}"#;
+
+/// `question`, aliased `text`; `tags` on the predicate Message uses.
+const POLL_SDNA: &str = r#"{
+  "target_class":"ns://Poll",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://poll","target":"ns://open"}],
+  "destructor_actions":[{"action":"removeLink","source":"this","predicate":"ns://poll","target":"*"},{"action":"removeLink","source":"this","predicate":"ns://tag","target":"*"}],
+  "properties":[
+    {"path":"ns://poll","name":"state","has_value":"ns://open","min_count":1,"max_count":1},
+    {"path":"ns://question","name":"question","max_count":1,"alias":{"TextContent":"text"},"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://question","target":"value"}]},
+    {"path":"ns://tag","name":"tags","setter":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}]}
+  ]
+}"#;
+
+/// Anything with `tags`.
+const TAGGED_SDNA: &str = r#"{
+  "target_class":"ns://Tagged",
+  "abstract":true,
+  "properties":[{"path":"ns://tags","name":"tags","setter":[{"action":"addLink","source":"this","predicate":"ns://tags","target":"value"}]}]
 }"#;
 
 async fn install(
@@ -84,151 +100,131 @@ async fn create(
         .await
 }
 
-/// `(id, __subjectClass, text)` per row, sorted.
-fn rows(json: &str) -> Vec<(String, String, String)> {
-    let v: Value = serde_json::from_str(json).unwrap();
-    let mut rows: Vec<_> = v["instances"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| {
-            (
-                r["id"].as_str().unwrap().to_string(),
-                r["__subjectClass"].as_str().unwrap_or("").to_string(),
-                r["text"].as_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
-    rows.sort();
-    rows
-}
-
 const ALL: &str = r#"{"includeUnverified":true}"#;
 
 fn one(class: &str) -> QueryClasses {
     QueryClasses::One(class.to_string())
 }
 
-/// The ordinary model query over an abstract class reads every class with
-/// `text`, the aliased one included; the concrete class read on its own
-/// keeps its name. Creating an abstract class is refused.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_abstract_class_is_queried_through_the_ordinary_api_and_never_created() {
-    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
+fn class(name: &str) -> SubjectClassOption {
+    SubjectClassOption {
+        class_name: Some(name.to_string()),
+        query: None,
+    }
+}
+
+/// `m1` is a Message, a Poll and a Task (outside TextContent); `m2` only a
+/// Message; `t1` only a Task.
+async fn dispatch_setup() -> (PerspectiveInstance, AgentContext) {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[
         ("TextContent", TEXT_CONTENT_SDNA),
-        ("Chat", CHAT_SDNA),
+        ("Tagged", TAGGED_SDNA),
         ("Message", MESSAGE_SDNA),
+        ("Poll", POLL_SDNA),
         ("Task", TASK_SDNA),
     ])
     .await;
-    create(
-        &mut perspective,
-        &ctx,
-        "Chat",
-        "ad4m://chat/1",
-        serde_json::json!({"text": "hi @data"}),
-    )
-    .await
-    .unwrap();
-    create(
-        &mut perspective,
-        &ctx,
-        "Message",
-        "ad4m://message/1",
-        serde_json::json!({"body": "<p>hello</p>"}),
-    )
-    .await
-    .unwrap();
-    create(
-        &mut perspective,
-        &ctx,
-        "Task",
-        "ad4m://task/1",
-        serde_json::json!({"title": "t", "owner": "o"}),
-    )
-    .await
-    .unwrap();
-
-    let json = perspective
-        .model_query_classes(&one("TextContent"), ALL)
-        .await
-        .unwrap();
-    assert_eq!(
-        rows(&json),
-        vec![
-            ("ad4m://chat/1".into(), "Chat".into(), "hi @data".into()),
-            (
-                "ad4m://message/1".into(),
-                "Message".into(),
-                "<p>hello</p>".into()
-            ),
-        ]
-    );
-
-    let own: Value = serde_json::from_str(
-        &perspective
-            .model_query_classes(&one("Message"), ALL)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(own["instances"][0]["body"], "<p>hello</p>");
-    assert!(own["instances"][0].get("text").is_none(), "{own}");
-
-    let refused = create(
-        &mut perspective,
-        &ctx,
-        "TextContent",
-        "ad4m://text/1",
-        serde_json::json!({"text": "x"}),
-    )
-    .await
-    .unwrap_err();
-    assert!(refused.to_string().contains("abstract class"), "{refused}");
-    assert!(perspective
-        .get_links_local(&LinkQuery {
-            source: Some("ad4m://text/1".into()),
-            ..Default::default()
-        })
-        .unwrap()
-        .is_empty());
-
-    // Never a record's class.
-    let classes = perspective
-        .subject_classes_of(&["ad4m://chat/1".to_string()])
-        .unwrap();
-    assert_eq!(classes["ad4m://chat/1"], vec!["Chat".to_string()]);
+    let task = serde_json::json!({"title": "t", "owner": "o"});
+    for (class, base, props) in [
+        ("Message", "ad4m://m1", serde_json::json!({"body": "old"})),
+        ("Poll", "ad4m://m1", serde_json::json!({"question": "old?"})),
+        ("Task", "ad4m://m1", task.clone()),
+        ("Message", "ad4m://m2", serde_json::json!({"body": "old"})),
+        ("Task", "ad4m://t1", task),
+    ] {
+        create(&mut p, &ctx, class, base, props).await.unwrap();
+    }
+    (p, ctx)
 }
 
-/// A record read through an abstract class is updated through its own
-/// class. Through the abstract one, the setter would write the abstract
-/// predicate (`ns://text`) onto a Message whose text is `ns://body`: refused,
-/// and nothing is written.
+/// `prop` of the `class` instance at `id`, read as that class.
+async fn read(p: &PerspectiveInstance, class: &str, id: &str, prop: &str) -> Value {
+    let query = format!(r#"{{"includeUnverified":true,"where":{{"id":"{id}"}}}}"#);
+    let json: Value =
+        serde_json::from_str(&p.model_query_classes(&one(class), &query).await.unwrap()).unwrap();
+    json["instances"][0][prop].clone()
+}
+
+fn links_on(p: &PerspectiveInstance, source: &str, predicate: &str) -> usize {
+    p.get_links_local(&LinkQuery {
+        source: Some(source.into()),
+        predicate: Some(predicate.into()),
+        ..Default::default()
+    })
+    .unwrap()
+    .len()
+}
+
+/// An update through an abstract class runs, for each of the record's
+/// classes it reads, that class's setter for the property answering to the
+/// name: `text` writes Message.body and Poll.question on `m1`, only
+/// Message.body on `m2`, never the abstract predicate. Values as given.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_record_is_never_updated_through_an_abstract_class() {
-    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
-        ("TextContent", TEXT_CONTENT_SDNA),
-        ("Message", MESSAGE_SDNA),
-    ])
-    .await;
-    create(
-        &mut perspective,
+async fn an_update_through_an_abstract_class_runs_each_classs_setter() {
+    let (mut p, ctx) = dispatch_setup().await;
+    for base in ["ad4m://m1", "ad4m://m2"] {
+        p.update_subject(
+            class("TextContent"),
+            base.into(),
+            serde_json::json!({"text": "<p>new</p>"}),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(read(&p, "Message", "ad4m://m1", "body").await, "<p>new</p>");
+    assert_eq!(
+        read(&p, "Poll", "ad4m://m1", "question").await,
+        "<p>new</p>"
+    );
+    assert_eq!(read(&p, "Message", "ad4m://m2", "body").await, "<p>new</p>");
+    assert_eq!(links_on(&p, "ad4m://m2", "ns://question"), 0);
+    for base in ["ad4m://m1", "ad4m://m2"] {
+        assert_eq!(links_on(&p, base, "ns://text"), 0, "{base}");
+    }
+}
+
+/// Message and Poll both write `tags` with `addLink` on `ns://tag`: through
+/// Tagged, the append runs once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_setter_two_classes_share_runs_once() {
+    let (mut p, ctx) = dispatch_setup().await;
+    p.update_subject(
+        class("Tagged"),
+        "ad4m://m1".into(),
+        serde_json::json!({"tags": ["ad4m://tag/a"]}),
+        None,
         &ctx,
-        "Message",
-        "ad4m://message/1",
-        serde_json::json!({"body": "hello"}),
     )
     .await
     .unwrap();
+    assert_eq!(links_on(&p, "ad4m://m1", "ns://tag"), 1);
+    assert_eq!(links_on(&p, "ad4m://m1", "ns://tags"), 0);
+}
 
-    let refused = perspective
+/// A delete through an abstract class runs the destructors of the record's
+/// classes it reads; its Task, outside TextContent, stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_through_an_abstract_class_runs_each_destructor() {
+    let (mut p, ctx) = dispatch_setup().await;
+    p.remove_subject(class("TextContent"), "ad4m://m1".into(), None, &ctx)
+        .await
+        .unwrap();
+    let classes = p.subject_classes_of(&["ad4m://m1".to_string()]).unwrap();
+    assert_eq!(classes["ad4m://m1"], vec!["Task".to_string()]);
+}
+
+/// Through an abstract class: a name it does not have, a record of none of
+/// its classes and a create are refused, and nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_through_an_abstract_class_that_cannot_dispatch_are_refused() {
+    let (mut p, ctx) = dispatch_setup().await;
+    let err = p
         .update_subject(
-            SubjectClassOption {
-                class_name: Some("TextContent".into()),
-                query: None,
-            },
-            "ad4m://message/1".into(),
-            serde_json::json!({"text": "edited"}),
+            class("TextContent"),
+            "ad4m://m2".into(),
+            serde_json::json!({"body": "x"}),
             None,
             &ctx,
         )
@@ -236,42 +232,44 @@ async fn a_record_is_never_updated_through_an_abstract_class() {
         .unwrap_err()
         .to_string();
     assert!(
-        refused.contains("'TextContent' is an abstract class")
-            && refused.contains("cannot be updated through it")
-            && refused.contains("__subjectClass"),
-        "{refused}"
+        err.contains("'body' is not a name of the abstract class 'TextContent'"),
+        "{err}"
     );
-    assert!(perspective
-        .get_links_local(&LinkQuery {
-            source: Some("ad4m://message/1".into()),
-            predicate: Some("ns://text".into()),
-            ..Default::default()
-        })
-        .unwrap()
-        .is_empty());
+    assert_eq!(read(&p, "Message", "ad4m://m2", "body").await, "old");
 
-    // Through its own class it goes through.
-    perspective
+    let update = p
         .update_subject(
-            SubjectClassOption {
-                class_name: Some("Message".into()),
-                query: None,
-            },
-            "ad4m://message/1".into(),
-            serde_json::json!({"body": "edited"}),
+            class("TextContent"),
+            "ad4m://t1".into(),
+            serde_json::json!({"text": "x"}),
             None,
             &ctx,
         )
-        .await
-        .unwrap();
-    let json = perspective
-        .model_query_classes(&one("TextContent"), ALL)
-        .await
-        .unwrap();
-    assert_eq!(
-        rows(&json),
-        vec![("ad4m://message/1".into(), "Message".into(), "edited".into())]
-    );
+        .await;
+    let delete = p
+        .remove_subject(class("TextContent"), "ad4m://t1".into(), None, &ctx)
+        .await;
+    for err in [update.unwrap_err(), delete.unwrap_err()] {
+        assert!(
+            err.to_string()
+                .contains("'ad4m://t1' is not a record of any class 'TextContent' reads"),
+            "{err}"
+        );
+    }
+    assert_eq!(links_on(&p, "ad4m://t1", "ns://text"), 0);
+    assert_eq!(read(&p, "Task", "ad4m://t1", "title").await, "t");
+
+    let err = create(
+        &mut p,
+        &ctx,
+        "TextContent",
+        "ad4m://text/1",
+        serde_json::json!({"text": "x"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("cannot be created"), "{err}");
+    assert_eq!(links_on(&p, "ad4m://text/1", "ns://text"), 0);
 }
 
 /// Read on its own: in a union of several classes, refused. No conforming

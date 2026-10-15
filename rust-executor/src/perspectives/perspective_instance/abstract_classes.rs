@@ -1,23 +1,29 @@
-//! Abstract model classes on `PerspectiveInstance` (#1435): which concrete
-//! classes an abstract class reads, cached until the installed shapes change;
-//! the query and subscription wiring; and the refusal to create one.
+//! Abstract model classes on `PerspectiveInstance` (#1435): the cached
+//! resolution, the query and subscription wiring, and writes through one.
+//! The rule lives in `model_query::abstract_classes`; this module caches and
+//! wires it, as a child of `perspective_instance` to reach its private state.
 //!
-//! The rule itself lives in `model_query::abstract_classes`; this module only
-//! caches and wires it. A child module of `perspective_instance` so it can
-//! reach the shape cache and the subscription registry without widening
-//! their visibility.
+//! A write through an abstract class dispatches to the record's own classes
+//! among those the abstract class reads (`subject_classes_of` ∩ the
+//! resolution). An update runs each class's setter for the property that
+//! answers to the abstract name; a delete runs each class's destructor.
+//! Commands two classes share run once. Values are not converted: what one
+//! class stores as HTML another gets as is. Creating one is refused.
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::PerspectiveInstance;
+use super::{Action, Command, PerspectiveInstance};
+use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
     self, AbstractIndex, Resolution, ViewResolver,
 };
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
+use crate::perspectives::perspective_instance::SubjectClassOption;
+use serde_json::Value;
 
 /// What the installed shapes say about abstract classes, and how many times
 /// they have changed. A subscription over an abstract class keeps the
@@ -193,30 +199,150 @@ impl PerspectiveInstance {
         Ok(self.abstract_index()?.is_abstract(class_name))
     }
 
-    /// A write through an abstract class: refused, it names what records
-    /// have, not what they are. Its predicates are not the ones a record's
-    /// own class writes, so a write through it lands where no read looks.
-    /// Every subject write (create, update, delete) checks here first.
-    pub(crate) fn refuse_abstract_write(
-        &self,
-        class_name: &str,
-        write: AbstractWrite,
-    ) -> Result<(), AnyError> {
-        if !self.is_abstract_class(class_name)? {
-            return Ok(());
-        }
-        Err(match write {
-            AbstractWrite::Create => anyhow!(
+    /// Creating an abstract class is refused: it names what records have,
+    /// not what they are.
+    pub(crate) fn refuse_abstract_create(&self, class_name: &str) -> Result<(), AnyError> {
+        if self.is_abstract_class(class_name)? {
+            return Err(anyhow!(
                 "'{class_name}' is an abstract class and cannot be created. Create an instance \
                  of a class that has its properties; querying '{class_name}' reads it."
-            ),
-            AbstractWrite::Update | AbstractWrite::Delete => anyhow!(
-                "'{class_name}' is an abstract class: a record cannot be {} through it. Write \
-                 it through its own class, the `__subjectClass` a query on '{class_name}' \
-                 returns.",
-                write.done()
-            ),
-        })
+            ));
+        }
+        Ok(())
+    }
+
+    /// The classes of `base` a write through `abstract_class` reaches: those
+    /// it is, among those the abstract class reads. Never empty.
+    fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
+        let resolution = self.resolve_abstract(abstract_class)?;
+        let own = self
+            .subject_classes_of(&[base.to_string()])?
+            .remove(base)
+            .unwrap_or_default();
+        let targets: Vec<String> = resolution
+            .classes
+            .iter()
+            .filter(|c| own.contains(c))
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return Err(anyhow!(
+                "'{base}' is not a record of any class '{abstract_class}' reads ({}): there is \
+                 nothing to write through it.",
+                resolution.classes.join(", ")
+            ));
+        }
+        Ok(targets)
+    }
+
+    /// `update_subject` through `abstract_class`: each value is written by
+    /// every target class's setter for the property answering to its name.
+    /// A command another class already wrote for this name (same action,
+    /// source and predicate) is dropped, so a shared predicate is written,
+    /// or a shared collection appended to, once.
+    pub(super) async fn update_through_abstract(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        values: &Value,
+        context: &AgentContext,
+    ) -> Result<Vec<Command>, AnyError> {
+        let Value::Object(values) = values else {
+            return Ok(vec![]);
+        };
+        let shape = self.get_shape(abstract_class)?;
+        let names: HashSet<&str> = shape
+            .properties
+            .iter()
+            .map(|p| p.name.as_str())
+            .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
+            .collect();
+        if let Some(key) = values.keys().find(|k| !names.contains(k.as_str())) {
+            let mut names: Vec<_> = names.into_iter().collect();
+            names.sort();
+            return Err(anyhow!(
+                "'{key}' is not a name of the abstract class '{abstract_class}' ({}). Write it \
+                 through the record's own class.",
+                names.join(", ")
+            ));
+        }
+        let index = self.abstract_index()?;
+        let targets = self.write_targets(abstract_class, base)?;
+        let mut commands = Vec::new();
+        for (name, value) in values {
+            let mut written: Vec<(Action, Option<String>, Option<String>)> = Vec::new();
+            let mut has_setter = false;
+            for class in &targets {
+                let own_shape = self.get_shape(class)?;
+                let Some(own) = index.own_name(class, &own_shape, name, abstract_class) else {
+                    continue;
+                };
+                let Some(setter) = self.get_property_setter_actions(class, own).await? else {
+                    continue;
+                };
+                has_setter = true;
+                let setter: Vec<Command> = setter
+                    .into_iter()
+                    .filter(|c| {
+                        let key = (c.action.clone(), c.source.clone(), c.predicate.clone());
+                        !written.contains(&key) && {
+                            written.push(key);
+                            true
+                        }
+                    })
+                    .collect();
+                commands.extend(
+                    self.setter_commands(class, own, &setter, value, context)
+                        .await?,
+                );
+            }
+            if !has_setter {
+                return Err(anyhow!(
+                    "'{name}' cannot be written through '{abstract_class}': none of the \
+                     record's classes ({}) has a setter for it.",
+                    targets.join(", ")
+                ));
+            }
+        }
+        Ok(commands)
+    }
+
+    /// Delete the instance of `subject_class` at `base`: run the class's
+    /// destructor. Through an abstract class, run the destructor of each
+    /// target class, each command once; the record's other classes are left
+    /// as they are.
+    pub async fn remove_subject(
+        &mut self,
+        subject_class: SubjectClassOption,
+        base: String,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let class_name = self
+            .subject_class_option_to_class_name(subject_class, context)
+            .await?;
+        let classes = if self.is_abstract_class(&class_name)? {
+            self.write_targets(&class_name, &base)?
+        } else {
+            vec![class_name]
+        };
+        let mut commands: Vec<Command> = Vec::new();
+        for class in &classes {
+            let destructor = self
+                .get_shape_actions_from_shacl(class, "ad4m://destructor")
+                .await?
+                .ok_or_else(|| anyhow!("No destructor found for subject class: {class}."))?;
+            for command in destructor {
+                if !commands.contains(&command) {
+                    commands.push(command);
+                }
+            }
+        }
+        if commands.is_empty() {
+            return Ok(());
+        }
+        self.execute_commands(commands, base, vec![], batch_id, context)
+            .await
     }
 
     /// Resolve every subscription over an abstract class (#1435) again whose
@@ -288,24 +414,6 @@ impl PerspectiveInstance {
             query_json,
             result,
         )
-    }
-}
-
-/// The subject write [`PerspectiveInstance::refuse_abstract_write`] checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AbstractWrite {
-    Create,
-    Update,
-    Delete,
-}
-
-impl AbstractWrite {
-    fn done(self) -> &'static str {
-        match self {
-            AbstractWrite::Create => "created",
-            AbstractWrite::Update => "updated",
-            AbstractWrite::Delete => "deleted",
-        }
     }
 }
 

@@ -1,49 +1,29 @@
 //! Abstract model classes (#1435, design agreed on #1440).
 //!
-//! An abstract class is an ordinary model class whose shape carries one
-//! [`ABSTRACT_PREDICATE`] marker. It names what a record must have, not which
-//! class wrote it. A model query over it reads every installed concrete class
-//! that has all of its names, as one union (`execute_union_query`), so a
-//! caller can ask for "anything with `text`" without knowing which app wrote
-//! it or what it named its classes.
+//! An abstract class is a model class whose shape carries one
+//! [`ABSTRACT_PREDICATE`] marker. It names what a record has, not which class
+//! wrote it. A query over it reads every installed concrete class that has
+//! all of its names, as one union (`execute_union_query_with_views`).
 //!
-//! ```text
-//!  modelQuery("TextContent") ──▶ shape is abstract? ──▶ resolve(): every concrete
-//!                                      │                class with the names,
-//!                                      │                each as a view
-//!                                      ▼
-//!                       execute_union_query_with_views ──▶ rows keep their class
-//! ```
+//! **Conformance** is checked on shapes and names only: a concrete class
+//! conforms when it has a property answering to each of the abstract class's
+//! property names, and a relation for each relation name. Predicates,
+//! datatypes and directions are not compared. A property answers to its own
+//! name, or to its alias for this abstract class (one [`ALIAS_PREDICATE`]
+//! link, `@Property({ alias: { TextContent: "text" } })`). An abstract shape
+//! with no names reads no class.
 //!
-//! # Conformance
+//! **Views**: read through an abstract class, a concrete class's aliased
+//! properties carry the abstract names (`Message.body` comes back as `text`,
+//! read through `Message.body`'s predicate). Records reached through an
+//! `include` are read as their own class.
 //!
-//! Checked on shapes, never on instances, and on names only: a concrete class
-//! conforms when, for each of the abstract class's properties, it has a
-//! property answering to that name, and for each relation a relation
-//! answering to that name. Predicates, datatypes and directions are not
-//! compared. A property answers to its own name, or to its alias for this
-//! abstract class (`@Property({ alias: { TextContent: "text" } })`, one
-//! [`ALIAS_PREDICATE`] link on the property shape). An abstract shape with no
-//! names reads no class, never every class.
-//!
-//! # Views
-//!
-//! Read through an abstract class, a concrete class's aliased properties carry
-//! the abstract class's names: `Message.body` with alias `text` comes back as
-//! `text`, read through `Message.body`'s predicate, and `where: { text }`
-//! filters on it. The view is the concrete shape with those properties
-//! renamed; nothing else changes. It is used for the queried rows only:
-//! records reached through an `include` are read as their own class. Querying
-//! the concrete class itself returns its own names.
-//!
-//! # What an abstract class is not
-//!
-//! It is never created (`create_subject` refuses it) and never chosen when a
-//! record is classified (`subject_classes_of` lists concrete classes only).
-//! An abstract class does not conform to another abstract class.
-//!
-//! `@Model({ implements: [...] })` is checked by the SDK when a class is
-//! declared; the executor does not read it. Matching stays structural.
+//! **Writes** dispatch to the record's own classes (see
+//! `perspective_instance::abstract_classes`); [`AbstractIndex::own_name`] is
+//! the view read backwards. An abstract class is never created, never one of
+//! a record's classes, and never conforms to another abstract class.
+//! `@Model({ implements })` is an SDK check; the executor matches by
+//! structure.
 
 use super::types::{ModelShape, ShapeResolver};
 use crate::perspectives::shacl_parser::{ABSTRACT_PREDICATE, ALIAS_PREDICATE};
@@ -54,9 +34,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-/// The abstract classes and aliases in a perspective's installed SHACL. Read
-/// in two queries, and cached by the perspective until the installed shapes
-/// change.
+/// The abstract classes and aliases in a perspective's installed SHACL,
+/// cached by the perspective until the installed shapes change.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AbstractIndex {
     abstract_classes: BTreeSet<String>,
@@ -142,6 +121,23 @@ impl AbstractIndex {
             .map(String::as_str)
             .unwrap_or(property)
     }
+
+    /// The inverse of [`Self::name_through`]: the property or relation of
+    /// `class` (with `shape`) that answers to `name` through `abstract_class`.
+    pub fn own_name<'a>(
+        &self,
+        class: &str,
+        shape: &'a ModelShape,
+        name: &str,
+        abstract_class: &str,
+    ) -> Option<&'a str> {
+        shape
+            .properties
+            .iter()
+            .map(|p| p.name.as_str())
+            .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
+            .find(|own| self.name_through(class, own, abstract_class) == name)
+    }
 }
 
 /// The concrete classes an abstract class reads, each with its view (see the
@@ -219,10 +215,8 @@ pub fn view_through(
 }
 
 /// Every installed concrete class that conforms to `abstract_class`, with its
-/// view.
-///
-/// A class whose shape does not load is skipped with a warning rather than
-/// failing the query: one broken class must not hide every other app's rows.
+/// view. A class whose shape does not load is skipped with a warning: one
+/// broken class must not hide every other app's rows.
 pub fn resolve(
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
@@ -251,9 +245,8 @@ pub fn resolve(
     Ok(resolution)
 }
 
-/// A resolver that answers with the views of an abstract class's classes,
-/// and with `inner`'s shapes for every other class. For a subscription's
-/// trigger, whose `where` keys are the abstract class's names.
+/// Answers with the views of an abstract class's classes and with `inner`'s
+/// shapes otherwise: a subscription trigger's `where` keys are abstract names.
 pub struct ViewResolver<'a> {
     inner: &'a dyn ShapeResolver,
     views: &'a HashMap<String, Arc<ModelShape>>,
