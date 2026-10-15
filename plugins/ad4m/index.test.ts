@@ -1944,6 +1944,7 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
+                  class: "ad4m://TextContent",
                   query: "SELECT * FROM link WHERE ...",
                   names: ["TestAgent"],
                   did: "did:key:zTest",
@@ -2020,6 +2021,7 @@ describe("ad4mPlugin", () => {
               {
                 type: "text",
                 text: JSON.stringify({
+                  class: "ad4m://TextContent",
                   query: "SELECT * FROM link WHERE ...",
                   names: ["TestAgent"],
                   did: "did:key:zTest",
@@ -2098,9 +2100,8 @@ describe("ad4mPlugin", () => {
     }
   });
 
-  it("ad4m_subscribe_to_mentions hands the executor's containment predicates to the waker (#1446)", async () => {
-    const registeredTools: Array<{ name: string; execute: Function }> = [];
-
+  /** Answers the MCP handshake, and `get_mention_waker_config` with `config`. */
+  function mockMentionConfig(config: Record<string, unknown>) {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
       const body = JSON.parse((opts as any).body as string);
       if (body.method === "initialize") {
@@ -2116,37 +2117,30 @@ describe("ad4mPlugin", () => {
         return fakeJsonResponse({
           jsonrpc: "2.0",
           id: body.id,
-          result: {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  query: "SELECT * FROM link WHERE ...",
-                  names: ["TestAgent"],
-                  did: "did:key:zTest",
-                  containment_predicates: ["ad4m://has_child", "we://child"],
-                }),
-              },
-            ],
-          },
+          result: { content: [{ type: "text", text: JSON.stringify(config) }] },
         });
       }
       return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
     });
+  }
 
-    const mockApi = {
+  /** Runs ad4m_subscribe_to_mentions; returns the tool result, the proxies opened and the active subscriptions. */
+  async function subscribeToMentions(config: Record<string, unknown>) {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    mockMentionConfig(config);
+    await ad4mPlugin({
       pluginConfig: { mode: "external", mcpEndpoint: "http://localhost:3001/mcp", token: "test-cred" },
       logger: makeMockLogger(),
       registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
       registerService: vi.fn(),
       registerCli: vi.fn(),
-    };
-    await ad4mPlugin(mockApi);
-
+    });
+    const opened: any[][] = [];
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn() },
+      perspectiveClient: { modelQuery: vi.fn() },
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function () {
+      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
+        opened.push(args);
         return {
           initialized: Promise.resolve(),
           subscribe: vi.fn(() => Promise.resolve()),
@@ -2159,12 +2153,35 @@ describe("ad4mPlugin", () => {
     _setSubscriptionManagerForTests(manager);
     try {
       const subscribeTool = registeredTools.find((t) => t.name === "ad4m_subscribe_to_mentions");
-      await subscribeTool!.execute("call-1", { perspective_id: "persp-uuid-1" });
-      expect(manager.getActive().map((sub) => sub.containment)).toEqual([["ad4m://has_child", "we://child"]]);
+      const result = await subscribeTool!.execute("call-1", { perspective_id: "persp-uuid-1" });
+      return { result, opened, active: manager.getActive() };
     } finally {
       manager.disposeAll();
       _setSubscriptionManagerForTests(null);
     }
+  }
+
+  it("ad4m_subscribe_to_mentions opens the executor's mention query as a model query on its class (#1446)", async () => {
+    const query = JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } });
+    const { opened, active } = await subscribeToMentions({
+      class: "ad4m://TextContent",
+      query,
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+    });
+    expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([["persp-uuid-1", query, "ad4m://TextContent"]]);
+    expect(active.map((sub) => sub.className)).toEqual(["ad4m://TextContent"]);
+  });
+
+  it("ad4m_subscribe_to_mentions refuses an executor that still answers with SPARQL", async () => {
+    const { result, opened, active } = await subscribeToMentions({
+      query: "SELECT ?source ?predicate ?target WHERE { ... }",
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+    });
+    expect(JSON.stringify(result)).toContain("Update the executor");
+    expect(opened).toEqual([]);
+    expect(active).toEqual([]);
   });
 
   it("ad4m_unsubscribe_from_mentions reports 'No mention subscription found' when nothing matches", async () => {
@@ -3401,7 +3418,7 @@ describe("WakerSubscriptionManager", () => {
   };
 
   const mockPerspectiveClientSimple = {
-    querySparql: vi.fn(() => Promise.resolve([])),
+    modelQuery: vi.fn(() => Promise.resolve({ instances: [] })),
   };
 
   it("should throw when the executor rejects the subscription, and not keep it active", async () => {
@@ -3593,7 +3610,7 @@ describe("WakerSubscriptionManager", () => {
     expect(hintFor("connection refused")).toBe("");
   });
 
-  it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
+  it("should ignore a mention result without instances (e.g. false) and not store it as seen", async () => {
     const mock = makeMockProxy();
     const persisted: { seen: Record<string, string[]> } = { seen: {} };
     let wakeCount = 0;
@@ -3621,7 +3638,7 @@ describe("WakerSubscriptionManager", () => {
     expect(wakeCount).toBe(0);
 
     // Deliver a real result — should fire
-    mock.deliver([{ source: "channel-1", target: "literal://string:Hey @you" }]);
+    mock.deliver({ instances: [{ id: "channel-1" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
     // Seen messages should contain the message address
@@ -3653,15 +3670,12 @@ describe("WakerSubscriptionManager", () => {
     });
 
     // Deliver same message that was already seen — should NOT wake
-    mock.deliver([{ source: "channel-1", target: "literal://string:Hey @you" }]);
+    mock.deliver({ instances: [{ id: "channel-1" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(0);
 
     // Deliver a new message — should wake
-    mock.deliver([
-      { source: "channel-1", target: "literal://string:Hey @you" },
-      { source: "channel-2", target: "literal://string:@you check this" },
-    ]);
+    mock.deliver({ instances: [{ id: "channel-2" }, { id: "channel-1" }], totalCount: 2 });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
 
@@ -3707,18 +3721,19 @@ describe("WakerSubscriptionManager", () => {
     const mock = makeMockProxy();
     let capturedMentions: any[] | undefined;
 
-    // Mock perspectiveClient.querySparql to return has_child links for parent resolution
+    // Parent resolution is a model query on Container: `where: { children }`.
     const mockPerspectiveClient = {
-      querySparql: vi.fn((_perspectiveId: string, query: string) => {
+      modelQuery: vi.fn((_perspectiveId: string, _className: string, query: string) => {
+        const children: string[] = JSON.parse(query).where.children;
         // msg-1 has two parents (channel + conversation thread)
-        if (query.includes("msg-1")) {
-          return Promise.resolve([{ source: "channel-abc" }, { source: "conversation-xyz" }]);
+        if (children.includes("msg-1")) {
+          return Promise.resolve({ instances: [{ id: "channel-abc" }, { id: "conversation-xyz" }] });
         }
         // msg-2 is only in channel-abc
-        if (query.includes("msg-2")) {
-          return Promise.resolve([{ source: "channel-abc" }]);
+        if (children.includes("msg-2")) {
+          return Promise.resolve({ instances: [{ id: "channel-abc" }] });
         }
-        return Promise.resolve([]);
+        return Promise.resolve({ instances: [] });
       }),
     };
 
@@ -3740,15 +3755,13 @@ describe("WakerSubscriptionManager", () => {
       query: "SELECT * FROM link",
     });
 
-    // Body links: source = message address, target = body content with mention
-    mock.deliver([
-      { source: "msg-1", target: "literal://string:Hey @Marvin!" },
-      { source: "msg-2", target: "literal://string:@Marvin check this" },
-    ]);
+    // The mention query's result: the records whose text mentions the agent.
+    mock.deliver({ instances: [{ id: "msg-1" }, { id: "msg-2" }], totalCount: 2 });
     await new Promise(r => setTimeout(r, 50));
 
     // One parent lookup per message, then one batched lookup per ancestor level.
-    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(4);
+    expect(mockPerspectiveClient.modelQuery).toHaveBeenCalledTimes(4);
+    expect(mockPerspectiveClient.modelQuery.mock.calls.every(([, className]) => className === "ad4m://Container")).toBe(true);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
@@ -3767,7 +3780,7 @@ describe("WakerSubscriptionManager", () => {
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
-      querySparql: vi.fn(() => Promise.resolve([])),
+      modelQuery: vi.fn(() => Promise.resolve({ instances: [] })),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -3788,7 +3801,7 @@ describe("WakerSubscriptionManager", () => {
       query: "SELECT * FROM link",
     });
 
-    mock.deliver([{ source: "msg-1", target: "literal://string:Hey @Marvin!" }]);
+    mock.deliver({ instances: [{ id: "msg-1" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
 
     expect(capturedMentions).toHaveLength(1);
@@ -3804,7 +3817,7 @@ describe("WakerSubscriptionManager", () => {
     let wakeCount = 0;
 
     const mockPerspectiveClient = {
-      querySparql: vi.fn(() => Promise.reject(new Error("network error"))),
+      modelQuery: vi.fn(() => Promise.reject(new Error("network error"))),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -3826,7 +3839,7 @@ describe("WakerSubscriptionManager", () => {
       query: "SELECT * FROM link",
     });
 
-    mock.deliver([{ source: "msg-1", target: "literal://string:Hey @Marvin!" }]);
+    mock.deliver({ instances: [{ id: "msg-1" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
 
     // Should still wake with empty parents for the message
@@ -3844,7 +3857,7 @@ describe("WakerSubscriptionManager disposal races", () => {
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   });
   const perspectiveClient = {
-    querySparql: vi.fn(() => Promise.resolve([])),
+    modelQuery: vi.fn(() => Promise.resolve({ instances: [] })),
   };
 
   /** A proxy whose subscribe() only settles when the test says so. */

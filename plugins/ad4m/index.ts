@@ -756,15 +756,20 @@ Notes:
       type: "mention",
       perspective: perspectiveId,
       channel: "",
+      // A model query over the built-in TextContent (#1446).
+      className: data.class ?? data.subscription?.class,
       query: data.query ?? data.subscription?.query,
       neighbourhood: data.neighbourhood,
-      // What holds a mentioned item here (has_child, Container's children), for the parent walk.
-      ...(Array.isArray(data.containment_predicates) ? { containment: data.containment_predicates } : {}),
     };
 
     if (!subscription.query) {
       throw new Error(
         "MCP tool did not return a query. Is the perspective accessible?",
+      );
+    }
+    if (!subscription.className) {
+      throw new Error(
+        "MCP tool returned a SPARQL mention query; this waker reads mentions through TextContent. Update the executor.",
       );
     }
 
@@ -1368,7 +1373,13 @@ Notes:
       for (const sub of saved) {
         if (stale()) return true;
         try {
-          await createLiveSubscription(sub);
+          // Saved before mentions were read through TextContent (#1446):
+          // raw SPARQL, so ask the executor for the current subscription.
+          if (sub.type === "mention" && !sub.className) {
+            await subscribeToMentionsForPerspective(sub.perspective);
+          } else {
+            await createLiveSubscription(sub);
+          }
           if (stale()) return true;
           logger.info(
             `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,
