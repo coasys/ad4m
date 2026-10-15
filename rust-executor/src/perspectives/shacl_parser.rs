@@ -2447,7 +2447,8 @@ mod tests {
 
     /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds
     /// shapes (one using every field `SHACLShape.toJSON()` sends, one with
-    /// empty action lists) and the exact links this writer stores for each.
+    /// empty action lists, one abstract class) and the exact links this
+    /// writer stores for each.
     /// The SDK test "decodes the executor's golden links back to the shape it
     /// sent" reads the same file through `SHACLShape.fromLinks`, so a field
     /// this writer drops fails one side.
