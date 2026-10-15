@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text with any HTML turned into plain text. Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text with any HTML turned into plain text. Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -627,7 +627,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "nullable": true
         },
         "parent": {
-          "description": "Parent node URI whose ad4m://has_child children are read (e.g. a\nChannel's id). A bare string is wrapped as a literal URI.",
+          "description": "Parent node URI whose children are read (e.g. a Channel's id): via\nad4m://has_child, and via the children relation of any class\nimplementing the built-in Container (e.g. we://child). A bare string\nis wrapped as a literal URI.",
           "type": "string"
         },
         "limit": {
@@ -680,7 +680,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_children",
-    "description": "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript.",
+    "description": "List the children of a node, regardless of their class: those linked via ad4m://has_child and via the children relation of any class implementing the built-in Container (e.g. we://child): id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetChildrenParams",

@@ -1,5 +1,6 @@
 //! `instance_transcript` — a compact, chronological reading of one class's
-//! `ad4m://has_child` children under a node: the most recent N instances
+//! children under a node (`ad4m://has_child`, and the `children` of any class
+//! conforming to the built-in `Container`): the most recent N instances
 //! with their text property, author display name and timestamp, formatted
 //! as plain text an LLM can read in one go instead of N+1 tool calls.
 //!
@@ -19,8 +20,8 @@
 
 use super::plain_text::to_plain_text;
 use super::{
-    class_properties, error_json, find_property, link_target, resolve_class, run_model_query,
-    Ad4mMcpHandler, PropView, HAS_CHILD, MAX_QUERY_LIMIT,
+    class_properties, containment_predicates, error_json, find_property, link_target,
+    resolve_class, run_model_query, Ad4mMcpHandler, PropView, MAX_QUERY_LIMIT,
 };
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
@@ -46,8 +47,10 @@ pub struct InstanceTranscriptParams {
     /// describe_perspective. Omit it to read every class that has text,
     /// whatever the app calls it (the built-in TextContent).
     pub class_name: Option<String>,
-    /// Parent node URI whose ad4m://has_child children are read (e.g. a
-    /// Channel's id). A bare string is wrapped as a literal URI.
+    /// Parent node URI whose children are read (e.g. a Channel's id): via
+    /// ad4m://has_child, and via the children relation of any class
+    /// implementing the built-in Container (e.g. we://child). A bare string
+    /// is wrapped as a literal URI.
     pub parent: String,
     /// How many of the most recent instances to include (default 50, max 500)
     pub limit: Option<usize>,
@@ -220,7 +223,7 @@ impl Ad4mMcpHandler {
     /// Read the most recent children under a node that carry text, as a
     /// transcript: of one class, or through TextContent.
     #[tool(
-        description = "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text with any HTML turned into plain text. Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text with any HTML turned into plain text. Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -276,14 +279,21 @@ impl Ad4mMcpHandler {
             .limit
             .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
             .clamp(1, MAX_QUERY_LIMIT);
-        let query = json!({
-            "parent": { "id": link_target(parent), "predicate": HAS_CHILD },
-            "order": [["timestamp", "desc"]],
-            "limit": limit,
-        });
-        // Each source newest-first with the same limit, merged newest-first
+        // Children through every containment predicate (`has_child`, and the
+        // `children` of each class conforming to Container): each source
+        // under each, newest-first with the same limit, merged newest-first
         // and cut to `limit`, so the most recent of all of them stay. A
-        // record two sources both read is shown once.
+        // record two of them both read is shown once.
+        let queries: Vec<Value> = containment_predicates(&perspective)
+            .into_iter()
+            .map(|predicate| {
+                json!({
+                    "parent": { "id": link_target(parent), "predicate": predicate },
+                    "order": [["timestamp", "desc"]],
+                    "limit": limit,
+                })
+            })
+            .collect();
         let label = sources
             .iter()
             .map(|s| s.label.as_str())
@@ -292,19 +302,24 @@ impl Ad4mMcpHandler {
         let mut rows: Vec<(Value, &str)> = Vec::new();
         let mut total = 0;
         for source in &sources {
-            let (instances, count) =
-                match run_model_query(&perspective, &source.query_as, &query).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return error_json(format!("Error reading {} instances: {e}", source.label))
-                    }
-                };
-            total += count;
-            rows.extend(
-                instances
-                    .into_iter()
-                    .map(|inst| (inst, source.text_property.as_str())),
-            );
+            for query in &queries {
+                let (instances, count) =
+                    match run_model_query(&perspective, &source.query_as, query).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return error_json(format!(
+                                "Error reading {} instances: {e}",
+                                source.label
+                            ))
+                        }
+                    };
+                total += count;
+                rows.extend(
+                    instances
+                        .into_iter()
+                        .map(|inst| (inst, source.text_property.as_str())),
+                );
+            }
         }
         let timestamp = |inst: &Value| {
             inst.get("timestamp")

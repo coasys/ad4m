@@ -2852,3 +2852,109 @@ async fn instance_update_returns_the_store_error_of_the_abstract_check() {
     );
     assert_eq!(got["body"], "hello", "{got}");
 }
+
+// ── Containers (#1446): We's shapes, unchanged ──────────────────────────────
+
+/// We's `CollectionBlock` and `TextBlock` (We origin/dev 4e48f3b6) as the SDK
+/// writes them. `core/src/perspectives/Container.test.ts` holds these files
+/// equal to what We's decorators generate.
+const WE_COLLECTION_BLOCK_SDNA: &str = include_str!("we_shapes/collection_block.json");
+const WE_TEXT_BLOCK_SDNA: &str = include_str!("we_shapes/text_block.json");
+
+async fn we_setup() -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+    setup_with(
+        &[
+            ("CollectionBlock", WE_COLLECTION_BLOCK_SDNA),
+            ("TextBlock", WE_TEXT_BLOCK_SDNA),
+        ],
+        false,
+    )
+    .await
+}
+
+/// A We call: a `CollectionBlock { kind: 'call' }` holding a `TextBlock`
+/// through `we://child`, the link We writes. Returns (call, block).
+async fn we_call(handler: &Ad4mMcpHandler, uuid: &str, text: &str) -> (String, String) {
+    let mut ids = Vec::new();
+    for (class_name, properties) in [
+        ("CollectionBlock", props(&[("kind", json!("call"))])),
+        ("TextBlock", props(&[("text", json!(text))])),
+    ] {
+        let created = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.to_string(),
+                    class_name: class_name.into(),
+                    properties: Some(properties),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(created["created"], true, "{created}");
+        ids.push(created["base_uri"].as_str().unwrap().to_string());
+    }
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.to_string(),
+                source: ids[0].clone(),
+                predicate: "we://child".into(),
+                target: ids[1].clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    (ids[0].clone(), ids[1].clone())
+}
+
+/// With We's shapes as they are, `CollectionBlock` conforms to the built-in
+/// Container through its `children` and `TextBlock` to TextContent through
+/// its `text`, by name: no alias, no We change. Containment is then
+/// `has_child` and `we://child`.
+#[tokio::test(flavor = "multi_thread")]
+async fn we_blocks_conform_to_the_builtins_by_name() {
+    use crate::perspectives::model_query::builtin_classes::{CONTAINER_URI, TEXT_CONTENT_URI};
+    let (_handler, uuid, _guard) = we_setup().await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let classes = |uri: &str| perspective.resolve_abstract(uri).unwrap().classes.clone();
+    assert_eq!(classes(CONTAINER_URI), vec!["CollectionBlock".to_string()]);
+    assert_eq!(classes(TEXT_CONTENT_URI), vec!["TextBlock".to_string()]);
+    assert_eq!(
+        containment_predicates(&perspective),
+        vec!["ad4m://has_child".to_string(), "we://child".to_string()]
+    );
+}
+
+/// `get_children` and `instance_transcript` read a We call's blocks: its
+/// `we://child` links, beside `has_child`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_we_calls_blocks_are_its_children() {
+    let (handler, uuid, _guard) = we_setup().await;
+    let (call, block) = we_call(&handler, &uuid, "Hey @data, can you summarise?").await;
+
+    let listed = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: call.clone(),
+                limit: None,
+            }))
+            .await,
+    );
+    let ids: Vec<&str> = listed["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![block.as_str()], "{listed}");
+
+    let transcript = handler
+        .instance_transcript(Parameters(transcript(&uuid, None, &call)))
+        .await;
+    assert!(
+        transcript.contains("Hey @data, can you summarise?"),
+        "{transcript}"
+    );
+}

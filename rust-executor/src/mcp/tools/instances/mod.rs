@@ -73,6 +73,7 @@ pub(crate) use validate::{
 
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl;
+use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -97,6 +98,19 @@ pub(super) const CLASS_SYNC_WAIT: Duration = Duration::from_secs(5);
 /// `instance_query` — the same child link the per-class `{class}_create` /
 /// `{class}_list` tools use.
 pub(super) const HAS_CHILD: &str = "ad4m://has_child";
+
+/// The predicates a node holds its children under (#1446): `ad4m://has_child`
+/// first, then the `children` relation of every class that conforms to the
+/// built-in `Container`, whatever predicate it uses (We's `CollectionBlock`:
+/// `we://child`). On an error reading through `Container`, `has_child` alone.
+pub(crate) fn containment_predicates(perspective: &PerspectiveInstance) -> Vec<String> {
+    let mut predicates = vec![HAS_CHILD.to_string()];
+    match perspective.predicates_through(CONTAINER_URI, "children") {
+        Ok(declared) => predicates.extend(declared.into_iter().filter(|p| p != HAS_CHILD)),
+        Err(e) => log::warn!("containment: reading through Container failed: {e}"),
+    }
+    predicates
+}
 
 // ============================================================================
 // Schema projection — SHACL shape → data an agent can read

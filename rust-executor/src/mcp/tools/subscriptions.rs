@@ -262,6 +262,15 @@ impl Ad4mMcpHandler {
             log::warn!("get_mention_waker_config: no Message class has a body, falling back to unscoped (but ontology-excluded) query");
         }
         let query = build_mention_query(&names, &did, &text_predicates);
+        // What holds a mentioned item, so the waker walks every kind of
+        // parent it can have, not only `has_child` (#1446).
+        let containment: Vec<String> = match perspective {
+            Some(ref p) => super::instances::containment_predicates(p),
+            None => vec!["ad4m://has_child".to_string()],
+        }
+        .into_iter()
+        .filter(|p| validate_sparql_iri(p).is_ok())
+        .collect();
 
         let sub_id = build_mention_sub_id(perspective_id);
 
@@ -276,6 +285,7 @@ impl Ad4mMcpHandler {
             "names": names,
             "perspective_id": perspective_id,
             "query": query,
+            "containment_predicates": containment,
             "subscription": subscription,
             "message": format!(
                 "Add the subscription entry to your waker config and restart the waker. \
