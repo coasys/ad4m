@@ -38,11 +38,12 @@ const MESSAGE_SDNA: &str = r#"{
   "properties":[
     {"path":"ns://entry_type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
     {"path":"ns://body","name":"body","min_count":0,"max_count":1,"resolve_language":"literal","alias":{"TextContent":"text"},"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]},
-    {"path":"ns://tag","name":"tags","setter":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}]}
+    {"path":"ns://tag","name":"tags","resolve_language":"literal","setter":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}]}
   ]
 }"#;
 
-/// `question`, aliased `text`; `tags` on the predicate Message uses.
+/// `question`, aliased `text`; `tags` as Message has it. Signed literals:
+/// each write mints a new link, so a second append would show.
 const POLL_SDNA: &str = r#"{
   "target_class":"ns://Poll",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://poll","target":"ns://open"}],
@@ -50,7 +51,7 @@ const POLL_SDNA: &str = r#"{
   "properties":[
     {"path":"ns://poll","name":"state","has_value":"ns://open","min_count":1,"max_count":1},
     {"path":"ns://question","name":"question","max_count":1,"alias":{"TextContent":"text"},"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://question","target":"value"}]},
-    {"path":"ns://tag","name":"tags","setter":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}]}
+    {"path":"ns://tag","name":"tags","resolve_language":"literal","setter":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}]}
   ]
 }"#;
 
@@ -186,14 +187,15 @@ async fn an_update_through_an_abstract_class_runs_each_classs_setter() {
 }
 
 /// Message and Poll both write `tags` with `addLink` on `ns://tag`: through
-/// Tagged, the append runs once.
+/// Tagged, the append runs once. (Signed literals: run twice, it would mint
+/// two links.)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_setter_two_classes_share_runs_once() {
     let (mut p, ctx) = dispatch_setup().await;
     p.update_subject(
         class("Tagged"),
         "ad4m://m1".into(),
-        serde_json::json!({"tags": ["ad4m://tag/a"]}),
+        serde_json::json!({"tags": ["a"]}),
         None,
         &ctx,
     )
