@@ -5679,14 +5679,11 @@ impl PerspectiveInstance {
         // Through an abstract class (#1435): each of the record's classes it
         // reads writes the value with its own setter.
         if self.is_abstract_class(&class_name)? {
-            let commands = self
+            let runs = self
                 .update_through_abstract(&class_name, &expression_address, &values, context)
                 .await?;
-            if commands.is_empty() {
-                return Ok(());
-            }
             return self
-                .execute_commands(commands, expression_address, vec![], batch_id, context)
+                .execute_runs(runs, expression_address, batch_id, context)
                 .await;
         }
 
