@@ -441,6 +441,10 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 #[derive(Clone)]
 pub struct SparqlStore {
     store: Arc<Store>,
+    /// Test-only: runs in `remove_link` after the still-referenced check and
+    /// before the commit, so a test can line two removals up at that point.
+    #[cfg(test)]
+    before_remove_commit: Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -498,6 +502,8 @@ impl SparqlStore {
         };
         Ok(SparqlStore {
             store: Arc::new(store),
+            #[cfg(test)]
+            before_remove_commit: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -718,6 +724,14 @@ impl SparqlStore {
             )
             .next()
             .is_some();
+
+        #[cfg(test)]
+        {
+            let hook = self.before_remove_commit.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
 
         if !still_referenced {
             let target_ref: TermRef = match &target_term {
@@ -2394,6 +2408,62 @@ mod tests {
             .query_links(Some("ad4m://remove"), None, None, None, None, None)
             .unwrap();
         assert_eq!(remove_links.len(), 0, "Remove links not fully removed");
+    }
+
+    /// Two links share one direct triple. Removing both at once, from two
+    /// threads, must remove the triple too. On RocksDB each removal reads a
+    /// snapshot in which the other link is still there; if both commit from
+    /// there, each keeps the triple for the other and it outlives both links.
+    ///
+    /// The hook holds each removal after its still-referenced check until the
+    /// other one has made its check as well. When removals are serialized the
+    /// second cannot reach the hook while the first waits, so the first goes
+    /// on after the timeout.
+    #[test]
+    fn two_concurrent_removals_sharing_a_triple_remove_it_on_disk() {
+        use std::sync::{Condvar, Mutex};
+        use std::time::Duration;
+
+        let signer = TestSigner::generate();
+        let dir = tempfile::tempdir().unwrap();
+        let svc = SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap();
+        let (s, p, t) = ("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let link1 = make_link_with_ts(&signer, s, p, t, "2024-01-01T00:00:00Z");
+        let link2 = make_link_with_ts(&signer, s, p, t, "2024-01-02T00:00:00Z");
+        svc.add_link(&link1).unwrap();
+        svc.add_link(&link2).unwrap();
+
+        let checked = Arc::new((Mutex::new(0usize), Condvar::new()));
+        *svc.before_remove_commit.lock().unwrap() = Some({
+            let checked = checked.clone();
+            Arc::new(move || {
+                let (count, cvar) = &*checked;
+                let mut count = count.lock().unwrap();
+                *count += 1;
+                cvar.notify_all();
+                let _ = cvar
+                    .wait_timeout_while(count, Duration::from_secs(2), |c| *c < 2)
+                    .unwrap();
+            })
+        });
+
+        let removers: Vec<_> = [link1, link2]
+            .into_iter()
+            .map(|link| {
+                let svc = svc.clone();
+                std::thread::spawn(move || svc.remove_link(&link).unwrap())
+            })
+            .collect();
+        for r in removers {
+            r.join().unwrap();
+        }
+
+        assert_eq!(*checked.0.lock().unwrap(), 2, "both removals ran the hook");
+        assert!(
+            !svc.has_triple(s, p, t).unwrap(),
+            "the direct triple outlived both of its links"
+        );
+        assert_eq!(svc.quad_count(), 0);
     }
 
     // ── Persistence tests ──
