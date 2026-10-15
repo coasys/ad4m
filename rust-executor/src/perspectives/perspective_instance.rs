@@ -5533,6 +5533,9 @@ impl PerspectiveInstance {
         let mut commands = self.get_constructor_actions(&class_name).await?;
         //log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}",
         //    commands.len(), constructor_start.elapsed());
+        // Each `collectionSetter`, run after the merged commands with the
+        // members as its parameters (as in `update_subject`).
+        let mut collection_runs = Vec::new();
 
         // Handle initial values if provided
         if let Some(obj) = initial_values {
@@ -5544,6 +5547,24 @@ impl PerspectiveInstance {
                     if let Some(setter_commands) =
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
+                        let (collection, setter_commands): (Vec<_>, Vec<_>) = setter_commands
+                            .into_iter()
+                            .partition(|c| c.action == Action::CollectionSetter);
+                        if !collection.is_empty() {
+                            collection_runs.extend(
+                                self.collection_setter_runs(
+                                    &class_name,
+                                    prop,
+                                    collection,
+                                    value,
+                                    context,
+                                )
+                                .await?,
+                            );
+                        }
+                        if setter_commands.is_empty() {
+                            continue;
+                        }
                         // An array value on a property whose setter actions are all
                         // `addLink` is a collection write: one setter execution per
                         // element, accumulating N links. Everywhere else an array
@@ -5635,15 +5656,14 @@ impl PerspectiveInstance {
 
         //let execute_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Executing {} commands...", commands.len());
-        // Execute the merged commands
-        self.execute_commands(
+        // Execute the merged commands, then each collection setter
+        let mut runs = vec![abstract_classes::Run {
             commands,
-            expression_address.clone(),
-            vec![],
-            batch_id.clone(),
-            context,
-        )
-        .await?;
+            parameters: vec![],
+        }];
+        runs.extend(collection_runs);
+        self.execute_runs(runs, expression_address, batch_id, context)
+            .await?;
 
         //log::info!("🎯 CREATE SUBJECT: Commands executed in {:?}", execute_start.elapsed());
         //log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
@@ -5688,6 +5708,7 @@ impl PerspectiveInstance {
         }
 
         let mut commands: Vec<Command> = Vec::new();
+        let mut runs = Vec::new();
         if let serde_json::Value::Object(obj) = values {
             for (prop, value) in obj.iter() {
                 let Some(setter_commands) =
@@ -5704,18 +5725,37 @@ impl PerspectiveInstance {
                     );
                     continue;
                 };
+                // A `collectionSetter` sets the members as its parameters, in
+                // a run of its own: with none it would set `[]`.
+                let (collection, setter): (Vec<_>, Vec<_>) = setter_commands
+                    .into_iter()
+                    .partition(|c| c.action == Action::CollectionSetter);
                 commands.extend(
-                    self.setter_commands(&class_name, prop, &setter_commands, value, context)
+                    self.setter_commands(&class_name, prop, &setter, value, context)
                         .await?,
                 );
+                if !collection.is_empty() {
+                    runs.extend(
+                        self.collection_setter_runs(&class_name, prop, collection, value, context)
+                            .await?,
+                    );
+                }
             }
         }
 
-        if commands.is_empty() {
+        if !commands.is_empty() {
+            runs.insert(
+                0,
+                abstract_classes::Run {
+                    commands,
+                    parameters: vec![],
+                },
+            );
+        }
+        if runs.is_empty() {
             return Ok(());
         }
-
-        self.execute_commands(commands, expression_address, vec![], batch_id, context)
+        self.execute_runs(runs, expression_address, batch_id, context)
             .await
     }
 

@@ -337,6 +337,33 @@ async fn a_collection_setter_through_an_abstract_class_sets_the_members() {
     assert!(targets_on(&p, "ad4m://f1", "ns://children").is_empty());
 }
 
+/// The same on the concrete class, which `perspective.updateSubject`
+/// reaches: an update sets exactly the members given, and so does a create.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collection_setter_on_a_concrete_class_sets_the_members() {
+    let (mut p, ctx) = relation_setup().await;
+    let old = vec![link("ad4m://f1", "ns://folder_child", "ad4m://c0")];
+    p.add_links(old, LinkStatus::Shared, None, &ctx)
+        .await
+        .unwrap();
+    let children = json!({"children": ["ad4m://c1", "ad4m://c2"]});
+    update(&mut p, &ctx, "Folder", "ad4m://f1", children.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        targets_on(&p, "ad4m://f1", "ns://folder_child"),
+        ["ad4m://c1", "ad4m://c2"]
+    );
+
+    create(&mut p, &ctx, "Folder", "ad4m://f2", children)
+        .await
+        .unwrap();
+    assert_eq!(
+        targets_on(&p, "ad4m://f2", "ns://folder_child"),
+        ["ad4m://c1", "ad4m://c2"]
+    );
+}
+
 /// `addX` / `removeX` / `setX` through an abstract class (the SDK sends
 /// `{"action", "value"}`) run each of the record's classes' adder, remover
 /// or setter, at its own predicate. Box has no setter: its members are set

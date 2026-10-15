@@ -319,21 +319,10 @@ impl PerspectiveInstance {
                     );
                 }
                 if !collection.is_empty() {
-                    // No name: nothing in the commands is replaced by a
-                    // member; `collectionSetter` reads only their values.
-                    let parameters: Vec<Parameter> = self
-                        .members(class, own, value, context)
-                        .await?
-                        .into_iter()
-                        .map(|m| Parameter {
-                            name: String::new(),
-                            value: Value::String(m),
-                        })
-                        .collect();
-                    runs.extend(collection.into_iter().map(|c| Run {
-                        commands: vec![c],
-                        parameters: parameters.clone(),
-                    }));
+                    runs.extend(
+                        self.collection_setter_runs(class, own, collection, value, context)
+                            .await?,
+                    );
                 }
             }
             if !has_action {
@@ -396,7 +385,7 @@ impl PerspectiveInstance {
     /// The members `value` names for `own` of `class`, each encoded as that
     /// property stores it: an array's elements, or a single value. `null`
     /// is refused: it names no members, and read as `[]` it would clear.
-    async fn members(
+    pub(super) async fn members(
         &self,
         class: &str,
         own: &str,
@@ -422,8 +411,39 @@ impl PerspectiveInstance {
         Ok(members)
     }
 
-    /// Run what [`Self::update_through_abstract`] returned, in one batch:
-    /// the caller's, or one made here when there are several runs.
+    /// One run per `collectionSetter` in `collection`, with the members
+    /// `value` names for `own` of `class` as its parameters. They have no
+    /// name: nothing in the commands is replaced by a member;
+    /// `collectionSetter` reads only their values.
+    pub(super) async fn collection_setter_runs(
+        &self,
+        class: &str,
+        own: &str,
+        collection: Vec<Command>,
+        value: &Value,
+        context: &AgentContext,
+    ) -> Result<Vec<Run>, AnyError> {
+        let parameters: Vec<Parameter> = self
+            .members(class, own, value, context)
+            .await?
+            .into_iter()
+            .map(|m| Parameter {
+                name: String::new(),
+                value: Value::String(m),
+            })
+            .collect();
+        Ok(collection
+            .into_iter()
+            .map(|c| Run {
+                commands: vec![c],
+                parameters: parameters.clone(),
+            })
+            .collect())
+    }
+
+    /// Run what [`Self::update_through_abstract`] (or a write on a concrete
+    /// class with a `collectionSetter`) returned, in one batch: the
+    /// caller's, or one made here when there are several runs.
     pub(super) async fn execute_runs(
         &mut self,
         runs: Vec<Run>,
@@ -566,11 +586,12 @@ impl PerspectiveInstance {
     }
 }
 
-/// One `execute_commands` run of an update through an abstract class.
+/// One `execute_commands` run of a write that sets a collection: a
+/// `collectionSetter` gets its members as parameters, in a run of its own.
 pub(super) struct Run {
-    commands: Vec<Command>,
+    pub(super) commands: Vec<Command>,
     /// The members a `collectionSetter` sets; empty otherwise.
-    parameters: Vec<Parameter>,
+    pub(super) parameters: Vec<Parameter>,
 }
 
 /// What an update through an abstract class does to one name.
