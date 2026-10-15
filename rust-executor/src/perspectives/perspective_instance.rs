@@ -66,6 +66,8 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+#[cfg(test)]
+pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).

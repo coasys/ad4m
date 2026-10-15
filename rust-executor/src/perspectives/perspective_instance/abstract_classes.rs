@@ -422,7 +422,7 @@ pub(super) mod faults {
 
     static FAIL_NEXT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
-    pub(in crate::perspectives) fn fail_next_index(perspective_uuid: &str) {
+    pub(crate) fn fail_next_index(perspective_uuid: &str) {
         FAIL_NEXT
             .lock()
             .unwrap()
