@@ -1633,6 +1633,18 @@ export class PerspectiveProxy {
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
 
+        // An abstract class (#1435) is never a record's class: its destructor
+        // removes its own predicates, not the record's. Marked by the presence
+        // of the link, as the executor reads it.
+        const shapePattern = new RegExp(`[/:#]${this.escapeRegExp(className)}Shape$`);
+        const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
+        if (markers.some((link) => shapePattern.test(link.data.source))) {
+            throw new Error(
+                `'${className}' is an abstract class: a record cannot be deleted through it. ` +
+                `Delete it through its own class, the \`__subjectClass\` a query on '${className}' returns.`
+            );
+        }
+
         // Get destructor actions from SHACL links (Prolog-free)
         let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");
 

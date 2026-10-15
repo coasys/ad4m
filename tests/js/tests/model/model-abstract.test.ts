@@ -5,8 +5,9 @@
  * `modelQuery`, subscriptions): it reads every installed class that has its
  * property names, or aliases for them, as one union. Rows keep their class,
  * an aliased property comes back under the abstract class's name, a class
- * without the name is left out, the abstract class cannot be created, and a
- * subscription picks up a class installed after it was opened.
+ * without the name is left out, the abstract class cannot be created and no
+ * record is written through it, and a subscription picks up a class installed
+ * after it was opened.
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --serial --exit \
@@ -18,6 +19,7 @@ import {
   Ad4mClient,
   Ad4mModel,
   Flag,
+  LinkQuery,
   LiveQuery,
   Model,
   PerspectiveProxy,
@@ -190,6 +192,45 @@ describe("Abstract model classes", function () {
     expect(String(error?.message ?? error)).to.contain("abstract class");
 
     expect(await perspective.subjectClassesOf([block.id])).to.deep.equal({ [block.id]: ["AbsBlock"] });
+  });
+
+  it("a record read through an abstract class is never written through it", async () => {
+    const { message } = await seed();
+    const refusal = async (write: () => Promise<unknown>) => {
+      try {
+        await write();
+      } catch (e: any) {
+        return String(e?.message ?? e);
+      }
+      return "(not refused)";
+    };
+
+    const [row] = await AbsText.findAll(perspective, { where: { text: "<p>hi @data</p>" } });
+    expect(row.id).to.equal(message.id);
+    row.text = "edited";
+    expect(await refusal(() => row.save())).to.contain(
+      "'AbsText' is an abstract class: a record cannot be updated through it. Write it through its own class, 'AbsMessage'",
+    );
+    expect(await refusal(() => row.delete())).to.contain("cannot be deleted through it");
+    expect(await refusal(() => AbsText.update(perspective, message.id, { text: "edited" }))).to.contain(
+      "cannot be updated through it",
+    );
+    expect(await refusal(() => perspective.removeSubject("AbsText", message.id))).to.contain(
+      "cannot be deleted through it",
+    );
+
+    // Nothing was written or removed: the abstract predicate is absent, the
+    // body and the record are as they were.
+    expect(await perspective.get(new LinkQuery({ source: message.id, predicate: "test://abs/text" }))).to.have.length(0);
+    const [own] = await AbsMessage.findAll(perspective);
+    expect(own.id).to.equal(message.id);
+    expect(own.body).to.equal("<p>hi @data</p>");
+
+    // Through its own class it goes through.
+    own.body = "edited";
+    await own.save();
+    const [again] = await AbsText.findAll(perspective, { where: { text: "edited" } });
+    expect(again?.id).to.equal(message.id);
   });
 
   it("an alias that clashes with a name of the class is refused at registration", async () => {

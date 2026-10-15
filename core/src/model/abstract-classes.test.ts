@@ -126,4 +126,29 @@ describe("abstract classes", () => {
     const instance = new Readable(perspective);
     await expect(instance.save()).rejects.toThrow("'Readable' is an abstract class and cannot be created");
   });
+
+  it("save() and delete() refuse a record read through an abstract class", async () => {
+    const touched: string[] = [];
+    const perspective: any = new Proxy({}, {
+      get: (_t, key) => {
+        if (key === "modelQuery") {
+          return async () => ({
+            instances: [{ id: "ad4m://m/1", __subjectClass: "Message", text: "hi" }],
+            totalCount: 1,
+          });
+        }
+        return () => { touched.push(String(key)); throw new Error(`the perspective was touched: ${String(key)}`); };
+      },
+    });
+    const [row] = await Readable.findAll(perspective);
+    expect(row.id).toBe("ad4m://m/1");
+    row.text = "edited";
+    await expect(row.save()).rejects.toThrow(
+      "'Readable' is an abstract class: a record cannot be updated through it. Write it through its own class, 'Message'.",
+    );
+    await expect(row.delete()).rejects.toThrow(
+      "'Readable' is an abstract class: a record cannot be deleted through it.",
+    );
+    expect(touched).toEqual([]);
+  });
 });
