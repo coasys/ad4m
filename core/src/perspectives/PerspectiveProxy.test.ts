@@ -3,6 +3,7 @@ import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
 import { SHACLFlow } from '../shacl/SHACLFlow';
+import { clearQueryCache } from '../model/query-cache';
 
 function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
@@ -435,5 +436,56 @@ describe('PerspectiveProxy.addFlow replace', () => {
     const registered = await proxy.get(new LinkQuery({ source: Literal.from('Todo').toUrl(), predicate: 'ad4m://flow_uri' }));
     expect(registered.map(l => l.data.target)).toEqual([todoFlow(2, 'new://').flowUri]);
     expect((await proxy.getFlow('Todo'))?.flowUri).toBe(todoFlow(2, 'new://').flowUri);
+  });
+});
+
+// A read right after an awaited write must not be served from the query
+// cache: `updateSubject` and `removeSubject` through an abstract class (#1435)
+// write in the executor, so they invalidate it like the other writes.
+describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
+  const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
+
+  function client() {
+    const marker = new LinkExpression();
+    marker.data = new Link({ source: 'test://ReadableShape', predicate: 'ad4m://abstract', target: 'literal:true' });
+    return {
+      querySparql: jest.fn()
+        .mockResolvedValueOnce([{ v: 'old' }])
+        .mockResolvedValueOnce([{ v: 'new' }]),
+      updateSubject: jest.fn().mockResolvedValue(true),
+      removeSubject: jest.fn().mockResolvedValue(true),
+      queryLinks: jest.fn().mockResolvedValue([marker]),
+    } as any;
+  }
+
+  beforeEach(() => clearQueryCache());
+
+  it('after updateSubject', async () => {
+    const proxy = createProxy(client());
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    await proxy.updateSubject('Readable', 'ad4m://m/1', { text: 'new' });
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
+  });
+
+  it('after removeSubject through an abstract class', async () => {
+    const c = client();
+    const proxy = createProxy(c);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    await proxy.removeSubject('Readable', 'ad4m://m/1');
+    expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'Readable', 'ad4m://m/1', undefined);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
+  });
+
+  it('after delete of a built-in TextContent row', async () => {
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+    const c = client();
+    const proxy = createProxy(c);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    const row = { constructor: { builtinUri: 'ad4m://TextContent' } };
+    await proxy.removeSubject(row, 'ad4m://m/1');
+    expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
+    jest.spyOn(Date, 'now').mockRestore();
   });
 });
