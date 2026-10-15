@@ -1843,14 +1843,21 @@ export class Ad4mModel {
   }
 
   /** `changedValues()` with each relation's members as IDs, as the relation
-   *  helpers send them: a member may be a model instance. */
+   *  helpers send them: a member may be a model instance. An action envelope
+   *  (`{ action: "adder", value }`) keeps its action, as `innerUpdate()` runs
+   *  it; an action it does not know is a setter there, so it is one here. */
   private changedValuesForDispatch(): Record<string, any> {
     const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
+    const ids = (value: any) =>
+      Array.isArray(value) ? value.map((v) => this.resolveRelationId(v)) : this.resolveRelationId(value);
     return Object.fromEntries(
       Object.entries(this.changedValues()).map(([key, value]) => {
         if (!relations[key] || value == null) return [key, value];
-        const ids = Array.isArray(value) ? value.map((v) => this.resolveRelationId(v)) : this.resolveRelationId(value);
-        return [key, ids];
+        if (value.action) {
+          const action = ["adder", "remover", "setter"].includes(value.action) ? value.action : "setter";
+          return [key, { action, value: ids(value.value) }];
+        }
+        return [key, ids(value)];
       })
     );
   }
