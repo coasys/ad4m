@@ -331,7 +331,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "describe_perspective",
-    "description": "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url \u2014 it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove / instance_transcript tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema.",
+    "description": "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url \u2014 it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "DescribePerspectiveParams",
@@ -610,19 +610,15 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for one specific class, for the full property maps, or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
-      "description": "Parameters for reading a transcript of one class's children under a node",
+      "description": "Parameters for reading a transcript of the children under a node that\ncarry text",
       "type": "object",
       "properties": {
         "perspective_id": {
           "description": "Perspective UUID",
-          "type": "string"
-        },
-        "class_name": {
-          "description": "Subject class of the children to read (e.g. \"Message\"), as listed by\ndescribe_perspective",
           "type": "string"
         },
         "parent": {
@@ -635,16 +631,10 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "format": "uint",
           "minimum": 0,
           "nullable": true
-        },
-        "text_property": {
-          "description": "Which property holds the text shown per entry. Defaults to `body`,\nfalling back to the class's identity property.",
-          "type": "string",
-          "nullable": true
         }
       },
       "required": [
         "perspective_id",
-        "class_name",
         "parent"
       ]
     }
@@ -680,7 +670,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_children",
-    "description": "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript.",
+    "description": "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent); to read the ones that carry text as a transcript, instance_transcript.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetChildrenParams",

@@ -937,6 +937,47 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(Value::Bool(true))
 }
 
+async fn update_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: UpdateSubjectRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let values: Value = serde_json::from_str(&body.values)
+        .map_err(|e| WsRpcError::bad_request(format!("values: {}", e)))?;
+    let mut perspective = guarded_perspective(&params).await?;
+    perspective
+        .update_subject(
+            crate::perspectives::perspective_instance::SubjectClassOption {
+                class_name: Some(body.subject_class),
+                query: None,
+            },
+            body.expression_address,
+            values,
+            body.batch_id,
+            &ctx.acts_as(),
+        )
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+async fn remove_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: RemoveSubjectRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let mut perspective = guarded_perspective(&params).await?;
+    perspective
+        .remove_subject(
+            crate::perspectives::perspective_instance::SubjectClassOption {
+                class_name: Some(body.subject_class),
+                query: None,
+            },
+            body.expression_address,
+            body.batch_id,
+            &ctx.acts_as(),
+        )
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
 async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GetSubjectDataRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -2457,6 +2498,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(update());
     map.method::<PerspectiveCreateSubjectParams, bool>("perspective.createSubject", create_subject)
         .guard(update());
+    map.method::<PerspectiveUpdateSubjectParams, bool>("perspective.updateSubject", update_subject)
+        .guard(update());
+    map.method::<PerspectiveRemoveSubjectParams, bool>("perspective.removeSubject", remove_subject)
+        .guard(update());
     map.method::<PerspectiveGetSubjectDataParams, String>(
         "perspective.getSubjectData",
         get_subject_data,
@@ -2778,6 +2823,22 @@ pub struct PerspectiveCreateSubjectParams {
     pub uuid: String,
     #[serde(flatten)]
     pub body: CreateSubjectRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveUpdateSubjectParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: UpdateSubjectRequest,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct PerspectiveRemoveSubjectParams {
+    pub uuid: String,
+    #[serde(flatten)]
+    pub body: RemoveSubjectRequest,
 }
 
 #[derive(Deserialize, TS)]

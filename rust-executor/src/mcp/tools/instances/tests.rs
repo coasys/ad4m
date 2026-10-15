@@ -1691,45 +1691,22 @@ async fn add_child_and_get_children_are_class_agnostic() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn instance_transcript_reads_children_chronologically() {
-    let (handler, uuid, _guard) = setup(false).await;
-    let channel = parse(
-        &handler
-            .instance_create(Parameters(InstanceCreateParams {
-                perspective_id: uuid.clone(),
-                class_name: "Channel".into(),
-                properties: Some(props(&[("name", json!("general"))])),
-                base_uri: None,
-                parent: None,
-            }))
-            .await,
-    );
-    let channel = channel["base_uri"].as_str().unwrap().to_string();
-
-    for body in ["first words", "second words", "third words"] {
-        let m = parse(
-            &handler
-                .instance_create(Parameters(InstanceCreateParams {
-                    perspective_id: uuid.clone(),
-                    class_name: "Message".into(),
-                    properties: Some(props(&[("body", json!(body))])),
-                    base_uri: None,
-                    parent: Some(channel.clone()),
-                }))
-                .await,
-        );
-        assert_eq!(m["created"], true, "{m}");
-        // Distinct reifier timestamps so the chronological order is defined.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (handler, uuid, _guard) =
+        setup_with(&[("Channel", CHANNEL_SDNA), ("Block", BLOCK_SDNA)], false).await;
+    let channel = "ad4m://test/channel-chrono";
+    for text in ["first words", "second words", "third words"] {
+        create_under(
+            &handler,
+            &uuid,
+            "Block",
+            props(&[("title", json!("t")), ("text", json!(text))]),
+            channel,
+        )
+        .await;
     }
 
     let all = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: "message".into(), // case-insensitive class name
-            parent: channel.clone(),
-            limit: None,
-            text_property: None,
-        }))
+        .instance_transcript(Parameters(transcript(&uuid, channel)))
         .await;
     assert!(!all.starts_with("(showing"), "{all}");
     let pos = |needle: &str| {
@@ -1738,94 +1715,40 @@ async fn instance_transcript_reads_children_chronologically() {
     };
     assert!(pos("first words") < pos("second words") && pos("second words") < pos("third words"));
     assert!(all.contains("(did:key:"), "author DID per entry: {all}");
-    assert_eq!(
-        all.matches("]:\n").count() + all.matches("):\n").count(),
-        3,
-        "{all}"
-    );
+    assert_eq!(all.matches("):\n").count(), 3, "{all}");
 
     let last_two = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: "Message".into(),
-            parent: channel.clone(),
             limit: Some(2),
-            text_property: None,
+            ..transcript(&uuid, channel)
         }))
         .await;
     assert!(
-        last_two.starts_with("(showing last 2 of 3 Message instances"),
+        last_two.starts_with(&format!(
+            "(showing last 2 of 3 TextContent instances under {channel})"
+        )),
         "{last_two}"
     );
     assert!(!last_two.contains("first words"), "{last_two}");
     assert!(last_two.find("second words").unwrap() < last_two.find("third words").unwrap());
 
-    // Explicit text property on a class without `body`: the Channel's name.
-    let channels = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: "Channel".into(),
-            parent: "ad4m://self".into(),
-            limit: None,
-            text_property: Some("name".into()),
-        }))
-        .await;
-    assert!(channels.starts_with("(no Channel instances"), "{channels}");
-
-    let bad_prop = parse(
+    let blank = parse(
         &handler
-            .instance_transcript(Parameters(InstanceTranscriptParams {
-                perspective_id: uuid.clone(),
-                class_name: "Message".into(),
-                parent: channel.clone(),
-                limit: None,
-                text_property: Some("subject".into()),
-            }))
+            .instance_transcript(Parameters(transcript(&uuid, "  ")))
             .await,
     );
-    let err = bad_prop["error"].as_str().unwrap();
-    assert!(err.contains("subject") && err.contains("body"), "{err}");
-
-    // A collection is a property of the class but not a text property: the
-    // error says so and offers only the single-valued ones.
-    let collection_prop = parse(
-        &handler
-            .instance_transcript(Parameters(InstanceTranscriptParams {
-                perspective_id: uuid.clone(),
-                class_name: "Channel".into(),
-                parent: "ad4m://self".into(),
-                limit: None,
-                text_property: Some("messages".into()),
-            }))
-            .await,
-    );
-    let err = collection_prop["error"].as_str().unwrap();
     assert!(
-        err.contains("'messages'") && err.contains("collection"),
-        "{err}"
-    );
-    let (_, offered) = err
-        .split_once("Single-valued properties:")
-        .unwrap_or_else(|| panic!("no property list in: {err}"));
-    assert!(
-        offered.contains("name") && offered.contains("description"),
-        "{err}"
-    );
-    assert!(
-        !offered.contains("messages"),
-        "collections must not be offered as text properties: {err}"
+        blank["error"].as_str().unwrap_or("").contains("parent"),
+        "{blank}"
     );
 
     let empty = handler
-        .instance_transcript(Parameters(InstanceTranscriptParams {
-            perspective_id: uuid.clone(),
-            class_name: "Message".into(),
-            parent: "ad4m://obj/emptyroom".into(),
-            limit: None,
-            text_property: None,
-        }))
+        .instance_transcript(Parameters(transcript(&uuid, "ad4m://obj/emptyroom")))
         .await;
-    assert_eq!(empty, "(no Message instances under ad4m://obj/emptyroom)");
+    assert_eq!(
+        empty,
+        "(no TextContent instances under ad4m://obj/emptyroom)"
+    );
 }
 
 #[test]
@@ -2305,4 +2228,382 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
         messages.is_none_or(|m| m.is_empty()),
         "a failed add_to_collection must not leave the item linked: {got}"
     );
+}
+
+/// Abstract (#1435): anything with `body` and `replies`, on predicates no
+/// concrete class here reads, so a write through it that is not dispatched
+/// lands where it can be seen.
+const READABLE_SDNA: &str = r#"{
+  "target_class": "flux://Readable",
+  "abstract": true,
+  "properties": [
+    {"path":"flux://text","name":"body","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://text","target":"value"}]},
+    {"path":"flux://reply","name":"replies","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"flux://reply","target":"value"}]}
+  ]
+}"#;
+
+/// Concrete, conforms to Readable with predicates of its own.
+const THREAD_SDNA: &str = r#"{
+  "target_class": "flux://Thread",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"flux://Thread"}
+  ],
+  "destructor_actions": [
+    {"action":"removeLink","source":"this","predicate":"rdf://type","target":"flux://Thread"}
+  ],
+  "properties": [
+    {"path":"rdf://type","name":"type","has_value":"flux://Thread","min_count":1,"max_count":1},
+    {"path":"flux://thread_body","name":"body","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://thread_body","target":"value"}]},
+    {"path":"flux://thread_reply","name":"replies","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"flux://thread_reply","target":"value"}]}
+  ]
+}"#;
+
+/// Through an abstract class, `instance_update` and `instance_remove` go to
+/// the record's own class (the dispatch itself is tested on the
+/// perspective). Collection membership and the generated write tools, which
+/// write at one class's predicates, are refused; its generated tools are
+/// its reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_through_an_abstract_class() {
+    let (handler, uuid, _guard) = setup_with(
+        &[("Thread", THREAD_SDNA), ("Readable", READABLE_SDNA)],
+        true,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                properties: Some(props(&[("body", json!("hello"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let thread = created["base_uri"].as_str().unwrap().to_string();
+    let get = || async {
+        parse(
+            &handler
+                .instance_get(Parameters(InstanceGetParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Thread".into(),
+                    base_uri: thread.clone(),
+                }))
+                .await,
+        )
+    };
+
+    let names: Vec<String> = handler
+        .exposed_tools()
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "readable_get_replies"),
+        "{names:?}"
+    );
+    for write in ["readable_create", "readable_delete", "readable_set_body"] {
+        assert!(!names.iter().any(|n| n == write), "{write}: {names:?}");
+    }
+    let refused = handler
+        .dispatch_non_router_tool(
+            "readable_set_body",
+            Some(props(&[
+                ("perspective_id", json!(uuid.clone())),
+                ("expression_address", json!(thread.clone())),
+                ("value", json!("edited")),
+            ])),
+        )
+        .await
+        .expect("a tool result");
+    let text = refused
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<String>();
+    assert!(text.contains("generated tools only read"), "{text}");
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+                collection: "replies".into(),
+                item_uri: "ad4m://obj/reply".into(),
+            }))
+            .await,
+    );
+    assert!(
+        added["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("collection membership is written through the record's own class"),
+        "{added}"
+    );
+
+    let update = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+                properties: props(&[("body", json!("edited"))]),
+            }))
+            .await,
+    );
+    assert_eq!(update["success"], true, "{update}");
+    assert_eq!(get().await["body"], "edited");
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    for predicate in ["flux://text", "flux://reply"] {
+        assert!(perspective
+            .get_links(&LinkQuery {
+                source: Some(thread.clone()),
+                predicate: Some(predicate.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    let removed = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+    let gone = get().await;
+    assert!(
+        gone["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("No Thread instance"),
+        "{gone}"
+    );
+}
+
+// ── Reading through TextContent (#1446) ─────────────────────────────────────
+
+/// A class that aliases a property of another name to TextContent's `text`,
+/// and has an identity property that is not the text.
+const ALIASED_NOTE_SDNA: &str = r#"{
+  "target_class": "app://Note",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"app://kind","target":"app://note"}
+  ],
+  "properties": [
+    {"path":"app://kind","name":"kind","has_value":"app://note","min_count":1,"max_count":1},
+    {"path":"app://title","name":"title","datatype":"xsd:string","max_count":1,"identity":true,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"app://title","target":"value"}]},
+    {"path":"app://content","name":"content","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "resolve_language":"literal","alias":{"TextContent":"text"},
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"app://content","target":"value"}]}
+  ]
+}"#;
+
+/// A We-shaped block, with its own `text` and an identity property that is
+/// not the text.
+const BLOCK_SDNA: &str = r#"{
+  "target_class": "we://Block",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"we://kind","target":"we://block"}
+  ],
+  "properties": [
+    {"path":"we://kind","name":"kind","has_value":"we://block","min_count":1,"max_count":1},
+    {"path":"we://title","name":"title","datatype":"xsd:string","max_count":1,"identity":true,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://title","target":"value"}]},
+    {"path":"we://text","name":"text","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://text","target":"value"}]}
+  ]
+}"#;
+
+async fn create_under(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class_name: &str,
+    properties: Map<String, Value>,
+    parent: &str,
+) -> String {
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: class_name.into(),
+                properties: Some(properties),
+                base_uri: None,
+                parent: Some(parent.to_string()),
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    // Distinct reifier timestamps so the chronological order is defined.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    created["base_uri"].as_str().unwrap().to_string()
+}
+
+fn transcript(uuid: &str, parent: &str) -> InstanceTranscriptParams {
+    InstanceTranscriptParams {
+        perspective_id: uuid.to_string(),
+        parent: parent.to_string(),
+        limit: None,
+    }
+}
+
+/// A transcript is a model query on TextContent: a class's aliased `content`
+/// and a We block's `text`, in one chronology, each text as stored (HTML
+/// here) — never the identity property (`title`) of either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transcript_reads_through_text_content() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("Channel", CHANNEL_SDNA),
+            ("Note", ALIASED_NOTE_SDNA),
+            ("Block", BLOCK_SDNA),
+        ],
+        false,
+    )
+    .await;
+    let channel = "ad4m://test/channel-tc";
+    create_under(
+        &handler,
+        &uuid,
+        "Note",
+        props(&[
+            ("title", json!("a note")),
+            (
+                "content",
+                json!(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#),
+            ),
+        ]),
+        channel,
+    )
+    .await;
+    create_under(
+        &handler,
+        &uuid,
+        "Block",
+        props(&[
+            ("title", json!("notes")),
+            ("text", json!("<ul><li>one</li><li>two</li></ul>")),
+        ]),
+        channel,
+    )
+    .await;
+
+    let all = handler
+        .instance_transcript(Parameters(transcript(&uuid, channel)))
+        .await;
+    let hey = all
+        .find(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#)
+        .unwrap_or_else(|| panic!("the note's text, as stored:\n{all}"));
+    let list = all
+        .find("<ul><li>one</li><li>two</li></ul>")
+        .unwrap_or_else(|| panic!("the block's text, as stored:\n{all}"));
+    assert!(hey < list, "oldest first:\n{all}");
+
+    assert!(
+        !all.contains("a note") && !all.contains("notes"),
+        "the text, not the identity property:\n{all}"
+    );
+}
+
+/// The transcript is TextContent's answer and nothing else: a `Message` whose
+/// `body` is not aliased to `text` does not conform, so it is not shown next
+/// to a block that does, under the same parent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transcript_has_only_what_conforms_to_text_content() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("Channel", CHANNEL_SDNA),
+            ("Message", MESSAGE_SDNA),
+            ("Block", BLOCK_SDNA),
+        ],
+        false,
+    )
+    .await;
+    let channel = "ad4m://test/channel-plain";
+    create_under(
+        &handler,
+        &uuid,
+        "Message",
+        props(&[("body", json!("<p>plain body</p>"))]),
+        channel,
+    )
+    .await;
+    create_under(
+        &handler,
+        &uuid,
+        "Block",
+        props(&[("title", json!("b")), ("text", json!("<p>block text</p>"))]),
+        channel,
+    )
+    .await;
+    let all = handler
+        .instance_transcript(Parameters(transcript(&uuid, channel)))
+        .await;
+    assert!(all.contains("<p>block text</p>"), "{all}");
+    assert!(!all.contains("plain body"), "{all}");
+    assert_eq!(all.matches("):\n").count(), 1, "{all}");
+}
+
+/// A store error while `instance_update` asks whether the class is abstract
+/// is returned. Read as "not abstract", the update would go on.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_update_returns_the_store_error_of_the_abstract_check() {
+    let (handler, uuid, _guard) = setup_with(
+        &[("Thread", THREAD_SDNA), ("Readable", READABLE_SDNA)],
+        true,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                properties: Some(props(&[("body", json!("hello"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let thread = created["base_uri"].as_str().unwrap().to_string();
+
+    crate::perspectives::perspective_instance::fail_next_index(&uuid);
+    let update = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+                properties: props(&[("body", json!("edited"))]),
+            }))
+            .await,
+    );
+    assert!(
+        update["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("injected store error"),
+        "{update}"
+    );
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                base_uri: thread,
+            }))
+            .await,
+    );
+    assert_eq!(got["body"], "hello", "{got}");
 }

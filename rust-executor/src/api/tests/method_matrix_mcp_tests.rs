@@ -919,10 +919,8 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
             Box::pin(async move {
                 h.instance_transcript(Parameters(instances::InstanceTranscriptParams {
                     perspective_id: uuid,
-                    class_name: CLASS.into(),
                     parent: "matrix://s".into(),
                     limit: None,
-                    text_property: None,
                 }))
                 .await
             })

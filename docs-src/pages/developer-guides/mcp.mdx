@@ -145,7 +145,7 @@ These tools are the default way to work with typed data. The subject class is an
 | `instance_add_to_collection` | `(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
 | `instance_remove_from_collection` | `(perspective_id, class_name, base_uri, collection, item_uri)` | Remove the membership link only; the item itself is untouched |
 | `instance_remove` | `(perspective_id, class_name, base_uri)` | Delete an instance and every link touching it |
-| `instance_transcript` | `(perspective_id, class_name, parent, limit?, text_property?)` | The newest N instances of one class under a parent, as a readable chronological transcript — the way to read a channel |
+| `instance_transcript` | `(perspective_id, parent, limit?)` | The newest N children under a parent that carry text, as a readable chronological transcript — the way to read a channel. One query on the built-in abstract class TextContent: every class with a `text` property or a property aliased to `text`; read any other class with `instance_query` |
 | `add_child` / `get_children` | `(perspective_id, parent, child)` / `(perspective_id, parent, limit?)` | The raw `ad4m://has_child` tree, class-agnostic: neither node has to be a subject-class instance |
 | `execute_commands` | `(perspective_id, expression_address, commands, parameters?)` | Escape hatch: raw SDNA `{action, source, predicate, target}` commands on one instance. **Not** SHACL-validated |
 

@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import websocketPlugin from "@fastify/websocket";
 import { AuthManager, ChallengeStore } from "./auth.js";
 import { LinkServerDB } from "./db.js";
+import { buildOperatorApp, type OperatorOptions } from "./operator.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import { registerRoutes, type RouteContext } from "./routes.js";
 import { TelepresenceManager } from "./telepresence.js";
@@ -42,10 +43,17 @@ export interface ServerOptions {
   sessionSweepIntervalMs?: number;
   /** WebSocket rate-limit and auth-timeout overrides. */
   wsOptions?: WsManagerOptions;
+  /**
+   * Builds the operator admission app (operator.ts) next to the public one.
+   * The caller listens on it separately, on loopback only. Off by default.
+   */
+  operator?: OperatorOptions;
 }
 
 export interface BuiltServer {
   app: FastifyInstance;
+  /** Present when `operator` was given; not listening until the caller says so. */
+  operatorApp?: FastifyInstance;
   db: LinkServerDB;
   close: () => Promise<void>;
 }
@@ -101,6 +109,13 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   registerRoutes(app, ctx);
   ws.register(app);
 
+  const operatorApp = opts.operator
+    ? await buildOperatorApp(
+        { db, auth, ws, telepresence },
+        { logger: opts.logger ?? false, ...opts.operator }
+      )
+    : undefined;
+
   // Periodic sweep of expired JWT sessions from the DB.
   const sweepInterval = setInterval(() => {
     db.sweepExpiredSessions();
@@ -120,8 +135,11 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   return {
     app,
+    operatorApp,
     db,
     close: async () => {
+      // The operator app shares the DB the public app's onClose closes.
+      await operatorApp?.close();
       await app.close();
     },
   };

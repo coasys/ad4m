@@ -256,6 +256,7 @@ the guard checked:
 | `perspective.removeAutoProcessor` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.removeSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.resyncSubscription` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -265,6 +266,7 @@ the guard checked:
 | `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.updateSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.verifyFlowReceipt` | `Owns(Perspective uuid, perspective:READ)` |
 | `runtime.addFriends` | `Executor(runtime.friends:CREATE)` |
 | `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |

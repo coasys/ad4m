@@ -20,7 +20,7 @@ from there.
 |---|---|
 | Public URL | `https://staging.ad4m.dev` (nginx, `*.ad4m.dev` certificate) → `127.0.0.1:12400` |
 | Deployed commit | `https://staging.ad4m.dev/status.json` |
-| Ports, all on 127.0.0.1 | RPC 12400, Holochain admin 12401, Holochain app 12402, MCP 3003 (not proxied) |
+| Ports, all on 127.0.0.1 | RPC 12400, Holochain admin 12401, Holochain app 12402, MCP 12403 (not proxied) |
 | Units | `ad4m-staging.service`, `ad4m-staging-update.service`, `ad4m-staging-update.timer` |
 | Config | `~/.config/ad4m-staging/executor-config.json` |
 | Secrets | `~/.config/ad4m-staging/secrets/admin-credential`, `…/unlock-passphrase` |
@@ -36,7 +36,7 @@ from there.
 | `ad4m-staging-update.timer` | `~/.config/systemd/user/` | Starts the update 10 minutes after the last one finished |
 | `update.sh` | `~/.local/share/ad4m-staging/bin/` | Fetch, build, snapshot, swap, gate, roll back; writes `status.json`. `update.sh rollback` goes back one build by hand |
 | `agent.mjs` | `~/.local/share/ad4m-staging/bin/` | `status` / `generate` over the WebSocket RPC, secrets read from files |
-| `executor-config.json` | `~/.config/ad4m-staging/` | Ports 12400/12401/12402, MCP 3003, all on 127.0.0.1; multi-user on; no SMTP; no dapp server |
+| `executor-config.json` | `~/.config/ad4m-staging/` | Ports 12400/12401/12402, MCP 12403, all on 127.0.0.1; multi-user on; no SMTP; no dapp server |
 | `nginx.conf.example` | `/etc/nginx/sites-available/staging-ad4m-dev` (root) | TLS vhost proxying to 127.0.0.1:12400, `/status.json` from `/var/www/ad4m-staging` |
 | `test/update.test.sh` | — | Runs `update.sh` against a throwaway remote with stubbed build and systemd |
 
@@ -267,7 +267,7 @@ service user without root.
 5. Nothing listens beyond loopback:
 
    ```bash
-   ss -ltnH '( sport = :12400 or sport = :12401 or sport = :12402 or sport = :3003 )' | awk '{print $4}' | sort -u
+   ss -ltnH '( sport = :12400 or sport = :12401 or sport = :12402 or sport = :12403 )' | awk '{print $4}' | sort -u
    ```
 
    Expected: only `127.0.0.1:…` and `[::1]:…` addresses.
