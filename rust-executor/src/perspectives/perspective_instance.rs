@@ -197,6 +197,22 @@ mod inbound_touches_shacl_tests {
         }
     }
 
+    /// The abstract-class marker and an alias can arrive in a diff of their
+    /// own; the cached abstract index must still be dropped (#1435).
+    #[test]
+    fn abstract_marker_and_alias_count_as_shacl() {
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ns://TextContentShape",
+            crate::perspectives::shacl_parser::ABSTRACT_PREDICATE,
+            "literal:true",
+        )])));
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ns://Message.body",
+            crate::perspectives::shacl_parser::ALIAS_PREDICATE,
+            "literal:string:%7B%7D",
+        )])));
+    }
+
     #[test]
     fn class_shape_assignment_triggers_invalidation() {
         assert!(inbound_touches_shacl(&diff(vec![link(

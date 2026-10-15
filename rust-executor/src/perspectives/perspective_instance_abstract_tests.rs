@@ -31,12 +31,14 @@ const CHAT_SDNA: &str = r#"{
   ]
 }"#;
 
-/// Flux-like: `body`, aliased `text` for TextContent.
+/// Flux-like: `body`, aliased `text` for TextContent. Its flag and body
+/// predicates are its own, so a trigger built before it was installed cannot
+/// match its writes by accident.
 const MESSAGE_SDNA: &str = r#"{
   "target_class":"ns://Message",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://message"}],
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://entry_type","target":"ns://message"}],
   "properties":[
-    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://entry_type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
     {"path":"ns://body","name":"body","min_count":0,"max_count":1,"resolve_language":"literal","alias":{"TextContent":"text"},"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]}
   ]
 }"#;
@@ -362,7 +364,7 @@ async fn a_subscription_picks_up_a_class_installed_after_subscribe() {
     .unwrap();
     perspective
         .check_subscribed_queries(writes(&[
-            ("ad4m://message/late", "ns://type", "ns://message"),
+            ("ad4m://message/late", "ns://entry_type", "ns://message"),
             ("ad4m://message/late", "ns://body", "literal://string:@data hi"),
         ]))
         .await;
@@ -374,6 +376,70 @@ async fn a_subscription_picks_up_a_class_installed_after_subscribe() {
         update.contains("ad4m://message/late")
             && update.contains("\"__subjectClass\":\"Message\"")
             && update.contains("\"text\""),
+        "{update}"
+    );
+}
+
+/// Records can exist before their class does: a peer's data arrives before
+/// its SHACL, or an app registers its class after writing. Installing the
+/// class alone must push them: the subscription's classes changed, so it
+/// re-runs whatever the write was.
+#[tokio::test(flavor = "multi_thread")]
+async fn installing_a_class_pushes_records_that_were_already_there() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("TextContent", TEXT_CONTENT_SDNA),
+        ("Chat", CHAT_SDNA),
+    ])
+    .await;
+    // A Message, written as raw links before its class exists.
+    perspective
+        .add_links(
+            vec![
+                Link {
+                    source: "ad4m://message/early".into(),
+                    predicate: Some("ns://entry_type".into()),
+                    target: "ns://message".into(),
+                },
+                Link {
+                    source: "ad4m://message/early".into(),
+                    predicate: Some("ns://body".into()),
+                    target: "literal://string:early".into(),
+                },
+            ],
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let (id, _, initial) = perspective
+        .model_subscribe_and_query(one("TextContent"), ALL.into(), "c".into())
+        .await
+        .expect("subscribe");
+    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+
+    let mut rx = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    // The write under test: Message's SHACL, and nothing else. Its
+    // predicates are no record's, so only the re-resolution re-runs it.
+    install(&mut perspective, &ctx, "Message", MESSAGE_SDNA).await;
+    perspective
+        .check_subscribed_queries(writes(&[(
+            "ns://MessageShape",
+            "sh://property",
+            "ns://Message.body",
+        )]))
+        .await;
+    let update = next_update_for(&mut rx, &perspective.uuid, &id)
+        .await
+        .expect("the record already there must be pushed once its class is installed")
+        .to_string();
+    assert!(
+        update.contains("ad4m://message/early") && update.contains("\"text\""),
         "{update}"
     );
 }
