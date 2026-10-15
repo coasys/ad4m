@@ -14,7 +14,20 @@ export interface WakerSubscription {
   channel: string;
   query: string;
   neighbourhood?: string;
+  /**
+   * The predicates a parent holds a mentioned item under, from the executor's
+   * `get_mention_waker_config` (`containment_predicates`): `ad4m://has_child`
+   * and the `children` predicate of every class conforming to the built-in
+   * `Container` (#1446), e.g. We's `we://child`. `ad4m://has_child` is always
+   * followed, with or without this.
+   */
+  containment?: string[];
 }
+
+const HAS_CHILD = "ad4m://has_child";
+
+/** Whether `iri` cannot be embedded in a query as `<iri>`. */
+const unsafeIri = (iri: string) => /[<>"{}|^`\\\s\x00-\x20]/.test(iri);
 
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
@@ -470,21 +483,27 @@ export class WakerSubscriptionManager {
   /** Resolve one containment level in one query; skip unsafe IRI tokens and treat failures as none. */
   private async parentsOf(sub: WakerSubscription, addresses: string[]): Promise<string[]> {
     const safe = [...new Set(addresses)].filter((address) => {
-      if (/[<>"{}|^`\\\s\x00-\x20]/.test(address)) {
+      if (unsafeIri(address)) {
         this.logger.warn(`[waker] ${sub.id}: skipping parent lookup for unsafe address ${JSON.stringify(address)}`);
         return false;
       }
       return true;
     });
     if (!safe.length) return [];
+    // `has_child` and every predicate the subscription names as containment.
+    const predicates = [...new Set([HAS_CHILD, ...(sub.containment ?? []).filter((p) => !unsafeIri(p))])];
+    const [predicate, containment] = predicates.length === 1
+      ? [`<${HAS_CHILD}>`, ""]
+      : ["?containment", `VALUES ?containment { ${predicates.map((p) => `<${p}>`).join(" ")} } `];
     try {
       const query = safe.length === 1
-        ? `SELECT ?source WHERE { ?source <ad4m://has_child> <${safe[0]}> . }`
-        : `SELECT ?source WHERE { VALUES ?child { ${safe.map((address) => `<${address}>`).join(" ")} } ?source <ad4m://has_child> ?child . }`;
+        ? `SELECT ?source WHERE { ${containment}?source ${predicate} <${safe[0]}> . }`
+        : `SELECT ?source WHERE { VALUES ?child { ${safe.map((address) => `<${address}>`).join(" ")} } ${containment}?source ${predicate} ?child . }`;
       const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, query);
       if (!Array.isArray(rows)) return [];
-      // A row omits a variable left unbound in its solution.
-      return rows.map((row) => row?.source).filter((source): source is string => typeof source === "string");
+      // A row omits a variable left unbound in its solution; a parent holding
+      // the item through two predicates is one parent.
+      return [...new Set(rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"))];
     } catch (err: any) {
       this.logger.warn(`[waker] ${sub.id}: parent resolution failed for ${JSON.stringify(safe)} — ${err?.message ?? err}`);
       return [];

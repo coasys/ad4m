@@ -2098,6 +2098,75 @@ describe("ad4mPlugin", () => {
     }
   });
 
+  it("ad4m_subscribe_to_mentions hands the executor's containment predicates to the waker (#1446)", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { serverInfo: { name: "ad4m" } } }),
+          { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-1" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/call" && body.params?.name === "get_mention_waker_config") {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  query: "SELECT * FROM link WHERE ...",
+                  names: ["TestAgent"],
+                  did: "did:key:zTest",
+                  containment_predicates: ["ad4m://has_child", "we://child"],
+                }),
+              },
+            ],
+          },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: { mode: "external", mcpEndpoint: "http://localhost:3001/mcp", token: "test-cred" },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    };
+    await ad4mPlugin(mockApi);
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { querySparql: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function () {
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+        };
+      }),
+      onWake: () => {},
+    });
+    _setSubscriptionManagerForTests(manager);
+    try {
+      const subscribeTool = registeredTools.find((t) => t.name === "ad4m_subscribe_to_mentions");
+      await subscribeTool!.execute("call-1", { perspective_id: "persp-uuid-1" });
+      expect(manager.getActive().map((sub) => sub.containment)).toEqual([["ad4m://has_child", "we://child"]]);
+    } finally {
+      manager.disposeAll();
+      _setSubscriptionManagerForTests(null);
+    }
+  });
+
   it("ad4m_unsubscribe_from_mentions reports 'No mention subscription found' when nothing matches", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];
 

@@ -1,4 +1,4 @@
-import { WakerSubscriptionManager, hintFor } from './WakerSubscriptionManager';
+import { WakerSubscriptionManager, WakerSubscription, hintFor } from './WakerSubscriptionManager';
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -185,7 +185,7 @@ describe('WakerSubscriptionManager', () => {
   });
 
   /** Delivers one new mention and returns the parents it woke with, the parent query and any warnings. */
-  async function wakeWithParentRows(rows: unknown, ancestorDepth?: number, address = 'test://message') {
+  async function wakeWithParentRows(rows: unknown, ancestorDepth?: number, address = 'test://message', extra: Partial<WakerSubscription> = {}) {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const ProxyClass = function () {
       return {
@@ -214,7 +214,7 @@ describe('WakerSubscriptionManager', () => {
       onWake: (_sub, _result, mentions) => { wakes.push(mentions); },
     });
 
-    await manager.subscribe({ ...sub, id: 'mention-parents' });
+    await manager.subscribe({ ...sub, ...extra, id: 'mention-parents' });
     await deliver!([{ source: address }]);
     await waitUntil(() => wakes.length > 0);
     manager.disposeAll();
@@ -225,6 +225,20 @@ describe('WakerSubscriptionManager', () => {
     const { wakes, queries } = await wakeWithParentRows([{ source: 'test://parent' }]);
     expect(queries[0]).toContain('<ad4m://has_child> <test://message>');
     expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [] }]]);
+  });
+
+  it('follows every containment predicate the subscription names, beside has_child', async () => {
+    const { wakes, queries } = await wakeWithParentRows(
+      // A We TextBlock held by a CollectionBlock through we://child, and through has_child too.
+      [{ source: 'test://call' }, { source: 'test://call' }],
+      0,
+      'test://message',
+      { containment: ['ad4m://has_child', 'we://child', 'bad> . ?s ?p ?o . #'] },
+    );
+    expect(queries[0]).toBe(
+      'SELECT ?source WHERE { VALUES ?containment { <ad4m://has_child> <we://child> } ?source ?containment <test://message> . }',
+    );
+    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://call'], ancestors: [] }]]);
   });
 
   it('keeps only string parents when a row leaves ?source unbound', async () => {

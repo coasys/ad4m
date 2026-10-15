@@ -758,6 +758,8 @@ Notes:
       channel: "",
       query: data.query ?? data.subscription?.query,
       neighbourhood: data.neighbourhood,
+      // What holds a mentioned item here (has_child, Container's children), for the parent walk.
+      ...(Array.isArray(data.containment_predicates) ? { containment: data.containment_predicates } : {}),
     };
 
     if (!subscription.query) {
