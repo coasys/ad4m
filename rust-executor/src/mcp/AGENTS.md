@@ -31,6 +31,10 @@ is a second, raw-link parser slated for deletion.
   perspective existence.
 - Multi-step writes must use `create_batch` … `commit_batch` so partial state is never
   visible.
+- Instance writes go through `PerspectiveInstance` (`create_subject`, `update_subject`
+  with the class's setters, adders and removers, `remove_subject_cascading`), never as
+  links at a class's predicates: through an abstract class only the perspective knows
+  which classes and predicates a write reaches. Validation stays here.
 - **New instance-level behaviour goes in `instances/` — `dynamic.rs` depends on it,
   not the reverse** (`dynamic.rs` calls `instances::generate_instance_uri`; nothing
   under `instances/` references `dynamic`). The static surface is the default one

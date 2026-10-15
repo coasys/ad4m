@@ -68,6 +68,10 @@ use uuid::Uuid;
 mod abstract_classes;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
+// Member writes through adders / removers, and MCP's cascading delete.
+mod subject_writes;
+#[cfg(test)]
+pub(crate) use subject_writes::faults::fail_remove_link_after;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
@@ -1809,6 +1813,10 @@ impl PerspectiveInstance {
         link_expression: LinkExpression,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        #[cfg(test)]
+        if subject_writes::faults::take(&self.uuid) {
+            return Err(anyhow!("injected store error"));
+        }
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
@@ -5685,6 +5693,10 @@ impl PerspectiveInstance {
     ///
     /// Properties with no declared setter are skipped, exactly as in
     /// `create_subject`. An empty/absent value set is a no-op.
+    ///
+    /// A relation or collection also takes `{"action": "adder" | "remover",
+    /// "value": [...]}`: its adder or remover runs once per member, as
+    /// through an abstract class.
     pub async fn update_subject(
         &mut self,
         subject_class: SubjectClassOption,
@@ -5711,6 +5723,10 @@ impl PerspectiveInstance {
         let mut runs = Vec::new();
         if let serde_json::Value::Object(obj) = values {
             for (prop, value) in obj.iter() {
+                if let Some(member) = self.member_op(&class_name, prop, value, context).await? {
+                    commands.extend(member);
+                    continue;
+                }
                 let Some(setter_commands) =
                     self.get_property_setter_actions(&class_name, prop).await?
                 else {

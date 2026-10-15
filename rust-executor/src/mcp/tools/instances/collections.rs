@@ -3,11 +3,11 @@
 
 use super::{
     class_properties, coerce_scalar, decoded_literal, describe_value, error_json, fetch_instance,
-    find_property, instance_uri, link_target, not_found, pretty, resolve_writable_class,
-    validation_failure, Ad4mMcpHandler, PropView, ValidationError,
+    find_property, instance_uri, link_target, not_found, pretty, resolve_class, subject_class,
+    typed_value, validation_failure, Ad4mMcpHandler, PropView, ValidationError,
 };
-use crate::mcp::shacl;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::agent::AgentContext;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,7 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_writable_class(&perspective, &p.class_name).await {
+        let (class_name, shape) = match resolve_class(&perspective, &p.class_name).await {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -154,101 +154,31 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
-        let predicate = match shacl::resolve_property_predicate(
-            &perspective,
+        match add_member(
+            &mut perspective,
             &class_name,
-            &info.name(),
-        )
-        .await
-        {
-            Ok(pred) => pred,
-            Err(e) => {
-                return error_json(format!(
-                    "Error resolving collection '{}': {}",
-                    info.name(),
-                    e
-                ))
-            }
-        };
-
-        // Idempotent: the store dedups the raw triple, but every signed
-        // link expression gets its own reifier, so adding the same item
-        // twice would show up as a duplicate member. Look for an existing
-        // membership link first and leave the collection untouched if the
-        // item is already in it.
-        let wanted = p.item_uri.trim();
-        let encoded = link_target(wanted);
-        let existing = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate.clone()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(e) => {
-                return error_json(format!(
-                    "Error reading collection '{}': {:#}",
-                    info.name(),
-                    e
-                ))
-            }
-        };
-        if existing
-            .iter()
-            .any(|link| target_matches(&link.data.target, wanted, &encoded))
-        {
-            return pretty(&json!({
-                "success": true,
-                "class_name": class_name,
-                "base_uri": base_uri,
-                "collection": info.name(),
-                "item_uri": p.item_uri,
-                "links_added": 0,
-                "already_member": true,
-            }));
-        }
-
-        let target = Self::create_property_expression(
-            &perspective,
-            &class_name,
-            &info.name(),
+            &base_uri,
+            info.name(),
             &p.item_uri,
             &agent_context,
         )
-        .await;
-        let link = Link {
-            source: base_uri.clone(),
-            predicate: Some(predicate),
-            target,
-        };
-        // This path writes the membership link directly rather than running
-        // the collection's `adder` action, so the action's `local` flag never
-        // reaches it — resolve the status from the property shape instead, or
-        // a `local: true` collection would be gossiped by this tool alone.
-        let status = if info.local() {
-            LinkStatus::Local
-        } else {
-            LinkStatus::Shared
-        };
-        match perspective
-            .add_link(link, status, None, &agent_context)
-            .await
+        .await
         {
-            Ok(_) => pretty(&json!({
-                "success": true,
-                "class_name": class_name,
-                "base_uri": base_uri,
-                "collection": info.name(),
-                "item_uri": p.item_uri,
-                "links_added": 1,
-            })),
-            Err(e) => error_json(format!(
-                "Error adding to collection '{}': {:#}",
-                info.name(),
-                e
-            )),
+            Ok(added) => {
+                let mut result = json!({
+                    "success": true,
+                    "class_name": class_name,
+                    "base_uri": base_uri,
+                    "collection": info.name(),
+                    "item_uri": p.item_uri,
+                    "links_added": if added { 1 } else { 0 },
+                });
+                if !added {
+                    result["already_member"] = json!(true);
+                }
+                pretty(&result)
+            }
+            Err(e) => error_json(e),
         }
     }
 
@@ -261,12 +191,12 @@ impl Ad4mMcpHandler {
         params: Parameters<InstanceRemoveFromCollectionParams>,
     ) -> String {
         let p = &params.0;
-        let (mut perspective, _agent_context) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(&p.perspective_id).await {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_writable_class(&perspective, &p.class_name).await {
+        let (class_name, shape) = match resolve_class(&perspective, &p.class_name).await {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -287,62 +217,20 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
-        let predicate = match shacl::resolve_property_predicate(
-            &perspective,
+        let wanted = p.item_uri.trim();
+        let (removed, stored_targets) = match remove_member(
+            &mut perspective,
             &class_name,
-            &info.name(),
+            &base_uri,
+            info.name(),
+            wanted,
+            &agent_context,
         )
         .await
         {
-            Ok(pred) => pred,
-            Err(e) => {
-                return error_json(format!(
-                    "Error resolving collection '{}': {}",
-                    info.name(),
-                    e
-                ))
-            }
+            Ok(v) => v,
+            Err(e) => return error_json(e),
         };
-
-        let wanted = p.item_uri.trim();
-        let encoded = link_target(wanted);
-        let links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(e) => {
-                return error_json(format!(
-                    "Error reading collection '{}': {:#}",
-                    info.name(),
-                    e
-                ))
-            }
-        };
-        let stored_targets: Vec<String> = links.iter().map(|l| l.data.target.clone()).collect();
-        let mut removed = 0usize;
-        for link in links {
-            if !target_matches(&link.data.target, wanted, &encoded) {
-                continue;
-            }
-            match perspective.remove_link(link.into(), None).await {
-                Ok(_) => removed += 1,
-                Err(e) => {
-                    return error_json(format!(
-                        "Error removing '{}' from collection '{}' ({} link(s) already \
-                         removed): {:#}",
-                        wanted,
-                        info.name(),
-                        removed,
-                        e
-                    ))
-                }
-            }
-        }
 
         // A collection whose property declares a custom `resolveLanguage`
         // stores each member as an `expression_create` address, not as the
@@ -379,4 +267,103 @@ impl Ad4mMcpHandler {
             "links_removed": removed,
         }))
     }
+}
+
+/// Add `item` to `collection` of the instance at `base_uri` through the
+/// class's adder (`update_subject`), unless it already is a member: the
+/// store dedups the raw triple, but every signed link expression gets its
+/// own reifier, so a second add would show up as a duplicate member.
+/// `Ok(false)`: it already was. The error is the message to return.
+pub(crate) async fn add_member(
+    perspective: &mut PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+    collection: &str,
+    item: &str,
+    agent_context: &AgentContext,
+) -> Result<bool, String> {
+    let wanted = item.trim();
+    let encoded = link_target(wanted);
+    let links = perspective
+        .member_links(class_name, base_uri, collection)
+        .await
+        .map_err(|e| format!("Error reading collection '{collection}': {e:#}"))?;
+    if links
+        .iter()
+        .any(|link| target_matches(&link.data.target, wanted, &encoded))
+    {
+        return Ok(false);
+    }
+    perspective
+        .update_subject(
+            subject_class(class_name),
+            base_uri.to_string(),
+            json!({ collection: { "action": "adder", "value": [typed_value(item)] } }),
+            None,
+            agent_context,
+        )
+        .await
+        .map_err(|e| format!("Error adding to collection '{collection}': {e:#}"))?;
+    Ok(true)
+}
+
+/// Remove `item` from `collection` of the instance at `base_uri` through the
+/// class's remover (`update_subject`), in whichever spelling it is stored
+/// (see [`target_matches`]). Returns how many membership links went, read
+/// back after the remover ran, and every member stored before, for the
+/// caller to explain a miss. The error is the message to return.
+pub(crate) async fn remove_member(
+    perspective: &mut PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+    collection: &str,
+    item: &str,
+    agent_context: &AgentContext,
+) -> Result<(usize, Vec<String>), String> {
+    let encoded = link_target(item);
+    let holding = |perspective: &PerspectiveInstance| {
+        let perspective = perspective.clone();
+        let encoded = encoded.clone();
+        async move {
+            let links = perspective
+                .member_links(class_name, base_uri, collection)
+                .await
+                .map_err(|e| format!("Error reading collection '{collection}': {e:#}"))?;
+            let stored: Vec<String> = links.into_iter().map(|l| l.data.target).collect();
+            let matching: Vec<String> = stored
+                .iter()
+                .filter(|target| target_matches(target, item, &encoded))
+                .cloned()
+                .collect();
+            Ok::<_, String>((matching, stored))
+        }
+    };
+    let (mut members, stored) = holding(perspective).await?;
+    if members.is_empty() {
+        return Ok((0, stored));
+    }
+    let before = members.len();
+    members.sort();
+    members.dedup();
+    perspective
+        .update_subject(
+            subject_class(class_name),
+            base_uri.to_string(),
+            json!({ collection: { "action": "remover", "value": members } }),
+            None,
+            agent_context,
+        )
+        .await
+        .map_err(|e| format!("Error removing '{item}' from collection '{collection}': {e:#}"))?;
+    let (left, _) = holding(perspective).await?;
+    if !left.is_empty() {
+        return Err(format!(
+            "Error removing '{item}' from collection '{collection}': its remover left {} of {} \
+             membership link(s): {}",
+            left.len(),
+            before,
+            left.join(", ")
+        ));
+    }
+    Ok((before, stored))
 }

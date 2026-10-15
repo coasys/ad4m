@@ -135,7 +135,7 @@ pub use types::{
 };
 /// Re-export the shared IRI-safety predicate so write-side callers
 /// (e.g. `perspective_instance::resolve_property_value`,
-/// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
+/// `mcp::tools::instances::typed_value`) can gate raw-`NamedNode`
 /// storage on the same rule the SPARQL query builder uses.  See
 /// [`utils::is_safe_iri_target`] for the full contract.
 pub(crate) use union::refuse_union_reads;

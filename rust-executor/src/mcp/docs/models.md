@@ -105,20 +105,21 @@ JSON array — see `get_documentation(topic="flux")`).
 ### 3. Whether a property can be written
 
 A scalar property is writable only if it declares a `setter`. Without one,
-`instance_create` and `instance_update` reject the write with *"read-only: the
-class declares no setter for this property"* — a class that registers cleanly
-can still be unwritable, and nothing warns you at registration time.
+`instance_create`, `instance_update` and the per-class `{class}_set_{property}`
+/ `{class}_update` tools reject the write with *"read-only: the class declares
+no setter for this property"* — a class that registers cleanly can still be
+unwritable, and nothing warns you at registration time.
 
 The `writable` field is accepted and stored, but the static `instance_*` tools
 do not consult it: presence of a `setter` is what actually decides. Do not
 rely on `writable: false` to protect a property that has a setter.
 
-Collections behave differently again: `instance_create` (array value) and
-`instance_add_to_collection` / `instance_remove_from_collection` resolve the
-property's `path` predicate and write the link themselves. They never run your
-`adder` / `remover` actions. Declare them anyway — the Prolog surface and the
-optional per-class tools do use them — but their absence will not stop the
-static tools.
+Collections work the same way with `adder` and `remover`:
+`instance_create` (array value), `instance_add_to_collection` and the per-class
+`{class}_add_{collection}` run the `adder`; `instance_remove_from_collection`
+and `{class}_remove_{collection}` run the `remover`. A collection without an
+`adder` cannot be added to (and `instance_create` with members for it creates
+nothing); one without a `remover` cannot be removed from.
 
 ### 4. Whether a property is shared or local
 
@@ -341,7 +342,8 @@ announce breaking ones.
 - [ ] `class_name` is the bare local name of `target_class`.
 - [ ] `constructor_actions` writes the class marker or the required values.
 - [ ] At least one property is `min_count: 1`, or there is a class marker.
-- [ ] Every scalar you expect to write has a `setter`.
+- [ ] Every scalar you expect to write has a `setter`; every collection you
+      expect to write has an `adder` and a `remover`.
 - [ ] Every non-relation collection has `"collection": true` (not just a
       `max_count`); relations never need the flag — `relation_kind` alone
       decides one-or-many there.
