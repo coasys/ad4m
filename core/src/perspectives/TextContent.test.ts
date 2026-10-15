@@ -104,4 +104,20 @@ describe("TextContent", () => {
     await row.delete("batch");
     expect(calls[0]).toEqual(["removeSubject", "p", "ad4m://TextContent", "ad4m://m/1", "batch"]);
   });
+
+  it("delete() through it drops the perspective's cached query results, like an update", async () => {
+    const { setCachedResult, getCachedResult } = await import("../model/query-cache");
+    const client: any = new Proxy({}, { get: () => async () => true });
+    const { PerspectiveProxy } = await import("./PerspectiveProxy");
+    const proxy = new PerspectiveProxy({ uuid: "p-cache" } as any, client);
+    const row = new TextContent(proxy, "ad4m://m/1");
+
+    setCachedResult("p-cache", "SELECT ?v", [{ v: "old" }]);
+    await proxy.updateSubject("ad4m://TextContent", "ad4m://m/1", { text: "new" });
+    expect(getCachedResult("p-cache", "SELECT ?v")).toBeUndefined();
+
+    setCachedResult("p-cache", "SELECT ?v", [{ v: "old" }]);
+    await row.delete();
+    expect(getCachedResult("p-cache", "SELECT ?v")).toBeUndefined();
+  });
 });

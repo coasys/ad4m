@@ -1646,6 +1646,7 @@ export class PerspectiveProxy {
         const ctor = (subjectClass as any)?.constructor;
         if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
             await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
             return;
         }
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)

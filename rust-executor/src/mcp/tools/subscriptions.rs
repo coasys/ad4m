@@ -259,7 +259,7 @@ impl Ad4mMcpHandler {
         };
 
         if text_predicates.is_empty() {
-            log::warn!("get_mention_waker_config: no Message class has a body, falling back to unscoped (but ontology-excluded) query");
+            log::debug!("🔗 get_mention_waker_config: no scoped text predicates (no usable Message.body), using unscoped ontology-excluded query");
         }
         let query = build_mention_query(&names, &did, &text_predicates);
         // What holds a mentioned item, so the waker walks every kind of
