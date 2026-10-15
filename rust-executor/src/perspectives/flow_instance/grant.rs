@@ -21,7 +21,7 @@
 //!
 //! ```text
 //!   F --ad4m://flow/flow_receipt--> receipt      (F's index, anyone writes)
-//!            │ load_flow_receipts: scoped to F, refuses over budget
+//!            │ load_flow_receipts: scoped to F, content-addressed candidates
 //!            ▼
 //!   produced::first_produced_at(own catalogue, F, state)
 //!            │ verify_receipt per receipt; flow, state, (class, id)
@@ -67,16 +67,18 @@
 //! Referencing the granting receipt by hash, optionally carrying it, and
 //! transitive verification with a depth budget are deferred to #1140.
 //!
-//! # A receipt flood is an error, never "not a member"
+//! # A failed read is an error, never "not a member"
 //!
-//! Anyone can write F's index. Over
-//! [`MAX_FLOW_RECEIPTS`](super::produced::MAX_FLOW_RECEIPTS) the read is a
-//! [`ReceiptBudgetExceeded`](super::produced::ReceiptBudgetExceeded) error,
-//! and [`resolve_role_grants`](super::roles::resolve_role_grants) propagates
-//! it, so the flow whose rule asked cannot derive a state until the flood is
-//! gone. "I could not read every receipt" is neither "not granted" (a
-//! truncated read hides the witness) nor "granted". It is loud, and it
-//! stops only the flows gated on F.
+//! Anyone can write F's index. Junk under it is skipped by
+//! [`load_flow_receipts`](super::produced::load_flow_receipts) — only a
+//! body that is the receipt its URI names, for F, is a candidate — and no
+//! amount of junk can hide or refuse the honest receipt beside it (#1177).
+//! But a read that fails (a store error) is an error that
+//! [`resolve_role_grants`](super::roles::resolve_role_grants) propagates, so
+//! the flow whose rule asked cannot derive a state until it is resolved. "I
+//! could not read every receipt" is neither "not granted" (a truncated read
+//! hides the witness) nor "granted". It is loud, and it stops only the flows
+//! gated on F.
 //!
 //! A granting flow this replica holds no definition for is an error for the
 //! same reason: no receipt for it can be verified. That is the rule
@@ -147,7 +149,7 @@ use std::collections::BTreeMap;
 /// member of this one.
 ///
 /// Errors, never an empty map, when the answer cannot be decided: F is not in
-/// this replica's catalogue, or F's index is over budget (module header).
+/// this replica's catalogue, or F's index could not be read (module header).
 pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     role_class: &str,
@@ -167,13 +169,17 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
             spec.flow
         ))
     })?;
-    Ok(
-        first_produced_at(&catalogue, &spec.flow, Some(&spec.state), &receipts)
-            .into_iter()
-            .filter(|(output, _)| output.class_name == role_class)
-            .map(|(output, at)| (output.id, at))
-            .collect(),
+    Ok(first_produced_at(
+        &catalogue,
+        &spec.flow,
+        Some(&spec.state),
+        &receipts,
+        perspective.receipt_verdict_memo(),
     )
+    .into_iter()
+    .filter(|(output, _)| output.class_name == role_class)
+    .map(|(output, at)| (output.id, at))
+    .collect())
 }
 
 #[cfg(test)]
@@ -186,7 +192,7 @@ mod tests {
         PROPOSER_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
     };
     use crate::perspectives::flow_instance::fold_read_set;
-    use crate::perspectives::flow_instance::produced::{produced_by_flow, ReceiptBudgetExceeded};
+    use crate::perspectives::flow_instance::produced::produced_by_flow;
     use crate::perspectives::flow_instance::receipt::FlowReceipt;
     use crate::perspectives::flow_instance::roles::{
         resolve_role_grants, RoleGrant, RoleGrantEvidence, RoleGrantWindow, RoleInstanceHistory,
@@ -429,7 +435,8 @@ mod tests {
     struct GateStore {
         instances: Vec<&'static str>,
         catalogue: HashMap<String, SHACLFlow>,
-        receipts: Result<Vec<FlowReceipt>, ReceiptBudgetExceeded>,
+        /// `Err` is the loader failing to read, as a store error would.
+        receipts: Result<Vec<FlowReceipt>, String>,
         asked: Mutex<Vec<String>>,
     }
 
@@ -470,7 +477,7 @@ mod tests {
 
         async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
             self.asked.lock().unwrap().push(flow_uri.to_string());
-            self.receipts.clone().map_err(anyhow::Error::from)
+            self.receipts.clone().map_err(|e| anyhow::anyhow!(e))
         }
 
         async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
@@ -693,7 +700,14 @@ mod tests {
             );
             assert_eq!(
                 windows == 1,
-                produced_by_flow(&cat, &this, &granting.flow_uri(), Some("done"), &receipts),
+                produced_by_flow(
+                    &cat,
+                    &this,
+                    &granting.flow_uri(),
+                    Some("done"),
+                    &receipts,
+                    None
+                ),
                 "{label}: the role gate and `produced_by_flow` must give ONE answer"
             );
         }
@@ -871,43 +885,40 @@ mod tests {
 
     // ---- what the loader refuses to decide ---------------------------------
 
-    /// **A receipt flood is an error, not a silent deny.** Lal's review of
-    /// #1127, applied to roles: if the granting flow's index is over budget,
-    /// the role cannot be decided, and `resolve_role_grants` must say so with
-    /// the typed error. Mapping it to "no receipts" would answer "not a
-    /// member" for every candidate on a read that did not finish.
+    /// **A failed receipt read is an error, not a silent deny.** Lal's
+    /// review of #1127, applied to roles: if the granting flow's receipts
+    /// cannot be read, the role cannot be decided, and `resolve_role_grants`
+    /// must say so with the loader's error. Mapping it to "no receipts" would
+    /// answer "not a member" for every candidate on a read that did not
+    /// finish. (A junk flood is not such a read any more: the loader skips
+    /// junk, #1177.)
     ///
     /// And a role WITHOUT `producedByFlow` never reads receipts, so the same
-    /// flood cannot touch it.
+    /// failure cannot touch it.
     ///
     /// Red if the loader error is swallowed into an empty list, or if the
-    /// context wrapping hides the typed error from `downcast_ref`.
+    /// context wrapping loses the loader's own message.
     #[tokio::test]
-    async fn a_receipt_flood_is_a_budget_error_not_a_silent_deny() {
+    async fn a_failed_receipt_read_is_an_error_not_a_silent_deny() {
         let granting = granting_flow("Onboarding");
         let gate_spec = spec(&granting.flow_uri(), "done");
         let gated = gated_flow(&gate_spec);
-        let flood = ReceiptBudgetExceeded {
-            flow: granting.flow_uri(),
-            found: 257,
-            cap: 256,
-        };
-        let flooded = || GateStore {
-            receipts: Err(flood.clone()),
+        let failure = "the receipt store is unreadable".to_string();
+        let failing = || GateStore {
+            receipts: Err(failure.clone()),
             ..store(&[&granting], Vec::new())
         };
 
-        let err = collect(&flooded(), &role(Some(&gate_spec)), &gated)
+        let err = collect(&failing(), &role(Some(&gate_spec)), &gated)
             .await
-            .expect_err("an over-budget index must not resolve to anything");
-        assert_eq!(
-            err.downcast_ref::<ReceiptBudgetExceeded>(),
-            Some(&flood),
-            "the typed budget error reaches the caller: {err:#}"
+            .expect_err("an unreadable index must not resolve to anything");
+        assert!(
+            format!("{err:#}").contains(&failure),
+            "the loader's error reaches the caller: {err:#}"
         );
 
-        // An ordinary role never asks, so F's flood cannot reach it.
-        let plain = flooded();
+        // An ordinary role never asks, so F's failure cannot reach it.
+        let plain = failing();
         collect(&plain, &role(None), &gated)
             .await
             .expect("a role without producedByFlow does not read receipts");

@@ -150,6 +150,7 @@
 //! a broken grant signature collapses an eligibility window rather than
 //! widening one.
 
+pub mod memo;
 #[cfg(test)]
 mod tests;
 pub mod verdict;
