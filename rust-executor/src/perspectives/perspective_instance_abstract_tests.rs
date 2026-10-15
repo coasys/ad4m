@@ -692,12 +692,6 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
 
     assert_eq!(
         perspective
-            .predicates_through(TEXT_CONTENT_URI, "text")
-            .unwrap(),
-        vec!["ns://body".to_string(), "ns://message".to_string()]
-    );
-    assert_eq!(
-        perspective
             .property_through(TEXT_CONTENT_URI, "Message", "text")
             .unwrap(),
         Some("body".to_string())

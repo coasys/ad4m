@@ -110,7 +110,10 @@ impl PerspectiveInstance {
     /// Every installed concrete class `abstract_class` reads, with its view.
     /// Cached until the installed shapes change. `abstract_class` is a stored
     /// abstract class's name or a built-in's URI (`ad4m://TextContent`).
-    pub fn resolve_abstract(&self, abstract_class: &str) -> Result<Arc<Resolution>, AnyError> {
+    pub(super) fn resolve_abstract(
+        &self,
+        abstract_class: &str,
+    ) -> Result<Arc<Resolution>, AnyError> {
         let generation = {
             let cache = self.abstract_cache.read().unwrap();
             if let Some(hit) = cache.resolved.get(abstract_class) {
@@ -625,26 +628,20 @@ impl PerspectiveInstance {
     }
 
     /// The name of `class_name`'s property that answers to `property` when
-    /// read through `abstract_class`: its own `property`, or the one aliased
-    /// to it. `None` when the class does not conform.
+    /// read through `abstract_class`: the one it aliases to `property`, else
+    /// its own `property`. A name lookup only; `None` when it has neither.
     pub fn property_through(
         &self,
         abstract_class: &str,
         class_name: &str,
         property: &str,
     ) -> Result<Option<String>, AnyError> {
-        let resolution = self.resolve_abstract(abstract_class)?;
-        let Some(view) = resolution.views.get(class_name) else {
-            return Ok(None);
-        };
+        let (alias_key, _) = self.abstract_shape(abstract_class)?;
         let own = self.get_shape(class_name)?;
-        // A view is its class's shape with properties renamed in place.
-        Ok(view
-            .properties
-            .iter()
-            .zip(&own.properties)
-            .find(|(v, _)| v.name == property)
-            .map(|(_, o)| o.name.clone()))
+        Ok(self
+            .abstract_index()?
+            .own_name(class_name, &own, property, alias_key)
+            .map(str::to_string))
     }
 }
 

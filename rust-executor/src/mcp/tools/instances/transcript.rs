@@ -1,21 +1,18 @@
-//! `instance_transcript` — a compact, chronological reading of one class's
-//! children under a node (`ad4m://has_child`, and the `children` of any class
-//! conforming to the built-in `Container`): the most recent N instances
-//! with their text property, author display name and timestamp, formatted
+//! `instance_transcript` — a compact, chronological reading of the children
+//! under a node that carry text (`ad4m://has_child`, and the `children` of any
+//! class conforming to the built-in `Container`): the most recent N instances
+//! with their text, author display name and timestamp, formatted
 //! as plain text an LLM can read in one go instead of N+1 tool calls.
 //!
 //! This is the static-surface replacement for the old
-//! `get_children_body_parsed`: same transcript shape, but the text property
-//! is looked up on the class shape and the values come through `model_query`
-//! so signed literal envelopes and custom-language expressions resolve the
-//! same way `instance_query` resolves them.
+//! `get_children_body_parsed`: same transcript shape, but the values come
+//! through `model_query` so signed literal envelopes and custom-language
+//! expressions resolve the same way `instance_query` resolves them.
 //!
-//! Without a class it reads every class's `text` through the built-in
-//! abstract class `TextContent` (#1446), whatever the app calls its class or
-//! property, and `Message.body` as it did before, merged into one chronology.
-//! TextContent only adds: until Flux declares its alias, `Message` conforms
-//! to nothing, and a class with a `text` of its own (a poll's `Answer`) must
-//! not hide the chat.
+//! Without a class it is one model query on the built-in abstract class
+//! `TextContent` (#1446): every class with a `text` property, or a property
+//! aliased to `text`, whatever the app calls its class. With a class it is
+//! one model query on that class. Either runs once per containment predicate.
 
 use super::{
     class_properties, containment_predicates, error_json, find_property, link_target,
@@ -42,8 +39,9 @@ pub struct InstanceTranscriptParams {
     /// Perspective UUID
     pub perspective_id: String,
     /// Subject class of the children to read (e.g. "Message"), as listed by
-    /// describe_perspective. Omit it to read every class that has text,
-    /// whatever the app calls it (the built-in TextContent).
+    /// describe_perspective. Omit it to read through the built-in abstract
+    /// class TextContent: every class with a `text` property, or a property
+    /// aliased to `text`.
     pub class_name: Option<String>,
     /// Parent node URI whose children are read (e.g. a Channel's id): via
     /// ad4m://has_child, and via the children relation of any class
@@ -98,61 +96,6 @@ fn render_text(instance: &Value, text_property: &str) -> String {
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
     }
-}
-
-/// What a transcript reads: the class (or `ad4m://TextContent`) to query, how
-/// to name it in the output, and the property holding the text.
-struct Source {
-    query_as: String,
-    label: String,
-    text_property: String,
-}
-
-/// Every class's `text` through TextContent, and the `body` of a class named
-/// `Message` unless it already conforms (its alias reads it through
-/// TextContent). One of them, or both.
-async fn text_content_sources(perspective: &PerspectiveInstance) -> Result<Vec<Source>, String> {
-    let conforming = perspective
-        .resolve_abstract(TEXT_CONTENT_URI)
-        .map_err(|e| error_json(format!("Error reading through TextContent: {e}")))?;
-    let mut sources = Vec::new();
-    if !conforming.classes.is_empty() {
-        sources.push(Source {
-            query_as: TEXT_CONTENT_URI.to_string(),
-            label: "TextContent".to_string(),
-            text_property: "text".to_string(),
-        });
-    }
-    let message = match perspective.get_shape("Message") {
-        Ok(shape) => Some(("Message".to_string(), shape)),
-        Err(_) => match crate::mcp::shacl::find_class_name(perspective, "message").await {
-            Some(name) => perspective.get_shape(&name).ok().map(|shape| (name, shape)),
-            None => None,
-        },
-    };
-    match message {
-        Some((class_name, _)) if conforming.classes.contains(&class_name) => {}
-        Some((class_name, shape)) => {
-            match text_property_for(perspective, &class_name, &shape, Some("body")) {
-                Ok(text_property) => sources.push(Source {
-                    query_as: class_name.clone(),
-                    label: class_name,
-                    text_property,
-                }),
-                // A Message without a body: TextContent alone, if anything.
-                Err(e) if sources.is_empty() => return Err(e),
-                Err(_) => {}
-            }
-        }
-        None => {}
-    }
-    if sources.is_empty() {
-        return Err(error_json(
-            "No class has text: none conforms to TextContent (a `text` property, or an alias \
-             for it) and there is no Message class. Pass class_name.",
-        ));
-    }
-    Ok(sources)
 }
 
 /// Which property of `class_name` to print: `requested`, else the one that
@@ -221,7 +164,7 @@ impl Ad4mMcpHandler {
     /// Read the most recent children under a node that carry text, as a
     /// transcript: of one class, or through TextContent.
     #[tool(
-        description = "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)', where M is an upper bound when several classes are read. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it is one query on the built-in abstract class TextContent, which reads every class with a `text` property or a property aliased to `text`, whatever the app calls the class. Pass class_name (and optionally text_property) to read one class instead; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)', where M is an upper bound when the node holds children under several predicates. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -241,7 +184,8 @@ impl Ad4mMcpHandler {
             .as_deref()
             .map(str::trim)
             .filter(|c| !c.is_empty());
-        let sources = match class_name {
+        // What to query, and which property holds the text.
+        let (query_as, text_property) = match class_name {
             Some(class_name) => {
                 let (class_name, shape) = match resolve_class(&perspective, class_name).await {
                     Ok(v) => v,
@@ -253,24 +197,22 @@ impl Ad4mMcpHandler {
                     &shape,
                     p.text_property.as_deref(),
                 ) {
-                    Ok(text_property) => vec![Source {
-                        query_as: class_name.clone(),
-                        label: class_name,
-                        text_property,
-                    }],
+                    Ok(text_property) => (class_name, text_property),
                     Err(e) => return e,
                 }
             }
             None if p.text_property.is_some() => {
                 return error_json(
-                    "text_property needs class_name: without it the transcript reads every \
-                     class's text through TextContent",
+                    "text_property needs class_name: without it the transcript reads `text` \
+                     through TextContent",
                 )
             }
-            None => match text_content_sources(&perspective).await {
-                Ok(sources) => sources,
-                Err(e) => return e,
-            },
+            None => (TEXT_CONTENT_URI.to_string(), "text".to_string()),
+        };
+        let label = if query_as == TEXT_CONTENT_URI {
+            "TextContent"
+        } else {
+            query_as.as_str()
         };
 
         let limit = p
@@ -278,72 +220,54 @@ impl Ad4mMcpHandler {
             .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
             .clamp(1, MAX_QUERY_LIMIT);
         // Children through every containment predicate (`has_child`, and the
-        // `children` of each class conforming to Container): each source
-        // under each, newest-first with the same limit, merged newest-first
-        // and cut to `limit`, so the most recent of all of them stay. A
-        // record two of them both read is shown once.
-        let queries: Vec<Value> = containment_predicates(&perspective)
-            .into_iter()
-            .map(|predicate| {
-                json!({
-                    "parent": { "id": link_target(parent), "predicate": predicate },
-                    "order": [["timestamp", "desc"]],
-                    "limit": limit,
-                })
-            })
-            .collect();
-        let label = sources
-            .iter()
-            .map(|s| s.label.as_str())
-            .collect::<Vec<_>>()
-            .join(" and ");
-        let mut rows: Vec<(Value, &str)> = Vec::new();
+        // `children` of each class conforming to Container): newest-first with
+        // the same limit under each, merged newest-first and cut to `limit`,
+        // so the most recent of all of them stay. A record two predicates
+        // both reach is shown once.
+        let predicates = containment_predicates(&perspective);
+        let mut instances: Vec<Value> = Vec::new();
         let mut total = 0;
-        for source in &sources {
-            for query in &queries {
-                let (instances, count) =
-                    match run_model_query(&perspective, &source.query_as, query).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return error_json(format!(
-                                "Error reading {} instances: {e}",
-                                source.label
-                            ))
-                        }
-                    };
-                total += count;
-                rows.extend(
-                    instances
-                        .into_iter()
-                        .map(|inst| (inst, source.text_property.as_str())),
-                );
+        for predicate in &predicates {
+            let query = json!({
+                "parent": { "id": link_target(parent), "predicate": predicate },
+                "order": [["timestamp", "desc"]],
+                "limit": limit,
+            });
+            match run_model_query(&perspective, &query_as, &query).await {
+                Ok((found, count)) => {
+                    total += count;
+                    instances.extend(found);
+                }
+                Err(e) => return error_json(format!("Error reading {label} instances: {e}")),
             }
         }
-        let timestamp = |inst: &Value| {
-            inst.get("timestamp")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-        };
-        rows.sort_by_key(|(inst, _)| std::cmp::Reverse(timestamp(inst)));
-        let fetched = rows.len();
-        let mut seen = std::collections::HashSet::new();
-        rows.retain(|(inst, _)| {
-            inst.get("id")
-                .and_then(Value::as_str)
-                .is_none_or(|id| seen.insert(id.to_string()))
-        });
-        total = total.saturating_sub(fetched - rows.len());
-        rows.truncate(limit);
-        if rows.is_empty() {
+        if predicates.len() > 1 {
+            let timestamp = |inst: &Value| {
+                inst.get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            instances.sort_by_key(|inst| std::cmp::Reverse(timestamp(inst)));
+            let fetched = instances.len();
+            let mut seen = std::collections::HashSet::new();
+            instances.retain(|inst| {
+                inst.get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| seen.insert(id.to_string()))
+            });
+            total = total.saturating_sub(fetched - instances.len());
+            instances.truncate(limit);
+        }
+        if instances.is_empty() {
             return format!("(no {label} instances under {parent})");
         }
-        // Newest-first so `limit` keeps the most recent; present
-        // oldest-first like a conversation reads.
-        rows.reverse();
+        // Newest-first from the query so `limit` keeps the most recent;
+        // present oldest-first like a conversation reads.
+        instances.reverse();
 
         let mut names: HashMap<String, String> = HashMap::new();
-        for (inst, _) in &rows {
+        for inst in &instances {
             if let Some(did) = inst.get("author").and_then(Value::as_str) {
                 if !names.contains_key(did) {
                     let name = display_name_for(did).await;
@@ -352,21 +276,21 @@ impl Ad4mMcpHandler {
             }
         }
 
-        let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
-        if total > rows.len() {
-            // A record two sources both read is subtracted only when both
-            // windows returned it, so across sources the total is a bound.
-            let bound = if sources.len() > 1 { "up to " } else { "" };
+        let mut lines: Vec<String> = Vec::with_capacity(instances.len() + 1);
+        if total > instances.len() {
+            // A record two predicates both reach is subtracted only when both
+            // windows returned it, so across predicates the total is a bound.
+            let bound = if predicates.len() > 1 { "up to " } else { "" };
             lines.push(format!(
                 "(showing last {} of {}{} {} instances under {})",
-                rows.len(),
+                instances.len(),
                 bound,
                 total,
                 label,
                 parent
             ));
         }
-        for (inst, text_property) in &rows {
+        for inst in &instances {
             let did = inst.get("author").and_then(Value::as_str).unwrap_or("");
             let name = names.get(did).cloned().unwrap_or_else(|| did.to_string());
             let timestamp = inst.get("timestamp").and_then(Value::as_str).unwrap_or("");
@@ -375,7 +299,7 @@ impl Ad4mMcpHandler {
                 timestamp,
                 name,
                 did,
-                render_text(inst, text_property)
+                render_text(inst, &text_property)
             ));
         }
         lines.join("\n\n")
