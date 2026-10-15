@@ -264,7 +264,8 @@ pub fn sfu_bind_ip(explicit: Option<&str>, localhost: bool) -> std::net::IpAddr 
 ///   interface IP; otherwise a bad one still falls back to loopback, as
 ///   [`sfu_bind_ip`] does.
 /// - `public_addr` must be an IP of the bind's family, and one a candidate
-///   can carry: not unspecified, multicast, broadcast or link-local.
+///   can carry: not unspecified, multicast, broadcast or link-local. It needs
+///   a fixed `udp_port`: the router forwards only a port it knows.
 pub fn sfu_media_addrs(
     bind_addr: Option<&str>,
     localhost: bool,
@@ -324,6 +325,13 @@ pub fn sfu_media_addrs(
             Some(ip)
         }
     };
+    if public_ip.is_some() && port == 0 {
+        return Err(
+            "sfu_public_addr needs a fixed sfu_udp_port: callers reach the public address \
+             only on a port the router forwards"
+                .to_string(),
+        );
+    }
     Ok((SocketAddr::new(bind_ip, port), public_ip))
 }
 
@@ -1569,6 +1577,18 @@ mod tests {
                 None,
                 Some("198.51.100.7"),
                 "different IP families",
+            ),
+            (
+                Some("192.168.0.10"),
+                None,
+                Some("198.51.100.7"),
+                "needs a fixed sfu_udp_port",
+            ),
+            (
+                Some("192.168.0.10"),
+                Some(0),
+                Some("198.51.100.7"),
+                "needs a fixed sfu_udp_port",
             ),
         ] {
             let err = ok(bind, port, public).unwrap_err();

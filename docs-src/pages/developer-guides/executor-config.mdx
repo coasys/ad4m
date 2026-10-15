@@ -101,8 +101,8 @@ With `enabled: true`, `run` stops unless a password is set (see
 On a machine behind NAT, set `sfu_bind_addr` to its LAN address, fix
 `sfu_udp_port` and forward that UDP port on the router: the SFU then also
 offers its public address on that port, which callers outside the LAN reach.
-The public address is `sfu_public_addr` if set, otherwise the address the
-`sfu_stun_server` reports, asked once at startup. `sfu.status` reports
+The public address is `sfu_public_addr` if set (it needs `sfu_udp_port`),
+otherwise the address the `sfu_stun_server` reports, asked once at startup. `sfu.status` reports
 `isPublic: true` once the STUN server sees the public address the SFU offers.
 A fixed port that is taken stops `run`. The public address is read at
 startup only: after the public IP changes, restart the executor.

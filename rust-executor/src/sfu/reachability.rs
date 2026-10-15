@@ -307,9 +307,8 @@ pub struct Advertised {
 ///   the router forwards 1:1; with an ephemeral port it is the port the probe
 ///   saw, which only a NAT that keeps the mapping open to anyone lets callers
 ///   in through.
-/// - Reachability is `public` once the probe reports the advertised IP and a
-///   caller can use it: on a fixed port (forwarded) or for an IP the operator
-///   named. An ephemeral port with a STUN-learnt address is still advertised,
+/// - Reachability is `public` once the probe reports the advertised IP on a
+///   fixed (forwarded) port. An ephemeral port's address is still advertised,
 ///   but stays `nat`: the probe only proves the mapping exists for the STUN
 ///   server, and most routers drop a new peer's packets to it.
 pub fn assess(
@@ -351,9 +350,8 @@ pub fn assess(
         _ => None,
     };
 
-    let usable = |a: &Advertised| fixed_port || a.source == AdvertisedSource::Flag;
     let reachability = match (advertised, probe) {
-        (Some(a), Some(Ok(r))) if r.ip() == a.addr.ip() && usable(&a) => SfuReachability::Public {
+        (Some(a), Some(Ok(r))) if r.ip() == a.addr.ip() && fixed_port => SfuReachability::Public {
             reflexive_addr: a.addr,
         },
         (Some(a), Some(Err(e))) => SfuReachability::Unknown {
