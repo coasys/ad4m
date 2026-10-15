@@ -64,6 +64,10 @@ use uuid::Uuid;
 
 // Live query subscriptions, split out per the planned
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
+// Abstract classes: resolution cache, queries, subscriptions (#1435).
+mod abstract_classes;
+#[cfg(test)]
+pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
@@ -72,6 +76,10 @@ mod subscription_triggers;
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
 mod subscription_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_abstract_tests.rs"]
+mod abstract_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -100,7 +108,8 @@ fn notification_pool_name(uuid: &str) -> String {
 ///     application links must not flush the cache), or
 ///   * any SHACL-vocabulary predicate (`sh://...`) which only
 ///     appears on property-shape triples written by the SHACL
-///     writer, not on regular application data.
+///     writer, not on regular application data, or
+///   * an abstract-class marker or alias (#1435).
 ///
 /// Used by `diff_from_link_language` to decide whether to
 /// invalidate the shape cache. The scan is one loop over
@@ -120,6 +129,11 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
         }
         match predicate {
             "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => return true,
+            // The abstract-class marker and aliases (#1435) can sync apart
+            // from the rest of a shape.
+            super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => {
+                return true
+            }
             "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
             _ => {}
         }
@@ -183,6 +197,22 @@ mod inbound_touches_shacl_tests {
             additions,
             removals: vec![],
         }
+    }
+
+    /// The abstract-class marker and an alias can arrive in a diff of their
+    /// own; the cached abstract index must still be dropped (#1435).
+    #[test]
+    fn abstract_marker_and_alias_count_as_shacl() {
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ns://TextContentShape",
+            crate::perspectives::shacl_parser::ABSTRACT_PREDICATE,
+            "literal:true",
+        )])));
+        assert!(inbound_touches_shacl(&diff(vec![link(
+            "ns://Message.body",
+            crate::perspectives::shacl_parser::ALIAS_PREDICATE,
+            "literal:string:%7B%7D",
+        )])));
     }
 
     #[test]
@@ -462,6 +492,10 @@ pub struct PerspectiveMemoryStats {
 #[derive(Clone)]
 struct ModelSubscriptionParams {
     classes: super::model_query::QueryClasses,
+    /// When `classes` is an abstract class (#1435): the shapes generation its
+    /// classes were resolved at, or `abstract_classes::UNRESOLVED`. See
+    /// `refresh_abstract_subscriptions`.
+    abstract_read: Option<u64>,
     query_json: String,
     /// Which writes re-run it; holds the nodes of `last_result`.
     trigger: subscription_triggers::ModelTrigger,
@@ -543,6 +577,10 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The abstract classes and aliases installed here, and the classes each
+    /// abstract class reads (#1435). Derived from every class's shape, so
+    /// dropped whenever any shape is (see `forget_derived_shapes`).
+    abstract_cache: Arc<std::sync::RwLock<abstract_classes::AbstractCache>>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -637,6 +675,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
@@ -682,6 +721,7 @@ impl PerspectiveInstance {
     /// (re-)written for the class so the next query re-parses fresh state.
     pub fn invalidate_shape(&self, class_name: &str) {
         self.shape_cache.write().unwrap().remove(class_name);
+        self.forget_derived_shapes();
     }
 
     /// Like [`get_shape`], but for perspectives joined to a
@@ -1011,7 +1051,7 @@ impl PerspectiveInstance {
             })
             .collect();
         self.sparql_store.reload(link_exprs)?;
-        self.shape_cache.write().unwrap().clear();
+        self.clear_shape_cache();
         Ok(())
     }
 
@@ -1706,7 +1746,7 @@ impl PerspectiveInstance {
         // peer that has never registered a class locally still picks up
         // the class the moment its SHACL arrives.
         if inbound_touches_shacl(&decorated_diff) {
-            self.shape_cache.write().unwrap().clear();
+            self.clear_shape_cache();
         }
 
         // Queue the Prolog fact update and the notification + live-query checks
@@ -1843,6 +1883,14 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        // A class's SHACL written or removed by any path — `add_sdna`, a raw
+        // link write, a wipe — can change which classes are abstract, their
+        // aliases and which classes an abstract class reads (#1435). Shapes
+        // are cached per class and refreshed where they are written; what is
+        // derived from them spans every class, so any such write drops it.
+        if inbound_touches_shacl(&decorated_diff) {
+            self.forget_derived_shapes();
+        }
         // A `FlowInstance` minted by an agent this node acts for gets its
         // bookkeeping row now, before any pass can treat it as a catch-up
         // (#1424). Awaited, not spawned: a client's `start` is followed at
@@ -3945,14 +3993,32 @@ impl PerspectiveInstance {
         // its includes reach get whatever this wait leaves (see the retry
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
-        let mut shapes = Vec::new();
         for class_name in classes.names() {
+            // A built-in abstract class is not stored (#1446).
+            if super::model_query::builtin_classes::builtin(class_name).is_some() {
+                continue;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            shapes.push((
-                class_name.clone(),
-                self.get_shape_or_wait(class_name, remaining).await?,
-            ));
+            self.get_shape_or_wait(class_name, remaining).await?;
         }
+        // An abstract class (#1435) reads the concrete classes that have its
+        // names, each through its view; none of them is an empty result.
+        let targets = self.read_targets(classes, &query_input)?;
+        let classes = &targets.classes;
+        if classes.names().is_empty() {
+            return serde_json::to_string(&super::model_query::ModelQueryResult {
+                instances: vec![],
+                total_count: 0,
+            })
+            .map_err(|e| {
+                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+            });
+        }
+        let shapes = classes
+            .names()
+            .iter()
+            .map(|class_name| Ok((class_name.clone(), self.get_shape(class_name)?)))
+            .collect::<Result<Vec<_>, AnyError>>()?;
         let resolver = self.shape_resolver();
 
         if let Some(filter) = produced_by_flow {
@@ -4019,11 +4085,12 @@ impl PerspectiveInstance {
                     .await
                 }
                 super::model_query::QueryClasses::Union(names) => {
-                    super::model_query::execute_union_query(
+                    super::model_query::execute_union_query_with_views(
                         &self.sparql_store,
                         names,
                         &query_input,
                         &resolver,
+                        &targets.views,
                     )
                     .await
                 }
@@ -5471,11 +5538,15 @@ impl PerspectiveInstance {
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
+        self.refuse_abstract_create(&class_name)?;
 
         //let constructor_start = std::time::Instant::now();
         let mut commands = self.get_constructor_actions(&class_name).await?;
         //log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}",
         //    commands.len(), constructor_start.elapsed());
+        // Each `collectionSetter`, run after the merged commands with the
+        // members as its parameters (as in `update_subject`).
+        let mut collection_runs = Vec::new();
 
         // Handle initial values if provided
         if let Some(obj) = initial_values {
@@ -5487,6 +5558,24 @@ impl PerspectiveInstance {
                     if let Some(setter_commands) =
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
+                        let (collection, setter_commands): (Vec<_>, Vec<_>) = setter_commands
+                            .into_iter()
+                            .partition(|c| c.action == Action::CollectionSetter);
+                        if !collection.is_empty() {
+                            collection_runs.extend(
+                                self.collection_setter_runs(
+                                    &class_name,
+                                    prop,
+                                    collection,
+                                    value,
+                                    context,
+                                )
+                                .await?,
+                            );
+                        }
+                        if setter_commands.is_empty() {
+                            continue;
+                        }
                         // An array value on a property whose setter actions are all
                         // `addLink` is a collection write: one setter execution per
                         // element, accumulating N links. Everywhere else an array
@@ -5578,15 +5667,14 @@ impl PerspectiveInstance {
 
         //let execute_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Executing {} commands...", commands.len());
-        // Execute the merged commands
-        self.execute_commands(
+        // Execute the merged commands, then each collection setter
+        let mut runs = vec![abstract_classes::Run {
             commands,
-            expression_address.clone(),
-            vec![],
-            batch_id.clone(),
-            context,
-        )
-        .await?;
+            parameters: vec![],
+        }];
+        runs.extend(collection_runs);
+        self.execute_runs(runs, expression_address, batch_id, context)
+            .await?;
 
         //log::info!("🎯 CREATE SUBJECT: Commands executed in {:?}", execute_start.elapsed());
         //log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
@@ -5619,8 +5707,19 @@ impl PerspectiveInstance {
         let class_name = self
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
+        // Through an abstract class (#1435): each of the record's classes it
+        // reads writes the value with its own setter.
+        if self.is_abstract_class(&class_name)? {
+            let runs = self
+                .update_through_abstract(&class_name, &expression_address, &values, context)
+                .await?;
+            return self
+                .execute_runs(runs, expression_address, batch_id, context)
+                .await;
+        }
 
         let mut commands: Vec<Command> = Vec::new();
+        let mut runs = Vec::new();
         if let serde_json::Value::Object(obj) = values {
             for (prop, value) in obj.iter() {
                 let Some(setter_commands) =
@@ -5637,35 +5736,71 @@ impl PerspectiveInstance {
                     );
                     continue;
                 };
-                // Same collection expansion as `create_subject`: an array on an
-                // all-`addLink` setter appends one link per element; any other
-                // array stays a single `literal:json:` value.
-                let expand_collection = matches!(value, serde_json::Value::Array(_))
-                    && setter_commands.iter().all(|c| c.action == Action::AddLink);
-                let elements: Vec<serde_json::Value> = match (expand_collection, value) {
-                    (true, serde_json::Value::Array(items)) => items.clone(),
-                    _ => vec![value.clone()],
-                };
-                for element in &elements {
-                    let target_value = self
-                        .resolve_property_value(&class_name, prop, element, context)
-                        .await?;
-                    for setter_cmd in setter_commands.iter() {
-                        commands.push(Command {
-                            target: Some(target_value.clone()),
-                            ..setter_cmd.clone()
-                        });
-                    }
+                // A `collectionSetter` sets the members as its parameters, in
+                // a run of its own: with none it would set `[]`.
+                let (collection, setter): (Vec<_>, Vec<_>) = setter_commands
+                    .into_iter()
+                    .partition(|c| c.action == Action::CollectionSetter);
+                commands.extend(
+                    self.setter_commands(&class_name, prop, &setter, value, context)
+                        .await?,
+                );
+                if !collection.is_empty() {
+                    runs.extend(
+                        self.collection_setter_runs(&class_name, prop, collection, value, context)
+                            .await?,
+                    );
                 }
             }
         }
 
-        if commands.is_empty() {
+        if !commands.is_empty() {
+            runs.insert(
+                0,
+                abstract_classes::Run {
+                    commands,
+                    parameters: vec![],
+                },
+            );
+        }
+        if runs.is_empty() {
             return Ok(());
         }
-
-        self.execute_commands(commands, expression_address, vec![], batch_id, context)
+        self.execute_runs(runs, expression_address, batch_id, context)
             .await
+    }
+
+    /// The commands `setter` runs to write `value` to `prop` of `class_name`.
+    /// Same collection expansion as `create_subject`: an array on an
+    /// all-`addLink` setter appends one link per element; any other array
+    /// stays a single `literal:json:` value.
+    async fn setter_commands(
+        &self,
+        class_name: &str,
+        prop: &str,
+        setter: &[Command],
+        value: &serde_json::Value,
+        context: &AgentContext,
+    ) -> Result<Vec<Command>, AnyError> {
+        let expand_collection = matches!(value, serde_json::Value::Array(_))
+            && setter.iter().all(|c| c.action == Action::AddLink);
+        let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+            (true, serde_json::Value::Array(items)) => items.clone(),
+            _ => vec![value.clone()],
+        };
+        let mut commands = Vec::new();
+        for element in &elements {
+            let target_value = self
+                .resolve_property_value(class_name, prop, element, context)
+                .await?;
+            for setter_cmd in setter {
+                commands.push(Command {
+                    target: Some(target_value.clone()),
+                    ..setter_cmd.clone()
+                });
+            }
+        }
+        Ok(commands)
     }
 
     pub async fn get_subject_data(
@@ -5867,42 +6002,17 @@ impl PerspectiveInstance {
         query_json: String,
         connection_id: String,
     ) -> Result<(String, u64, String), AnyError> {
-        // Build trigger SPARQL from shape predicates resolved through the cache.
-        // Each class contributes its own trigger set; the matcher below is
-        // predicate-only, so the sets meet as their union.
-        let mut trigger_predicates: Vec<String> = classes
-            .names()
-            .iter()
-            .flat_map(|class_name| {
-                self.build_model_trigger_predicates(class_name, Some(&query_json))
-            })
-            .collect();
-        trigger_predicates.sort();
-        trigger_predicates.dedup();
-
-        let trigger_sparql = if trigger_predicates.is_empty() {
-            // Fallback: match any triple (always re-check)
-            "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
-        } else {
-            let patterns: Vec<String> = trigger_predicates
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
-                .collect();
-            format!(
-                "SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1",
-                patterns.join(" UNION ")
-            )
-        };
-
-        let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
-        let trigger = self.build_model_trigger(
-            classes.names().iter().map(String::as_str),
-            &query_json,
-            // No result yet: `open_subscription` points the trigger at the
-            // nodes of the first result when it stores it.
-            "",
-        );
+        // An abstract class (#1435) is watched through the classes it reads
+        // now; `refresh_abstract_subscriptions` resolves it again when the
+        // installed shapes change. The generation is read first, so a change
+        // that lands while resolving is seen.
+        let generation = self.shapes_generation();
+        let targets = self.trigger_targets(&classes, &query_json);
+        let (trigger_sparql, predicate_set) = self.model_trigger_query(&targets, &query_json);
+        // No result yet: `open_subscription` points the trigger at the
+        // nodes of the first result when it stores it.
+        let trigger = self.build_model_trigger_for(&targets, &query_json, "");
+        let abstract_read = Self::abstract_read(&targets, generation);
 
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
@@ -5910,6 +6020,7 @@ impl PerspectiveInstance {
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
                 classes: classes.clone(),
+                abstract_read,
                 query_json: query_json.clone(),
                 trigger,
             }),
@@ -5961,6 +6072,9 @@ impl PerspectiveInstance {
     }
 
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
+        // First, so the queries collected below carry the new class lists.
+        let reresolved = self.refresh_abstract_subscriptions().await;
+
         let mut query_futures: Vec<
             std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
         > = Vec::new();
@@ -5988,9 +6102,13 @@ impl PerspectiveInstance {
 
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
+            if reresolved.contains(&id) {
+                // A subscription over an abstract class resolved again this
+                // pass: what it reads moved, so it runs whatever was written.
+            }
             // Model subscriptions match each written link against their
             // trigger (see `subscription_triggers`), not the predicate alone.
-            if let (Some(params), ChangedPredicates::Specific(ref writes)) =
+            else if let (Some(params), ChangedPredicates::Specific(ref writes)) =
                 (&model_params, &changed_predicates)
             {
                 if !params.trigger.matches(writes, &mut trigger_lookups) {

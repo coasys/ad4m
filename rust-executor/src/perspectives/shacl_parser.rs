@@ -39,7 +39,25 @@ pub struct SHACLShape {
     /// link per parent on the shape node.
     #[serde(default)]
     pub parent_shapes: Vec<String>,
+    /// An abstract class (#1435): queried as the union of every concrete
+    /// class that has its property names, never created, never chosen when a
+    /// record is classified. Emitted as one [`ABSTRACT_PREDICATE`] link on
+    /// the shape node. See `model_query::abstract_classes`.
+    #[serde(
+        default,
+        rename = "abstract",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_abstract: bool,
 }
+
+/// Marks a node shape as an abstract class (#1435).
+pub const ABSTRACT_PREDICATE: &str = "ad4m://abstract";
+
+/// A property's names for abstract classes (#1435): one link on the property
+/// shape, targeting `literal:string:` + the URL-encoded JSON map
+/// `{ abstractClassName: name }`.
+pub const ALIAS_PREDICATE: &str = "ad4m://alias";
 
 /// A single structured conformance condition for relation filtering.
 /// DB-agnostic representation that can be translated to any query language.
@@ -148,6 +166,11 @@ pub struct PropertyShape {
     pub min_inclusive: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_inclusive: Option<f64>,
+    /// The name this property answers to when the class is read through an
+    /// abstract class (#1435), keyed by the abstract class's name:
+    /// `{ "TextContent": "text" }`. Emitted as one [`ALIAS_PREDICATE`] link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<std::collections::BTreeMap<String, String>>,
 }
 
 // ============================================================================
@@ -1468,6 +1491,67 @@ fn propagate_property_local(shape: &mut SHACLShape) {
     }
 }
 
+/// The name a property is stored under: its `name`, or its path's local part.
+fn property_name(prop: &PropertyShape) -> String {
+    prop.name
+        .clone()
+        .unwrap_or_else(|| extract_local_name(&prop.path))
+}
+
+/// Refuse what an abstract class or an alias cannot mean (#1435).
+///
+/// - An abstract class with no property or relation would match every class.
+/// - An alias must name something. It must not be a reserved name, and it
+///   must not be a name the class already uses: queried through the abstract
+///   class, both would answer to it.
+/// - Two properties of one class cannot take the same alias for the same
+///   abstract class.
+fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), AnyError> {
+    if shape.is_abstract && shape.properties.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Abstract class '{class_name}' declares no property and no relation: it would \
+             match every class. Declare the names a class must have."
+        ));
+    }
+    let names: Vec<String> = shape.properties.iter().map(property_name).collect();
+    let mut taken: std::collections::BTreeMap<(&str, &str), &str> = Default::default();
+    for (prop, own_name) in shape.properties.iter().zip(&names) {
+        for (abstract_class, alias) in prop.alias.iter().flatten() {
+            if abstract_class.is_empty() || alias.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has an empty alias \
+                     {abstract_class:?}: {alias:?}. Name the abstract class and the name."
+                ));
+            }
+            if alias == own_name {
+                continue;
+            }
+            if RESERVED_PROPERTY_NAMES.contains(&alias.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has alias '{alias}' for \
+                     '{abstract_class}', a name every instance already carries ({}).",
+                    RESERVED_PROPERTY_NAMES.join(", ")
+                ));
+            }
+            if names.contains(alias) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': property '{own_name}' has alias '{alias}' for \
+                     '{abstract_class}', but the class already has a property named \
+                     '{alias}'. Read through '{abstract_class}', both would answer to it: \
+                     drop the alias or rename one of them."
+                ));
+            }
+            if let Some(other) = taken.insert((abstract_class, alias), own_name) {
+                return Err(anyhow::anyhow!(
+                    "Class '{class_name}': properties '{other}' and '{own_name}' both have \
+                     alias '{alias}' for '{abstract_class}'."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
     let mut shape: SHACLShape = serde_json::from_str(shacl_json)
@@ -1530,6 +1614,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             literal_and_instance,
         ));
     }
+
+    refuse_abstract_misuse(&shape, class_name)?;
 
     let mut links = Vec::new();
 
@@ -1611,6 +1697,14 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         });
     }
 
+    if shape.is_abstract {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some(ABSTRACT_PREDICATE.to_string()),
+            target: "literal:true".to_string(),
+        });
+    }
+
     // Constructor and destructor actions (JSON in a literal). Written even
     // when empty: `create_subject` needs the constructor link to know the
     // class exists, and an empty list is a valid no-op.
@@ -1668,6 +1762,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://interpretation_hint".to_string()),
                 target: format!("literal:string:{}", hint),
+            });
+        }
+
+        if let Some(alias) = prop.alias.as_ref().filter(|a| !a.is_empty()) {
+            let json = serde_json::to_string(alias).unwrap_or_else(|_| "{}".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some(ALIAS_PREDICATE.to_string()),
+                target: format!("literal:string:{}", urlencoding::encode(&json)),
             });
         }
 
@@ -2344,7 +2447,8 @@ mod tests {
 
     /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds
     /// shapes (one using every field `SHACLShape.toJSON()` sends, one with
-    /// empty action lists) and the exact links this writer stores for each.
+    /// empty action lists, one abstract class) and the exact links this
+    /// writer stores for each.
     /// The SDK test "decodes the executor's golden links back to the shape it
     /// sent" reads the same file through `SHACLShape.fromLinks`, so a field
     /// this writer drops fails one side.

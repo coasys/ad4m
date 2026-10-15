@@ -1106,12 +1106,24 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * The name the executor knows this class by: its class name, or a
+   * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
+   * the class's own static only: a subclass is a class of its own.
+   * @internal
+   */
+  static queriedAs(): string {
+    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
+    return builtinUri || this.getModelMetadata().className;
+  }
+
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
   ): { className: string; queryJson: string } {
-    // A query by class name runs on the undecorated base class: no metadata.
-    const className = classNameOverride || this.getModelMetadata().className;
+    // A query by class name runs on the undecorated base class: no metadata,
+    // so queriedAs() (which may read it) only runs without an override.
+    const className = classNameOverride || this.queriedAs();
 
     query = Ad4mModel.withIncludeAll([this], query);
 
@@ -1281,7 +1293,7 @@ export class Ad4mModel {
       merged.parent = JSON.parse(scopes[0]);
     }
     return {
-      classNames: classes.map((c) => c.getModelMetadata().className),
+      classNames: classes.map((c) => c.queriedAs()),
       queryJson: JSON.stringify(merged),
     };
   }
@@ -1610,10 +1622,30 @@ export class Ad4mModel {
     return String(value);
   }
 
+  /** A relation write on a row read through an abstract class (#1435). The
+   *  relation's predicate is the abstract class's, which no record's class
+   *  reads: the executor runs the adder, remover or setter of each of the
+   *  record's classes for the relation answering to `key`. */
+  private async relationThroughAbstract(
+    abstractName: string,
+    key: string,
+    action: 'adder' | 'remover' | 'setter',
+    value: any,
+    batchId?: string
+  ) {
+    const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    await this._perspective.updateSubject(abstractName, this._baseExpression, { [key]: { action, value: ids } }, batchId);
+  }
+
   private async setRelationValues(key: string, value: any, batchId?: string) {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
       return;
     }
 
@@ -1640,6 +1672,11 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
+      return;
+    }
 
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, 'adder');
@@ -1661,6 +1698,11 @@ export class Ad4mModel {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'remover', value, batchId);
       return;
     }
 
@@ -1709,7 +1751,12 @@ export class Ad4mModel {
   async save(batchId?: string) {
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
-      await this.innerUpdate(true, batchId);
+      const abstractName = this.abstractName();
+      if (abstractName) {
+        await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValuesForDispatch(), batchId);
+      } else {
+        await this.innerUpdate(true, batchId);
+      }
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
         // and overwrite in-memory values. Just refresh the snapshot so further
@@ -1721,9 +1768,19 @@ export class Ad4mModel {
       return;
     }
 
-    // New instance → create path. With a caller's batch, the caller commits;
-    // take a snapshot so a later save() in the same batch updates instead of
-    // creating again (two competing "title" values).
+    // New instance → create path. The executor refuses an abstract class
+    // too; refusing here keeps the error ahead of the batch.
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      throw new Error(
+        `'${abstractName}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${abstractName}' reads it.`
+      );
+    }
+
+    // With a caller's batch, the caller commits; take a snapshot so a later
+    // save() in the same batch updates instead of creating again (two
+    // competing "title" values).
     if (batchId) {
       await this.createIn(batchId);
       this.takeSnapshot();
@@ -1794,6 +1851,38 @@ export class Ad4mModel {
         await this.setProperty(key, value, batchId);
       }
     }
+  }
+
+  /** The name the executor knows the class by when it is abstract (#1435):
+   *  a built-in's URI (#1446). Through an abstract class, the executor
+   *  writes to the record's own classes. */
+  private abstractName(): string | undefined {
+    const ctor = this.constructor as typeof Ad4mModel & { isAbstract?: boolean };
+    return ctor.isAbstract ? ctor.queriedAs() : undefined;
+  }
+
+  private changedValues(): Record<string, any> {
+    return Object.fromEntries(this.changedFields().map((key) => [key, (this as any)[key]]));
+  }
+
+  /** `changedValues()` with each relation's members as IDs, as the relation
+   *  helpers send them: a member may be a model instance. An action envelope
+   *  (`{ action: "adder", value }`) keeps its action, as `innerUpdate()` runs
+   *  it; an action it does not know is a setter there, so it is one here. */
+  private changedValuesForDispatch(): Record<string, any> {
+    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
+    const ids = (value: any) =>
+      Array.isArray(value) ? value.map((v) => this.resolveRelationId(v)) : this.resolveRelationId(value);
+    return Object.fromEntries(
+      Object.entries(this.changedValues()).map(([key, value]) => {
+        if (!relations[key] || value == null) return [key, value];
+        if (value.action) {
+          const action = ["adder", "remover", "setter"].includes(value.action) ? value.action : "setter";
+          return [key, { action, value: ids(value.value) }];
+        }
+        return [key, ids(value)];
+      })
+    );
   }
 
   private cleanCopy() {
@@ -2062,7 +2151,9 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasDestructor = Object.values(metadata.properties).some(
+    // Through an abstract class (#1435), `removeSubject` runs the destructors
+    // of the record's own classes.
+    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
