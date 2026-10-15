@@ -23,7 +23,8 @@
 //! answering to that name. Predicates, datatypes and directions are not
 //! compared. A property answers to its own name, or to its alias for this
 //! abstract class (`@Property({ alias: { TextContent: "text" } })`, one
-//! [`ALIAS_PREDICATE`] link on the property shape).
+//! [`ALIAS_PREDICATE`] link on the property shape). An abstract shape with no
+//! names reads no class, never every class.
 //!
 //! # Views
 //!
@@ -160,6 +161,12 @@ pub fn view_through(
     concrete_class: &str,
     concrete: &ModelShape,
 ) -> Option<ModelShape> {
+    // With no name to ask for, every class would conform. Registration refuses
+    // such a class; a shape that arrived another way (its marker synced
+    // before its properties, raw links) matches nothing rather than all.
+    if abstract_shape.properties.is_empty() && abstract_shape.include_relations.is_empty() {
+        return None;
+    }
     let relation_names = |shape: &ModelShape| -> HashSet<String> {
         shape
             .include_relations

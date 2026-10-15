@@ -207,6 +207,40 @@ fn an_abstract_class_reads_every_concrete_class_with_its_names() {
     assert_eq!(resolved(&store, "Readable").classes, vec!["Note", "Post"]);
 }
 
+/// An abstract shape with no names reads nothing, not everything. The
+/// writer refuses one; here the marker arrived without the property links,
+/// as a sync can deliver it.
+#[test]
+fn an_abstract_shape_without_names_reads_no_class() {
+    let store = all_classes();
+    let links = parse_shacl_to_links(
+        r#"{"target_class":"app://Bare","abstract":true,
+            "properties":[{"path":"app://bare","name":"bare","max_count":1}]}"#,
+        "Bare",
+    )
+    .unwrap();
+    let property_nodes: Vec<String> = links
+        .iter()
+        .filter(|l| l.predicate.as_deref() == Some("sh://property"))
+        .map(|l| l.target.clone())
+        .collect();
+    assert!(!property_nodes.is_empty());
+    for link in links {
+        let property_link = link.predicate.as_deref() == Some("sh://property")
+            || property_nodes.contains(&link.source);
+        if !property_link {
+            store.add_link(&link_expression(link, "0")).unwrap();
+        }
+    }
+    let index = AbstractIndex::load(&store).unwrap();
+    assert!(index.is_abstract("Bare"));
+    let shape = StoreResolver(&store).get_shape("Bare").unwrap();
+    assert!(shape.properties.is_empty(), "{shape:?}");
+    assert_eq!(resolved(&store, "Bare").classes, Vec::<String>::new());
+    let post = StoreResolver(&store).get_shape("Post").unwrap();
+    assert!(view_through(&index, "Bare", &shape, "Post", &post).is_none());
+}
+
 /// Relations match relations by name, whatever their predicate or direction;
 /// a property of that name does not.
 #[test]
