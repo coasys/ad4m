@@ -218,7 +218,7 @@ impl Ad4mMcpHandler {
     /// Read the most recent children under a node that carry text, as a
     /// transcript: of one class, or through TextContent.
     #[tool(
-        description = "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). Ideal for reading a conversation-shaped container in one call: with only parent=<channel id> it reads every class that has text (the built-in TextContent), whatever the app calls its class or property. Pass class_name (and optionally text_property) to read one class; use describe_perspective to find them. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)', where M is an upper bound when several classes are read. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -339,9 +339,13 @@ impl Ad4mMcpHandler {
 
         let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
         if total > rows.len() {
+            // A record two sources both read is subtracted only when both
+            // windows returned it, so across sources the total is a bound.
+            let bound = if sources.len() > 1 { "up to " } else { "" };
             lines.push(format!(
-                "(showing last {} of {} {} instances under {})",
+                "(showing last {} of {}{} {} instances under {})",
                 rows.len(),
+                bound,
                 total,
                 label,
                 parent

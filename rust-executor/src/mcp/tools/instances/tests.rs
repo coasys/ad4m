@@ -2705,7 +2705,7 @@ async fn a_class_with_its_own_text_does_not_hide_the_message_body() {
         .await;
     assert!(
         last_two.starts_with(&format!(
-            "(showing last 2 of 3 TextContent and Message instances under {channel})"
+            "(showing last 2 of up to 3 TextContent and Message instances under {channel})"
         )) && !last_two.contains("lunch")
             && last_two.contains("an answer in the channel")
             && last_two.contains("second message"),
