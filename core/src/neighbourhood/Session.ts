@@ -79,7 +79,7 @@ export interface SessionCreateOptions {
      *  runs through the SFU, `mesh` stays peer-to-peer. Passing one is the app's statement that
      *  every member reaches the same SFU. */
     sfuConfig?: SfuConfig
-    /** NAT traversal for the mesh path. Takes precedence over `sfuConfig.iceServers`. */
+    /** NAT traversal for both paths, each server as given. Takes precedence over `sfuConfig.iceServers`. */
     iceServers?: IceServer[]
 }
 
@@ -386,9 +386,11 @@ export function createSession(config: SessionImplConfig): Session {
             }
 
             // SFU path — this executor's SFU.
+            // Each server as given: splitting them into STUN and TURN lists
+            // lost the credentials of a server that lists both, and joined
+            // several URLs into one string.
             const iceConfig = iceServers && iceServers.length > 0
-                ? { stun: iceServers.filter(s => s.urls.some(u => u.startsWith("stun:"))).flatMap(s => s.urls),
-                    turn: iceServers.filter(s => s.urls.some(u => u.startsWith("turn:"))).map(s => ({ urls: s.urls.join(","), username: s.username || "", credential: s.credential || "" })) }
+                ? { servers: iceServers.map(s => ({ urls: s.urls, ...(s.username ? { username: s.username } : {}), ...(s.credential ? { credential: s.credential } : {}) })) }
                 : undefined
 
             sfuManager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig)

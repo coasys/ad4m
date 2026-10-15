@@ -576,10 +576,21 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             config.sfu_bind_addr.as_deref(),
             config.localhost.unwrap_or(true),
         );
-        info!("SFU bind address: {}", bind_ip);
+        let public_ip = config.sfu_public_addr.as_deref().map(|addr| {
+            addr.parse::<std::net::IpAddr>().unwrap_or_else(|e| {
+                let message = format!(
+                    "sfu_public_addr `{}` is not an IP address ({}): give the public IP, without a port",
+                    addr, e
+                );
+                error!("{}", message);
+                panic!("{}", message);
+            })
+        });
+        let fixed_port = config.sfu_udp_port.filter(|port| *port != 0);
         let sfu_config = crate::sfu::server::SfuServerConfig {
-            bind_addr: std::net::SocketAddr::new(bind_ip, 0),
+            bind_addr: std::net::SocketAddr::new(bind_ip, fixed_port.unwrap_or(0)),
             stun_server: config.sfu_stun_server.clone(),
+            public_ip,
             preferred_node: config.sfu_preferred_node.clone(),
             cascade_peer_dids: config
                 .sfu_cascade_peers
@@ -590,11 +601,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .collect(),
         };
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
-            Ok(svc) => info!(
-                "SFU service ready on UDP {} (reachability: {})",
-                svc.local_addr(),
-                svc.reachability()
-            ),
+            Ok(_) => {}
+            // A fixed port is what the router forwards: running without it
+            // would leave calls broken with nothing to say why.
+            Err(e) if fixed_port.is_some() => {
+                error!("{}", e);
+                panic!("{}", e);
+            }
             Err(e) => warn!("SFU service failed to start: {}", e),
         }
     }

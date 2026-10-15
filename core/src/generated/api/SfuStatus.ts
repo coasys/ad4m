@@ -14,6 +14,11 @@ isPublic: boolean,
  */
 bindAddress: string, 
 /**
+ * The public address (`ip:port`) offered next to the bind address
+ * behind NAT, when there is one.
+ */
+advertisedAddress?: string, 
+/**
  * Human-readable reachability detail.
  */
 detail: string, };

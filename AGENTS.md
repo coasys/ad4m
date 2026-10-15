@@ -131,6 +131,12 @@ so the same file runs on both link languages.
   passwordless `sudo -n tc`. Never impair the whole of `lo` in a PR job:
   machine runners on one host share it, and every other job's localhost
   RPC times out (seen as `executeCommands`/`otherAgents` 30 s timeouts).
+- E14 runs the SFU behind a simulated NAT: the executor binds 127.0.0.1 on a
+  fixed port and advertises 127.0.0.2 (`executorEnv` in the world spec);
+  `reachOnlyThrough` DNATs 127.0.0.2:P to 127.0.0.1:P and drops direct UDP
+  to 127.0.0.1:P, for that port only. It asserts each caller's selected
+  candidate pair (`Snapshot.selectedRemotes`, from WebRTC stats) is the
+  advertised address. Skips without passwordless `sudo -n iptables -t nat`.
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
@@ -147,6 +153,19 @@ space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
 10 s of ICE `Disconnected`; the SDK rebuilds a failed connection and retries
 the join for 120 s.
+
+SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
+binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
+that is taken stops startup), runs the STUN probe on that same socket before
+the event loop owns it, and `assess` decides the advertised address
+(`sfu_public_addr`, else the probe's reflexive IP on the fixed port) and the
+reachability (`public` once STUN sees the advertised IP). Answers carry the
+host candidate and, when advertised, a srflx candidate on the same socket;
+str0m matches inbound STUN to the host candidate by destination, so the
+event loop's `destination: local_addr` stays right. Cascade pipes offer the
+host candidate only. The public address is read at startup: an IP change
+needs a restart. The four `sfu_*` keys live in the config file too; a build
+without them refuses them as unknown keys.
 
 Mesh signalling rules the scenarios pin (`core/src/neighbourhood/MeshManager.ts`):
 offers are numbered per connection and answers name theirs, so a late answer

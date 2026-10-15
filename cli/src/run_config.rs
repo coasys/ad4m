@@ -289,6 +289,18 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub sfu_stun_server: Option<String>,
+    /// UDP port the SFU binds. Default: a free port, chosen at each start.
+    /// Fix it to forward it from a router; startup fails when it is taken.
+    #[arg(long, env = "AD4M_SFU_UDP_PORT", value_parser = non_empty(value_parser!(u16)))]
+    pub sfu_udp_port: Option<u16>,
+    /// Public IP the SFU offers callers next to its bind address, for an SFU
+    /// behind NAT. Default: the address the STUN probe reports.
+    #[arg(
+        long,
+        env = "AD4M_SFU_PUBLIC_ADDR",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_public_addr: Option<String>,
     /// DID of the cascade node that takes redirected joins first; others
     /// get joins only when it is full. Unset: the least-loaded node.
     #[arg(
@@ -340,6 +352,10 @@ impl RunArgs {
         overlay(&mut file.run_dapp_server, &self.run_dapp_server);
         overlay(&mut file.mcp_enabled, &self.enable_mcp);
         overlay(&mut file.mcp_port, &self.mcp_port);
+        overlay(&mut file.sfu_bind_addr, &self.sfu_bind_addr);
+        overlay(&mut file.sfu_udp_port, &self.sfu_udp_port);
+        overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
+        overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
         overlay(
             &mut file.auto_permit_cap_requests,
             &self.auto_permit_cap_requests,
@@ -414,8 +430,6 @@ impl RunArgs {
         config.sfu_max_participants_per_node = self.sfu_max_participants_per_node;
         config.sfu_cascade_listen = self.sfu_cascade_listen;
         config.sfu_cascade_peers = self.sfu_cascade_peers;
-        config.sfu_bind_addr = self.sfu_bind_addr;
-        config.sfu_stun_server = self.sfu_stun_server;
         config.sfu_preferred_node = self.sfu_preferred_node;
         Ok(ResolvedRun {
             config,
@@ -650,6 +664,34 @@ pub(crate) mod tests {
             "14203",
             "14303",
         ),
+        (
+            "/sfu_bind_addr",
+            "AD4M_SFU_BIND_ADDR",
+            "--sfu-bind-addr",
+            "192.168.0.20",
+            "192.168.0.30",
+        ),
+        (
+            "/sfu_udp_port",
+            "AD4M_SFU_UDP_PORT",
+            "--sfu-udp-port",
+            "40001",
+            "40002",
+        ),
+        (
+            "/sfu_public_addr",
+            "AD4M_SFU_PUBLIC_ADDR",
+            "--sfu-public-addr",
+            "203.0.113.20",
+            "203.0.113.30",
+        ),
+        (
+            "/sfu_stun_server",
+            "AD4M_SFU_STUN_SERVER",
+            "--sfu-stun-server",
+            "stun.b.example:3478",
+            "stun.c.example:3478",
+        ),
     ];
 
     /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
@@ -682,6 +724,10 @@ pub(crate) mod tests {
             log_config: Some([("holochain".to_string(), "warn".to_string())].into()),
             mcp_enabled: Some(true),
             mcp_port: Some(14104),
+            sfu_bind_addr: Some("192.168.0.10".into()),
+            sfu_udp_port: Some(40000),
+            sfu_public_addr: Some("203.0.113.10".into()),
+            sfu_stun_server: Some("stun.a.example:3478".into()),
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());
@@ -966,7 +1012,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 37, "every flag of run has a variable");
+        assert_eq!(checked, 39, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

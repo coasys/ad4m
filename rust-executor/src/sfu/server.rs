@@ -15,6 +15,7 @@ use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, R
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use super::reachability::{assess, stun_reflexive, Advertised, SfuReachability};
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 use super::simulcast::{is_keyframe, LayerSelector};
@@ -188,11 +189,15 @@ pub struct SfuServerConfig {
     /// remote clients can reach. See [`sfu_bind_ip`] for how the executor
     /// picks it.
     ///
-    /// Port `:0` lets the OS pick a free UDP port.
+    /// Port `:0` lets the OS pick a free UDP port; any other port is bound
+    /// exactly, or startup fails.
     pub bind_addr: SocketAddr,
-    /// STUN server (`host:port`) for the startup reachability probe; `None`
-    /// skips it. See [`check_reachability`](super::reachability::check_reachability).
+    /// STUN server (`host:port`) for the startup probe of the SFU's public
+    /// address; `None` skips it. See [`assess`].
     pub stun_server: Option<String>,
+    /// Public IP to advertise behind NAT (`--sfu-public-addr`). `None`: the
+    /// probe's reflexive IP.
+    pub public_ip: Option<std::net::IpAddr>,
     /// DID of the cascade node that takes redirected joins first.
     pub preferred_node: Option<String>,
     /// DIDs of the configured cascade peers, as `sfu.getConfig` reports them.
@@ -206,6 +211,7 @@ impl Default for SfuServerConfig {
         Self {
             bind_addr: SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 0),
             stun_server: None,
+            public_ip: None,
             preferred_node: None,
             cascade_peer_dids: Vec::new(),
         }
@@ -264,6 +270,10 @@ pub struct DeadPeer {
 pub struct SfuServer {
     /// The bound local address of the UDP socket.
     pub local_addr: SocketAddr,
+    /// The public address offered next to `local_addr` behind NAT.
+    pub advertised: Option<Advertised>,
+    /// What the startup probe found.
+    pub reachability: SfuReachability,
     /// Channel to send commands to the event loop.
     pub command_tx: mpsc::Sender<SfuCommand>,
     /// Notifications about peers whose RTC connection died. Unbounded: a
@@ -274,9 +284,57 @@ pub struct SfuServer {
 impl SfuServer {
     /// Start the SFU server. Binds a UDP socket and spawns the event loop on tokio.
     pub async fn start(config: SfuServerConfig) -> Result<Self, std::io::Error> {
-        let socket = UdpSocket::bind(config.bind_addr).await?;
+        let fixed_port = config.bind_addr.port() != 0;
+        let socket = UdpSocket::bind(config.bind_addr).await.map_err(|e| {
+            if fixed_port {
+                std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "SFU UDP port {} on {} is not available ({}): free it, or set another \
+                         --sfu-udp-port and forward that one",
+                        config.bind_addr.port(),
+                        config.bind_addr.ip(),
+                        e
+                    ),
+                )
+            } else {
+                e
+            }
+        })?;
         let local_addr = socket.local_addr()?;
-        info!("SFU server bound to UDP {}", local_addr);
+
+        // On the SFU's own socket, before the event loop owns it: the mapping
+        // a STUN server sees is the one callers' packets come back through.
+        // Loopback cannot reach a STUN server, so it is not probed.
+        let probe = match &config.stun_server {
+            Some(server) if !local_addr.ip().is_loopback() => {
+                Some(stun_reflexive(&socket, server).await)
+            }
+            _ => None,
+        };
+        let (advertised, reachability) =
+            assess(local_addr, fixed_port, config.public_ip, probe.as_ref());
+        info!(
+            "SFU media: bind {} ({} port); advertised {}; reachability {}",
+            local_addr,
+            if fixed_port { "fixed" } else { "ephemeral" },
+            match advertised {
+                Some(a) => format!("{} (from {})", a.addr, a.source),
+                None => "none".to_string(),
+            },
+            reachability
+        );
+        if let (true, Some(Ok(reflexive)), Some(a)) = (fixed_port, &probe, advertised) {
+            if reflexive.port() != local_addr.port() {
+                info!(
+                    "SFU: the router maps outbound traffic to port {}; callers reach {} only \
+                     through a port forward of UDP {}",
+                    reflexive.port(),
+                    a.addr,
+                    local_addr.port()
+                );
+            }
+        }
 
         let (command_tx, command_rx) = mpsc::channel(256);
         let (dead_peer_tx, dead_peer_rx) = mpsc::unbounded_channel();
@@ -290,6 +348,8 @@ impl SfuServer {
 
         Ok(Self {
             local_addr,
+            advertised,
+            reachability,
             command_tx,
             dead_peer_rx: StdMutex::new(Some(dead_peer_rx)),
         })
@@ -297,15 +357,26 @@ impl SfuServer {
 
     /// Create an Rtc instance for a new peer, process the SDP offer, and return the answer.
     /// The Rtc instance is NOT yet added to the event loop — call `add_peer` after.
+    ///
+    /// The answer offers the bound socket as a host candidate and, behind NAT,
+    /// `advertised` as a server-reflexive one on that socket. A caller's
+    /// packets to the advertised address arrive addressed to the bound socket,
+    /// so str0m matches them to the host candidate.
     pub fn create_rtc_for_offer(
         offer: SdpOffer,
         local_addr: SocketAddr,
+        advertised: Option<SocketAddr>,
     ) -> Result<(Rtc, String), String> {
         let mut rtc = Rtc::builder().build();
 
         let candidate = Candidate::host(local_addr, "udp")
             .map_err(|e| format!("Failed to create host candidate: {}", e))?;
         rtc.add_local_candidate(candidate);
+        if let Some(public) = advertised {
+            let candidate = Candidate::server_reflexive(public, local_addr, "udp")
+                .map_err(|e| format!("Failed to create server-reflexive candidate: {}", e))?;
+            rtc.add_local_candidate(candidate);
+        }
 
         let answer = rtc
             .sdp_api()
@@ -1244,6 +1315,129 @@ fn publish_renegotiation_offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A browser's offer: one audio section, as a caller sends to join.
+    fn caller_offer() -> SdpOffer {
+        let mut caller = Rtc::builder().build();
+        let mut change = caller.sdp_api();
+        change.add_media(
+            str0m::media::MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        change.apply().unwrap().0
+    }
+
+    /// The `a=candidate` lines of an answer as `create_rtc_for_offer` returns it.
+    fn candidates(answer_json: &str) -> Vec<String> {
+        let answer: serde_json::Value = serde_json::from_str(answer_json).unwrap();
+        answer["sdp"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.strip_prefix("a=candidate:"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Behind NAT the answer offers the bound socket and the public address
+    /// on the same, fixed port: a srflx candidate whose base is the socket.
+    #[test]
+    fn the_answer_offers_the_host_and_the_advertised_address() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let public: SocketAddr = "198.51.100.7:40000".parse().unwrap();
+        let (_, answer) =
+            SfuServer::create_rtc_for_offer(caller_offer(), local, Some(public)).unwrap();
+        let lines = candidates(&answer);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("192.168.0.10 40000 typ host")),
+            "{lines:?}"
+        );
+        // str0m does not reveal the base: `raddr 0.0.0.0 rport 0`.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("198.51.100.7 40000 typ srflx")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn without_an_advertised_address_the_answer_offers_the_host_only() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let (_, answer) = SfuServer::create_rtc_for_offer(caller_offer(), local, None).unwrap();
+        let lines = candidates(&answer);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("typ host"), "{lines:?}");
+    }
+
+    /// A fixed port is bound exactly; the STUN probe runs on that socket and
+    /// the public address is advertised on it.
+    #[tokio::test]
+    async fn a_fixed_port_is_bound_and_advertised_with_the_probes_ip() {
+        // Loopback is never probed, so bind another local address.
+        let ip = super::super::detect_outbound_ip();
+        if ip.is_loopback() {
+            return; // no interface but loopback on this machine
+        }
+        let stun = UdpSocket::bind(SocketAddr::new(ip, 0)).await.unwrap();
+        let stun_addr = stun.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            let (_, from) = stun.recv_from(&mut buf).await.unwrap();
+            let mapped: SocketAddr = "198.51.100.7:61111".parse().unwrap();
+            let resp = crate::sfu::reachability::tests::binding_response(&buf[8..20], mapped);
+            stun.send_to(&resp, from).await.unwrap();
+        });
+        let port = UdpSocket::bind(SocketAddr::new(ip, 0))
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: SocketAddr::new(ip, port),
+            stun_server: Some(stun_addr.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.local_addr, SocketAddr::new(ip, port));
+        let advertised = server
+            .advertised
+            .expect("behind NAT, something is advertised");
+        assert_eq!(
+            advertised.addr,
+            format!("198.51.100.7:{port}")
+                .parse::<SocketAddr>()
+                .unwrap()
+        );
+        assert!(server.reachability.is_public(), "{}", server.reachability);
+    }
+
+    #[tokio::test]
+    async fn a_taken_fixed_port_fails_with_a_message_that_names_it() {
+        let taken = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let err = SfuServer::start(SfuServerConfig {
+            bind_addr: SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), port),
+            ..Default::default()
+        })
+        .await
+        .err()
+        .expect("the port is taken");
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("SFU UDP port {port}")),
+            "{message}"
+        );
+        assert!(message.contains("--sfu-udp-port"), "{message}");
+    }
 
     #[test]
     fn sfu_binds_loopback_unless_exposure_is_asked_for() {

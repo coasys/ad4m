@@ -147,6 +147,13 @@ pub struct Ad4mConfig {
     /// bind address reports reachability "unknown". Only a public bind
     /// address is ever probed.
     pub sfu_stun_server: Option<String>,
+    /// UDP port the SFU binds. Unset (or 0): a free port, chosen at each
+    /// start. Fixed, a router can forward it; startup fails when it is taken.
+    pub sfu_udp_port: Option<u16>,
+    /// Public IP the SFU offers callers as a server-reflexive candidate,
+    /// with the bound port. Unset: the STUN probe's reflexive IP, when the
+    /// bind address is private.
+    pub sfu_public_addr: Option<String>,
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
@@ -480,6 +487,8 @@ impl Ad4mConfig {
             sfu_cascade_peers: None,
             sfu_bind_addr: None,
             sfu_stun_server: None,
+            sfu_udp_port: None,
+            sfu_public_addr: None,
             sfu_preferred_node: None,
             wallet_backend: None,
             wallet_backend_url: None,
