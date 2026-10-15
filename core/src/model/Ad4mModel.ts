@@ -1608,10 +1608,30 @@ export class Ad4mModel {
     return String(value);
   }
 
+  /** A relation write on a row read through an abstract class (#1435). The
+   *  relation's predicate is the abstract class's, which no record's class
+   *  reads: the executor runs the adder, remover or setter of each of the
+   *  record's classes for the relation answering to `key`. */
+  private async relationThroughAbstract(
+    abstractName: string,
+    key: string,
+    action: 'adder' | 'remover' | 'setter',
+    value: any,
+    batchId?: string
+  ) {
+    const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    await this._perspective.updateSubject(abstractName, this._baseExpression, { [key]: { action, value: ids } }, batchId);
+  }
+
   private async setRelationValues(key: string, value: any, batchId?: string) {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
       return;
     }
 
@@ -1638,6 +1658,11 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
+      return;
+    }
 
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateRelationAction(key, 'adder');
@@ -1659,6 +1684,11 @@ export class Ad4mModel {
     const metadata = this.getRelationOptions(key);
     if (!metadata) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
+      return;
+    }
+    const abstractName = this.abstractName();
+    if (abstractName) {
+      if (value != null) await this.relationThroughAbstract(abstractName, key, 'remover', value, batchId);
       return;
     }
 
