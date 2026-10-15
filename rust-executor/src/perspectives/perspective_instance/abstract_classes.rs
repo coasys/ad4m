@@ -605,7 +605,8 @@ impl PerspectiveInstance {
 impl PerspectiveInstance {
     /// The predicates the classes `abstract_class` reads store `property`
     /// under, deduplicated: what a raw SPARQL scan over "every class's
-    /// `text`" matches on (the waker's mention scan, #1446).
+    /// `text`" matches on (the waker's mention scan, #1446), or over every
+    /// container's `children`.
     pub fn predicates_through(
         &self,
         abstract_class: &str,
