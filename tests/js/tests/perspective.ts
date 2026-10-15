@@ -1,8 +1,28 @@
-import { Ad4mClient, Link, LinkQuery, MentionMessage, PerspectiveProxy, PerspectiveState, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, Flag, HasMany, Link, LinkQuery, MentionMessage, Model, PerspectiveProxy, PerspectiveState, Property, QuerySubscriptionProxy, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
 import { pollUntil } from "../utils/utils";
+
+// The waker reads mentions through the built-in TextContent and parents through
+// the built-in Container (#1446); both classes conform by name.
+@Model({ name: "WakerChannel" })
+class WakerChannel extends Ad4mModel {
+    @Flag({ through: "test://waker/kind", value: "test://waker/channel" })
+    kind = "test://waker/channel";
+
+    @HasMany({ through: "ad4m://has_child", polymorphic: true })
+    children: string[] = [];
+}
+
+@Model({ name: "WakerNote" })
+class WakerNote extends Ad4mModel {
+    @Flag({ through: "test://waker/kind", value: "test://waker/note" })
+    kind = "test://waker/note";
+
+    @Property({ through: "test://waker/text" })
+    text: string = "";
+}
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -274,18 +294,35 @@ export default function perspectiveTests(testContext: TestContext) {
                     onWake: (_sub, _result, mentions) => { wakes.push(mentions) },
                 })
                 try {
+                    await WakerChannel.register(p)
+                    await WakerNote.register(p)
+                    const channel = await WakerChannel.create(p, {})
+                    const note = await WakerNote.create(p, { text: 'a draft' })
+                    const other = await WakerNote.create(p, { text: 'no names here' })
+                    await p.add(new Link({ source: channel.id, predicate: 'ad4m://has_child', target: note.id }))
+                    await p.add(new Link({ source: channel.id, predicate: 'ad4m://has_child', target: other.id }))
+                    // No class describes this node, so it is not a Container and not a parent.
+                    await p.add(new Link({ source: 'test://loose', predicate: 'ad4m://has_child', target: note.id }))
+
+                    // The shape `get_mention_waker_config` returns.
                     await manager.subscribe({
                         id: 'waker-mention-parents',
                         type: 'mention',
                         perspective: p.uuid,
                         channel: '',
-                        query: 'SELECT ?source WHERE { ?source <test://mentions> <test://me> . }',
+                        query: JSON.stringify({
+                            where: { OR: [{ text: { contains: '@me' } }] },
+                            order: { timestamp: 'DESC' },
+                            limit: 50,
+                            properties: [],
+                        }),
+                        className: TextContent.builtinUri,
                     })
-                    await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
-                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
+                    note.text = 'hi @me'
+                    await note.save()
 
-                    await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
-                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'], ancestors: [] }]])
+                    await pollUntil(() => wakes.length > 0, { label: 'waker wake for the edited note' })
+                    expect(wakes).to.deep.equal([[{ address: note.id, parents: [channel.id], ancestors: [] }]])
                 } finally {
                     manager.disposeAll()
                     await ad4mClient.perspective.remove(p.uuid)
