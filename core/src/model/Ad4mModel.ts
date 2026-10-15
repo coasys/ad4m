@@ -18,7 +18,7 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  Scope, IncludeMap, Query,
+  Scope, TraverseScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
@@ -371,6 +371,37 @@ function jsonToModelInstance<T extends Ad4mModel>(
   }
 
   return instance;
+}
+
+
+/**
+ * Put `childId` under `parent`. A containment scope `{ id }` writes through the
+ * built-in `Container` (#1446): the executor runs the adder of the parent's own
+ * `children` relation when its class has one (a block's `we://child`), else
+ * writes `ad4m://has_child`. The other forms write their one predicate.
+ */
+async function linkToParent(
+  perspective: PerspectiveProxy,
+  parent: Exclude<Scope, TraverseScope>,
+  childCtor: Function,
+  childId: string,
+  batchId?: string,
+): Promise<void> {
+  if (isContainedScope(parent)) {
+    await perspective.updateSubject(
+      "ad4m://Container",
+      parent.id,
+      { children: { action: "adder", value: [childId] } },
+      batchId,
+    );
+    return;
+  }
+  const link = new Link({
+    source: parent.id,
+    predicate: resolveParentPredicate(parent, childCtor),
+    target: childId,
+  });
+  await perspective.add(link, 'shared', batchId);
 }
 
 /**
@@ -2244,14 +2275,7 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, batchId);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -2263,14 +2287,7 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', options?.batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options?.batchId);
     }
 
     return instance;

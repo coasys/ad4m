@@ -1244,7 +1244,9 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("add_child result 1:", JSON.stringify(result));
             expect(result.success).to.be.true;
-            expect(result.link.predicate).to.equal("ad4m://has_child");
+            // A parent no class describes holds its children by ad4m://has_child.
+            expect(result.parent).to.be.a('string');
+            expect(result.child).to.be.a('string');
 
             result = await callMcpTool(MCP_BASE_URL,'add_child', {
                 perspective_id: perspectiveUuid,

@@ -47,3 +47,32 @@ describe("containment scope { id }", () => {
     expect(isContainedScope({ ids: ["x"] } as any)).toBe(false);
   });
 });
+
+describe("create({ parent: { id } })", () => {
+  it("puts the record under the parent through the built-in Container", async () => {
+    const calls: any[][] = [];
+    const client: any = new Proxy({}, {
+      get: (_t, key) => async (...args: any[]) => {
+        calls.push([key, ...args]);
+        return true;
+      },
+    });
+    const { PerspectiveProxy } = await import("../perspectives/PerspectiveProxy");
+    const proxy = new PerspectiveProxy({ uuid: "p" } as any, client);
+    const note = await ScopedNote.create(proxy as any, { body: "hi" }, {
+      parent: { id: "ad4m://p" },
+      batchId: "b",
+    });
+    const writes = calls.filter(([key]) => key === "updateSubject" || key === "addLink");
+    expect(writes).toEqual([
+      [
+        "updateSubject",
+        "p",
+        "ad4m://Container",
+        "ad4m://p",
+        JSON.stringify({ children: { action: "adder", value: [note.id] } }),
+        "b",
+      ],
+    ]);
+  });
+});

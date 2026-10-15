@@ -294,6 +294,11 @@ impl PerspectiveInstance {
         values: &Value,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
+        if abstract_class == CONTAINER_URI {
+            if let Some(runs) = self.has_child_runs(base, values).await? {
+                return Ok(runs);
+            }
+        }
         let Value::Object(values) = values else {
             return Ok(vec![]);
         };
@@ -566,6 +571,92 @@ impl PerspectiveInstance {
         }
         self.execute_commands(commands, base, vec![], batch_id, context)
             .await
+    }
+
+    /// Put `child` under `parent` through `Container` (#1446): what MCP's
+    /// `add_child` and `instance_create(parent)` do, and what the SDK's
+    /// `create({ parent: { id } })` asks `updateSubject` for. See
+    /// [`Self::has_child_runs`] for which link it writes.
+    pub(crate) async fn add_to_container(
+        &mut self,
+        parent: &str,
+        child: &str,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let value = serde_json::json!({ "children": { "action": "adder", "value": [child] } });
+        let runs = self
+            .update_through_abstract(CONTAINER_URI, parent, &value, context)
+            .await?;
+        self.execute_runs(runs, parent.to_string(), batch_id, context)
+            .await
+    }
+
+    /// An add or remove through `Container`'s `children` on a parent none of
+    /// whose classes has that action for the relation answering to
+    /// `children`: `ad4m://has_child` links, which hold on any node
+    /// (`ad4m://self`, a plain-string id, a Flux channel whose relation is
+    /// not `children`). `None` when one of its classes has the action: then
+    /// each such class runs its own (a Block's adder writes `we://child`,
+    /// open question 5), as for any abstract class.
+    async fn has_child_runs(
+        &self,
+        base: &str,
+        values: &Value,
+    ) -> Result<Option<Vec<Run>>, AnyError> {
+        let Some(children) = values.get("children") else {
+            return Ok(None);
+        };
+        let (op, value) = Op::of(children);
+        let action = match op {
+            Op::Add => Action::AddLink,
+            Op::Remove => Action::RemoveLink,
+            Op::Set => return Ok(None),
+        };
+        if values.as_object().is_some_and(|o| o.len() != 1) {
+            return Ok(None);
+        }
+        let resolution = self.resolve_abstract(CONTAINER_URI)?;
+        let own = self
+            .subject_classes_of(&[base.to_string()])?
+            .remove(base)
+            .unwrap_or_default();
+        let index = self.abstract_index()?;
+        let alias_key = builtin(CONTAINER_URI)
+            .map(|b| b.name)
+            .unwrap_or("Container");
+        for class in resolution.classes.iter().filter(|c| own.contains(c)) {
+            let shape = self.get_shape(class)?;
+            let Some(own_name) = index.own_name(class, &shape, "children", alias_key) else {
+                continue;
+            };
+            if self.actions_for(class, own_name, op, true).await?.is_some() {
+                return Ok(None);
+            }
+        }
+        let members: Vec<String> = match value {
+            Value::Array(items) => items
+                .iter()
+                .map(|i| i.as_str().map(str::to_string))
+                .collect::<Option<_>>()
+                .ok_or_else(|| anyhow!("'children' of a Container: members are node ids"))?,
+            Value::String(one) => vec![one.clone()],
+            _ => return Err(anyhow!("'children' of a Container: members are node ids")),
+        };
+        let commands = members
+            .into_iter()
+            .map(|member| Command {
+                source: Some("this".to_string()),
+                predicate: Some(containment::HAS_CHILD.to_string()),
+                target: Some(member),
+                local: None,
+                action: action.clone(),
+            })
+            .collect();
+        Ok(Some(vec![Run {
+            commands,
+            parameters: vec![],
+        }]))
     }
 
     /// Resolve again every subscription over an abstract class, or reading

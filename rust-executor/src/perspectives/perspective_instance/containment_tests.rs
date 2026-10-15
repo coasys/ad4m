@@ -450,3 +450,81 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
         "{update}"
     );
 }
+
+/// The targets of `source`'s links on `predicate`, sorted.
+async fn targets(p: &PerspectiveInstance, source: &str, predicate: &str) -> Vec<String> {
+    let mut out: Vec<String> = p
+        .get_links(&LinkQuery {
+            source: Some(source.into()),
+            predicate: Some(predicate.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Writes through `Container` (open question 5): under a Block its own
+/// adder runs (`we://child`); under a node no class describes, and under a
+/// FluxChannel (not a Container), one `has_child` link. `updateSubject` on
+/// `ad4m://Container` is the same write, adder and remover.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
+    let (mut p, ctx) = setup().await;
+    let block = "ad4m://block/w";
+    create(&mut p, &ctx, "Block", block).await;
+    let flux = "ad4m://flux/w";
+    create(&mut p, &ctx, "FluxChannel", flux).await;
+
+    for parent in [block, "ad4m://plain/w", flux] {
+        p.add_to_container(parent, "ad4m://c/1", None, &ctx)
+            .await
+            .unwrap_or_else(|e| panic!("add under {parent}: {e}"));
+    }
+    assert_eq!(targets(&p, block, "we://child").await, vec!["ad4m://c/1"]);
+    assert!(targets(&p, block, HAS_CHILD).await.is_empty());
+    assert_eq!(
+        targets(&p, "ad4m://plain/w", HAS_CHILD).await,
+        vec!["ad4m://c/1"]
+    );
+    assert_eq!(targets(&p, flux, HAS_CHILD).await, vec!["ad4m://c/1"]);
+
+    let through =
+        |action: &str, child: &str| json!({"children": {"action": action, "value": [child]}});
+    p.update_subject(
+        class(CONTAINER_URI),
+        "ad4m://plain/w".into(),
+        through("adder", "ad4m://c/2"),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p.update_subject(
+        class(CONTAINER_URI),
+        "ad4m://plain/w".into(),
+        through("remover", "ad4m://c/1"),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        targets(&p, "ad4m://plain/w", HAS_CHILD).await,
+        vec!["ad4m://c/2"]
+    );
+    p.update_subject(
+        class(CONTAINER_URI),
+        block.into(),
+        through("remover", "ad4m://c/1"),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert!(targets(&p, block, "we://child").await.is_empty());
+}

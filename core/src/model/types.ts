@@ -124,6 +124,11 @@ export type Scope =
  */
 export interface ContainedScope {
   id: string;
+  // Never set: they make the other forms. Declared so the type does not
+  // also describe `{ id, predicate }` or `{ id, model }`.
+  predicate?: never;
+  model?: never;
+  field?: never;
 }
 
 /** Whether this scope is the containment form, `{ id }` alone. */

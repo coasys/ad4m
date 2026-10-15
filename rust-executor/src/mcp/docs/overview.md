@@ -64,8 +64,8 @@ assume they are there; prefer the static tools below.
 
 | Tool | What it does |
 | --- | --- |
-| `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also links it as an `ad4m://has_child` child (e.g. a Message into a Channel). Returns its `base_uri` |
-| `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to one node's children |
+| `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also puts it under that node (e.g. a Message into a Channel), the way the node holds children. Returns its `base_uri` |
+| `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to what one node contains |
 | `instance_get(perspective_id, class_name, base_uri)` | One instance, fully resolved |
 | `instance_update(perspective_id, class_name, base_uri, properties)` | Set single-valued properties |
 | `instance_add_to_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
@@ -81,8 +81,8 @@ cardinality, so fix what the error says rather than guessing.
 
 | Tool | What it does |
 | --- | --- |
-| `add_child(perspective_id, parent, child)` | Link any two nodes with `ad4m://has_child` (class-agnostic; e.g. a Channel under `ad4m://self`) |
-| `get_children(perspective_id, parent, limit?)` | Children of any node with timestamp and author, oldest first |
+| `add_child(perspective_id, parent, child)` | Put any node under another (class-agnostic; e.g. a Channel under `ad4m://self`): through the parent class's own `children` relation, else `ad4m://has_child` |
+| `get_children(perspective_id, parent, limit?)` | Children of any node, whatever their class and however the node holds them, with timestamp and author, oldest first |
 | `add_link` / `query_links` | Raw triples — rarely needed, see "classes, not links" below |
 | `execute_commands` | Run raw SDNA actions on an instance (escape hatch) *(direct MCP only)* |
 
