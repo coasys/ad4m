@@ -1812,11 +1812,12 @@ export class Ad4mModel {
     }
   }
 
-  /** The class's name when it is abstract (#1435). Through an abstract
-   *  class, the executor writes to the record's own classes. */
+  /** The name the executor knows the class by when it is abstract (#1435):
+   *  a built-in's URI (#1446). Through an abstract class, the executor
+   *  writes to the record's own classes. */
   private abstractName(): string | undefined {
-    const ctor = this.constructor as { isAbstract?: boolean; className?: string };
-    return ctor.isAbstract ? ctor.className : undefined;
+    const ctor = this.constructor as typeof Ad4mModel & { isAbstract?: boolean };
+    return ctor.isAbstract ? ctor.queriedAs() : undefined;
   }
 
   private changedValues(): Record<string, any> {

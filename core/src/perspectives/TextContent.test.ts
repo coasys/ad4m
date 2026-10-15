@@ -80,4 +80,28 @@ describe("TextContent", () => {
     await expect(proxy.ensureSubjectClass(TextContent)).resolves.toBeUndefined();
     expect(calls).toEqual([]);
   });
+
+  it("save() and delete() of a row read through it go to the executor by its URI", async () => {
+    const calls: any[][] = [];
+    const client: any = new Proxy({}, {
+      get: (_t, key) => async (...args: any[]) => {
+        calls.push([key, ...args]);
+        if (key === "modelQuery") {
+          return { instances: [{ id: "ad4m://m/1", __subjectClass: "Message", text: "hi" }], totalCount: 1 };
+        }
+        return true;
+      },
+    });
+    const { PerspectiveProxy } = await import("./PerspectiveProxy");
+    const proxy = new PerspectiveProxy({ uuid: "p" } as any, client);
+    const [row] = await TextContent.findAll(proxy);
+    row.text = "edited";
+    calls.length = 0;
+    await row.save("batch");
+    expect(calls).toEqual([["updateSubject", "p", "ad4m://TextContent", "ad4m://m/1", JSON.stringify({ text: "edited" }), "batch"]]);
+
+    calls.length = 0;
+    await row.delete("batch");
+    expect(calls[0]).toEqual(["removeSubject", "p", "ad4m://TextContent", "ad4m://m/1", "batch"]);
+  });
 });

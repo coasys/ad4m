@@ -1640,6 +1640,13 @@ export class PerspectiveProxy {
      * and won't be executed until the batch is committed.
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
+        // A built-in abstract class (`TextContent`, #1446) is never stored,
+        // so it has no marker: the executor dispatches it by its URI.
+        const ctor = (subjectClass as any)?.constructor;
+        if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
+            await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
+            return;
+        }
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
 
         // An abstract class (#1435) is never a record's class: the executor
