@@ -24,7 +24,7 @@ import type {
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
-import { isTraverseScope } from "./types";
+import { isContainedScope, isTraverseScope } from "./types";
 
 
 
@@ -1105,7 +1105,11 @@ export class Ad4mModel {
     }
 
     const queryInput: any = {};
-    if (query.parent) {
+    if (query.parent && isContainedScope(query.parent)) {
+      // Containment: the executor resolves the predicates from the installed
+      // classes, so only the id travels.
+      queryInput.parent = { id: query.parent.id };
+    } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
       // A traversal keeps its own shape on the wire: the executor reads `ids`,
       // and flattening it to one `id` here is how a request for a whole level

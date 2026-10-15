@@ -3998,6 +3998,9 @@ impl PerspectiveInstance {
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
         let targets = self.read_targets(classes, &query_input)?;
+        if let Some(edges) = &targets.containment {
+            super::model_query::containment::set_containment(&mut query_input, edges);
+        }
         let named = classes;
         let classes = &targets.classes;
         if classes.names().is_empty() {

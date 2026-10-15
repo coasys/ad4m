@@ -20,7 +20,8 @@ use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
     self, AbstractIndex, Resolution, ViewResolver,
 };
-use crate::perspectives::model_query::builtin_classes::builtin;
+use crate::perspectives::model_query::builtin_classes::{builtin, CONTAINER_URI};
+use crate::perspectives::model_query::containment::{self, ContainmentEdges};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
@@ -47,6 +48,9 @@ pub(super) struct ReadTargets {
     pub(super) resolution: Option<Arc<Resolution>>,
     /// Not resolved (a store error): a subscription tries again next pass.
     pub(super) unresolved: bool,
+    /// The containment edge set, when the query reads containment (a
+    /// containment scope, or a query over `Container`).
+    pub(super) containment: Option<ContainmentEdges>,
 }
 
 /// The generation an unresolved subscription records: never a real one.
@@ -157,6 +161,20 @@ impl PerspectiveInstance {
         classes: &QueryClasses,
         query: &ModelQueryInput,
     ) -> Result<ReadTargets, AnyError> {
+        let mut targets = self.read_classes(classes, query)?;
+        let over_container = matches!(classes, QueryClasses::One(name) if name == CONTAINER_URI);
+        if over_container || containment::reads_containment(query) {
+            targets.containment = Some(self.containment_edges()?);
+        }
+        Ok(targets)
+    }
+
+    /// The classes of [`Self::read_targets`].
+    fn read_classes(
+        &self,
+        classes: &QueryClasses,
+        query: &ModelQueryInput,
+    ) -> Result<ReadTargets, AnyError> {
         let index = self.abstract_index()?;
         let is_abstract = |name: &str| builtin(name).is_some() || index.is_abstract(name);
         let abstract_class = match classes {
@@ -179,6 +197,7 @@ impl PerspectiveInstance {
             views: resolution.views.clone(),
             resolution: Some(resolution),
             unresolved: false,
+            containment: None,
         })
     }
 
@@ -202,12 +221,15 @@ impl PerspectiveInstance {
     }
 
     /// What a subscription over `targets` records as read (see
-    /// `ModelSubscriptionParams::abstract_read`).
+    /// `ModelSubscriptionParams::abstract_read`): the generation, when what
+    /// it reads depends on the installed shapes. An abstract class's classes
+    /// do, and so does a containment read: a class installed later can add
+    /// a containment edge.
     pub(super) fn abstract_read(targets: &ReadTargets, generation: u64) -> Option<u64> {
         if targets.unresolved {
             return Some(UNRESOLVED);
         }
-        targets.resolution.as_ref().map(|_| generation)
+        (targets.resolution.is_some() || targets.containment.is_some()).then_some(generation)
     }
 
     /// Whether `class_name` is an abstract class here: a built-in's URI
@@ -546,9 +568,10 @@ impl PerspectiveInstance {
             .await
     }
 
-    /// Resolve again every subscription over an abstract class resolved
-    /// before the installed shapes last changed, and rebuild its trigger: a
-    /// change can move its classes or only a view (an alias moved). Returns
+    /// Resolve again every subscription over an abstract class, or reading
+    /// containment, resolved before the installed shapes last changed, and
+    /// rebuild its trigger: a change can move its classes, only a view (an
+    /// alias moved), or the containment edge set. Returns
     /// their ids, which re-run this pass whatever was written. One still
     /// unresolved waits for the next pass.
     pub(super) async fn refresh_abstract_subscriptions(&self) -> HashSet<String> {
@@ -611,6 +634,7 @@ impl PerspectiveInstance {
             targets.classes.names().iter().map(String::as_str),
             query_json,
             result,
+            targets.containment.as_deref().map(Vec::as_slice),
         )
     }
 }
@@ -667,6 +691,7 @@ impl ReadTargets {
             views: HashMap::new(),
             resolution: None,
             unresolved: false,
+            containment: None,
         }
     }
 }

@@ -1,0 +1,49 @@
+/**
+ * The containment scope `{ id }` (#1446): sent to the executor as the id
+ * alone, which resolves the predicates through the built-in `Container`.
+ */
+import { Ad4mModel } from "./Ad4mModel";
+import { Model, Property } from "./decorators";
+import { ModelQueryBuilder } from "./ModelQueryBuilder";
+import { resolveParentPredicate } from "./query-common";
+import { isContainedScope } from "./types";
+
+@Model({ name: "ScopedNote" })
+class ScopedNote extends Ad4mModel {
+  @Property({ through: "test://note_body" })
+  body: string = "";
+}
+
+@Model({ name: "ScopedTask" })
+class ScopedTask extends Ad4mModel {
+  @Property({ through: "test://task_title" })
+  title: string = "";
+}
+
+describe("containment scope { id }", () => {
+  it("travels as the id alone", () => {
+    const { queryJson } = (ScopedNote as any).prepareModelQueryParams({ parent: { id: "ad4m://p" } });
+    expect(JSON.parse(queryJson).parent).toEqual({ id: "ad4m://p" });
+  });
+
+  it("is what .parent(id) with no second argument asks for", () => {
+    const builder: any = new ModelQueryBuilder({} as any, ScopedNote).parent("ad4m://p");
+    expect(builder.queryParams.parent).toEqual({ id: "ad4m://p" });
+    expect(isContainedScope(builder.queryParams.parent)).toBe(true);
+  });
+
+  it("is one scope over a union: every class sends the same", () => {
+    const { queryJson } = Ad4mModel.prepareUnionQueryParams([ScopedNote, ScopedTask] as any, {
+      parent: { id: "ad4m://p" },
+    });
+    expect(JSON.parse(queryJson).parent).toEqual({ id: "ad4m://p" });
+  });
+
+  it("names no single predicate, so the client-side resolver refuses it", () => {
+    expect(() => resolveParentPredicate({ id: "ad4m://p" }, ScopedNote)).toThrow(
+      "containment scope",
+    );
+    expect(isContainedScope({ id: "x", predicate: "p" })).toBe(false);
+    expect(isContainedScope({ ids: ["x"] } as any)).toBe(false);
+  });
+});

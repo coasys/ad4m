@@ -10,7 +10,7 @@ use super::super::*;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
 use crate::perspectives::model_query::containment::HAS_CHILD;
-use crate::perspectives::model_query::QueryClasses;
+use crate::perspectives::model_query::{ModelQueryInput, QueryClasses, Scope};
 use serde_json::{json, Value};
 
 pub(super) const BLOCK_SDNA: &str = r#"{
@@ -233,4 +233,220 @@ async fn class_less_holders_are_container_rows() {
     assert_eq!(root["__subjectClass"], CONTAINER_URI, "{root}");
     assert_eq!(root["children"], json!(["ad4m://channel/top"]));
     assert_eq!(by_id(flux)["children"], json!(["ad4m://m3"]));
+}
+
+/// `{ id }` is containment; `{ id, predicate }` and `{ model, id }` keep their
+/// meaning; a misspelt field is an error, never a containment read.
+#[test]
+fn a_containment_scope_deserializes_only_from_id_alone() {
+    use crate::perspectives::model_query::types::ContainedScope;
+    let scope = |v: Value| serde_json::from_value::<Scope>(v);
+    assert_eq!(
+        scope(json!({"id": "ad4m://p"})).unwrap(),
+        Scope::Contained(ContainedScope {
+            id: "ad4m://p".into()
+        })
+    );
+    assert!(matches!(
+        scope(json!({"id": "ad4m://p", "predicate": "ad4m://has_child"})).unwrap(),
+        Scope::Raw { .. }
+    ));
+    assert!(matches!(
+        scope(json!({"id": "ad4m://p", "model": "Channel"})).unwrap(),
+        Scope::Model { .. }
+    ));
+    assert!(scope(json!({"id": "ad4m://p", "predicat": "ad4m://has_child"})).is_err());
+    assert!(scope(json!({"id": "ad4m://p", "feld": "children"})).is_err());
+    // Through a whole query too: the typo fails the query.
+    let typo = r#"{"parent":{"id":"ad4m://p","predicat":"ad4m://has_child"}}"#;
+    assert!(serde_json::from_str::<ModelQueryInput>(typo).is_err());
+}
+
+/// Test 1: `Message` with `parent: { id: P }`, where `P has_child m1`,
+/// returns m1, whatever P is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_containment_scope_reads_has_child_on_any_node() {
+    let (mut p, ctx) = setup().await;
+    create(&mut p, &ctx, "Message", "ad4m://m1").await;
+    create(&mut p, &ctx, "Message", "ad4m://m-elsewhere").await;
+    link(&mut p, &ctx, "ad4m://p1", HAS_CHILD, "ad4m://m1").await;
+    let rows = query(&p, "Message", json!({"parent": {"id": "ad4m://p1"}})).await;
+    assert_eq!(ids(&rows), vec!["ad4m://m1".to_string()]);
+}
+
+/// Test 2: P is a Block (`blocks` → `we://child`, alias `children`):
+/// `parent: { id: P }` returns its `we://child` child beside its `has_child`
+/// one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_containment_scope_reads_an_aliased_predicate_on_its_class() {
+    let (mut p, ctx) = setup().await;
+    let block = "ad4m://block/2";
+    create(&mut p, &ctx, "Block", block).await;
+    create(&mut p, &ctx, "Message", "ad4m://m-alias").await;
+    create(&mut p, &ctx, "Message", "ad4m://m-has-child").await;
+    link(&mut p, &ctx, block, "we://child", "ad4m://m-alias").await;
+    link(&mut p, &ctx, block, HAS_CHILD, "ad4m://m-has-child").await;
+    let rows = query(&p, "Message", json!({"parent": {"id": block}})).await;
+    assert_eq!(
+        ids(&rows),
+        vec![
+            "ad4m://m-alias".to_string(),
+            "ad4m://m-has-child".to_string()
+        ]
+    );
+}
+
+/// Test 3, the other direction: Q is not a Block and has `Q we://child m2`:
+/// `parent: { id: Q }` does not return m2. On a node that is not a Block,
+/// `we://child` is not containment (rule 2).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aliased_predicate_holds_nothing_on_another_node() {
+    let (mut p, ctx) = setup().await;
+    let q = "ad4m://not-a-block/3";
+    create(&mut p, &ctx, "Message", "ad4m://m2").await;
+    link(&mut p, &ctx, q, "we://child", "ad4m://m2").await;
+    let rows = query(&p, "Message", json!({"parent": {"id": q}})).await;
+    assert!(rows.is_empty(), "{rows:?}");
+    // A FluxChannel's other relations are not containment either (rule 6).
+    let flux = "ad4m://flux/3";
+    create(&mut p, &ctx, "FluxChannel", flux).await;
+    link(&mut p, &ctx, flux, "ns://pinned", "ad4m://m2").await;
+    assert!(query(&p, "Message", json!({"parent": {"id": flux}}))
+        .await
+        .is_empty());
+}
+
+/// Test 4, the root: `parent: { id: "ad4m://self" }` over `Container`
+/// returns the class-less top-level channel (it holds a message by
+/// `has_child`), and a Block hung under the root.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_root_holds_class_less_channels() {
+    let (mut p, ctx) = setup().await;
+    let top = "ad4m://channel/top";
+    link(&mut p, &ctx, "ad4m://self", HAS_CHILD, top).await;
+    link(&mut p, &ctx, top, HAS_CHILD, "ad4m://m/top").await;
+    let block = "ad4m://block/top";
+    create(&mut p, &ctx, "Block", block).await;
+    link(&mut p, &ctx, "ad4m://self", HAS_CHILD, block).await;
+    // Not under the root.
+    link(&mut p, &ctx, "ad4m://elsewhere", HAS_CHILD, "ad4m://m/x").await;
+
+    let rows = query(&p, CONTAINER_URI, json!({"parent": {"id": "ad4m://self"}})).await;
+    assert_eq!(ids(&rows), vec![block.to_string(), top.to_string()]);
+    let channel = rows.iter().find(|r| r["id"] == top).unwrap();
+    assert_eq!(channel["__subjectClass"], CONTAINER_URI);
+    assert_eq!(channel["children"], json!(["ad4m://m/top"]));
+}
+
+/// A subscription, its passes driven by hand as in the abstract-class tests.
+pub(super) struct Sub {
+    pub(super) id: String,
+    rx: tokio::sync::broadcast::Receiver<String>,
+}
+
+impl Sub {
+    pub(super) async fn open(p: &PerspectiveInstance, class: &str, q: Value) -> (Sub, String) {
+        use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
+        let pubsub = get_global_pubsub().await;
+        let rx = pubsub
+            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+            .await;
+        let (id, _, initial) = p
+            .model_subscribe_and_query(QueryClasses::One(class.into()), q.to_string(), "c".into())
+            .await
+            .expect("subscribe");
+        (Sub { id, rx }, initial)
+    }
+
+    /// One pass over `links` written; the update it pushed, if any, within
+    /// 5 s.
+    pub(super) async fn pass(
+        &mut self,
+        p: &PerspectiveInstance,
+        links: &[(&str, &str, &str)],
+    ) -> Option<String> {
+        let mut writes = super::super::subscription_triggers::Writes::new();
+        for (s, pr, t) in links {
+            writes.record(s, pr, t);
+        }
+        p.check_subscribed_queries(ChangedPredicates::Specific(writes))
+            .await;
+        let wait = async {
+            loop {
+                let msg = self.rx.recv().await.expect("pubsub receiver closed");
+                let update: Value = serde_json::from_str(&msg).unwrap();
+                if update["perspectiveUuid"] == p.uuid && update["subscriptionId"] == self.id {
+                    return update.to_string();
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .ok()
+    }
+}
+
+/// Test 8: a subscription on `Message` with `parent: { id: P }`. `Block` is
+/// installed after it opened; then P gets Block's flag, then
+/// `P we://child m3` alone in its pass: the subscription fires with m3, so its
+/// trigger follows the new edge. A second subscription: the `has_child` link
+/// is removed and the row leaves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_containment_subscription_follows_new_edges_and_removals() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Message", MESSAGE_SDNA)]).await;
+    let parent = "ad4m://later-a-block";
+    create(&mut p, &ctx, "Message", "ad4m://m3").await;
+    let (mut sub, initial) = Sub::open(&p, "Message", json!({"parent": {"id": parent}})).await;
+    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+
+    p.add_sdna(
+        "Block".into(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(BLOCK_SDNA.into()),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    sub.pass(
+        &p,
+        &[("ns://BlockShape", "sh://property", "ns://Block.blocks")],
+    )
+    .await;
+    create(&mut p, &ctx, "Block", parent).await;
+    sub.pass(&p, &[(parent, "ns://type", "ns://block")]).await;
+    link(&mut p, &ctx, parent, "we://child", "ad4m://m3").await;
+    let update = sub
+        .pass(&p, &[(parent, "we://child", "ad4m://m3")])
+        .await
+        .expect("the new edge's write re-runs the subscription");
+    assert!(update.contains("ad4m://m3"), "{update}");
+
+    // The row leaves when its has_child link is removed.
+    let p2 = "ad4m://p2";
+    create(&mut p, &ctx, "Message", "ad4m://m4").await;
+    let held = p
+        .add_link(
+            Link {
+                source: p2.into(),
+                predicate: Some(HAS_CHILD.into()),
+                target: "ad4m://m4".into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let (mut sub2, initial) = Sub::open(&p, "Message", json!({"parent": {"id": p2}})).await;
+    assert!(initial.contains("ad4m://m4"), "{initial}");
+    p.remove_link(held.into(), None).await.unwrap();
+    let update = sub2
+        .pass(&p, &[(p2, HAS_CHILD, "ad4m://m4")])
+        .await
+        .expect("a removed containment link re-runs the subscription");
+    assert!(
+        !update.contains("ad4m://m4") && update.contains("\"totalCount\":0"),
+        "{update}"
+    );
 }

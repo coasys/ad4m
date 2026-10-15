@@ -27,6 +27,13 @@ impl PerspectiveInstance {
         let resolution = self.resolve_abstract(CONTAINER_URI)?;
         let edges: ContainmentEdges =
             Arc::new(containment::edges(&resolution.classes, &resolution.views));
+        log::debug!(
+            "containment edges: {:?}",
+            edges
+                .iter()
+                .map(|e| (&e.predicate, e.holder.as_ref().map(|h| &h.class)))
+                .collect::<Vec<_>>()
+        );
         let mut cache = self.abstract_cache.write().unwrap();
         // Computed against shapes that changed meanwhile: answer, don't keep.
         if cache.generation == generation {

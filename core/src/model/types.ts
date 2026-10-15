@@ -103,11 +103,33 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  * **Traverse form** — bounded traversal from one or more anchors, for reading
  * a tree rather than one node's children. Read-only: AutoProcessor's write
  * scopes reject it, because it names no single parent to write under.
+ *
+ * **Containment form** — `{ id }` alone: everything contained in `id`, through
+ * the built-in `Container`. That is the targets of `id`'s `ad4m://has_child`
+ * links, whatever `id` is, and the targets of the `children` relation (by name,
+ * or aliased to `children`) of every class `id` is an instance of. The caller
+ * names no class and no predicate; the executor resolves them from the
+ * installed classes. See {@link ContainedScope}.
  */
 export type Scope =
   | { model: typeof Ad4mModel; id: string; field?: string }
   | { id: string; predicate: string }
-  | TraverseScope;
+  | TraverseScope
+  | ContainedScope;
+
+/**
+ * Contained in `id`, through `Container`: `{ id }` and nothing else. A
+ * misspelt extra field (`{ id, predicat }`) is an error in the executor,
+ * never a containment read.
+ */
+export interface ContainedScope {
+  id: string;
+}
+
+/** Whether this scope is the containment form, `{ id }` alone. */
+export function isContainedScope(scope: Scope): scope is ContainedScope {
+  return !isTraverseScope(scope) && !('predicate' in scope) && !('model' in scope);
+}
 
 /**
  * Walk a predicate from several anchors at once, and optionally all the way

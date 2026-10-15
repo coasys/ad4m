@@ -50,6 +50,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::perspectives::model_query::containment::{watched_predicates, ContainmentEdge};
 use crate::perspectives::model_query::types::ShapeProperty;
 use crate::perspectives::model_query::{
     conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
@@ -290,7 +291,16 @@ impl super::PerspectiveInstance {
         query_json: &str,
         result: &str,
     ) -> ModelTrigger {
-        self.build_model_trigger_with(&self.shape_resolver(), class_names, query_json, result)
+        let query: ModelQueryInput = serde_json::from_str(query_json).unwrap_or_default();
+        let edges = crate::perspectives::model_query::containment::reads_containment(&query)
+            .then(|| self.containment_edges().expect("containment edges"));
+        self.build_model_trigger_with(
+            &self.shape_resolver(),
+            class_names,
+            query_json,
+            result,
+            edges.as_deref().map(Vec::as_slice),
+        )
     }
 
     /// [`Self::build_model_trigger`] reading shapes through `resolver`: the
@@ -302,6 +312,7 @@ impl super::PerspectiveInstance {
         class_names: impl IntoIterator<Item = &'a str>,
         query_json: &str,
         result: &str,
+        containment: Option<&[ContainmentEdge]>,
     ) -> ModelTrigger {
         let mut rules: Option<TriggerRules> = None;
         for class_name in class_names {
@@ -313,6 +324,7 @@ impl super::PerspectiveInstance {
                 resolver,
                 side,
                 &super::extract_predicates_from_sparql,
+                containment.unwrap_or_default(),
             );
             match &mut rules {
                 Some(rules) => rules.merge(class_rules),
@@ -349,6 +361,9 @@ impl super::PerspectiveInstance {
                 predicates
             })
             .collect();
+        if let Some(edges) = &targets.containment {
+            trigger_predicates.extend(watched_predicates(edges));
+        }
         trigger_predicates.sort();
         trigger_predicates.dedup();
 
@@ -421,13 +436,15 @@ impl super::PerspectiveInstance {
 /// `extra_any` are predicates the query reads beside its classes' shapes
 /// (`links`, `producedByFlow`; see `model_query_side_predicates`), matched on
 /// the predicate alone. `getter_predicates` names the predicates a property
-/// getter's SPARQL reads.
+/// getter's SPARQL reads. `containment` is the edge set a containment scope
+/// reads.
 pub(super) fn build_rules(
     class_name: &str,
     query_json: &str,
     resolver: &dyn ShapeResolver,
     extra_any: impl IntoIterator<Item = String>,
     getter_predicates: &dyn Fn(&str) -> HashSet<String>,
+    containment: &[ContainmentEdge],
 ) -> TriggerRules {
     let Ok(shape) = resolver.get_shape(class_name) else {
         return TriggerRules::every_write();
@@ -439,6 +456,7 @@ pub(super) fn build_rules(
         rules: TriggerRules::default(),
         resolver,
         getter_predicates,
+        containment,
     };
     walk.rules.any.extend(extra_any);
     walk.scan_class(&shape, query.where_clause.as_ref());
@@ -453,6 +471,7 @@ struct Walk<'a> {
     rules: TriggerRules,
     resolver: &'a dyn ShapeResolver,
     getter_predicates: &'a dyn Fn(&str) -> HashSet<String>,
+    containment: &'a [ContainmentEdge],
 }
 
 impl Walk<'_> {
@@ -753,6 +772,16 @@ impl Walk<'_> {
                     self.rules.any.insert(predicate.clone());
                 } else {
                     self.rules.near.add(predicate);
+                }
+            }
+            // Every edge's predicate on the anchor, and the predicates its
+            // holder classes are recognised by: a flag written on the anchor
+            // turns its existing links on that class's predicate into
+            // containment.
+            Scope::Contained(c) => {
+                self.rules.anchors.insert(c.id.clone());
+                for predicate in watched_predicates(self.containment) {
+                    self.rules.near.add(&predicate);
                 }
             }
         }

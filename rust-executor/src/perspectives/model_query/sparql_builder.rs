@@ -24,13 +24,14 @@ use crate::perspectives::sparql_store::status_str;
 use crate::types::LinkStatus;
 use std::collections::BTreeMap;
 
+use super::containment::{contains_patterns, has_child_only};
 use super::link_author::{
     instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
     side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
 };
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
-    ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
@@ -851,6 +852,18 @@ pub(super) fn build_query_patterns(
                     conformance_patterns
                         .extend(not_in_filter("source", &safe_ids).map(|f| format!("    {f}")));
                 }
+            }
+            // Contained in `id`: one UNION branch per containment edge, each
+            // checking its holder class on `id` (see `super::containment`).
+            Scope::Contained(ContainedScope { id }) => {
+                let Ok(safe_id) = validate_iri(id) else {
+                    log::warn!("Parent scope matches nothing: invalid IRI in id='{}'", id);
+                    return matches_nothing();
+                };
+                let edges = query.containment.clone().unwrap_or_else(has_child_only);
+                let (subj, filter) = parent_subject(safe_id);
+                conformance_patterns.push(contains_patterns(&edges, &subj, "?source", guard));
+                conformance_patterns.extend(filter);
             }
         }
     }

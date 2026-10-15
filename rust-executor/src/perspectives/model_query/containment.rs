@@ -30,7 +30,7 @@ use super::sparql_builder::{
     link_status_filter, proof_valid_filter, rebase_into_subquery, shape_conformance_patterns,
     LinkGuard,
 };
-use super::types::ModelShape;
+use super::types::{IncludeValue, ModelQueryInput, ModelShape, Scope};
 use super::utils::{validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::LinkStatus;
@@ -125,6 +125,112 @@ pub fn edges(
     out
 }
 
+/// One edge's patterns: `holder <p> child`, the link guarded, and when the edge
+/// has a holder class, that class's conformance on `holder`. `holder` and
+/// `child` are terms (`<iri>` or a variable); `n` keeps the helper variables
+/// of two edges apart.
+pub(super) fn edge_patterns(
+    edge: &ContainmentEdge,
+    n: usize,
+    holder: &str,
+    child: &str,
+    guard: LinkGuard,
+) -> String {
+    let pred = format!("<{}>", edge.predicate);
+    format!(
+        "{holder} {pred} {child} .{}{}",
+        guard.join(&format!("?_ce{n}r"), holder, &pred, child),
+        holder_check(edge, n, holder, guard)
+    )
+}
+
+/// The edge's holder class's conformance on `holder`, its helper variables
+/// namespaced by `n`; empty for an edge any node holds through.
+fn holder_check(edge: &ContainmentEdge, n: usize, holder: &str, guard: LinkGuard) -> String {
+    let Some(h) = &edge.holder else {
+        return String::new();
+    };
+    let conformance = shape_conformance_patterns(&h.shape, false, guard);
+    rebase_into_subquery(&conformance, &format!("ce{n}h"), holder)
+        .iter()
+        .map(|p| format!(" {}", p.trim()))
+        .collect()
+}
+
+/// "`holder` contains `child`" over every edge of `edges`: one `UNION` branch
+/// per edge, or the one edge's patterns alone.
+pub(super) fn contains_patterns(
+    edges: &[ContainmentEdge],
+    holder: &str,
+    child: &str,
+    guard: LinkGuard,
+) -> String {
+    let branches: Vec<String> = edges
+        .iter()
+        .enumerate()
+        .map(|(n, e)| edge_patterns(e, n, holder, child, guard))
+        .collect();
+    match branches.as_slice() {
+        [one] => format!("    {one}"),
+        _ => format!("    {{ {} }}", branches.join(" } UNION { ")),
+    }
+}
+
+/// Whether `scope` reads containment: `{ id }`.
+pub fn is_containment_scope(scope: &Scope) -> bool {
+    matches!(scope, Scope::Contained(_))
+}
+
+/// Whether `query`, or an `include` sub-query of it, reads containment.
+pub fn reads_containment(query: &ModelQueryInput) -> bool {
+    query.parent.as_ref().is_some_and(is_containment_scope)
+        || query.include.iter().flatten().any(|(_, v)| match v {
+            IncludeValue::SubQuery(sub) => reads_containment(sub),
+            IncludeValue::Bool(_) => false,
+        })
+}
+
+/// Hand `edges` to `query` and every `include` sub-query: the builder reads
+/// containment from them (see `ModelQueryInput::containment`).
+pub fn set_containment(query: &mut ModelQueryInput, edges: &ContainmentEdges) {
+    query.containment = Some(edges.clone());
+    for value in query.include.iter_mut().flat_map(|m| m.values_mut()) {
+        if let IncludeValue::SubQuery(sub) = value {
+            set_containment(sub, edges);
+        }
+    }
+}
+
+/// E with no class installed: rule (a) alone. What a query gets when no
+/// perspective resolved E for it (a caller running the pipeline on a bare
+/// store), so a containment read never matches less than `has_child` does.
+pub fn has_child_only() -> ContainmentEdges {
+    Arc::new(vec![ContainmentEdge::has_child()])
+}
+
+/// Every predicate a containment read follows, and the predicates the holder
+/// classes are recognised by: a node that becomes a holder turns its existing
+/// links into containment, so those writes change the read too.
+pub fn watched_predicates(edges: &[ContainmentEdge]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for edge in edges {
+        out.push(edge.predicate.clone());
+        if let Some(h) = &edge.holder {
+            out.extend(
+                h.shape
+                    .properties
+                    .iter()
+                    .filter(|p| p.is_required || p.is_flag || p.initial_value.is_some())
+                    .filter(|p| !p.predicate.is_empty())
+                    .map(|p| p.predicate.clone()),
+            );
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The `children` of `Container` rows, and their `__links` rows when asked
 /// for: everything E says each row holds, merged across the classes it is an
 /// instance of. A row read as one class carries only that class's `children`;
@@ -159,18 +265,11 @@ pub async fn fill_container_rows(
         .iter()
         .enumerate()
         .map(|(n, edge)| {
-            let mut branch = format!(
-                "VALUES ?predicate {{ <{}> }} ?source ?predicate ?target .",
-                edge.predicate
-            );
-            if let Some(h) = &edge.holder {
-                let conformance = shape_conformance_patterns(&h.shape, false, guard);
-                for p in rebase_into_subquery(&conformance, &format!("ce{n}h"), "?source") {
-                    branch.push(' ');
-                    branch.push_str(p.trim());
-                }
-            }
-            branch
+            format!(
+                "VALUES ?predicate {{ <{}> }} ?source ?predicate ?target .{}",
+                edge.predicate,
+                holder_check(edge, n, "?source", guard)
+            )
         })
         .collect();
     let link_status = link_status_filter(link_status);
