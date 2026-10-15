@@ -1206,6 +1206,8 @@ export class PerspectiveProxy {
     async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
         const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
         for (const jsClass of jsClasses) {
+            // Built-in classes (`TextContent`) live in the executor, not here.
+            if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) continue;
             const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
             if (this.#ensuredSubjectClasses.has(className)) continue;
 
@@ -1574,6 +1576,14 @@ export class PerspectiveProxy {
         return exprAddr as unknown as B extends undefined ? T : string;
     }
 
+    /** Sets properties of an existing instance in the executor. Through an
+     *  abstract class (#1435), each value is written by every class of the
+     *  record that the abstract class reads, under its own name. */
+    async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
+        await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
+        invalidatePerspectiveCache(this.#handle.uuid);
+    }
+
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
         if (typeof subjectClass === "string") {
             return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
@@ -1631,7 +1641,25 @@ export class PerspectiveProxy {
      * and won't be executed until the batch is committed.
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
+        // A built-in abstract class (`TextContent`, #1446) is never stored,
+        // so it has no marker: the executor dispatches it by its URI.
+        const ctor = (subjectClass as any)?.constructor;
+        if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
+            await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
+            return;
+        }
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
+
+        // An abstract class (#1435) is never a record's class: the executor
+        // runs the destructors of the record's classes it reads.
+        const shapePattern = new RegExp(`[/:#]${this.escapeRegExp(className)}Shape$`);
+        const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
+        if (markers.some((link) => shapePattern.test(link.data.source))) {
+            await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
+            return;
+        }
 
         // Get destructor actions from SHACL links (Prolog-free)
         let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");
@@ -1982,6 +2010,9 @@ export class PerspectiveProxy {
 
     /** Takes a JS class (its constructor) and ensures the SHACL subject class exists. */
     async ensureSubjectClass(jsClass: any): Promise<void> {
+        // Built-in classes (`TextContent`) live in the executor, not here.
+        if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) return;
+
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
