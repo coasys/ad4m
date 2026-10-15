@@ -438,9 +438,14 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 ///
 /// # Thread Safety
 /// Oxigraph's `Store` is `Send + Sync` and uses internal locking for concurrent access.
+/// Its RocksDB transactions read a snapshot and commit without conflict
+/// detection, so two writers that each read before writing can both act on
+/// stale state. Every write therefore holds `write_lock` (see
+/// [`SparqlStore::write_guard`]); reads take no lock.
 #[derive(Clone)]
 pub struct SparqlStore {
     store: Arc<Store>,
+    write_lock: Arc<std::sync::Mutex<()>>,
     /// Test-only: runs in `remove_link` after the still-referenced check and
     /// before the commit, so a test can line two removals up at that point.
     #[cfg(test)]
@@ -502,9 +507,22 @@ impl SparqlStore {
         };
         Ok(SparqlStore {
             store: Arc::new(store),
+            write_lock: Arc::new(std::sync::Mutex::new(())),
             #[cfg(test)]
             before_remove_commit: Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    /// Serializes writers. `remove_link` decides whether to drop the direct
+    /// triple from what its transaction reads; on RocksDB that is a snapshot,
+    /// so two removals of different links sharing the triple each saw the
+    /// other's reifier and both kept the triple. Hold this from the start of a
+    /// write transaction to its commit. The lock guards no data, so a
+    /// poisoned lock is still usable.
+    fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Returns the number of quads in the store (for diagnostics).
@@ -543,6 +561,7 @@ impl SparqlStore {
                 link.data.target
             )
         })?;
+        let _writer = self.write_guard();
         let mut tx = self.store.start_transaction()?;
         let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
         let reifier_iri = make_reifier_iri(link);
@@ -670,6 +689,7 @@ impl SparqlStore {
         link: &LinkExpression,
         predicate: &str,
     ) -> Result<(), Error> {
+        let _writer = self.write_guard();
         let reifier_iri = make_reifier_iri(link);
         let quads: Vec<_> = self
             .store
@@ -692,7 +712,10 @@ impl SparqlStore {
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
         // One transaction, as in `insert_link_triples`: the reifier, its
-        // annotations and the direct triple go together or not at all.
+        // annotations and the direct triple go together or not at all. The
+        // write lock keeps the still-referenced check below current until the
+        // commit: no other writer can add or remove a reifier in between.
+        let _writer = self.write_guard();
         let mut tx = self.store.start_transaction()?;
         let reifier_iri = make_reifier_iri(link);
 
@@ -1487,6 +1510,7 @@ impl SparqlStore {
 
     /// Remove all triples from the store.
     pub fn clear(&self) -> Result<(), Error> {
+        let _writer = self.write_guard();
         self.store.clear()?;
         Ok(())
     }
