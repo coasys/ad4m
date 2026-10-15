@@ -1574,6 +1574,14 @@ export class PerspectiveProxy {
         return exprAddr as unknown as B extends undefined ? T : string;
     }
 
+    /** Sets properties of an existing instance in the executor. Through an
+     *  abstract class (#1435), each value is written by every class of the
+     *  record that the abstract class reads, under its own name. */
+    async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
+        await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
+        invalidatePerspectiveCache(this.#handle.uuid);
+    }
+
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
         if (typeof subjectClass === "string") {
             return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
@@ -1632,6 +1640,16 @@ export class PerspectiveProxy {
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
+
+        // An abstract class (#1435) is never a record's class: the executor
+        // runs the destructors of the record's classes it reads.
+        const shapePattern = new RegExp(`[/:#]${this.escapeRegExp(className)}Shape$`);
+        const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
+        if (markers.some((link) => shapePattern.test(link.data.source))) {
+            await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
+            invalidatePerspectiveCache(this.#handle.uuid);
+            return;
+        }
 
         // Get destructor actions from SHACL links (Prolog-free)
         let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");

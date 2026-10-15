@@ -2252,3 +2252,217 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
         "a failed add_to_collection must not leave the item linked: {got}"
     );
 }
+
+/// Abstract (#1435): anything with `body` and `replies`, on predicates no
+/// concrete class here reads, so a write through it that is not dispatched
+/// lands where it can be seen.
+const READABLE_SDNA: &str = r#"{
+  "target_class": "flux://Readable",
+  "abstract": true,
+  "properties": [
+    {"path":"flux://text","name":"body","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://text","target":"value"}]},
+    {"path":"flux://reply","name":"replies","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"flux://reply","target":"value"}]}
+  ]
+}"#;
+
+/// Concrete, conforms to Readable with predicates of its own.
+const THREAD_SDNA: &str = r#"{
+  "target_class": "flux://Thread",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"flux://Thread"}
+  ],
+  "destructor_actions": [
+    {"action":"removeLink","source":"this","predicate":"rdf://type","target":"flux://Thread"}
+  ],
+  "properties": [
+    {"path":"rdf://type","name":"type","has_value":"flux://Thread","min_count":1,"max_count":1},
+    {"path":"flux://thread_body","name":"body","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://thread_body","target":"value"}]},
+    {"path":"flux://thread_reply","name":"replies","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"flux://thread_reply","target":"value"}]}
+  ]
+}"#;
+
+/// Through an abstract class, `instance_update` and `instance_remove` go to
+/// the record's own class (the dispatch itself is tested on the
+/// perspective). Collection membership and the generated write tools, which
+/// write at one class's predicates, are refused; its generated tools are
+/// its reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_through_an_abstract_class() {
+    let (handler, uuid, _guard) = setup_with(
+        &[("Thread", THREAD_SDNA), ("Readable", READABLE_SDNA)],
+        true,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                properties: Some(props(&[("body", json!("hello"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let thread = created["base_uri"].as_str().unwrap().to_string();
+    let get = || async {
+        parse(
+            &handler
+                .instance_get(Parameters(InstanceGetParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Thread".into(),
+                    base_uri: thread.clone(),
+                }))
+                .await,
+        )
+    };
+
+    let names: Vec<String> = handler
+        .exposed_tools()
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "readable_get_replies"),
+        "{names:?}"
+    );
+    for write in ["readable_create", "readable_delete", "readable_set_body"] {
+        assert!(!names.iter().any(|n| n == write), "{write}: {names:?}");
+    }
+    let refused = handler
+        .dispatch_non_router_tool(
+            "readable_set_body",
+            Some(props(&[
+                ("perspective_id", json!(uuid.clone())),
+                ("expression_address", json!(thread.clone())),
+                ("value", json!("edited")),
+            ])),
+        )
+        .await
+        .expect("a tool result");
+    let text = refused
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<String>();
+    assert!(text.contains("generated tools only read"), "{text}");
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+                collection: "replies".into(),
+                item_uri: "ad4m://obj/reply".into(),
+            }))
+            .await,
+    );
+    assert!(
+        added["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("collection membership is written through the record's own class"),
+        "{added}"
+    );
+
+    let update = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+                properties: props(&[("body", json!("edited"))]),
+            }))
+            .await,
+    );
+    assert_eq!(update["success"], true, "{update}");
+    assert_eq!(get().await["body"], "edited");
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    for predicate in ["flux://text", "flux://reply"] {
+        assert!(perspective
+            .get_links(&LinkQuery {
+                source: Some(thread.clone()),
+                predicate: Some(predicate.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    let removed = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+    let gone = get().await;
+    assert!(
+        gone["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("No Thread instance"),
+        "{gone}"
+    );
+}
+
+/// A store error while `instance_update` asks whether the class is abstract
+/// is returned. Read as "not abstract", the update would go on.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_update_returns_the_store_error_of_the_abstract_check() {
+    let (handler, uuid, _guard) = setup_with(
+        &[("Thread", THREAD_SDNA), ("Readable", READABLE_SDNA)],
+        true,
+    )
+    .await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                properties: Some(props(&[("body", json!("hello"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let thread = created["base_uri"].as_str().unwrap().to_string();
+
+    crate::perspectives::perspective_instance::fail_next_index(&uuid);
+    let update = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: thread.clone(),
+                properties: props(&[("body", json!("edited"))]),
+            }))
+            .await,
+    );
+    assert!(
+        update["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("injected store error"),
+        "{update}"
+    );
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                base_uri: thread,
+            }))
+            .await,
+    );
+    assert_eq!(got["body"], "hello", "{got}");
+}
