@@ -5,7 +5,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 ## How It Works
 
 1. The plugin's `ad4m-waker` service connects to the AD4M executor's WebSocket event endpoint
-2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a SPARQL live query
+2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin opens a live query: a model query over the built-in `TextContent` for mentions, a SPARQL query for children
 3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
 4. Your agent wakes up with context about what changed and processes the new data via MCP tools
 
@@ -29,7 +29,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching that parent                                           |
 | `ad4m_list_waker_subscriptions()`                                    | List active subscriptions, plus any still pending re-attempt        |
 
-The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_generate_waker_query` internally to build the SPARQL queries — you don't need to construct queries manually.
+The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_generate_waker_query` internally to build the queries — you don't need to construct queries manually.
 
 ## Wake Message Format
 
@@ -48,10 +48,10 @@ For mention subscriptions, the wake message includes per-item details with resol
 
 The `Mentioned items` section lists each item that triggered the wake:
 - **Item** — the base address of the instance whose property text carried your name or DID
-- **Parents** — every node this item hangs under via `ad4m://has_child`
+- **Parents** — every instance of a class implementing the built-in `Container` whose `children` hold the item (We's `CollectionBlock`: `we://child`). A node no class describes (e.g. a neighbourhood root holding channels through `ad4m://has_child`) is not listed
 - **Ancestors** — everything above the parents, nearest first, a few levels up (absent when there is nothing above them)
 
-**The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a `Message` class: it matches any link whose literal target contains one of your profile names or your DID, excluding `ad4m://ontology/*` proof metadata. If the space declares a `Message` class with a `body` property, the query is scoped to that one predicate for speed; in a space with a user-defined ontology and no such class it scans every other link. So the address you are handed is the source of whichever link carried your name — a task, a proposal, a comment, a field of a class this space invented. Treat "message" as one possible answer, never the assumption.
+**The item is not necessarily a message.** The subscription is a model query over the built-in `TextContent`, not over a `Message` class: it matches any instance of any class with a `text` property (or a property aliased to `text`) that contains one of your profile names or your DID, case-insensitively. So the item you are handed is whatever record carried your name — a block, a task, a proposal, a comment. Treat "message" as one possible answer, never the assumption. A class whose text property is neither named nor aliased `text` (Flux's `Message.body` until Flux declares its alias) is not watched.
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
 
@@ -62,7 +62,7 @@ The wake event gives you two addresses and no types. Work out the rest from the 
 1. **`ad4m_describe_perspective(perspective_id)`** — the classes this space actually has, their properties and collections. This is the vocabulary for everything below; nothing else tells you what a "task" or a "proposal" means here.
 2. **Type the item.** `ad4m_query_links(perspective_id, source=<Item>)` returns its links, including its `rdf://type` marker and its property predicates — match those against the classes from step 1. Then `ad4m_instance_get(class_name=<that class>, base_uri=<Item>)` for the resolved property values.
 3. **The context the request is about, read by default.** Type the parent the same way (`query_links(source=<Parent>)`), then read its other children: `ad4m_instance_transcript(parent=<Parent>)` for the children that carry text, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know which classes are down there. Then go as far up the `Ancestors` as the request reaches: a request about the conversation ("what did we decide", "summarise this", "who is doing what") reads the ancestor that holds the conversation, not just the item's neighbours. Match the reading to the request rather than stopping at one step and waiting to be unclear.
-4. **Further only when the request needs it.** Down: `get_children` on a sibling that looks like a container. Sideways: the collections the item's class declares, resolved by `instance_get`. Above the listed ancestors: `ad4m_query_links(target=<Ancestor>, predicate="ad4m://has_child")`. Each hop costs a call.
+4. **Further only when the request needs it.** Down: `get_children` on a sibling that looks like a container. Sideways: the collections the item's class declares, resolved by `instance_get`. Above the listed ancestors: `ad4m_query_links(target=<Ancestor>, predicate="ad4m://has_child")` (or the app's own child predicate, e.g. `we://child`). Each hop costs a call.
 5. **Then decide what is being asked of you, and in what shape the answer belongs.** The ontology says what you may write: usually a new instance of the same class as the item's siblings, under the same parent. If no class fits what you want to say, that is a signal to ask rather than to invent one.
 
 Some containers must not be written into — for a space an app created, that app's own documentation says which (`ad4m_get_documentation(topic="flux")` for a Flux space; for other apps, the conventions are in `describe_perspective` and whatever docs the executor serves). There is no `ad4m_channel_list` on the static surface.

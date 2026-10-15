@@ -1,18 +1,23 @@
-//! `instance_transcript` — a compact, chronological reading of the
-//! `ad4m://has_child` children under a node that carry text: the most recent
-//! N instances with their text, author display name and timestamp, formatted
+//! `instance_transcript` — a compact, chronological reading of the children
+//! under a node that carry text (`ad4m://has_child`, and the `children` of any
+//! class conforming to the built-in `Container`): the most recent N instances
+//! with their text, author display name and timestamp, formatted
 //! as plain text an LLM can read in one go instead of N+1 tool calls.
 //!
 //! This is the static-surface replacement for the old
 //! `get_children_body_parsed`, and it is one model query on the built-in
-//! abstract class `TextContent` (#1446): every class with a `text` property,
-//! or a property aliased to `text`, whatever the app calls its class. The
-//! tool looks up no class and no property; which children carry text, and
-//! under which name, is TextContent's answer. The values come through
-//! `model_query`, so signed literal envelopes and custom-language
-//! expressions resolve the same way `instance_query` resolves them.
+//! abstract class `TextContent` (#1446) per containment predicate: every
+//! class with a `text` property, or a property aliased to `text`, whatever
+//! the app calls its class. The tool looks up no class and no property;
+//! which children carry text, and under which name, is TextContent's
+//! answer. The values come through `model_query`, so signed literal
+//! envelopes and custom-language expressions resolve the same way
+//! `instance_query` resolves them.
 
-use super::{error_json, link_target, run_model_query, Ad4mMcpHandler, HAS_CHILD, MAX_QUERY_LIMIT};
+use super::{
+    containment_predicates, error_json, link_target, run_model_query, Ad4mMcpHandler,
+    MAX_QUERY_LIMIT,
+};
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
 use crate::types::Agent;
@@ -31,8 +36,10 @@ pub(super) const DEFAULT_TRANSCRIPT_LIMIT: usize = 50;
 pub struct InstanceTranscriptParams {
     /// Perspective UUID
     pub perspective_id: String,
-    /// Parent node URI whose ad4m://has_child children are read (e.g. a
-    /// Channel's id). A bare string is wrapped as a literal URI.
+    /// Parent node URI whose children are read (e.g. a Channel's id): via
+    /// ad4m://has_child, and via the children relation of any class
+    /// implementing the built-in Container (e.g. we://child). A bare string
+    /// is wrapped as a literal URI.
     pub parent: String,
     /// How many of the most recent instances to include (default 50, max 500)
     pub limit: Option<usize>,
@@ -85,7 +92,7 @@ impl Ad4mMcpHandler {
     /// Read the most recent children under a node that carry text, through
     /// TextContent, as a transcript.
     #[tool(
-        description = "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for one specific class, for the full property maps, or for filters."
+        description = "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It reads through the built-in abstract class TextContent: every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)', where M is an upper bound when the node holds children under several predicates. Use instance_query for one specific class, for the full property maps, or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -105,16 +112,46 @@ impl Ad4mMcpHandler {
             .limit
             .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
             .clamp(1, MAX_QUERY_LIMIT);
-        let query = json!({
-            "parent": { "id": link_target(parent), "predicate": HAS_CHILD },
-            "order": [["timestamp", "desc"]],
-            "limit": limit,
-        });
-        let (mut instances, total) =
+        // Children through every containment predicate (`has_child`, and the
+        // `children` of each class conforming to Container): newest-first with
+        // the same limit under each, merged newest-first and cut to `limit`,
+        // so the most recent of all of them stay. A record two predicates
+        // both reach is shown once.
+        let predicates = containment_predicates(&perspective);
+        let mut instances: Vec<Value> = Vec::new();
+        let mut total = 0;
+        for predicate in &predicates {
+            let query = json!({
+                "parent": { "id": link_target(parent), "predicate": predicate },
+                "order": [["timestamp", "desc"]],
+                "limit": limit,
+            });
             match run_model_query(&perspective, TEXT_CONTENT_URI, &query).await {
-                Ok(v) => v,
+                Ok((found, count)) => {
+                    total += count;
+                    instances.extend(found);
+                }
                 Err(e) => return error_json(format!("Error reading TextContent instances: {e}")),
+            }
+        }
+        if predicates.len() > 1 {
+            let timestamp = |inst: &Value| {
+                inst.get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
             };
+            instances.sort_by_key(|inst| std::cmp::Reverse(timestamp(inst)));
+            let fetched = instances.len();
+            let mut seen = std::collections::HashSet::new();
+            instances.retain(|inst| {
+                inst.get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| seen.insert(id.to_string()))
+            });
+            total = total.saturating_sub(fetched - instances.len());
+            instances.truncate(limit);
+        }
         if instances.is_empty() {
             return format!("(no TextContent instances under {parent})");
         }
@@ -134,9 +171,13 @@ impl Ad4mMcpHandler {
 
         let mut lines: Vec<String> = Vec::with_capacity(instances.len() + 1);
         if total > instances.len() {
+            // A record two predicates both reach is subtracted only when both
+            // windows returned it, so across predicates the total is a bound.
+            let bound = if predicates.len() > 1 { "up to " } else { "" };
             lines.push(format!(
-                "(showing last {} of {} TextContent instances under {})",
+                "(showing last {} of {}{} TextContent instances under {})",
                 instances.len(),
+                bound,
                 total,
                 parent
             ));

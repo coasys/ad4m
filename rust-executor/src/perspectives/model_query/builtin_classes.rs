@@ -1,4 +1,5 @@
-//! Built-in abstract classes (#1446).
+//! Built-in abstract classes (#1446): `TextContent { text }` and
+//! `Container { children }`.
 //!
 //! A built-in abstract class is declared here, as SHACL JSON beside the flow
 //! classes in `hardwired_sdna/`, and is never written into a perspective. A
@@ -24,8 +25,17 @@ use std::sync::{Arc, OnceLock};
 pub const TEXT_CONTENT_URI: &str = "ad4m://TextContent";
 pub(crate) const TEXT_CONTENT_SDNA: &str = include_str!("../hardwired_sdna/text_content.json");
 
+/// `Container { children }`: what holds other records. `children` is a
+/// relation; a class conforms with a forward `children` relation of its own,
+/// whatever its predicate (We's `CollectionBlock` holds through `we://child`).
+pub const CONTAINER_URI: &str = "ad4m://Container";
+pub(crate) const CONTAINER_SDNA: &str = include_str!("../hardwired_sdna/container.json");
+
 /// URI, name aliases use, SHACL JSON.
-const BUILTINS: &[(&str, &str, &str)] = &[(TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA)];
+const BUILTINS: &[(&str, &str, &str)] = &[
+    (TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA),
+    (CONTAINER_URI, "Container", CONTAINER_SDNA),
+];
 
 /// A built-in abstract class.
 #[derive(Debug)]
@@ -103,8 +113,25 @@ mod tests {
     }
 
     #[test]
+    fn container_is_an_abstract_class_with_a_children_relation() {
+        let container = builtin(CONTAINER_URI).expect("Container is built in");
+        assert_eq!(container.name, "Container");
+        assert_eq!(container.shape.target_class, CONTAINER_URI);
+        let relations: Vec<(&str, &str)> = container
+            .shape
+            .include_relations
+            .iter()
+            .map(|r| (r.name.as_str(), r.kind.as_str()))
+            .collect();
+        assert_eq!(relations, vec![("children", "hasMany")]);
+        let sdna: serde_json::Value = serde_json::from_str(CONTAINER_SDNA).unwrap();
+        assert_eq!(sdna["abstract"], true);
+    }
+
+    #[test]
     fn only_the_uri_names_a_builtin() {
         assert!(builtin("TextContent").is_none());
         assert!(builtin("app://TextContent").is_none());
+        assert!(builtin("Container").is_none());
     }
 }

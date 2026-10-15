@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for one specific class, for the full property maps, or for filters.",
+    "description": "Read the most recent children of a node that carry text (children via ad4m://has_child, and via the children relation of any class implementing the built-in Container, e.g. we://child), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It reads through the built-in abstract class TextContent: every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)', where M is an upper bound when the node holds children under several predicates. Use instance_query for one specific class, for the full property maps, or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -622,7 +622,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "type": "string"
         },
         "parent": {
-          "description": "Parent node URI whose ad4m://has_child children are read (e.g. a\nChannel's id). A bare string is wrapped as a literal URI.",
+          "description": "Parent node URI whose children are read (e.g. a Channel's id): via\nad4m://has_child, and via the children relation of any class\nimplementing the built-in Container (e.g. we://child). A bare string\nis wrapped as a literal URI.",
           "type": "string"
         },
         "limit": {

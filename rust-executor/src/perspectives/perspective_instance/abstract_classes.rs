@@ -605,6 +605,29 @@ impl PerspectiveInstance {
     }
 }
 
+impl PerspectiveInstance {
+    /// The predicates the classes `abstract_class` reads store `property`
+    /// under, deduplicated: what a link scan over every container's
+    /// `children` follows (`get_children`, `instance_transcript`, #1446).
+    pub fn predicates_through(
+        &self,
+        abstract_class: &str,
+        property: &str,
+    ) -> Result<Vec<String>, AnyError> {
+        let resolution = self.resolve_abstract(abstract_class)?;
+        let mut predicates: Vec<String> = resolution
+            .views
+            .values()
+            .filter_map(|view| view.properties.iter().find(|p| p.name == property))
+            .map(|p| p.predicate.clone())
+            .filter(|p| !p.is_empty())
+            .collect();
+        predicates.sort();
+        predicates.dedup();
+        Ok(predicates)
+    }
+}
+
 /// One `execute_commands` run of a write that sets a collection: a
 /// `collectionSetter` gets its members as parameters, in a run of its own.
 pub(super) struct Run {

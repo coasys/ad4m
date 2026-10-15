@@ -1,0 +1,8 @@
+{
+  "target_class": "ad4m://Container",
+  "abstract": true,
+  "interpretation_hint": "Something that holds other records as its children: a channel, a post, a call, a document, a board.",
+  "properties": [
+    {"path": "ad4m://has_child", "name": "children", "node_kind": "IRI", "relation_kind": "hasMany", "collection": true}
+  ]
+}
