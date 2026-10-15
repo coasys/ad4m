@@ -1,0 +1,62 @@
+/**
+ * The SDK's TextContent mirrors the executor's built-in
+ * (`hardwired_sdna/text_content.json`), is read by its URI, and is never
+ * registered in a perspective (#1446).
+ */
+import * as fs from "fs";
+import * as path from "path";
+import { TextContent } from "./TextContent";
+import { Ad4mModel } from "../model/Ad4mModel";
+import { Model, Property } from "../model/decorators";
+
+const SDNA = JSON.parse(
+  fs.readFileSync(
+    path.resolve(__dirname, "../../../rust-executor/src/perspectives/hardwired_sdna/text_content.json"),
+    "utf-8",
+  ),
+);
+
+describe("TextContent", () => {
+  it("matches the executor's built-in shape", () => {
+    const { shape } = (TextContent as any).generateSHACL();
+    expect(shape.targetClass).toBe(SDNA.target_class);
+    expect(shape.isAbstract).toBe(SDNA.abstract);
+    expect(shape.properties.map((p: any) => [p.path, p.name])).toEqual(
+      SDNA.properties.map((p: any) => [p.path, p.name]),
+    );
+  });
+
+  it("is queried by its URI; a class extending it is not", () => {
+    expect((TextContent as any).prepareModelQueryParams({}).className).toBe("ad4m://TextContent");
+
+    @Model({ name: "OwnText" })
+    class OwnText extends TextContent {
+      @Property({ through: "app://extra" })
+      extra: string = "";
+    }
+    expect((OwnText as any).prepareModelQueryParams({}).className).toBe("OwnText");
+  });
+
+  it("is implemented through an alias", () => {
+    expect(() => {
+      @Model({ name: "FluxishMessage", implements: [TextContent] })
+      class FluxishMessage extends Ad4mModel {
+        @Property({ through: "flux://body", alias: { TextContent: "text" } })
+        body: string = "";
+      }
+    }).not.toThrow();
+  });
+
+  it("register() writes nothing", async () => {
+    const { PerspectiveProxy } = await import("./PerspectiveProxy");
+    const calls: string[] = [];
+    const proxy = Object.create(PerspectiveProxy.prototype);
+    // The skip comes before anything else: a write would be recorded, and
+    // reaching the private registration set throws on this bare object.
+    Object.defineProperty(proxy, "addSdna", { value: () => { calls.push("addSdna"); } });
+    Object.defineProperty(proxy, "addSdnaAll", { value: () => { calls.push("addSdnaAll"); } });
+    await expect(proxy.ensureSubjectClasses([TextContent])).resolves.toBeUndefined();
+    await expect(proxy.ensureSubjectClass(TextContent)).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+});

@@ -1206,6 +1206,8 @@ export class PerspectiveProxy {
     async ensureSubjectClasses(jsClasses: any[]): Promise<void> {
         const entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[] = [];
         for (const jsClass of jsClasses) {
+            // Built-in classes (`TextContent`) live in the executor, not here.
+            if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) continue;
             const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
             if (this.#ensuredSubjectClasses.has(className)) continue;
 
@@ -1994,6 +1996,9 @@ export class PerspectiveProxy {
 
     /** Takes a JS class (its constructor) and ensures the SHACL subject class exists. */
     async ensureSubjectClass(jsClass: any): Promise<void> {
+        // Built-in classes (`TextContent`) live in the executor, not here.
+        if (Object.prototype.hasOwnProperty.call(jsClass, 'builtinUri')) return;
+
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         

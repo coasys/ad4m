@@ -1079,7 +1079,10 @@ export class Ad4mModel {
     classNameOverride?: string | null,
   ): { className: string; queryJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
+    // A built-in abstract class (`TextContent`) is read by its URI (#1446).
+    // Its own static only: a subclass is a class of its own.
+    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
+    const className = classNameOverride || builtinUri || metadata.className;
 
     // Expand includeAll: true to a full IncludeMap covering every forward relation.
     if (query.includeAll) {
