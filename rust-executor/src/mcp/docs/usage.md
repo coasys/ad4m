@@ -100,8 +100,10 @@ instance_query(perspective_id, class_name="Message", parent="<channel-id>", limi
 instance_transcript(perspective_id, parent="<channel-id>", limit=20)
   → the NEWEST N instances under parent, presented oldest-to-newest as a
     plain-text transcript: timestamp, author display name and DID, and the
-    text as stored (HTML or Markdown). Without class_name it is one query on
-    the built-in abstract class TextContent: every class with a `text`
+    text as stored (HTML or Markdown). Children are the parent's has_child
+    links and, when it is a Container (e.g. a We CollectionBlock), its
+    children relation. Without class_name it reads through the built-in
+    abstract class TextContent: every class with a `text`
     property, or a property aliased to `text`. A class that has neither is
     not in it; pass class_name="<class>" to read that class (its `text`, or
     the property it aliases to `text`, else body; override with
