@@ -1020,6 +1020,41 @@ These are refused with an error rather than approximated: a `parent` scope with 
 
 The raw RPC takes the classes as an array: `perspective.modelQuery(["Placement", "EdgeRoute"], JSON.stringify({ limit: 50 }))`.
 
+### Abstract Classes
+
+An abstract class names what a record has, not which class it is. Querying it reads every installed class that has all of its property and relation names, so a view or an agent can ask for "anything with `text`" without knowing which app wrote the record or what that app called its class.
+
+```typescript
+@Model({ name: "Readable", abstract: true })
+class Readable extends Ad4mModel {
+  @Property({ through: "app://text" })
+  text: string = "";
+}
+
+// Another app calls it `body`: an alias makes it answer to `text` too.
+@Model({ name: "Message", implements: [Readable] })
+class Message extends Ad4mModel {
+  @Property({ through: "flux://body", alias: { Readable: "text" } })
+  body: string = "";
+}
+
+const everything = await Readable.findAll(perspective);
+const mentions = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
+```
+
+A query over an abstract class is a [union query](#querying-several-classes-at-once) over the classes it matches, with the same rules and limits. `modelQuery("Readable", …)` and `modelSubscribe("Readable", …)` work the same way.
+
+| Rule | Detail |
+|---|---|
+| Matching | By name only. A class matches when, for every property of the abstract class, it has a property with that name or an alias for it, and the same for relations. Predicates (`through`), datatypes and directions are not compared, so the abstract class's own `through` values are never used. |
+| Aliases | `alias: { Readable: "text" }` on a property or relation. Read through `Readable`, the row carries `text`, read through this property's predicate, and `where` / `order` use `text`. Read as `Message`, it stays `body`. A class that already has a property named `text` cannot also alias another property to `text`: registering it fails. |
+| Rows | Each row is the record's real class: `__subjectClass` names it. |
+| Creating | Refused: `Readable.create(…)` and `createSubject("Readable", …)` throw. |
+| Classifying | An abstract class is never one of a record's classes (`subjectClassesOf`, polymorphic relations, union queries). |
+| Later classes | A subscription over an abstract class picks up a class installed after it was opened. |
+| Unions | An abstract class is queried on its own, not in `classNames` with other classes. |
+| `implements` | Checked when the class is declared: `Message implements Readable but has no property or alias named \`text\``. It is a check only: the executor matches by structure whether a class lists it or not. |
+
 ### Unverified Links
 
 Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
