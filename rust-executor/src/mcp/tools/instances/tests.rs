@@ -2483,7 +2483,7 @@ fn transcript(uuid: &str, class_name: Option<&str>, parent: &str) -> InstanceTra
 
 /// Without a class, a transcript reads every class's text under the parent
 /// through TextContent: Flux's aliased `body` and another app's `text`, in
-/// one chronology, with HTML turned into plain text.
+/// one chronology, each text as stored (HTML here).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_transcript_without_a_class_reads_every_class_with_text() {
     let (handler, uuid, _guard) = setup_with(
@@ -2523,13 +2523,12 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
         .instance_transcript(Parameters(transcript(&uuid, None, channel)))
         .await;
     let hey = all
-        .find("Hey @data, look & see")
-        .unwrap_or_else(|| panic!("the message's text, as plain text:\n{all}"));
+        .find(r#"<p>Hey <span class="mention" data-id="did:key:zData">@data</span>, look &amp; see</p>"#)
+        .unwrap_or_else(|| panic!("the message's text, as stored:\n{all}"));
     let list = all
-        .find("- one\n- two")
-        .unwrap_or_else(|| panic!("the block's text, as plain text:\n{all}"));
+        .find("<ul><li>one</li><li>two</li></ul>")
+        .unwrap_or_else(|| panic!("the block's text, as stored:\n{all}"));
     assert!(hey < list, "oldest first:\n{all}");
-    assert!(!all.contains("<p>") && !all.contains("&amp;"), "{all}");
 
     // A class named: its own text — the aliased `body`, and `text` over the
     // identity property.
@@ -2537,14 +2536,14 @@ async fn a_transcript_without_a_class_reads_every_class_with_text() {
         .instance_transcript(Parameters(transcript(&uuid, Some("Message"), channel)))
         .await;
     assert!(
-        message.contains("Hey @data") && !message.contains("- one"),
+        message.contains("look &amp; see") && !message.contains("<li>one</li>"),
         "{message}"
     );
     let block = handler
         .instance_transcript(Parameters(transcript(&uuid, Some("Block"), channel)))
         .await;
     assert!(
-        block.contains("- one") && !block.contains("notes"),
+        block.contains("<li>one</li>") && !block.contains("notes"),
         "{block}"
     );
 
@@ -2588,10 +2587,7 @@ async fn without_a_conforming_class_the_old_message_body_lookup_applies() {
     let all = handler
         .instance_transcript(Parameters(transcript(&uuid, None, channel)))
         .await;
-    assert!(
-        all.contains("plain old body") && !all.contains("<p>"),
-        "{all}"
-    );
+    assert!(all.contains("<p>plain old body</p>"), "{all}");
 
     let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
     assert_eq!(
@@ -2696,7 +2692,10 @@ async fn a_class_with_its_own_text_does_not_hide_the_message_body() {
             && pos("an answer in the channel") < pos("second message"),
         "{all}"
     );
-    assert!(!all.contains("pizza") && !all.contains("<p>"), "{all}");
+    assert!(
+        !all.contains("pizza") && all.contains("<p>hey @data, lunch?</p>"),
+        "{all}"
+    );
 
     let last_two = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
