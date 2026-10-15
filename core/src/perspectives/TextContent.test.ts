@@ -37,6 +37,27 @@ describe("TextContent", () => {
     expect((OwnText as any).prepareModelQueryParams({}).className).toBe("OwnText");
   });
 
+  it("is sent by its URI in a union too, so the executor refuses it as abstract", async () => {
+    @Model({ name: "UnionPeer" })
+    class UnionPeer extends Ad4mModel {
+      @Property({ through: "app://peer" })
+      peer: string = "";
+    }
+    expect(Ad4mModel.prepareUnionQueryParams([TextContent, UnionPeer] as any, {}).classNames).toEqual([
+      "ad4m://TextContent",
+      "UnionPeer",
+    ]);
+    const sent: any[] = [];
+    const perspective: any = {
+      modelQuery: async (classNames: any) => {
+        sent.push(classNames);
+        throw new Error("classNames: 'ad4m://TextContent' is an abstract class.");
+      },
+    };
+    await expect(Ad4mModel.findAllOf(perspective, [TextContent, UnionPeer] as any)).rejects.toThrow("abstract class");
+    expect(sent).toEqual([["ad4m://TextContent", "UnionPeer"]]);
+  });
+
   it("is implemented through an alias", () => {
     expect(() => {
       @Model({ name: "FluxishMessage", implements: [TextContent] })

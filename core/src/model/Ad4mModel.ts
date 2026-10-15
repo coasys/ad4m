@@ -1074,15 +1074,23 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * The name the executor knows this class by: its class name, or a
+   * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
+   * the class's own static only: a subclass is a class of its own.
+   * @internal
+   */
+  static queriedAs(): string {
+    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
+    return builtinUri || this.getModelMetadata().className;
+  }
+
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
   ): { className: string; queryJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
-    // A built-in abstract class (`TextContent`) is read by its URI (#1446).
-    // Its own static only: a subclass is a class of its own.
-    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
-    const className = classNameOverride || builtinUri || metadata.className;
+    const className = classNameOverride || this.queriedAs();
 
     // Expand includeAll: true to a full IncludeMap covering every forward relation.
     if (query.includeAll) {
@@ -1261,7 +1269,7 @@ export class Ad4mModel {
       merged.parent = JSON.parse(scopes[0]);
     }
     return {
-      classNames: classes.map((c) => c.getModelMetadata().className),
+      classNames: classes.map((c) => c.queriedAs()),
       queryJson: JSON.stringify(merged),
     };
   }
