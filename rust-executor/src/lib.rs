@@ -570,25 +570,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     {
         info!("Initializing SFU service...");
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
-        // An IP, then port 0: a bare IPv6 like "::1" formatted as "{}:0"
-        // would not parse as a SocketAddr.
-        let bind_ip = crate::sfu::server::sfu_bind_ip(
+        let (bind_addr, public_ip) = crate::sfu::server::sfu_media_addrs(
             config.sfu_bind_addr.as_deref(),
             config.localhost.unwrap_or(true),
-        );
-        let public_ip = config.sfu_public_addr.as_deref().map(|addr| {
-            addr.parse::<std::net::IpAddr>().unwrap_or_else(|e| {
-                let message = format!(
-                    "sfu_public_addr `{}` is not an IP address ({}): give the public IP, without a port",
-                    addr, e
-                );
-                error!("{}", message);
-                panic!("{}", message);
-            })
+            config.sfu_udp_port,
+            config.sfu_public_addr.as_deref(),
+        )
+        .unwrap_or_else(|message| {
+            error!("{}", message);
+            panic!("{}", message);
         });
-        let fixed_port = config.sfu_udp_port.filter(|port| *port != 0);
+        let fixed_port = Some(bind_addr.port()).filter(|port| *port != 0);
         let sfu_config = crate::sfu::server::SfuServerConfig {
-            bind_addr: std::net::SocketAddr::new(bind_ip, fixed_port.unwrap_or(0)),
+            bind_addr,
             stun_server: config.sfu_stun_server.clone(),
             public_ip,
             preferred_node: config.sfu_preferred_node.clone(),

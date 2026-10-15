@@ -307,8 +307,11 @@ pub struct Advertised {
 ///   the router forwards 1:1; with an ephemeral port it is the port the probe
 ///   saw, which only a NAT that keeps the mapping open to anyone lets callers
 ///   in through.
-/// - Reachability is `public` once the probe reports the advertised IP: the
-///   address callers are given is the one the internet sees.
+/// - Reachability is `public` once the probe reports the advertised IP and a
+///   caller can use it: on a fixed port (forwarded) or for an IP the operator
+///   named. An ephemeral port with a STUN-learnt address is still advertised,
+///   but stays `nat`: the probe only proves the mapping exists for the STUN
+///   server, and most routers drop a new peer's packets to it.
 pub fn assess(
     local: SocketAddr,
     fixed_port: bool,
@@ -348,8 +351,9 @@ pub fn assess(
         _ => None,
     };
 
+    let usable = |a: &Advertised| fixed_port || a.source == AdvertisedSource::Flag;
     let reachability = match (advertised, probe) {
-        (Some(a), Some(Ok(r))) if r.ip() == a.addr.ip() => SfuReachability::Public {
+        (Some(a), Some(Ok(r))) if r.ip() == a.addr.ip() && usable(&a) => SfuReachability::Public {
             reflexive_addr: a.addr,
         },
         (Some(a), Some(Err(e))) => SfuReachability::Unknown {
@@ -539,8 +543,12 @@ pub(crate) mod tests {
     #[test]
     fn behind_nat_an_ephemeral_port_advertises_the_mapping_as_seen() {
         let probe = Ok(addr("198.51.100.7:61111"));
-        let (adv, _) = assess(addr("192.168.0.10:53000"), false, None, Some(&probe));
+        let (adv, reach) = assess(addr("192.168.0.10:53000"), false, None, Some(&probe));
         assert_eq!(adv.unwrap().addr, addr("198.51.100.7:61111"));
+        // The mapping exists for the STUN server; a caller's packets to it
+        // are dropped by most routers, so `auto` must not count on it.
+        assert!(!reach.is_public(), "{reach}");
+        assert_eq!(reach.label(), "nat");
     }
 
     #[test]

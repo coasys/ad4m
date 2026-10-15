@@ -254,6 +254,79 @@ pub fn sfu_bind_ip(explicit: Option<&str>, localhost: bool) -> std::net::IpAddr 
     }
 }
 
+/// The SFU's bind address and the public IP it advertises, from the
+/// `sfu_*` settings, or why they cannot work. `run` stops on an error:
+/// with a port forwarded to this box, falling back to loopback or offering an
+/// address no caller can use would leave every call broken with nothing to
+/// say why.
+///
+/// - With a fixed `udp_port` or a `public_addr`, `bind_addr` must be a real
+///   interface IP; otherwise a bad one still falls back to loopback, as
+///   [`sfu_bind_ip`] does.
+/// - `public_addr` must be an IP of the bind's family, and one a candidate
+///   can carry: not unspecified, multicast, broadcast or link-local.
+pub fn sfu_media_addrs(
+    bind_addr: Option<&str>,
+    localhost: bool,
+    udp_port: Option<u16>,
+    public_addr: Option<&str>,
+) -> Result<(SocketAddr, Option<std::net::IpAddr>), String> {
+    use std::net::IpAddr;
+    let port = udp_port.unwrap_or(0);
+    let strict = port != 0 || public_addr.is_some();
+    let bind_ip = match bind_addr {
+        Some(addr) if strict => match addr.parse::<IpAddr>() {
+            Ok(ip) if !ip.is_unspecified() => ip,
+            _ => {
+                return Err(format!(
+                    "sfu_bind_addr `{}` is not an IP address of this machine's interface: \
+                     give the LAN IP the router forwards to",
+                    addr
+                ))
+            }
+        },
+        _ => sfu_bind_ip(bind_addr, localhost),
+    };
+    let public_ip = match public_addr {
+        None => None,
+        Some(addr) => {
+            let ip: IpAddr = addr.parse().map_err(|e| {
+                format!(
+                    "sfu_public_addr `{}` is not an IP address ({}): give the public IP, without a port",
+                    addr, e
+                )
+            })?;
+            let unusable = match ip {
+                IpAddr::V4(v4) => {
+                    v4.is_unspecified()
+                        || v4.is_multicast()
+                        || v4.is_broadcast()
+                        || v4.is_link_local()
+                }
+                IpAddr::V6(v6) => {
+                    v6.is_unspecified()
+                        || v6.is_multicast()
+                        || (v6.segments()[0] & 0xffc0) == 0xfe80
+                }
+            };
+            if unusable {
+                return Err(format!(
+                    "sfu_public_addr `{}` cannot be offered to callers: give the public IP callers reach",
+                    addr
+                ));
+            }
+            if ip.is_ipv4() != bind_ip.is_ipv4() {
+                return Err(format!(
+                    "sfu_public_addr `{}` and the SFU's bind address {} are of different IP families",
+                    addr, bind_ip
+                ));
+            }
+            Some(ip)
+        }
+    };
+    Ok((SocketAddr::new(bind_ip, port), public_ip))
+}
+
 /// Notification emitted by the event loop when a peer's RTC dies. The
 /// event loop has already dropped the peer; the service removes what it
 /// holds: a client's room slot, or a pipe's cascade entry.
@@ -1438,6 +1511,69 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("--sfu-udp-port"), "{message}");
+    }
+
+    #[test]
+    fn the_media_settings_refuse_what_no_caller_could_use() {
+        let ok = |b: Option<&str>, port: Option<u16>, public: Option<&str>| {
+            sfu_media_addrs(b, true, port, public)
+        };
+        assert_eq!(
+            ok(Some("192.168.0.10"), Some(40000), Some("198.51.100.7")).unwrap(),
+            (
+                "192.168.0.10:40000".parse().unwrap(),
+                Some("198.51.100.7".parse().unwrap())
+            )
+        );
+        // No fixed port and no public address: a bad bind address still
+        // falls back to loopback, as before.
+        assert_eq!(
+            ok(Some("lan"), None, None).unwrap().0.ip(),
+            std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST)
+        );
+        for (bind, port, public, says) in [
+            (Some("lan"), Some(40000), None, "sfu_bind_addr"),
+            (Some("0.0.0.0"), Some(40000), None, "sfu_bind_addr"),
+            (
+                Some("192.168.0.10"),
+                None,
+                Some("198.51.100.7:40000"),
+                "without a port",
+            ),
+            (
+                Some("192.168.0.10"),
+                None,
+                Some("0.0.0.0"),
+                "cannot be offered",
+            ),
+            (
+                Some("192.168.0.10"),
+                None,
+                Some("224.0.0.1"),
+                "cannot be offered",
+            ),
+            (
+                Some("192.168.0.10"),
+                None,
+                Some("169.254.1.1"),
+                "cannot be offered",
+            ),
+            (
+                Some("192.168.0.10"),
+                None,
+                Some("2001:db8::1"),
+                "different IP families",
+            ),
+            (
+                Some("fd00::10"),
+                None,
+                Some("198.51.100.7"),
+                "different IP families",
+            ),
+        ] {
+            let err = ok(bind, port, public).unwrap_err();
+            assert!(err.contains(says), "{bind:?} {port:?} {public:?}: {err}");
+        }
     }
 
     #[test]
