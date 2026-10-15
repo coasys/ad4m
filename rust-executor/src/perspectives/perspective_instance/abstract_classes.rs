@@ -195,13 +195,13 @@ impl PerspectiveInstance {
             let Some(resolution) = targets.resolution.as_ref() else {
                 // No longer abstract (re-registered as a concrete class): the
                 // re-run reads it as named; watch it as named.
-                let (trigger_sparql, predicates) =
-                    self.model_trigger_query(&targets, &query_json);
+                let (trigger_sparql, predicates) = self.model_trigger_query(&targets, &query_json);
                 let mut queries = self.subscribed_queries.lock().await;
                 let Some(query) = queries.get_mut(&id) else {
                     continue;
                 };
-                let trigger = self.build_model_trigger_for(&targets, &query_json, &query.last_result);
+                let trigger =
+                    self.build_model_trigger_for(&targets, &query_json, &query.last_result);
                 if let Some(params) = query.model_query_params.as_mut() {
                     params.abstract_read = None;
                     params.trigger = trigger;

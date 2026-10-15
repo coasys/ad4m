@@ -202,11 +202,8 @@ async fn an_abstract_class_is_queried_through_the_ordinary_api_and_never_created
 /// class is an empty result; what a union refuses is refused even then.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abstract_class_is_read_on_its_own() {
-    let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[
-        ("TextContent", TEXT_CONTENT_SDNA),
-        ("Task", TASK_SDNA),
-    ])
-    .await;
+    let (perspective, _shapes, _ctx) =
+        setup_perspective_no_llm(&[("TextContent", TEXT_CONTENT_SDNA), ("Task", TASK_SDNA)]).await;
     let err = perspective
         .model_query_classes(
             &QueryClasses::union(vec!["TextContent".into(), "Task".into()]),
@@ -241,11 +238,8 @@ async fn an_abstract_class_is_read_on_its_own() {
 /// included, and one re-registered as abstract drops out.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_resolution_is_cached_and_dropped_when_shapes_change() {
-    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
-        ("TextContent", TEXT_CONTENT_SDNA),
-        ("Chat", CHAT_SDNA),
-    ])
-    .await;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("TextContent", TEXT_CONTENT_SDNA), ("Chat", CHAT_SDNA)]).await;
     let first = perspective.resolve_abstract("TextContent").unwrap();
     assert_eq!(first.classes, vec!["Chat".to_string()]);
     let again = perspective.resolve_abstract("TextContent").unwrap();
@@ -253,7 +247,10 @@ async fn the_resolution_is_cached_and_dropped_when_shapes_change() {
 
     install(&mut perspective, &ctx, "Message", MESSAGE_SDNA).await;
     let after = perspective.resolve_abstract("TextContent").unwrap();
-    assert_eq!(after.classes, vec!["Chat".to_string(), "Message".to_string()]);
+    assert_eq!(
+        after.classes,
+        vec!["Chat".to_string(), "Message".to_string()]
+    );
 
     // Re-registered as abstract: the marker comes with the refreshed shape,
     // and the index sees it.
@@ -320,11 +317,8 @@ fn writes(links: &[(&str, &str, &str)]) -> ChangedPredicates {
 /// new class's first record is never pushed.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_subscription_picks_up_a_class_installed_after_subscribe() {
-    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
-        ("TextContent", TEXT_CONTENT_SDNA),
-        ("Chat", CHAT_SDNA),
-    ])
-    .await;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("TextContent", TEXT_CONTENT_SDNA), ("Chat", CHAT_SDNA)]).await;
     let (id, _, initial) = perspective
         .model_subscribe_and_query(one("TextContent"), ALL.into(), "c".into())
         .await
@@ -365,7 +359,11 @@ async fn a_subscription_picks_up_a_class_installed_after_subscribe() {
     perspective
         .check_subscribed_queries(writes(&[
             ("ad4m://message/late", "ns://entry_type", "ns://message"),
-            ("ad4m://message/late", "ns://body", "literal://string:@data hi"),
+            (
+                "ad4m://message/late",
+                "ns://body",
+                "literal://string:@data hi",
+            ),
         ]))
         .await;
     let update = next_update_for(&mut rx, &perspective.uuid, &id)
@@ -386,11 +384,8 @@ async fn a_subscription_picks_up_a_class_installed_after_subscribe() {
 /// re-runs whatever the write was.
 #[tokio::test(flavor = "multi_thread")]
 async fn installing_a_class_pushes_records_that_were_already_there() {
-    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
-        ("TextContent", TEXT_CONTENT_SDNA),
-        ("Chat", CHAT_SDNA),
-    ])
-    .await;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("TextContent", TEXT_CONTENT_SDNA), ("Chat", CHAT_SDNA)]).await;
     // A Message, written as raw links before its class exists.
     perspective
         .add_links(

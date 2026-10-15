@@ -183,7 +183,9 @@ fn the_index_reads_abstract_markers_and_aliases() {
     for name in ["TextContent", "Readable", "Container"] {
         assert!(index.is_abstract(name), "{name} is abstract");
     }
-    for name in ["Post", "Message", "Note", "Poll", "Article", "Folder", "List"] {
+    for name in [
+        "Post", "Message", "Note", "Poll", "Article", "Folder", "List",
+    ] {
         assert!(!index.is_abstract(name), "{name} is concrete");
     }
     assert_eq!(index.name_through("Message", "body", "TextContent"), "text");
@@ -274,7 +276,13 @@ fn a_class_with_two_properties_answering_to_one_name_is_left_out() {
 #[test]
 fn an_abstract_class_is_never_a_records_class() {
     let store = all_classes();
-    add(&store, "app://r1", "app://text", "literal:string:hello", "1");
+    add(
+        &store,
+        "app://r1",
+        "app://text",
+        "literal:string:hello",
+        "1",
+    );
     add(&store, "app://r2", "app://kind", "app://post", "1");
     let classes = subject_classes_of(
         &store,
