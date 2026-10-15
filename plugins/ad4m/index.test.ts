@@ -1837,7 +1837,11 @@ describe("ad4mPlugin", () => {
     expect(getDoc!.parameters.$defs.DocTopic.oneOf.map((o: any) => o.const))
       .toEqual(["overview", "architecture", "usage", "flux", "models"]);
     const transcript = registeredTools.find((t) => t.name === "ad4m_instance_transcript");
-    expect(transcript!.parameters.required).toEqual(["perspective_id", "class_name", "parent"]);
+    // The transcript reads through the built-in TextContent (#1446): no
+    // class, no text property to pick.
+    expect(transcript!.parameters.required).toEqual(["perspective_id", "parent"]);
+    expect(transcript!.parameters.properties).not.toHaveProperty("class_name");
+    expect(transcript!.parameters.properties).not.toHaveProperty("text_property");
     expect(transcript!.parameters.properties).not.toHaveProperty("parent_address");
     const query = registeredTools.find((t) => t.name === "ad4m_instance_query");
     expect(query!.parameters.properties).not.toHaveProperty("order");

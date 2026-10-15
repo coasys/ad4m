@@ -465,7 +465,7 @@ fn parse_bool_literal_target(raw: Option<&str>) -> Option<bool> {
 }
 
 /// Decode the target of a `literal:string:<urlencoded>` link.
-fn decode_literal_string_target(raw: &str) -> String {
+pub(crate) fn decode_literal_string_target(raw: &str) -> String {
     let trimmed = raw
         .strip_prefix("literal://string:")
         .or_else(|| raw.strip_prefix("literal:string:"))
