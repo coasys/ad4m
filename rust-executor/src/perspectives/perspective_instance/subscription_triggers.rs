@@ -283,20 +283,34 @@ impl super::PerspectiveInstance {
     /// `query_json`, watching the nodes of its first `result`. Each class
     /// contributes its own rules; a query over several classes (#1238)
     /// re-runs on a write any of them matches.
+    #[cfg(test)]
     pub(super) fn build_model_trigger<'a>(
         &self,
         class_names: impl IntoIterator<Item = &'a str>,
         query_json: &str,
         result: &str,
     ) -> ModelTrigger {
+        self.build_model_trigger_with(&self.shape_resolver(), class_names, query_json, result)
+    }
+
+    /// [`Self::build_model_trigger`] reading shapes through `resolver`: the
+    /// views of an abstract class's classes (#1435), whose `where` keys are
+    /// the abstract class's names.
+    pub(super) fn build_model_trigger_with<'a>(
+        &self,
+        resolver: &dyn ShapeResolver,
+        class_names: impl IntoIterator<Item = &'a str>,
+        query_json: &str,
+        result: &str,
+    ) -> ModelTrigger {
         let mut rules: Option<TriggerRules> = None;
         for class_name in class_names {
-            let shape = self.get_shape(class_name).ok();
+            let shape = resolver.get_shape(class_name).ok();
             let side = self.model_query_side_predicates(shape.as_deref(), query_json);
             let class_rules = build_rules(
                 class_name,
                 query_json,
-                &self.shape_resolver(),
+                resolver,
                 side,
                 &super::extract_predicates_from_sparql,
             );
@@ -307,6 +321,46 @@ impl super::PerspectiveInstance {
         }
         // No class to watch: nothing to tell writes apart by.
         ModelTrigger::new(rules.unwrap_or_else(TriggerRules::every_write), result)
+    }
+
+    /// The trigger SPARQL and predicate set of a model subscription over
+    /// `targets`: the union of each class's trigger set, matched on the
+    /// predicate alone.
+    pub(super) fn model_trigger_query(
+        &self,
+        targets: &super::abstract_classes::ReadTargets,
+        query_json: &str,
+    ) -> (String, HashSet<String>) {
+        // Each class contributes its own trigger set; the matcher is
+        // predicate-only, so the sets meet as their union. A view renames
+        // properties, never their predicates, so the classes' own shapes
+        // give the same set.
+        let mut trigger_predicates: Vec<String> = targets
+            .classes
+            .names()
+            .iter()
+            .flat_map(|class_name| {
+                self.build_model_trigger_predicates(class_name, Some(query_json))
+            })
+            .collect();
+        trigger_predicates.sort();
+        trigger_predicates.dedup();
+
+        let trigger_sparql = if trigger_predicates.is_empty() {
+            // Fallback: match any triple (always re-check)
+            "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
+        } else {
+            let patterns: Vec<String> = trigger_predicates
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
+                .collect();
+            format!(
+                "SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1",
+                patterns.join(" UNION ")
+            )
+        };
+        (trigger_sparql, trigger_predicates.into_iter().collect())
     }
 
     /// Predicates a model query reads beside its classes' shapes, which a
