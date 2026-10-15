@@ -678,3 +678,99 @@ async fn a_failed_resolution_is_tried_again_on_the_next_pass() {
         .to_string();
     assert!(update.contains("ad4m://message/1"), "{update}");
 }
+
+/// The built-in TextContent (#1446) is read by its URI, never from the
+/// store: an app class registered under the name `TextContent`, here with
+/// another property, changes neither what the built-in reads nor that it
+/// cannot be created. Aliases name it `TextContent`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_builtin_text_content_is_read_by_its_uri() {
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    const APP_TEXT_CONTENT_SDNA: &str = r#"{
+      "target_class":"app://TextContent",
+      "abstract":true,
+      "properties":[{"path":"app://title","name":"title","max_count":1}]
+    }"#;
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("TextContent", APP_TEXT_CONTENT_SDNA),
+        ("Chat", CHAT_SDNA),
+        ("Message", MESSAGE_SDNA),
+    ])
+    .await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Chat",
+        "ad4m://chat/b",
+        serde_json::json!({"text": "chat text"}),
+    )
+    .await
+    .unwrap();
+    create(
+        &mut perspective,
+        &ctx,
+        "Message",
+        "ad4m://message/b",
+        serde_json::json!({"body": "message body"}),
+    )
+    .await
+    .unwrap();
+
+    let builtin = perspective
+        .model_query_classes(&one(TEXT_CONTENT_URI), ALL)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&builtin),
+        vec![
+            ("ad4m://chat/b".into(), "Chat".into(), "chat text".into()),
+            (
+                "ad4m://message/b".into(),
+                "Message".into(),
+                "message body".into()
+            ),
+        ]
+    );
+
+    // The app's own `TextContent` asks for `title`: nothing has it.
+    let app: Value = serde_json::from_str(
+        &perspective
+            .model_query_classes(&one("TextContent"), ALL)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(app["totalCount"], 0, "{app}");
+
+    assert_eq!(
+        perspective
+            .predicates_through(TEXT_CONTENT_URI, "text")
+            .unwrap(),
+        vec!["ns://body".to_string(), "ns://message".to_string()]
+    );
+    assert_eq!(
+        perspective
+            .property_through(TEXT_CONTENT_URI, "Message", "text")
+            .unwrap(),
+        Some("body".to_string())
+    );
+
+    let refused = create(
+        &mut perspective,
+        &ctx,
+        TEXT_CONTENT_URI,
+        "ad4m://text/b",
+        serde_json::json!({"text": "x"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.to_string().contains("abstract class"), "{refused}");
+    let err = perspective
+        .model_query_classes(
+            &QueryClasses::union(vec![TEXT_CONTENT_URI.into(), "Chat".into()]),
+            ALL,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("abstract class"), "{err}");
+}

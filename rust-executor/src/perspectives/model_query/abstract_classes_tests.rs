@@ -173,7 +173,8 @@ fn all_classes() -> SparqlStore {
 
 fn resolved(store: &SparqlStore, abstract_class: &str) -> Resolution {
     let index = AbstractIndex::load(store).unwrap();
-    resolve(store, &StoreResolver(store), &index, abstract_class).unwrap()
+    let shape = load_shape_from_store(store, abstract_class).unwrap();
+    resolve(store, &StoreResolver(store), &index, abstract_class, &shape).unwrap()
 }
 
 #[test]

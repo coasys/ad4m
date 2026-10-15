@@ -16,6 +16,7 @@ use super::PerspectiveInstance;
 use crate::perspectives::model_query::abstract_classes::{
     self, AbstractIndex, Resolution, ViewResolver,
 };
+use crate::perspectives::model_query::builtin_classes::builtin;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 
@@ -92,11 +93,9 @@ impl PerspectiveInstance {
     }
 
     /// Every installed concrete class `abstract_class` reads, with its view.
-    /// Cached until the installed shapes change.
-    pub(super) fn resolve_abstract(
-        &self,
-        abstract_class: &str,
-    ) -> Result<Arc<Resolution>, AnyError> {
+    /// Cached until the installed shapes change. `abstract_class` is a stored
+    /// abstract class's name or a built-in's URI (`ad4m://TextContent`).
+    pub fn resolve_abstract(&self, abstract_class: &str) -> Result<Arc<Resolution>, AnyError> {
         let generation = {
             let cache = self.abstract_cache.read().unwrap();
             if let Some(hit) = cache.resolved.get(abstract_class) {
@@ -105,11 +104,18 @@ impl PerspectiveInstance {
             cache.generation
         };
         let index = self.abstract_index()?;
+        // A built-in by its URI, from `builtin_classes`, never from the store:
+        // an app class of the same name does not change what it reads.
+        let (alias_key, shape) = match builtin(abstract_class) {
+            Some(b) => (b.name, b.shape.clone()),
+            None => (abstract_class, self.get_shape(abstract_class)?),
+        };
         let resolution = Arc::new(abstract_classes::resolve(
             &self.sparql_store,
             &self.shape_resolver(),
             &index,
-            abstract_class,
+            alias_key,
+            &shape,
         )?);
         let mut cache = self.abstract_cache.write().unwrap();
         if cache.generation == generation {
@@ -133,10 +139,11 @@ impl PerspectiveInstance {
         query: &ModelQueryInput,
     ) -> Result<ReadTargets, AnyError> {
         let index = self.abstract_index()?;
+        let is_abstract = |name: &str| builtin(name).is_some() || index.is_abstract(name);
         let abstract_class = match classes {
-            QueryClasses::One(name) if index.is_abstract(name) => name,
+            QueryClasses::One(name) if is_abstract(name) => name,
             QueryClasses::Union(names) => {
-                if let Some(name) = names.iter().find(|n| index.is_abstract(n)) {
+                if let Some(name) = names.iter().find(|n| is_abstract(n)) {
                     return Err(anyhow!(
                         "classNames: '{name}' is an abstract class. Query it on its own: it \
                          already reads every class that has its properties."
@@ -188,9 +195,10 @@ impl PerspectiveInstance {
         targets.resolution.as_ref().map(|_| generation)
     }
 
-    /// Whether `class_name` is an abstract class here.
+    /// Whether `class_name` is an abstract class here: a built-in's URI
+    /// (`ad4m://TextContent`), or a stored class marked abstract.
     pub(crate) fn is_abstract_class(&self, class_name: &str) -> Result<bool, AnyError> {
-        Ok(self.abstract_index()?.is_abstract(class_name))
+        Ok(builtin(class_name).is_some() || self.abstract_index()?.is_abstract(class_name))
     }
 
     /// A write through an abstract class: refused, it names what records
@@ -306,6 +314,52 @@ impl AbstractWrite {
             AbstractWrite::Update => "updated",
             AbstractWrite::Delete => "deleted",
         }
+    }
+}
+
+impl PerspectiveInstance {
+    /// The predicates the classes `abstract_class` reads store `property`
+    /// under, deduplicated: what a raw SPARQL scan over "every class's
+    /// `text`" matches on (the waker's mention scan, #1446).
+    pub fn predicates_through(
+        &self,
+        abstract_class: &str,
+        property: &str,
+    ) -> Result<Vec<String>, AnyError> {
+        let resolution = self.resolve_abstract(abstract_class)?;
+        let mut predicates: Vec<String> = resolution
+            .views
+            .values()
+            .filter_map(|view| view.properties.iter().find(|p| p.name == property))
+            .map(|p| p.predicate.clone())
+            .filter(|p| !p.is_empty())
+            .collect();
+        predicates.sort();
+        predicates.dedup();
+        Ok(predicates)
+    }
+
+    /// The name of `class_name`'s property that answers to `property` when
+    /// read through `abstract_class`: its own `property`, or the one aliased
+    /// to it. `None` when the class does not conform.
+    pub fn property_through(
+        &self,
+        abstract_class: &str,
+        class_name: &str,
+        property: &str,
+    ) -> Result<Option<String>, AnyError> {
+        let resolution = self.resolve_abstract(abstract_class)?;
+        let Some(view) = resolution.views.get(class_name) else {
+            return Ok(None);
+        };
+        let own = self.get_shape(class_name)?;
+        // A view is its class's shape with properties renamed in place.
+        Ok(view
+            .properties
+            .iter()
+            .zip(&own.properties)
+            .find(|(v, _)| v.name == property)
+            .map(|(_, o)| o.name.clone()))
     }
 }
 
