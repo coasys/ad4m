@@ -475,4 +475,17 @@ describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
     expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'Readable', 'ad4m://m/1', undefined);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
   });
+
+  it('after delete of a built-in TextContent row', async () => {
+    const now = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+    const c = client();
+    const proxy = createProxy(c);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    const row = { constructor: { builtinUri: 'ad4m://TextContent' } };
+    await proxy.removeSubject(row, 'ad4m://m/1');
+    expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
+    jest.spyOn(Date, 'now').mockRestore();
+  });
 });
