@@ -935,7 +935,7 @@ fn walked_pairs(pairs: &[(String, String)], path: &str) -> String {
 /// `allow_structural_fallback` gates the final tier, which scans every node
 /// carrying any of the class's predicates. It is the weakest signal and the most
 /// expensive one, so a caller that has already narrowed the subject declines it.
-fn shape_conformance_patterns(
+pub(super) fn shape_conformance_patterns(
     shape: &ModelShape,
     allow_structural_fallback: bool,
     guard: LinkGuard,
@@ -2354,7 +2354,11 @@ mod where_compiler_tests {
 /// than by substitution order, so nothing is rewritten twice. Nesting is still
 /// safe because each pass prefixes whatever the previous pass produced, so
 /// depth keeps the names distinct without threading a counter.
-fn rebase_into_subquery(patterns: &[String], namespace: &str, target_var: &str) -> Vec<String> {
+pub(super) fn rebase_into_subquery(
+    patterns: &[String],
+    namespace: &str,
+    target_var: &str,
+) -> Vec<String> {
     patterns
         .iter()
         .map(|p| rebase_pattern(p, namespace, target_var))

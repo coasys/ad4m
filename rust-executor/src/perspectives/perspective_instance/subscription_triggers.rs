@@ -340,7 +340,13 @@ impl super::PerspectiveInstance {
             .names()
             .iter()
             .flat_map(|class_name| {
-                self.build_model_trigger_predicates(class_name, Some(query_json))
+                let mut predicates =
+                    self.build_model_trigger_predicates(class_name, Some(query_json));
+                // A built-in's own rows (`Container`) have no stored shape.
+                if let Some(view) = targets.views.get(class_name) {
+                    predicates.extend(view.predicates());
+                }
+                predicates
             })
             .collect();
         trigger_predicates.sort();

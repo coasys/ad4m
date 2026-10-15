@@ -31,9 +31,11 @@ use serde_json::Value;
 /// generation it resolved at and resolves again when it moves.
 #[derive(Default)]
 pub(super) struct AbstractCache {
-    generation: u64,
+    pub(super) generation: u64,
     index: Option<Arc<AbstractIndex>>,
     resolved: HashMap<String, Arc<Resolution>>,
+    /// The containment edge set (see `super::containment`).
+    pub(super) containment: Option<crate::perspectives::model_query::containment::ContainmentEdges>,
 }
 
 /// The classes a model query or subscription reads: those it names, or an
@@ -64,6 +66,7 @@ impl PerspectiveInstance {
         cache.generation += 1;
         cache.index = None;
         cache.resolved.clear();
+        cache.containment = None;
     }
 
     /// How many times the installed shapes have changed. Read it *before*
@@ -123,13 +126,20 @@ impl PerspectiveInstance {
         };
         let index = self.abstract_index()?;
         let (alias_key, shape) = self.abstract_shape(abstract_class)?;
-        let resolution = Arc::new(abstract_classes::resolve(
+        let mut resolution = abstract_classes::resolve(
             &self.sparql_store,
             &self.shape_resolver(),
             &index,
             alias_key,
             &shape,
-        )?);
+        )?;
+        // A built-in that reads its own rows (`Container`'s class-less
+        // holders) is a member of its own union, under its URI.
+        if let Some(member) = builtin(abstract_class).and_then(|b| b.member.clone()) {
+            resolution.classes.push(abstract_class.to_string());
+            resolution.views.insert(abstract_class.to_string(), member);
+        }
+        let resolution = Arc::new(resolution);
         let mut cache = self.abstract_cache.write().unwrap();
         if cache.generation == generation {
             cache

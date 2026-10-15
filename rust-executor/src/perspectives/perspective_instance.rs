@@ -66,6 +66,7 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+mod containment;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
@@ -3997,6 +3998,7 @@ impl PerspectiveInstance {
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
         let targets = self.read_targets(classes, &query_input)?;
+        let named = classes;
         let classes = &targets.classes;
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
@@ -4007,10 +4009,14 @@ impl PerspectiveInstance {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
             });
         }
+        // A built-in's own rows (`Container`) are read through its view.
         let shapes = classes
             .names()
             .iter()
-            .map(|class_name| Ok((class_name.clone(), self.get_shape(class_name)?)))
+            .map(|class_name| match targets.views.get(class_name) {
+                Some(view) => Ok((class_name.clone(), view.clone())),
+                None => Ok((class_name.clone(), self.get_shape(class_name)?)),
+            })
             .collect::<Result<Vec<_>, AnyError>>()?;
         let resolver = self.shape_resolver();
 
@@ -4102,6 +4108,9 @@ impl PerspectiveInstance {
             self.get_shape_or_wait(&missing.class_name, remaining)
                 .await?;
         };
+        let mut result = result;
+        self.finish_container_rows(named, &query_input, &mut result)
+            .await?;
 
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
