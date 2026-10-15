@@ -185,7 +185,7 @@ describe('WakerSubscriptionManager', () => {
   });
 
   /** Delivers one new mention and returns the parents it woke with, the parent query and any warnings. */
-  async function wakeWithParentRows(rows: unknown, ancestorDepth?: number) {
+  async function wakeWithParentRows(rows: unknown, ancestorDepth?: number, address = 'test://message') {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const ProxyClass = function () {
       return {
@@ -215,7 +215,7 @@ describe('WakerSubscriptionManager', () => {
     });
 
     await manager.subscribe({ ...sub, id: 'mention-parents' });
-    await deliver!([{ source: 'test://message' }]);
+    await deliver!([{ source: address }]);
     await waitUntil(() => wakes.length > 0);
     manager.disposeAll();
     return { wakes, queries, warnings };
@@ -240,8 +240,11 @@ describe('WakerSubscriptionManager', () => {
 
   /** Containment as a map of child → parents, answered per query the way querySparql would. */
   const tree = (parents: Record<string, string[]>) => (query: string) => {
-    const child = /<ad4m:\/\/has_child> <([^>]+)>/.exec(query)?.[1] ?? '';
-    return (parents[child] ?? []).map((source) => ({ source }));
+    const values = /VALUES \?child \{([^}]+)\}/.exec(query)?.[1];
+    const children = values
+      ? Array.from(values.matchAll(/<([^>]+)>/g), (match) => match[1])
+      : [/<ad4m:\/\/has_child> <([^>]+)>/.exec(query)?.[1] ?? ''];
+    return children.flatMap((child) => (parents[child] ?? []).map((source) => ({ source })));
   };
 
   it('reports the chain above the parents, nearest first, each address once', async () => {
@@ -280,6 +283,40 @@ describe('WakerSubscriptionManager', () => {
     expect(wakes[0][0].ancestors).toEqual(['test://b', 'test://c']);
     const shallow = await wakeWithParentRows(tree({ 'test://message': ['test://a'], 'test://a': ['test://b'], 'test://b': ['test://c'] }), 1);
     expect(shallow.wakes[0][0].ancestors).toEqual(['test://b']);
+  });
+
+  it('looks up a branching ancestor level in one query', async () => {
+    const { wakes, queries } = await wakeWithParentRows(tree({
+      'test://message': ['test://left', 'test://right'],
+      'test://left': ['test://root'],
+      'test://right': ['test://root'],
+    }));
+    expect(wakes[0][0].ancestors).toEqual(['test://root']);
+    expect(queries).toHaveLength(3);
+    expect(queries[1]).toContain('VALUES ?child { <test://left> <test://right> }');
+  });
+
+  it.each(['<', '>', '"', '{', '}', '|', '^', '`', '\\', ' ', '\t', '\n', '\u0000'])(
+    'does not query an unsafe mention address containing %p', async (character) => {
+      const address = `test://unsafe${character}address`;
+      const { wakes, queries, warnings } = await wakeWithParentRows([], 3, address);
+      expect(queries).toEqual([]);
+      expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [] });
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('unsafe address');
+    },
+  );
+
+  it('skips an unsafe ancestor lookup without dropping safe siblings', async () => {
+    const unsafe = 'test://bad> . ?s ?p ?o . #';
+    const { wakes, queries, warnings } = await wakeWithParentRows(tree({
+      'test://message': [unsafe, 'test://safe'],
+      'test://safe': ['test://root'],
+    }));
+    expect(wakes[0][0].ancestors).toEqual(['test://root']);
+    expect(queries).toHaveLength(3);
+    expect(queries.every((query) => !query.includes(unsafe))).toBe(true);
+    expect(warnings).toHaveLength(1);
   });
 
   it('names the operator as the fix for a locked executor, on both message shapes', () => {

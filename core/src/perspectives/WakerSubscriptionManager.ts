@@ -46,7 +46,7 @@ export interface WakerSubscriptionManagerOptions {
   debounceMs?: number;
   /**
    * How many levels above a mentioned item's parents to report as `ancestors` (default 3).
-   * Each level is one query per address at that level, so the walk is bounded by this and by
+   * Each level is one batched query, so the walk is bounded by this depth and by
    * what the levels hold. 0 reports parents only.
    */
   ancestorDepth?: number;
@@ -308,7 +308,7 @@ export class WakerSubscriptionManager {
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
           this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-          const parents = await this.parentsOf(sub, msgAddr);
+          const parents = await this.parentsOf(sub, [msgAddr]);
           const ancestors = await this.ancestorsOf(sub, msgAddr, parents);
           this.logger.info(
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
@@ -467,16 +467,26 @@ export class WakerSubscriptionManager {
     return this.activeSubscriptions.has(id);
   }
 
-  /** The items holding one item through `ad4m://has_child`. A failed lookup reads as none. */
-  private async parentsOf(sub: WakerSubscription, address: string): Promise<string[]> {
+  /** Resolve one containment level in one query; skip unsafe IRI tokens and treat failures as none. */
+  private async parentsOf(sub: WakerSubscription, addresses: string[]): Promise<string[]> {
+    const safe = [...new Set(addresses)].filter((address) => {
+      if (/[<>"{}|^`\\\s\x00-\x20]/.test(address)) {
+        this.logger.warn(`[waker] ${sub.id}: skipping parent lookup for unsafe address ${JSON.stringify(address)}`);
+        return false;
+      }
+      return true;
+    });
+    if (!safe.length) return [];
     try {
-      const query = `SELECT ?source WHERE { ?source <ad4m://has_child> <${address}> . }`;
+      const query = safe.length === 1
+        ? `SELECT ?source WHERE { ?source <ad4m://has_child> <${safe[0]}> . }`
+        : `SELECT ?source WHERE { VALUES ?child { ${safe.map((address) => `<${address}>`).join(" ")} } ?source <ad4m://has_child> ?child . }`;
       const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, query);
       if (!Array.isArray(rows)) return [];
       // A row omits a variable left unbound in its solution.
       return rows.map((row) => row?.source).filter((source): source is string => typeof source === "string");
     } catch (err: any) {
-      this.logger.warn(`[waker] ${sub.id}: parent resolution failed for ${address} — ${err?.message ?? err}`);
+      this.logger.warn(`[waker] ${sub.id}: parent resolution failed for ${JSON.stringify(safe)} — ${err?.message ?? err}`);
       return [];
     }
   }
@@ -486,7 +496,7 @@ export class WakerSubscriptionManager {
    *
    * Breadth-first with a visited set: containment is a graph, not a tree — an item can sit in two
    * places, and nothing stops a cycle — so each address is reported once and the walk always ends.
-   * What it costs is one lookup per address per level, which the depth bounds.
+   * Each level uses one batched parent lookup, bounded by the depth.
    */
   private async ancestorsOf(sub: WakerSubscription, address: string, parents: string[]): Promise<string[]> {
     const seen = new Set<string>([address, ...parents]);
@@ -494,12 +504,10 @@ export class WakerSubscriptionManager {
     let level = parents;
     for (let depth = 0; depth < this.ancestorDepth && level.length; depth++) {
       const next: string[] = [];
-      for (const item of level) {
-        for (const parent of await this.parentsOf(sub, item)) {
-          if (seen.has(parent)) continue;
-          seen.add(parent);
-          next.push(parent);
-        }
+      for (const parent of await this.parentsOf(sub, level)) {
+        if (seen.has(parent)) continue;
+        seen.add(parent);
+        next.push(parent);
       }
       ancestors.push(...next);
       level = next;

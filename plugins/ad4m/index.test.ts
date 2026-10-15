@@ -3675,8 +3675,8 @@ describe("WakerSubscriptionManager", () => {
     ]);
     await new Promise(r => setTimeout(r, 50));
 
-    // One parent lookup per message, then one per parent for the chain above — none of which have any.
-    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(5);
+    // One parent lookup per message, then one batched lookup per ancestor level.
+    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(4);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
