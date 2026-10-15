@@ -236,3 +236,53 @@ export function clearPartition(): void {
     execSync(`sudo -n iptables -X ${PARTITION_CHAIN}`, { stdio: "pipe" });
   } catch {}
 }
+
+/** Whether `sudo -n iptables` can change the nat table. */
+export function natAvailable(): boolean {
+  try {
+    execSync("sudo -n iptables -t nat -L OUTPUT -n", { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The two rules of {@link reachOnlyThrough}: `iptables -t <table> <action> <rule>`. */
+function onlyThroughRules(published: string, local: string, port: number): [string, string][] {
+  const tag = `-m comment --comment ad4m-e2e-only-through-${port}`;
+  return [
+    ["nat", `OUTPUT -p udp -d ${published} --dport ${port} ${tag} -j DNAT --to-destination ${local}:${port}`],
+    ["filter", `OUTPUT -p udp -d ${local} --dport ${port} -m conntrack ! --ctstate DNAT ${tag} -j DROP`],
+  ];
+}
+
+/**
+ * Make UDP `port` on `local` reachable only as `published:port`: traffic to
+ * `published:port` is translated to `local:port`, and traffic sent to
+ * `local:port` directly is dropped. Loopback, this one port only, so other
+ * processes on the host are not touched. Returns false when the rules cannot
+ * be installed (none are left behind).
+ */
+export function reachOnlyThrough(published: string, local: string, port: number): boolean {
+  clearReachOnlyThrough(published, local, port);
+  try {
+    for (const [table, rule] of onlyThroughRules(published, local, port)) {
+      execSync(`sudo -n iptables -t ${table} -A ${rule}`, { stdio: "pipe" });
+    }
+    return true;
+  } catch {
+    clearReachOnlyThrough(published, local, port);
+    return false;
+  }
+}
+
+/** Remove what {@link reachOnlyThrough} installed. */
+export function clearReachOnlyThrough(published: string, local: string, port: number): void {
+  for (const [table, rule] of onlyThroughRules(published, local, port)) {
+    try {
+      execSync(`sudo -n iptables -t ${table} -D ${rule}`, { stdio: "pipe" });
+    } catch {
+      /* not installed */
+    }
+  }
+}

@@ -63,4 +63,6 @@ export interface Snapshot {
   errors: string[];
   peerStates: Record<string, string>;
   recoveries: number;
+  /** The remote address (`ip:port`) of each connection's selected candidate pair: where media goes. */
+  selectedRemotes: string[];
 }
