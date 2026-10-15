@@ -2800,3 +2800,66 @@ async fn without_a_message_class_the_mention_scan_stays_unscoped() {
             .is_empty()
     );
 }
+
+/// A record both an un-aliased `Message` and a class that conforms to
+/// TextContent (here also typed as an `Answer`) is read by both sources of a
+/// transcript: it is shown once, and counted once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_two_sources_read_is_shown_once() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("Channel", CHANNEL_SDNA),
+            ("Message", MESSAGE_SDNA),
+            ("Answer", ANSWER_SDNA),
+        ],
+        false,
+    )
+    .await;
+    let channel = "ad4m://test/channel-twice";
+    let both = create_under(
+        &handler,
+        &uuid,
+        "Message",
+        props(&[("body", json!("a message body"))]),
+        channel,
+    )
+    .await;
+    let mut perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let ctx = crate::agent::AgentContext::main_agent();
+    perspective
+        .add_links(
+            vec![
+                crate::types::Link {
+                    source: both.clone(),
+                    predicate: Some("flux://entry_type".into()),
+                    target: "flux://poll_answer".into(),
+                },
+                crate::types::Link {
+                    source: both.clone(),
+                    predicate: Some("rdf://text".into()),
+                    target: "literal:string:also%20an%20answer".into(),
+                },
+            ],
+            crate::types::LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let all = handler
+        .instance_transcript(Parameters(InstanceTranscriptParams {
+            limit: Some(1),
+            ..transcript(&uuid, None, channel)
+        }))
+        .await;
+    assert_eq!(
+        all.matches("):\n").count() + all.matches("]:\n").count(),
+        1,
+        "{all}"
+    );
+    assert!(
+        !all.starts_with("(showing"),
+        "one record, counted once: {all}"
+    );
+}
