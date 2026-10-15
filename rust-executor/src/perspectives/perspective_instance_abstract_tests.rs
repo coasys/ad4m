@@ -344,7 +344,8 @@ async fn a_collection_setter_through_an_abstract_class_sets_the_members() {
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_writes_through_an_abstract_class_run_each_classs_actions() {
     let (mut p, ctx) = relation_setup().await;
-    let op = |action: &str, members: &[&str]| json!({"children": {"action": action, "value": members}});
+    let op =
+        |action: &str, members: &[&str]| json!({"children": {"action": action, "value": members}});
     let children = |p: &PerspectiveInstance| {
         [
             targets_on(p, "ad4m://fb", "ns://folder_child"),
@@ -356,7 +357,10 @@ async fn relation_writes_through_an_abstract_class_run_each_classs_actions() {
     update(&mut p, &ctx, "Folderish", "ad4m://fb", added)
         .await
         .unwrap();
-    assert_eq!(children(&p), [["ad4m://c1", "ad4m://c2"], ["ad4m://c1", "ad4m://c2"]]);
+    assert_eq!(
+        children(&p),
+        [["ad4m://c1", "ad4m://c2"], ["ad4m://c1", "ad4m://c2"]]
+    );
 
     let removed = op("remover", &["ad4m://c1"]);
     update(&mut p, &ctx, "Folderish", "ad4m://fb", removed)
