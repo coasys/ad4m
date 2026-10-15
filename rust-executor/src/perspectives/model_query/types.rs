@@ -321,7 +321,14 @@ pub enum Scope {
         /// subscription) rather than one per parent.
         #[serde(deserialize_with = "deserialize_ids_flex")]
         ids: Vec<String>,
-        predicate: String,
+        /// The predicate to follow. `None` follows containment through
+        /// `Container` instead (see [`super::containment`]): every edge of the
+        /// edge set, each with its holder check, so `direction: "in"` from a
+        /// record reaches whatever holds it. A containment walk's
+        /// intermediate nodes are any container, not instances of the queried
+        /// class; only the rows are.
+        #[serde(default)]
+        predicate: Option<String>,
         /// Follow the predicate as far as it goes, rather than one step.
         ///
         /// Note the path reports only its endpoints: SPARQL property paths bind
@@ -372,6 +379,12 @@ pub enum Scope {
         /// wrong answer wearing the shape of a right one.
         #[serde(default)]
         levels: Option<Vec<usize>>,
+        /// With `transitive`, stop the walk after this many hops (`1` is the
+        /// direct neighbours). The walk is made in the executor one depth at
+        /// a time, so the bound holds over a union too. Refused without
+        /// `transitive` and beside `levels`.
+        #[serde(default, alias = "max_depth")]
+        max_depth: Option<usize>,
     },
     /// `{ id }`: everything contained in `id`, through `Container` (see
     /// [`super::containment`]): its `has_child` targets, and the targets of

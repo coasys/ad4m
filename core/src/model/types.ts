@@ -131,6 +131,11 @@ export interface ContainedScope {
   field?: never;
 }
 
+/** Whether this traversal follows containment rather than a named predicate. */
+export function isContainmentTraversal(scope: Scope): scope is TraverseByContainment {
+  return isTraverseScope(scope) && !('predicate' in scope && scope.predicate) && !('model' in scope && scope.model);
+}
+
 /** Whether this scope is the containment form, `{ id }` alone. */
 export function isContainedScope(scope: Scope): scope is ContainedScope {
   return !isTraverseScope(scope) && !('predicate' in scope) && !('model' in scope);
@@ -148,7 +153,24 @@ export function isContainedScope(scope: Scope): scope is ContainedScope {
  * or by the model and relation that own it. See {@link TraverseByPredicate} and
  * {@link TraverseByModel}.
  */
-export type TraverseScope = TraverseByPredicate | TraverseByModel;
+export type TraverseScope = TraverseByPredicate | TraverseByModel | TraverseByContainment;
+
+/**
+ * A traversal over containment, through the built-in `Container`: it names no
+ * predicate, and follows every edge the executor resolves from the installed
+ * classes — `ad4m://has_child` on any node, and each class's own `children`
+ * relation on its instances. `direction: 'in'` from a record reaches whatever
+ * holds it: `Container.findAll(p, { parent: { ids: [x], direction: 'in' } })`.
+ *
+ * The rows are the queried class; the nodes a transitive walk passes through
+ * are any container. With no `order`, a transitive walk's rows come nearest
+ * first. `levels` is refused on it, and so is `limitPerAnchor` on a
+ * transitive one; bound it with `maxDepth`.
+ */
+export interface TraverseByContainment extends TraverseOptions {
+  predicate?: never;
+  model?: never;
+}
 
 /** A traversal naming its predicate literally, as the Raw scope does. */
 export interface TraverseByPredicate extends TraverseOptions {
@@ -221,6 +243,11 @@ export interface TraverseOptions {
    * every depth.
    */
   limitPerAnchor?: number;
+  /**
+   * With `transitive`, stop the walk after this many hops (`1` is the direct
+   * neighbours). Refused without `transitive` and alongside `levels`.
+   */
+  maxDepth?: number;
   /**
    * Walk the relation level by level, keeping this many results per anchor at each depth —
    * `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".

@@ -3,7 +3,7 @@
  */
 
 import type { Scope, TraverseScope } from "./types";
-import { isContainedScope, isTraverseScope } from "./types";
+import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./types";
 import { getRelationsMetadata } from "./decorators";
 
 /**
@@ -42,7 +42,7 @@ export function resolveParentPredicate(
 
   // Containment form — one predicate per containment edge, resolved by the
   // executor from the installed classes. There is no single one to return.
-  if (isContainedScope(parent)) {
+  if (isContainedScope(parent) || isContainmentTraversal(parent)) {
     throw new Error(
       'parent(): a containment scope { id } names no single predicate; the executor resolves ' +
         'it. Use the model query path (findAll / query / subscribe) to read it.',

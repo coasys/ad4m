@@ -24,7 +24,7 @@ import type {
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
-import { isContainedScope, isTraverseScope } from "./types";
+import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./types";
 
 
 
@@ -1140,6 +1140,16 @@ export class Ad4mModel {
       // Containment: the executor resolves the predicates from the installed
       // classes, so only the id travels.
       queryInput.parent = { id: query.parent.id };
+    } else if (query.parent && isContainmentTraversal(query.parent)) {
+      // A traversal over containment: no predicate travels either.
+      const t = query.parent;
+      const traverse: Record<string, unknown> = { ids: t.ids };
+      if (t.transitive !== undefined) traverse.transitive = t.transitive;
+      if (t.direction !== undefined) traverse.direction = t.direction;
+      if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+      if (t.levels !== undefined) traverse.levels = t.levels;
+      if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
+      queryInput.parent = traverse;
     } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
       // A traversal keeps its own shape on the wire: the executor reads `ids`,
@@ -1160,6 +1170,7 @@ export class Ad4mModel {
         if (t.direction !== undefined) traverse.direction = t.direction;
         if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
         if (t.levels !== undefined) traverse.levels = t.levels;
+        if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
         queryInput.parent = traverse;
       } else {
         queryInput.parent = { id: query.parent.id, predicate: parentPredicate };

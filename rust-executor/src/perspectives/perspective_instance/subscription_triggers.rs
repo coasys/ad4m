@@ -766,12 +766,22 @@ impl Walk<'_> {
                 ..
             } => {
                 self.rules.anchors.extend(ids.iter().cloned());
-                if *transitive || levels.is_some() {
-                    // Below the first level, a link's ends are neither anchors
-                    // nor (when a level limit cut them) result nodes.
-                    self.rules.any.insert(predicate.clone());
-                } else {
-                    self.rules.near.add(predicate);
+                // A containment traversal follows every edge's predicate, and
+                // a node that becomes a holder changes it too (see
+                // `Scope::Contained` below).
+                let followed: Vec<String> = match predicate {
+                    Some(predicate) => vec![predicate.clone()],
+                    None => watched_predicates(self.containment),
+                };
+                for predicate in &followed {
+                    if *transitive || levels.is_some() {
+                        // Below the first level, a link's ends are neither
+                        // anchors nor (when a level limit cut them) result
+                        // nodes.
+                        self.rules.any.insert(predicate.clone());
+                    } else {
+                        self.rules.near.add(predicate);
+                    }
                 }
             }
             // Every edge's predicate on the anchor, and the predicates its

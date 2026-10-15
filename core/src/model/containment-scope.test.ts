@@ -76,3 +76,29 @@ describe("create({ parent: { id } })", () => {
     ]);
   });
 });
+
+describe("containment traversal { ids } with no predicate", () => {
+  it("travels without a predicate, with maxDepth", () => {
+    const { queryJson } = (ScopedNote as any).prepareModelQueryParams({
+      parent: { ids: ["ad4m://m"], direction: "in", transitive: true, maxDepth: 3 },
+    });
+    expect(JSON.parse(queryJson).parent).toEqual({
+      ids: ["ad4m://m"],
+      direction: "in",
+      transitive: true,
+      maxDepth: 3,
+    });
+  });
+
+  it("a traversal over a predicate still sends it", () => {
+    const { queryJson } = (ScopedNote as any).prepareModelQueryParams({
+      parent: { ids: ["ad4m://m"], predicate: "test://p", transitive: true, maxDepth: 2 },
+    });
+    expect(JSON.parse(queryJson).parent).toEqual({
+      ids: ["ad4m://m"],
+      predicate: "test://p",
+      transitive: true,
+      maxDepth: 2,
+    });
+  });
+});

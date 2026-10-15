@@ -528,3 +528,107 @@ async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
     .unwrap();
     assert!(targets(&p, block, "we://child").await.is_empty());
 }
+
+/// The ids of `rows`, in their order.
+fn ordered(rows: &[Value]) -> Vec<String> {
+    rows.iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Test 5: a `Container` step in from X returns everything that holds X:
+/// `ad4m://self`, which no class describes, and a Block holding it through
+/// `we://child`. A node linking X by `we://child` that is not a Block does
+/// not hold it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_containment_step_in_finds_every_holder() {
+    let (mut p, ctx) = setup().await;
+    let x = "ad4m://x/5";
+    let block = "ad4m://block/5";
+    create(&mut p, &ctx, "Block", block).await;
+    link(&mut p, &ctx, "ad4m://self", HAS_CHILD, x).await;
+    link(&mut p, &ctx, block, "we://child", x).await;
+    link(&mut p, &ctx, "ad4m://not-a-block/5", "we://child", x).await;
+
+    let rows = query(
+        &p,
+        CONTAINER_URI,
+        json!({"parent": {"ids": [x], "direction": "in"}}),
+    )
+    .await;
+    assert_eq!(
+        ids(&rows),
+        vec![block.to_string(), "ad4m://self".to_string()]
+    );
+}
+
+/// Test 7: a transitive walk in from a message over mixed hops (`has_child`
+/// into a class-less thread, `we://child` into a Block, `has_child` into
+/// `ad4m://self`) returns thread, block and root, nearest first; `maxDepth: 1`
+/// returns the parent only. A step out and a transitive walk out read the
+/// same edges downwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_containment_walk_follows_every_edge_nearest_first() {
+    let (mut p, ctx) = setup().await;
+    let m = "ad4m://m/7";
+    let thread = "ad4m://thread/7";
+    let block = "ad4m://block/7";
+    create(&mut p, &ctx, "Message", m).await;
+    create(&mut p, &ctx, "Block", block).await;
+    link(&mut p, &ctx, thread, HAS_CHILD, m).await;
+    link(&mut p, &ctx, block, "we://child", thread).await;
+    link(&mut p, &ctx, "ad4m://self", HAS_CHILD, block).await;
+    // Not containment: a we://child on a node that is not a Block.
+    link(&mut p, &ctx, "ad4m://imposter/7", "we://child", thread).await;
+
+    let up = |depth: Option<usize>| {
+        let mut scope = json!({"ids": [m], "direction": "in", "transitive": true});
+        if let Some(d) = depth {
+            scope["maxDepth"] = json!(d);
+        }
+        json!({ "parent": scope })
+    };
+    let rows = query(&p, CONTAINER_URI, up(None)).await;
+    assert_eq!(
+        ordered(&rows),
+        vec![
+            thread.to_string(),
+            block.to_string(),
+            "ad4m://self".to_string()
+        ]
+    );
+    let rows = query(&p, CONTAINER_URI, up(Some(1))).await;
+    assert_eq!(ordered(&rows), vec![thread.to_string()]);
+    let rows = query(&p, CONTAINER_URI, up(Some(2))).await;
+    assert_eq!(ordered(&rows), vec![thread.to_string(), block.to_string()]);
+
+    // Downwards: the Messages under the root, at any depth.
+    let rows = query(
+        &p,
+        "Message",
+        json!({"parent": {"ids": ["ad4m://self"], "transitive": true}}),
+    )
+    .await;
+    assert_eq!(ordered(&rows), vec![m.to_string()]);
+    // One step out of the block: the thread, through we://child.
+    let rows = query(&p, CONTAINER_URI, json!({"parent": {"ids": [block]}})).await;
+    assert_eq!(ordered(&rows), vec![thread.to_string()]);
+
+    // maxDepth without transitive, and levels on a containment walk, are refused.
+    let refused = p
+        .model_query_classes(
+            &QueryClasses::One("Message".into()),
+            &json!({"parent": {"ids": [m], "maxDepth": 1}}).to_string(),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("maxDepth"), "{refused}");
+    let refused = p
+        .model_query_classes(
+            &QueryClasses::One("Message".into()),
+            &json!({"parent": {"ids": [m], "levels": [2]}}).to_string(),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("levels"), "{refused}");
+}

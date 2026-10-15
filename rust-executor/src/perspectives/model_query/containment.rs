@@ -176,9 +176,17 @@ pub(super) fn contains_patterns(
     }
 }
 
-/// Whether `scope` reads containment: `{ id }`.
+/// Whether `scope` reads containment: `{ id }`, or a `Traverse` that names no
+/// predicate.
 pub fn is_containment_scope(scope: &Scope) -> bool {
-    matches!(scope, Scope::Contained(_))
+    matches!(
+        scope,
+        Scope::Contained(_)
+            | Scope::Traverse {
+                predicate: None,
+                ..
+            }
+    )
 }
 
 /// Whether `query`, or an `include` sub-query of it, reads containment.
