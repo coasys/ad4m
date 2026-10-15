@@ -13,5 +13,5 @@
   },
   "log_config": { "rust_executor": "info", "holochain": "warn" },
   "mcp_enabled": true,
-  "mcp_port": 3003
+  "mcp_port": 12403
 }
