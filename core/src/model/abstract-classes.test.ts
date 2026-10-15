@@ -193,4 +193,33 @@ describe("abstract classes", () => {
       ["updateSubject", "Folderish", "ad4m://folder/1", { children: ["ad4m://child/2", "ad4m://child/3"] }, "batch"],
     ]);
   });
+
+  it("save() through an abstract class keeps a relation's action envelope", async () => {
+    const calls: any[][] = [];
+    const perspective: any = new Proxy({}, {
+      get: (_t, key) => async (...args: any[]) => {
+        calls.push([key, ...args]);
+        if (key === "modelQuery") {
+          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "Folder", children: ["ad4m://child/1"] }], totalCount: 1 };
+        }
+        return [];
+      },
+    });
+    const [row]: any[] = await Folderish.findAll(perspective);
+    const sent = async (children: any) => {
+      row.children = children;
+      calls.length = 0;
+      await row.save("batch");
+      return calls.find((c) => c[0] === "updateSubject")?.[3];
+    };
+    expect(await sent({ action: "adder", value: [{ id: "ad4m://child/2" }] })).toEqual({
+      children: { action: "adder", value: ["ad4m://child/2"] },
+    });
+    expect(await sent({ action: "remover", value: "ad4m://child/1" })).toEqual({
+      children: { action: "remover", value: "ad4m://child/1" },
+    });
+    expect(await sent({ action: "other", value: ["ad4m://child/3"] })).toEqual({
+      children: { action: "setter", value: ["ad4m://child/3"] },
+    });
+  });
 });
