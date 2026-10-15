@@ -2100,12 +2100,16 @@ impl PerspectiveInstance {
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         // `status` applies to the additions. A removal keeps the status of the
         // link as stored, so removing a Local link never reaches the link
-        // language. A removal of a link this store does not hold keeps `status`.
+        // language, and it commits the stored expression, as `remove_link`
+        // does. A removal that matches no stored link counts as Local: the
+        // lookup is exact on author and timestamp, so a Local link sent back
+        // with its timestamp spelled differently would otherwise go out under
+        // the call's status. `remove_links` skips such a removal the same way.
         let removals = mutations
             .removals
             .into_iter()
             .map(|removal| {
-                let mut link = LinkExpression::try_from(removal)?;
+                let link = LinkExpression::try_from(removal)?;
                 let stored = self.sparql_store.get_link(
                     &link.data.source,
                     link.data.predicate.as_deref(),
@@ -2113,11 +2117,18 @@ impl PerspectiveInstance {
                     &link.author,
                     &link.timestamp,
                 )?;
-                link.status = Some(match stored {
-                    Some(stored) => stored.status.unwrap_or(LinkStatus::Local),
-                    None => status.clone(),
-                });
-                Ok(link)
+                Ok(match stored {
+                    Some(stored) => {
+                        let link_status = stored.status.clone().unwrap_or(LinkStatus::Local);
+                        let mut stored = LinkExpression::from(stored);
+                        stored.status = Some(link_status);
+                        stored
+                    }
+                    None => LinkExpression {
+                        status: Some(LinkStatus::Local),
+                        ..link
+                    },
+                })
             })
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let additions: Vec<LinkExpression> = additions
@@ -6872,6 +6883,74 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A removal that matches no stored link is not committed, even when the
+    /// call names `Shared`. Here a Local link comes back with its timestamp
+    /// spelled differently (same instant, `+00:00` for `Z`), so the exact
+    /// lookup misses it.
+    #[tokio::test]
+    async fn link_mutations_unmatched_removal_is_not_committed() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap();
+        let shared = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        let uuid = perspective.uuid.clone();
+
+        let input = |l: &DecoratedLinkExpression| -> serde_json::Value {
+            serde_json::to_value(LinkExpression::from(l.clone())).unwrap()
+        };
+        let mut respelled = input(&local);
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&local.timestamp)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, false);
+        assert_ne!(timestamp, local.timestamp);
+        respelled["timestamp"] = serde_json::Value::String(timestamp);
+
+        perspective
+            .link_mutations(
+                LinkMutations {
+                    additions: vec![],
+                    removals: vec![
+                        serde_json::from_value(respelled).unwrap(),
+                        serde_json::from_value(input(&shared)).unwrap(),
+                    ],
+                },
+                LinkStatus::Shared,
+                &context,
+            )
+            .await
+            .unwrap();
+
+        // The Shared removal is committed in the same diff, so once it is
+        // queued the unmatched one would be too.
+        let mut pending = PerspectiveDiff::empty();
+        for _ in 0..100 {
+            (pending, _) =
+                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            if !pending.removals.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let committed: Vec<_> = pending.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(committed, vec![shared.data.clone()]);
+        let remaining: Vec<_> = perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data)
+            .collect();
+        assert_eq!(remaining, vec![local.data.clone()]);
     }
 
     /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
