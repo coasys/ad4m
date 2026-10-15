@@ -6,14 +6,44 @@
 //! registration lands last is what it reports, so registrations must not
 //! overtake each other.
 
+use super::PerspectiveInstance;
+use crate::languages::language::Language;
+
+impl PerspectiveInstance {
+    /// Tell `language` this node's owners (the main agent's DID for a
+    /// perspective without any), unless it was last told exactly `told`.
+    /// Returns the owners it read.
+    ///
+    /// Reads them under `local_agents_mutex` and holds it until the language
+    /// answers, so no registration lands after a later one with an older
+    /// list.
+    pub(super) async fn register_local_agents(
+        &self,
+        language: &mut Language,
+        told: Option<&[String]>,
+    ) -> Vec<String> {
+        let _registering = self.local_agents_mutex.lock().await;
+        let agents = match self.persisted.lock().await.owners.clone() {
+            Some(owners) if !owners.is_empty() => owners,
+            _ => vec![crate::agent::did()],
+        };
+        if told != Some(agents.as_slice()) {
+            log::info!("Setting local agents for link language: {:?}", agents);
+            if let Err(e) = language.set_local_agents(agents.clone()).await {
+                log::error!("Failed to set local agents on link language: {:?}", e);
+            }
+        }
+        agents
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::PerspectiveHandle;
-    use super::super::PerspectiveInstance;
+    use super::*;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
     use crate::languages::capability::{register_capabilities, remove_capabilities, Capability};
-    use crate::languages::language::Language;
     use crate::languages::language_runtime::{LanguageOperation, LanguageRuntimeRequest};
     use crate::languages::language_runtime_handle::LanguageRuntimeHandle;
     use crate::languages::LanguageController;
