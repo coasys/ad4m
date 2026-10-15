@@ -69,7 +69,12 @@ impl PerspectiveInstance {
         let actions = self
             .get_property_actions_from_shacl(class, prop, predicate)
             .await?
-            .ok_or_else(|| anyhow!("'{prop}' of '{class}' has no {}.", op.what()))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "'{prop}' of '{class}' needs {}, and the class declares none.",
+                    op.what()
+                )
+            })?;
         let mut commands = Vec::new();
         for member in self.members(class, prop, value, context).await? {
             commands.extend(actions.iter().map(|c| Command {
@@ -198,4 +203,37 @@ fn predicate_of(shape: &ModelShape, name: &str) -> Option<String> {
         .iter()
         .find(|p| p.name == name)
         .map(|p| p.predicate.clone())
+}
+
+#[cfg(test)]
+pub(super) mod faults {
+    //! Test hook: fail a `remove_link` of a perspective, as a store error
+    //! would.
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    static FAIL_AFTER: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+    /// Let `removals` link removals through, then fail the next one.
+    pub(crate) fn fail_remove_link_after(perspective_uuid: &str, removals: usize) {
+        FAIL_AFTER
+            .lock()
+            .unwrap()
+            .insert(perspective_uuid.to_string(), removals);
+    }
+
+    pub(in crate::perspectives::perspective_instance) fn take(perspective_uuid: &str) -> bool {
+        let mut armed = FAIL_AFTER.lock().unwrap();
+        match armed.get_mut(perspective_uuid) {
+            Some(0) => {
+                armed.remove(perspective_uuid);
+                true
+            }
+            Some(left) => {
+                *left -= 1;
+                false
+            }
+            None => false,
+        }
+    }
 }

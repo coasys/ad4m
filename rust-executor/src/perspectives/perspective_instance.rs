@@ -70,6 +70,8 @@ mod abstract_classes;
 pub(crate) use abstract_classes::faults::fail_next_index;
 // Member writes through adders / removers, and MCP's cascading delete.
 mod subject_writes;
+#[cfg(test)]
+pub(crate) use subject_writes::faults::fail_remove_link_after;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
@@ -1811,6 +1813,10 @@ impl PerspectiveInstance {
         link_expression: LinkExpression,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        #[cfg(test)]
+        if subject_writes::faults::take(&self.uuid) {
+            return Err(anyhow!("injected store error"));
+        }
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches

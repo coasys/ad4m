@@ -2668,3 +2668,302 @@ async fn instance_update_returns_the_store_error_of_the_abstract_check() {
     );
     assert_eq!(got["body"], "hello", "{got}");
 }
+
+/// `{class}_get_X` through an abstract class reads the collection at the
+/// record's own class's predicate, where its members are.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_collection_read_through_an_abstract_class_finds_the_members() {
+    let (handler, uuid, _guard) = abstract_setup().await;
+    let thread = create_in(&handler, &uuid, "Thread", None, &[("body", json!("hello"))]).await;
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Thread".into(),
+                base_uri: thread.clone(),
+                collection: "replies".into(),
+                item_uri: "ad4m://obj/r1".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["links_added"], 1, "{added}");
+
+    let got = parse(
+        &call_tool(
+            &handler,
+            "readable_get_replies",
+            &[
+                ("perspective_id", json!(uuid.clone())),
+                ("expression_address", json!(thread.clone())),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(got["items"], json!(["ad4m://obj/r1"]), "{got}");
+}
+
+/// Concrete, with a property that declares no setter and a collection that
+/// declares neither adder nor remover.
+const NOTE_SDNA: &str = r#"{
+  "target_class": "flux://Note",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"flux://Note"}
+  ],
+  "properties": [
+    {"path":"flux://note_title","name":"title","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://note_title","target":"value"}]},
+    {"path":"flux://note_stamp","name":"stamp","datatype":"xsd:string","max_count":1},
+    {"path":"flux://note_tag","name":"tags","collection":true,"writable":true}
+  ]
+}"#;
+
+/// `{class}_set_X` and `{class}_update` refuse a property without a setter,
+/// as `instance_update` does, and write nothing of the call.
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_writes_to_a_property_without_a_setter_are_refused() {
+    let (handler, uuid, _guard) = setup_with(&[("Note", NOTE_SDNA)], true).await;
+    let note = create_in(&handler, &uuid, "Note", None, &[("title", json!("draft"))]).await;
+    let at = |extra: &[(&'static str, Value)]| {
+        let mut args = vec![
+            ("perspective_id", json!(uuid.clone())),
+            ("expression_address", json!(note.clone())),
+        ];
+        args.extend(extra.iter().cloned());
+        args
+    };
+
+    let set = call_tool(&handler, "note_set_stamp", &at(&[("value", json!("x"))])).await;
+    assert!(set.contains("read-only"), "{set}");
+    let update = call_tool(
+        &handler,
+        "note_update",
+        &at(&[("title", json!("final")), ("stamp", json!("x"))]),
+    )
+    .await;
+    assert!(update.contains("read-only"), "{update}");
+
+    assert!(
+        links_of(&uuid, Some(&note), Some("flux://note_stamp"), None)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        get_in(&handler, &uuid, "Note", &note).await["title"],
+        "draft"
+    );
+}
+
+/// A collection without an adder or remover cannot be written by any tool:
+/// the static and generated add and remove error and leave the links as
+/// they were, and `instance_create` with members creates nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn collection_writes_without_an_adder_or_remover_are_refused() {
+    let (handler, uuid, _guard) = setup_with(&[("Note", NOTE_SDNA)], true).await;
+    let note = create_in(&handler, &uuid, "Note", None, &[("title", json!("draft"))]).await;
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: note.clone(),
+                predicate: "flux://note_tag".into(),
+                target: "ad4m://obj/t0".into(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    let tags = || links_of(&uuid, Some(&note), Some("flux://note_tag"), None);
+
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Note".into(),
+                base_uri: note.clone(),
+                collection: "tags".into(),
+                item_uri: "ad4m://obj/t1".into(),
+            }))
+            .await,
+    );
+    assert!(
+        added["error"].as_str().unwrap_or("").contains("adder"),
+        "{added}"
+    );
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Note".into(),
+                base_uri: note.clone(),
+                collection: "tags".into(),
+                item_uri: "ad4m://obj/t0".into(),
+            }))
+            .await,
+    );
+    assert!(
+        removed["error"].as_str().unwrap_or("").contains("remover"),
+        "{removed}"
+    );
+    let at = |value: &str| {
+        vec![
+            ("perspective_id", json!(uuid.clone())),
+            ("expression_address", json!(note.clone())),
+            ("value", json!(value)),
+        ]
+    };
+    let add = call_tool(&handler, "note_add_tags", &at("ad4m://obj/t1")).await;
+    assert!(add.contains("adder"), "{add}");
+    let remove = call_tool(&handler, "note_remove_tags", &at("ad4m://obj/t0")).await;
+    assert!(remove.contains("remover"), "{remove}");
+    assert_eq!(
+        tags().await,
+        vec![format!("{note} flux://note_tag ad4m://obj/t0")]
+    );
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Note".into(),
+                properties: Some(props(&[
+                    ("title", json!("second")),
+                    ("tags", json!(["ad4m://obj/t1"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert!(created["error"].is_string(), "{created}");
+    assert_eq!(
+        links_of(&uuid, None, Some("rdf://type"), Some("flux://Note"))
+            .await
+            .len(),
+        1,
+        "nothing was created"
+    );
+}
+
+/// `{class}_add_X` adds a member once, as `instance_add_to_collection`
+/// does: the second add of the same member writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_add_writes_a_member_once() {
+    let (handler, uuid, _guard) = setup(true).await;
+    let channel = create_in(
+        &handler,
+        &uuid,
+        "Channel",
+        None,
+        &[("name", json!("general"))],
+    )
+    .await;
+    let args = [
+        ("perspective_id", json!(uuid.clone())),
+        ("expression_address", json!(channel.clone())),
+        ("value", json!("ad4m://obj/m1")),
+    ];
+
+    let first = call_tool(&handler, "channel_add_messages", &args).await;
+    assert!(first.contains("\"already_member\": false"), "{first}");
+    let second = call_tool(&handler, "channel_add_messages", &args).await;
+    assert!(second.contains("\"already_member\": true"), "{second}");
+    assert_eq!(
+        links_of(&uuid, Some(&channel), Some("ad4m://has_child"), None)
+            .await
+            .len(),
+        1
+    );
+}
+
+/// `{class}_remove_X` matches a member in the spelling it is stored in, as
+/// `instance_remove_from_collection` does: here a signed literal envelope,
+/// removed by its text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_remove_matches_the_stored_spelling() {
+    let (handler, uuid, _guard) = setup(true).await;
+    let channel = create_in(
+        &handler,
+        &uuid,
+        "Channel",
+        None,
+        &[("name", json!("general"))],
+    )
+    .await;
+    let message = create_in(
+        &handler,
+        &uuid,
+        "Message",
+        None,
+        &[("body", json!("hello"))],
+    )
+    .await;
+    let envelope = crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .get_links(&LinkQuery {
+            source: Some(message),
+            predicate: Some("flux://body".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .remove(0)
+        .data
+        .target;
+    assert!(envelope.starts_with("literal:"), "{envelope}");
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: channel.clone(),
+                predicate: "ad4m://has_child".into(),
+                target: envelope,
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+
+    let removed = call_tool(
+        &handler,
+        "channel_remove_messages",
+        &[
+            ("perspective_id", json!(uuid.clone())),
+            ("expression_address", json!(channel.clone())),
+            ("value", json!("hello")),
+        ],
+    )
+    .await;
+    assert!(removed.contains("\"links_removed\": 1"), "{removed}");
+    assert!(
+        links_of(&uuid, Some(&channel), Some("ad4m://has_child"), None)
+            .await
+            .is_empty()
+    );
+}
+
+/// `{class}_delete` reports a link removal that fails, with how many links
+/// went before it, instead of answering success.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_delete_reports_a_failed_removal() {
+    let (handler, uuid, _guard) = setup(true).await;
+    let channel = create_in(
+        &handler,
+        &uuid,
+        "Channel",
+        None,
+        &[("name", json!("general"))],
+    )
+    .await;
+
+    crate::perspectives::perspective_instance::fail_remove_link_after(&uuid, 1);
+    let deleted = call_tool(
+        &handler,
+        "channel_delete",
+        &[
+            ("perspective_id", json!(uuid.clone())),
+            ("expression_address", json!(channel.clone())),
+        ],
+    )
+    .await;
+    assert!(deleted.contains("injected store error"), "{deleted}");
+    assert!(deleted.contains("1 link(s) already removed"), "{deleted}");
+    assert!(!deleted.contains("\"success\": true"), "{deleted}");
+}

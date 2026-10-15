@@ -1089,26 +1089,15 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (perspective, _agent_ctx) = match self.get_writable_perspective(perspective_id).await {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
-
-        let predicate = match self
-            .resolve_property_predicate(&perspective, class_name, collection_name)
+        let (perspective, _, collection) = match self
+            .writable_collection(perspective_id, class_name, collection_name)
             .await
         {
-            Ok(pred) => pred,
-            Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
+            Ok(v) => v,
+            Err(e) => return e,
         };
-
-        // Query all links with this predicate from the expression
         match perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                predicate: Some(predicate),
-                ..Default::default()
-            })
+            .member_links(class_name, &expression_address, &collection)
             .await
         {
             Ok(links) => {
@@ -1215,7 +1204,7 @@ impl Ad4mMcpHandler {
     }
 
     /// The writable perspective and the class's own spelling of the
-    /// collection a `{class}_add_` / `_remove_` tool names.
+    /// collection a `{class}_get_` / `_add_` / `_remove_` tool names.
     async fn writable_collection(
         &self,
         perspective_id: &str,

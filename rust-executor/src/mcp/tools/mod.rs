@@ -743,17 +743,6 @@ impl Ad4mMcpHandler {
             .replace('"', "\\\"")
             .replace('\'', "\\'")
     }
-
-    /// Resolve a property name to its predicate URI using SHACL shape links.
-    /// Delegates to the shared shacl::resolve_property_predicate helper.
-    pub(crate) async fn resolve_property_predicate(
-        &self,
-        perspective: &PerspectiveInstance,
-        class_name: &str,
-        property_name: &str,
-    ) -> Result<String, String> {
-        super::shacl::resolve_property_predicate(perspective, class_name, property_name).await
-    }
 }
 
 #[cfg(test)]
