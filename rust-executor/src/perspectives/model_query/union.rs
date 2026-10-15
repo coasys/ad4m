@@ -43,13 +43,15 @@ use super::projection::resolve_projections;
 use super::query::execute_model_query_inner;
 use super::relations::{choose, SUBJECT_CLASSES_KEY, SUBJECT_CLASS_KEY};
 use super::types::{
-    ModelQueryInput, ModelQueryResult, OrderDirection, Scope, ShapeResolver, WhereCondition,
+    ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope, ShapeResolver,
+    WhereCondition,
 };
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 /// The classes a model query reads: one, or a union.
 ///
@@ -144,12 +146,20 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
     if classes.is_empty() {
         return Err(anyhow!("classNames: name at least one class"));
     }
+    refuse_union_reads(query)
+}
+
+/// The reads a union cannot answer, whatever its classes. A query over an
+/// abstract class (#1435) checks these before it resolves its classes, so
+/// whether it is refused does not depend on what happens to be installed.
+pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
     // The keyset is one class's `(first timestamp, id)` order in the store;
-    // the union sorts and pages its rows in the executor.
+    // the union sorts and pages its rows in the executor. An abstract class
+    // is read as a union of the classes it resolves to, so it is refused too.
     if query.after.is_some() {
         return Err(anyhow!(
-            "classNames: `after` cursors are not supported over several classes. Page the \
-             union with `limit`/`offset`, or query one class at a time."
+            "classNames / abstract class: `after` cursors are not supported over several \
+             classes. Page the union with `limit`/`offset`, or query one class at a time."
         ));
     }
     // A per-anchor limit and a walk pick their rows inside the store, once per
@@ -162,9 +172,9 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
     {
         if limit_per_anchor.is_some() || levels.is_some() {
             return Err(anyhow!(
-                "classNames: a parent scope with `limitPerAnchor` or `levels` is not supported \
-                 over several classes — each class would slice its own rows per anchor. Page the \
-                 union with `limit`/`offset`, or query one class at a time."
+                "classNames / abstract class: a parent scope with `limitPerAnchor` or `levels` \
+                 is not supported over several classes — each class would slice its own rows \
+                 per anchor. Page the union with `limit`/`offset`, or query one class at a time."
             ));
         }
     }
@@ -174,8 +184,9 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
     if let Some(order) = &query.order {
         if let Some((key, _)) = order.iter().find(|(k, _)| k.contains('.')) {
             return Err(anyhow!(
-                "classNames: order key '{key}' sorts on a relation, which is not supported over \
-                 several classes. Order by a property, a timestamp or a `$` projection count."
+                "classNames / abstract class: order key '{key}' sorts on a relation, which is \
+                 not supported over several classes. Order by a property, a timestamp or a `$` \
+                 projection count."
             ));
         }
     }
@@ -193,7 +204,25 @@ pub async fn execute_union_query(
     query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
+    execute_union_query_with_views(store, classes, query, resolver, &HashMap::new()).await
+}
+
+/// [`execute_union_query`], reading each class in `views` through its view
+/// instead of its shape: a query over an abstract class (#1435), whose rows
+/// carry the abstract class's names. Records an `include` reaches are read
+/// through `resolver`, as their own class.
+pub async fn execute_union_query_with_views(
+    store: &SparqlStore,
+    classes: &[String],
+    query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    views: &HashMap<String, Arc<ModelShape>>,
+) -> Result<ModelQueryResult, Error> {
     refuse_unanswerable(classes, query)?;
+    let shape_of = |class: &str| match views.get(class) {
+        Some(view) => Ok(view.clone()),
+        None => resolver.get_shape(class),
+    };
     let mut requested: Vec<String> = Vec::new();
     for c in classes {
         if !requested.contains(c) {
@@ -233,7 +262,7 @@ pub async fn execute_union_query(
     let mut all_ids: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for class in &requested {
-        let shape = resolver.get_shape(class)?;
+        let shape = shape_of(class)?;
         let mut result =
             execute_model_query_inner(store, shape.as_ref(), &select, resolver, 0).await?;
         if let Some(projs) = sort_projections.as_ref().filter(|p| !p.is_empty()) {
@@ -358,7 +387,7 @@ pub async fn execute_union_query(
     }
     let mut hydrated: HashMap<String, Value> = HashMap::new();
     for (class, ids) in page_by_class {
-        let shape = resolver.get_shape(&class)?;
+        let shape = shape_of(&class)?;
         let fetch = ModelQueryInput {
             parent: None,
             where_clause: Some(BTreeMap::from([(

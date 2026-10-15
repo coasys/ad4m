@@ -175,6 +175,10 @@ export class WsManager {
   }
 
   private handleMessage(conn: Connection, raw: Buffer | ArrayBuffer | Buffer[]): void {
+    // `ws` still emits messages while a socket is CLOSING (until the peer
+    // answers the close frame or the close timeout fires). A member removed
+    // from the room must not keep talking into it, so only OPEN sockets count.
+    if (conn.socket.readyState !== conn.socket.OPEN) return;
     if (!conn.limiter.check(conn.id).allowed) {
       // Drop the message silently — the client can retry after the window slides.
       return;
@@ -258,6 +262,23 @@ export class WsManager {
       for (const conn of conns) {
         if (opts.excludeConnId && conn.id === opts.excludeConnId) continue;
         this.sendTo(conn, msg);
+      }
+    }
+  }
+
+  /**
+   * Closes every socket a DID has open in a room (code 4005). Called when the
+   * DID leaves the ACL: revoking its sessions stops HTTP at once, but an open
+   * socket would otherwise keep receiving the room's diffs until it reconnects.
+   */
+  disconnectDid(roomId: string, did: string): void {
+    const conns = this.rooms.get(roomId)?.get(did);
+    if (!conns) return;
+    for (const conn of [...conns]) {
+      try {
+        conn.socket.close(4005, "removed from room");
+      } catch {
+        // already closing
       }
     }
   }

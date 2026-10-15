@@ -110,6 +110,7 @@ import type { PerspectiveRejectFlowProposalResult } from "./PerspectiveRejectFlo
 import type { PerspectiveRemoveAutoProcessorParams } from "./PerspectiveRemoveAutoProcessorParams";
 import type { PerspectiveRemoveLinkParams } from "./PerspectiveRemoveLinkParams";
 import type { PerspectiveRemoveLinksParams } from "./PerspectiveRemoveLinksParams";
+import type { PerspectiveRemoveSubjectParams } from "./PerspectiveRemoveSubjectParams";
 import type { PerspectiveResolveInterpretationParams } from "./PerspectiveResolveInterpretationParams";
 import type { PerspectiveResynced } from "./PerspectiveResynced";
 import type { PerspectiveShacl } from "./PerspectiveShacl";
@@ -120,6 +121,7 @@ import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
 import type { PerspectiveUpdateParams } from "./PerspectiveUpdateParams";
+import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectParams";
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
 import type { PromptRequest } from "./PromptRequest";
@@ -295,6 +297,7 @@ export interface RpcMethods {
   "perspective.removeAutoProcessor": { params: PerspectiveRemoveAutoProcessorParams; result: boolean };
   "perspective.removeLink": { params: PerspectiveRemoveLinkParams; result: boolean };
   "perspective.removeLinks": { params: PerspectiveRemoveLinksParams; result: Array<DecoratedLinkExpression> };
+  "perspective.removeSubject": { params: PerspectiveRemoveSubjectParams; result: boolean };
   "perspective.resyncSubscription": { params: PerspectiveSubscriptionParams; result: PerspectiveResynced };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
@@ -304,6 +307,7 @@ export interface RpcMethods {
   "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
+  "perspective.updateSubject": { params: PerspectiveUpdateSubjectParams; result: boolean };
   "perspective.verifyFlowReceipt": { params: PerspectiveVerifyFlowReceiptParams; result: PerspectiveFlowReceiptVerdict };
   "runtime.addFriends": { params: FriendsListRequest; result: Array<string> };
   "runtime.addHcAgentInfos": { params: AddAgentInfosRequest; result: boolean };

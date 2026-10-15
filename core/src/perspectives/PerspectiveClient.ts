@@ -473,6 +473,19 @@ export class PerspectiveClient {
         )
     }
 
+    /** Through an abstract class (#1435), the executor writes to the record's own classes. */
+    async updateSubject(uuid: string, subjectClass: string, expressionAddress: string, values: string, batchId?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.updateSubject', { uuid, subjectClass, expressionAddress, values, batchId }
+        )
+    }
+
+    async removeSubject(uuid: string, subjectClass: string, expressionAddress: string, batchId?: string): Promise<boolean> {
+        return this.#apiClient.call(
+            'perspective.removeSubject', { uuid, subjectClass, expressionAddress, batchId }
+        )
+    }
+
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
         return this.#apiClient.call(
             'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
