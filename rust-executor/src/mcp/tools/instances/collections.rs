@@ -309,9 +309,9 @@ pub(crate) async fn add_member(
 
 /// Remove `item` from `collection` of the instance at `base_uri` through the
 /// class's remover (`update_subject`), in whichever spelling it is stored
-/// (see [`target_matches`]). Returns how many membership links held it, and
-/// every stored member, for the caller to explain a miss. The error is the
-/// message to return.
+/// (see [`target_matches`]). Returns how many membership links went, read
+/// back after the remover ran, and every member stored before, for the
+/// caller to explain a miss. The error is the message to return.
 pub(crate) async fn remove_member(
     perspective: &mut PerspectiveInstance,
     class_name: &str,
@@ -321,19 +321,28 @@ pub(crate) async fn remove_member(
     agent_context: &AgentContext,
 ) -> Result<(usize, Vec<String>), String> {
     let encoded = link_target(item);
-    let links = perspective
-        .member_links(class_name, base_uri, collection)
-        .await
-        .map_err(|e| format!("Error reading collection '{collection}': {e:#}"))?;
-    let stored: Vec<String> = links.iter().map(|l| l.data.target.clone()).collect();
-    let matching: Vec<&String> = stored
-        .iter()
-        .filter(|target| target_matches(target, item, &encoded))
-        .collect();
-    if matching.is_empty() {
+    let holding = |perspective: &PerspectiveInstance| {
+        let perspective = perspective.clone();
+        let encoded = encoded.clone();
+        async move {
+            let links = perspective
+                .member_links(class_name, base_uri, collection)
+                .await
+                .map_err(|e| format!("Error reading collection '{collection}': {e:#}"))?;
+            let stored: Vec<String> = links.into_iter().map(|l| l.data.target).collect();
+            let matching: Vec<String> = stored
+                .iter()
+                .filter(|target| target_matches(target, item, &encoded))
+                .cloned()
+                .collect();
+            Ok::<_, String>((matching, stored))
+        }
+    };
+    let (mut members, stored) = holding(perspective).await?;
+    if members.is_empty() {
         return Ok((0, stored));
     }
-    let mut members = matching.clone();
+    let before = members.len();
     members.sort();
     members.dedup();
     perspective
@@ -346,5 +355,15 @@ pub(crate) async fn remove_member(
         )
         .await
         .map_err(|e| format!("Error removing '{item}' from collection '{collection}': {e:#}"))?;
-    Ok((matching.len(), stored))
+    let (left, _) = holding(perspective).await?;
+    if !left.is_empty() {
+        return Err(format!(
+            "Error removing '{item}' from collection '{collection}': its remover left {} of {} \
+             membership link(s): {}",
+            left.len(),
+            before,
+            left.join(", ")
+        ));
+    }
+    Ok((before, stored))
 }
