@@ -20,7 +20,8 @@ use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
     self, AbstractIndex, Resolution, ViewResolver,
 };
-use crate::perspectives::model_query::builtin_classes::builtin;
+use crate::perspectives::model_query::builtin_classes::{builtin, CONTAINER_URI};
+use crate::perspectives::model_query::containment::{self, ContainmentEdges};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
@@ -31,9 +32,11 @@ use serde_json::Value;
 /// generation it resolved at and resolves again when it moves.
 #[derive(Default)]
 pub(super) struct AbstractCache {
-    generation: u64,
+    pub(super) generation: u64,
     index: Option<Arc<AbstractIndex>>,
     resolved: HashMap<String, Arc<Resolution>>,
+    /// The containment edge set (see `super::containment`).
+    pub(super) containment: Option<crate::perspectives::model_query::containment::ContainmentEdges>,
 }
 
 /// The classes a model query or subscription reads: those it names, or an
@@ -45,6 +48,9 @@ pub(super) struct ReadTargets {
     pub(super) resolution: Option<Arc<Resolution>>,
     /// Not resolved (a store error): a subscription tries again next pass.
     pub(super) unresolved: bool,
+    /// The containment edge set, when the query reads containment (a
+    /// containment scope, or a query over `Container`).
+    pub(super) containment: Option<ContainmentEdges>,
 }
 
 /// The generation an unresolved subscription records: never a real one.
@@ -64,6 +70,7 @@ impl PerspectiveInstance {
         cache.generation += 1;
         cache.index = None;
         cache.resolved.clear();
+        cache.containment = None;
     }
 
     /// How many times the installed shapes have changed. Read it *before*
@@ -123,13 +130,20 @@ impl PerspectiveInstance {
         };
         let index = self.abstract_index()?;
         let (alias_key, shape) = self.abstract_shape(abstract_class)?;
-        let resolution = Arc::new(abstract_classes::resolve(
+        let mut resolution = abstract_classes::resolve(
             &self.sparql_store,
             &self.shape_resolver(),
             &index,
             alias_key,
             &shape,
-        )?);
+        )?;
+        // A built-in that reads its own rows (`Container`'s class-less
+        // holders) is a member of its own union, under its URI.
+        if let Some(member) = builtin(abstract_class).and_then(|b| b.member.clone()) {
+            resolution.classes.push(abstract_class.to_string());
+            resolution.views.insert(abstract_class.to_string(), member);
+        }
+        let resolution = Arc::new(resolution);
         let mut cache = self.abstract_cache.write().unwrap();
         if cache.generation == generation {
             cache
@@ -143,6 +157,20 @@ impl PerspectiveInstance {
     /// own (in a union its views would apply to some rows only), and what a
     /// union refuses is refused before it resolves, whatever is installed.
     pub(super) fn read_targets(
+        &self,
+        classes: &QueryClasses,
+        query: &ModelQueryInput,
+    ) -> Result<ReadTargets, AnyError> {
+        let mut targets = self.read_classes(classes, query)?;
+        let over_container = matches!(classes, QueryClasses::One(name) if name == CONTAINER_URI);
+        if over_container || containment::reads_containment(query) {
+            targets.containment = Some(self.containment_edges()?);
+        }
+        Ok(targets)
+    }
+
+    /// The classes of [`Self::read_targets`].
+    fn read_classes(
         &self,
         classes: &QueryClasses,
         query: &ModelQueryInput,
@@ -169,6 +197,7 @@ impl PerspectiveInstance {
             views: resolution.views.clone(),
             resolution: Some(resolution),
             unresolved: false,
+            containment: None,
         })
     }
 
@@ -192,12 +221,15 @@ impl PerspectiveInstance {
     }
 
     /// What a subscription over `targets` records as read (see
-    /// `ModelSubscriptionParams::abstract_read`).
+    /// `ModelSubscriptionParams::abstract_read`): the generation, when what
+    /// it reads depends on the installed shapes. An abstract class's classes
+    /// do, and so does a containment read: a class installed later can add
+    /// a containment edge.
     pub(super) fn abstract_read(targets: &ReadTargets, generation: u64) -> Option<u64> {
         if targets.unresolved {
             return Some(UNRESOLVED);
         }
-        targets.resolution.as_ref().map(|_| generation)
+        (targets.resolution.is_some() || targets.containment.is_some()).then_some(generation)
     }
 
     /// Whether `class_name` is an abstract class here: a built-in's URI
@@ -262,6 +294,11 @@ impl PerspectiveInstance {
         values: &Value,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
+        if abstract_class == CONTAINER_URI {
+            if let Some(runs) = self.has_child_runs(base, values).await? {
+                return Ok(runs);
+            }
+        }
         let Value::Object(values) = values else {
             return Ok(vec![]);
         };
@@ -536,9 +573,96 @@ impl PerspectiveInstance {
             .await
     }
 
-    /// Resolve again every subscription over an abstract class resolved
-    /// before the installed shapes last changed, and rebuild its trigger: a
-    /// change can move its classes or only a view (an alias moved). Returns
+    /// Put `child` under `parent` through `Container` (#1446): what MCP's
+    /// `add_child` and `instance_create(parent)` do, and what the SDK's
+    /// `create({ parent: { id } })` asks `updateSubject` for. See
+    /// [`Self::has_child_runs`] for which link it writes.
+    pub(crate) async fn add_to_container(
+        &mut self,
+        parent: &str,
+        child: &str,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let value = serde_json::json!({ "children": { "action": "adder", "value": [child] } });
+        let runs = self
+            .update_through_abstract(CONTAINER_URI, parent, &value, context)
+            .await?;
+        self.execute_runs(runs, parent.to_string(), batch_id, context)
+            .await
+    }
+
+    /// An add or remove through `Container`'s `children` on a parent none of
+    /// whose classes has that action for the relation answering to
+    /// `children`: `ad4m://has_child` links, which hold on any node
+    /// (`ad4m://self`, a plain-string id, a Flux channel whose relation is
+    /// not `children`). `None` when one of its classes has the action: then
+    /// each such class runs its own (a Block's adder writes `we://child`,
+    /// open question 5), as for any abstract class.
+    async fn has_child_runs(
+        &self,
+        base: &str,
+        values: &Value,
+    ) -> Result<Option<Vec<Run>>, AnyError> {
+        let Some(children) = values.get("children") else {
+            return Ok(None);
+        };
+        let (op, value) = Op::of(children);
+        let action = match op {
+            Op::Add => Action::AddLink,
+            Op::Remove => Action::RemoveLink,
+            Op::Set => return Ok(None),
+        };
+        if values.as_object().is_some_and(|o| o.len() != 1) {
+            return Ok(None);
+        }
+        let resolution = self.resolve_abstract(CONTAINER_URI)?;
+        let own = self
+            .subject_classes_of(&[base.to_string()])?
+            .remove(base)
+            .unwrap_or_default();
+        let index = self.abstract_index()?;
+        let alias_key = builtin(CONTAINER_URI)
+            .map(|b| b.name)
+            .unwrap_or("Container");
+        for class in resolution.classes.iter().filter(|c| own.contains(c)) {
+            let shape = self.get_shape(class)?;
+            let Some(own_name) = index.own_name(class, &shape, "children", alias_key) else {
+                continue;
+            };
+            if self.actions_for(class, own_name, op, true).await?.is_some() {
+                return Ok(None);
+            }
+        }
+        let members: Vec<String> = match value {
+            Value::Array(items) => items
+                .iter()
+                .map(|i| i.as_str().map(str::to_string))
+                .collect::<Option<_>>()
+                .ok_or_else(|| anyhow!("'children' of a Container: members are node ids"))?,
+            Value::String(one) => vec![one.clone()],
+            _ => return Err(anyhow!("'children' of a Container: members are node ids")),
+        };
+        let commands = members
+            .into_iter()
+            .map(|member| Command {
+                source: Some("this".to_string()),
+                predicate: Some(containment::HAS_CHILD.to_string()),
+                target: Some(member),
+                local: None,
+                action: action.clone(),
+            })
+            .collect();
+        Ok(Some(vec![Run {
+            commands,
+            parameters: vec![],
+        }]))
+    }
+
+    /// Resolve again every subscription over an abstract class, or reading
+    /// containment, resolved before the installed shapes last changed, and
+    /// rebuild its trigger: a change can move its classes, only a view (an
+    /// alias moved), or the containment edge set. Returns
     /// their ids, which re-run this pass whatever was written. One still
     /// unresolved waits for the next pass.
     pub(super) async fn refresh_abstract_subscriptions(&self) -> HashSet<String> {
@@ -601,6 +725,7 @@ impl PerspectiveInstance {
             targets.classes.names().iter().map(String::as_str),
             query_json,
             result,
+            targets.containment.as_deref().map(Vec::as_slice),
         )
     }
 }
@@ -657,6 +782,7 @@ impl ReadTargets {
             views: HashMap::new(),
             resolution: None,
             unresolved: false,
+            containment: None,
         }
     }
 }
