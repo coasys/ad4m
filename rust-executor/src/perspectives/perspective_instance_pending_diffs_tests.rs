@@ -21,6 +21,8 @@ struct FakeLanguage {
     /// Answer every commit holding `throttled_target` with the link server's 429.
     throttled_target: std::sync::Mutex<Option<String>>,
     committed: std::sync::Mutex<Vec<String>>,
+    /// Links per accepted commit, in order.
+    batches: std::sync::Mutex<Vec<usize>>,
 }
 
 impl FakeLanguage {
@@ -46,6 +48,10 @@ impl FakeLanguage {
                 "400: cannot remove a link authored by another agent"
             ));
         }
+        self.batches
+            .lock()
+            .unwrap()
+            .push(diff.additions.len() + diff.removals.len());
         let mut committed = self.committed.lock().unwrap();
         committed.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
         committed.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
@@ -246,6 +252,47 @@ async fn a_large_queue_drains_once_the_language_recovers() {
         "only the rejected diff is set aside, none of the outage's"
     );
     assert_eq!(aside[0].0, rejected("someone-elses-link"));
+}
+
+/// A burst of single-link commits through `commit()`, spawned as
+/// `spawn_commit_and_handle_error` does, while the loop drains: every link
+/// reaches the language exactly once and nothing stays queued.
+#[tokio::test(start_paused = true)]
+async fn a_burst_through_commit_reaches_the_language_exactly_once() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake);
+    let task = start_loop(&perspective);
+
+    let burst = targets("burst", 1500);
+    let mut commits = Vec::new();
+    for (i, t) in burst.iter().enumerate() {
+        let p = perspective.clone();
+        let diff = add(t);
+        commits.push(tokio::spawn(async move { p.commit(&diff).await }));
+        // About one link per millisecond, as a client adding links in a loop.
+        if i % 2 == 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+    for c in commits {
+        c.await.unwrap().unwrap();
+    }
+    let drained = run_until(Duration::from_secs(60), || pending(&perspective) == 0).await;
+    task.abort();
+
+    assert!(drained.is_some(), "{} still pending", pending(&perspective));
+    let mut committed = fake.committed();
+    committed.sort();
+    let mut expected: Vec<String> = burst.iter().map(|t| format!("+{}", t)).collect();
+    expected.sort();
+    assert_eq!(
+        committed.len(),
+        expected.len(),
+        "links reaching the language (batches: {:?})",
+        fake.batches.lock().unwrap()
+    );
+    assert_eq!(committed, expected, "every link reaches the language once");
+    assert!(set_aside(&perspective).is_empty());
 }
 
 #[tokio::test(start_paused = true)]
