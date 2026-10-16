@@ -27,7 +27,8 @@ extern "C" {
     pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
     #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
     pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
-    /// Hex of the calling agent's 32-byte room-key X25519 seed.
+    /// Hex of the 32-byte secret seed of the calling agent's room-key X25519
+    /// keypair. The executor refuses to sign the message it is derived from.
     #[wasm_bindgen(js_name = "agentRoomKeySeed", catch)]
     pub fn agent_room_key_seed() -> Result<String, JsValue>;
     #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]

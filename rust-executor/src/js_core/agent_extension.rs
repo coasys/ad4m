@@ -146,7 +146,8 @@ fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyhowWrap
         .map_err(AnyhowWrapperError::from)
 }
 
-/// Hex of the acting agent's room-key X25519 seed.
+/// Hex of the room-key seed of the agent the language runs for (see
+/// `room_key_seed_for_context`). Signing the seed message itself is refused.
 #[op2]
 #[string]
 fn agent_room_key_seed() -> Result<String, AnyhowWrapperError> {

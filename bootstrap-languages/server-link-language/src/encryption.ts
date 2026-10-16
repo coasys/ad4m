@@ -232,9 +232,20 @@ export interface X25519KeyPair {
     publicKey: Uint8Array;
 }
 
-/** The agent's X25519 keypair; the seed (`AgentAdapter.roomKeySeedHex`) is the private key. */
+/**
+ * The agent's X25519 keypair from its room-key seed. `roomKeySeedHex` should
+ * be `AgentAdapter.roomKeySeedHex` (the `agentRoomKeySeed()` host import):
+ * hex of the 32-byte seed the executor computes for the calling agent. The
+ * seed is the private key as is (clamped internally by
+ * x25519.getPublicKey/getSharedSecret).
+ */
 export function deriveX25519KeyPair(roomKeySeedHex: () => string): X25519KeyPair {
     const privateKey = hexToBytes(roomKeySeedHex());
+    if (privateKey.length !== X25519_KEY_BYTES) {
+        throw new Error(
+            `room-key seed must be ${X25519_KEY_BYTES} bytes, got ${privateKey.length}`,
+        );
+    }
     const publicKey = x25519.getPublicKey(privateKey);
     return { privateKey, publicKey };
 }

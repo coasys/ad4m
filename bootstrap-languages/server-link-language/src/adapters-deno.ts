@@ -101,7 +101,10 @@ export class DenoAgentAdapter implements AgentAdapter {
     signStringHex(payload: string): string {
         return agentSignStringHex(payload);
     }
-    roomKeySeedHex(): string { return agentRoomKeySeed(); }
+
+    roomKeySeedHex(): string {
+        return agentRoomKeySeed();
+    }
 }
 
 export class DenoRuntimeAdapter implements RuntimeAdapter {
