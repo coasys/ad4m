@@ -735,8 +735,10 @@ pub(super) async fn execute_model_query_inner(
         });
     }
 
-    // Apply transform expressions for resolveLanguage properties
-    resolve_language_transforms(&shape, &mut instances).await?;
+    // Apply transform expressions for resolveLanguage properties — only to the ones this query will
+    // hand back or still reads (see `properties_to_resolve`).
+    let only = properties_to_resolve(query_input, shape, resolver);
+    resolve_language_transforms(&shape, &mut instances, only.as_ref()).await?;
 
     // Resolve reverse relations
     let reverse_rels: Vec<(String, String, bool)> = shape
@@ -923,7 +925,42 @@ pub(super) async fn execute_model_query_inner(
     })
 }
 
+/// The properties worth resolving through their language, or `None` for all of them.
+///
+/// A query that names its `properties` gets only those back — everything else is stripped before
+/// the result leaves — and resolving a property through a language is a fetch, often a network
+/// round trip. So a query asking for a record's name and not its file should not pay for the file.
+///
+/// Two things read resolved values before the strip, and keep what they read: a `where` that could
+/// not be pushed into the store runs over the hydrated instances, so then everything stays; and an
+/// `order` that was not pushed sorts them, so its keys stay. And the strip itself keeps `include`
+/// keys beside the requested properties, so those are resolved too.
+pub(super) fn properties_to_resolve(
+    query_input: &ModelQueryInput,
+    shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
+) -> Option<HashSet<String>> {
+    let requested = query_input.properties.as_ref()?;
+    if query_input.where_clause.is_some() && !all_where_pushable(query_input, shape, Some(resolver))
+    {
+        return None;
+    }
+    let mut keep: HashSet<String> = requested.iter().cloned().collect();
+    if let Some(order) = &query_input.order {
+        keep.extend(order.iter().map(|(key, _)| key.clone()));
+    }
+    // What `filter_properties` keeps beside the requested properties, so nothing it hands back is
+    // left unresolved.
+    if let Some(include) = &query_input.include {
+        keep.extend(include.keys().cloned());
+    }
+    Some(keep)
+}
+
 /// Apply transform expressions to expression-resolved properties.
+///
+/// `only`, when given, limits that to the properties it names — see `properties_to_resolve`. The
+/// rest keep the value hydration gave them, and are expected to be stripped.
 ///
 /// Properties whose values are stored as signed expression URIs (rather than
 /// deterministic `literal:` IRIs) need their expression data fetched from the
@@ -933,9 +970,10 @@ pub(super) async fn execute_model_query_inner(
 ///   - `Some(<addr>)`    → expression on that custom language.
 /// Values stored as deterministic `literal:` IRIs (i.e. `resolve_language ==
 /// None`) are left untouched by the per-value check below.
-async fn resolve_language_transforms(
+pub(super) async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
+    only: Option<&HashSet<String>>,
 ) -> Result<(), Error> {
     // Two kinds of properties need post-hydration work here:
     //   - expression-resolved properties (`resolve_language` set): fetch the
@@ -947,6 +985,7 @@ async fn resolve_language_transforms(
         .properties
         .iter()
         .filter(|p| !p.is_deterministic_literal() || p.transform.is_some())
+        .filter(|p| only.map_or(true, |names| names.contains(&p.name)))
         .collect();
 
     if resolve_props.is_empty() {

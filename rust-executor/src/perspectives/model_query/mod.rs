@@ -104,6 +104,8 @@ mod proof_valid_tests;
 mod query;
 mod relations;
 #[cfg(test)]
+mod resolve_selection_tests;
+#[cfg(test)]
 mod round_trip_tests;
 #[cfg(test)]
 mod selection_guard_tests;
