@@ -4,20 +4,23 @@
  * ## Key derivation — no raw private key available
  *
  * The Deno sandbox a link language runs in never exposes the agent's raw
- * Ed25519 private key material — the only signing primitive available via
- * `ad4m:host` is `agentSignStringHex(payload)`, a black-box "sign this for
- * me" call (see src/adapters.ts AgentAdapter). So this module cannot do the
- * textbook `edwardsToMontgomery` conversion from a raw Ed25519 scalar.
+ * Ed25519 private key material, so this module cannot do the textbook
+ * `edwardsToMontgomery` conversion from a raw Ed25519 scalar.
  *
- * Instead it derives a stable, secret X25519 keypair from the agent's
- * signing capability itself: Ed25519 (EdDSA) signatures are deterministic
- * (RFC 8032 — no randomness is mixed in), so signing one fixed,
- * domain-separated message always reproduces the exact same signature
- * bytes for a given DID. That signature is only computable by whoever
- * controls the private key, so `sha256(sign(FIXED_MESSAGE))` behaves as a
- * secret, deterministic 32-byte value unique to this agent — exactly the
- * key material an X25519 private scalar needs. Nobody else can derive it
- * without the agent's cooperation (via the host's signing service).
+ * Instead the agent's X25519 private key is a secret, deterministic 32-byte
+ * seed the executor computes for the calling agent:
+ * `sha256(sign(sha256("adam-server-link-language:x25519-seed:v1")))`.
+ * Ed25519 (EdDSA) signatures are deterministic (RFC 8032), so that value is
+ * stable per DID and only computable with the agent's private key.
+ *
+ * The language gets the seed only through the `agentRoomKeySeed()` host
+ * import (`AgentAdapter.roomKeySeedHex`). It must never ask for the signature
+ * itself: whoever holds that signature holds the X25519 private key and can
+ * open every room key sealed to it. The executor therefore refuses to sign
+ * the seed message on every signing path (`agentSignStringHex`, `agentSign`,
+ * the `agent.sign` RPC, ...), for every caller. Earlier versions derived the
+ * seed in the language as `sha256(hexToBytes(agentSignStringHex(message)))`;
+ * the executor's seed is byte-identical, so existing X25519 keys are unchanged.
  *
  * The corresponding X25519 *public* key is computed the normal way
  * (scalar multiplication with the base point) and is safe to publish.
@@ -71,7 +74,6 @@ import { isEncryptedLinkData } from "./types.js";
 // Domain separation constants
 // ---------------------------------------------------------------------------
 
-const X25519_SEED_MESSAGE = "adam-server-link-language:x25519-seed:v1";
 const ROOM_KEY_SEAL_INFO = "adam-server-link-language:room-key-seal:v1";
 
 export const AES_KEY_BYTES = 32; // AES-256
@@ -231,17 +233,19 @@ export interface X25519KeyPair {
 }
 
 /**
- * Derives a deterministic X25519 keypair from the agent's Ed25519 signing
- * capability. `signStringHex` should be `AgentAdapter.signStringHex` (or an
- * equivalent deterministic-signature function in tests) — see the module
- * doc comment above for why this is a sound substitute for a direct
- * Ed25519-to-X25519 scalar conversion when the raw private key is
- * unavailable.
+ * The agent's X25519 keypair from its room-key seed. `roomKeySeedHex` should
+ * be `AgentAdapter.roomKeySeedHex` (the `agentRoomKeySeed()` host import):
+ * hex of the 32-byte seed the executor computes for the calling agent. The
+ * seed is the private key as is (clamped internally by
+ * x25519.getPublicKey/getSharedSecret).
  */
-export function deriveX25519KeyPair(signStringHex: (payload: string) => string): X25519KeyPair {
-    const signatureHex = signStringHex(X25519_SEED_MESSAGE);
-    const signatureBytes = hexToBytes(signatureHex);
-    const privateKey = sha256(signatureBytes); // 32 bytes — clamped internally by x25519.getPublicKey/getSharedSecret
+export function deriveX25519KeyPair(roomKeySeedHex: () => string): X25519KeyPair {
+    const privateKey = hexToBytes(roomKeySeedHex());
+    if (privateKey.length !== X25519_KEY_BYTES) {
+        throw new Error(
+            `room-key seed must be ${X25519_KEY_BYTES} bytes, got ${privateKey.length}`,
+        );
+    }
     const publicKey = x25519.getPublicKey(privateKey);
     return { privateKey, publicKey };
 }

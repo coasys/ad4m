@@ -81,6 +81,9 @@ export function agentDid() { return agent().did(); }
 export function agentSigningKeyId() { return agent().signingKeyId(); }
 export function agentSign(payload) { return agent().sign(payload); }
 export function agentSignStringHex(payload) { return agent().signStringHex(payload); }
+// Hex of the 32-byte secret seed of the calling agent's room-key X25519 keypair.
+// The executor refuses to sign the message it is derived from on every path.
+export function agentRoomKeySeed() { return agent().roomKeySeed(); }
 export function agentCreateSignedExpression(data) { return agent().createSignedExpression(data); }
 export function agentGetAllLocalUserDids() { return agent().getAllLocalUserDIDs(); }
 export function agentCreateSignedExpressionForUser(userEmail, data) {

@@ -453,6 +453,13 @@ as `extern "C"`.
 | `agentGetAllLocalUserDids()` | `string[]` |
 | `agentDidForUser(email: string)` | `string` |
 | `agentCreateSignedExpressionForUser(email, data)` | `Expression` |
+| `agentRoomKeySeed()` | `string` (hex, 32 bytes) |
+
+`agentSignStringHex(data)` signs `sha256(data)`. Every signing import refuses
+the reserved message `adam-server-link-language:x25519-seed:v1` (and `agentSign`
+refuses its SHA-256): an agent's signature over it is the secret its room-key
+X25519 keypair is derived from. `agentRoomKeySeed()` returns that secret,
+`sha256(signature bytes)`, for the acting agent only.
 
 #### Ambient acting-agent contract
 

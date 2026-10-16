@@ -13,6 +13,10 @@ declare module "ad4m:host" {
     export function agentSigningKeyId(): string;
     export function agentSign(payload: Uint8Array): Uint8Array;
     export function agentSignStringHex(payload: string): string;
+    // Hex of the 32-byte secret seed of the calling agent's room-key X25519
+    // keypair. The executor refuses to sign the message it is derived from
+    // ("adam-server-link-language:x25519-seed:v1") on every signing path.
+    export function agentRoomKeySeed(): string;
     export function agentCreateSignedExpression(data: unknown): object;
     export function agentGetAllLocalUserDids(): string[];
     export function agentCreateSignedExpressionForUser(userEmail: string, data: unknown): object;
