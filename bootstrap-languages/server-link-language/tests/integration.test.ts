@@ -32,6 +32,9 @@ import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
+import * as api from "../src/api.js";
+import { bytesToHex, deriveX25519KeyPair } from "../src/encryption.js";
+import { KeyRingManager } from "../src/key-ring-manager.js";
 import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
 
 // Link-server imports — test helpers to boot a real server, and auth
@@ -446,5 +449,165 @@ describe("integration: performSync", () => {
     const result = await syncModule.performSync();
     assert.deepEqual(result, { additions: [], removals: [] });
     assert.ok(syncStates.includes("Synced"), "must report Synced state");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E2E key grant for a member who joins after the admin made the room key
+// ---------------------------------------------------------------------------
+
+/** Authenticates `agent` without the auth module's singleton session, so
+ *  two agents can hold tokens at once. Registers the agent's X25519 key the
+ *  same way auth.authenticate() does. */
+function tokenGetter(serverUrl: string, roomId: string, agent: RealAgent): () => Promise<string> {
+  let token: Promise<string> | null = null;
+  return () => (token ??= (async () => {
+    const config = { serverUrl, roomId };
+    const challenge = await api.requestChallenge(config, agent.did());
+    const x25519Hex = bytesToHex(x25519KeyPair(agent).publicKey);
+    return api.verifyChallenge(
+      config, agent.did(), challenge, agent.signStringHex(challenge),
+      x25519Hex, agent.signStringHex(x25519Hex),
+    );
+  })());
+}
+
+function x25519KeyPair(agent: RealAgent) {
+  return deriveX25519KeyPair((payload) => agent.signStringHex(payload));
+}
+
+/** Points the sync module and the store at `agent`, with `manager`'s key ring. */
+function wireMember(
+  serverUrl: string,
+  roomId: string,
+  agent: RealAgent,
+  getToken: () => Promise<string>,
+  manager: KeyRingManager,
+): void {
+  wireClient(serverUrl, roomId, agent);
+  syncModule.initSync({
+    config: { serverUrl, roomId },
+    getToken,
+    emitDiff: () => {},
+    emitSyncState: () => {},
+    getKeyRing: () => manager.keyRing,
+  });
+}
+
+async function waitFor(cond: () => boolean, label: string, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out after ${timeoutMs} ms waiting for ${label}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+/** An admin that made the room key and committed `n` encrypted links. */
+async function roomWithEncryptedLinks(serverUrl: string, roomId: string, n: number) {
+  const admin = RealAgent.create();
+  wireClient(serverUrl, roomId, admin); // the HTTP transport api.ts uses
+  const adminToken = tokenGetter(serverUrl, roomId, admin);
+  const adminKeys = new KeyRingManager({
+    config: { serverUrl, roomId },
+    getToken: adminToken,
+    x25519PrivateKey: () => x25519KeyPair(admin).privateKey,
+    onNewKeys: async () => {},
+  });
+  _cleanups.push(() => adminKeys.teardown());
+  assert.equal(await adminKeys.detectAdmin(admin.did()), true);
+  await adminKeys.setup();
+  await adminKeys.rotate();
+  assert.equal(adminKeys.status, "ready");
+
+  wireMember(serverUrl, roomId, admin, adminToken, adminKeys);
+  await syncModule.commit({
+    additions: Array.from({ length: n }, (_, i) => ({
+      author: admin.did(),
+      timestamp: new Date().toISOString(),
+      data: { source: `test://admin-${i}`, predicate: "test://p", target: "test://t" },
+      proof: { signature: "sig", key: `${admin.did()}#primary` },
+    })),
+    removals: [],
+  });
+  return { admin, adminKeys };
+}
+
+/** A member who joins the room: authenticated, X25519 key registered, no keys. */
+async function joiner(serverUrl: string, roomId: string, pendingPollScheduleMs?: number[]) {
+  const agent = RealAgent.create();
+  const token = tokenGetter(serverUrl, roomId, agent);
+  const seen = { at: 0 };
+  const keys: KeyRingManager = new KeyRingManager({
+    config: { serverUrl, roomId },
+    getToken: token,
+    x25519PrivateKey: () => x25519KeyPair(agent).privateKey,
+    onNewKeys: async () => {
+      await syncModule.bootstrap();
+      seen.at = Date.now();
+    },
+    pendingPollScheduleMs,
+  });
+  _cleanups.push(() => keys.teardown());
+  wireMember(serverUrl, roomId, agent, token, keys);
+  await keys.detectAdmin(agent.did());
+  await keys.setup();
+  await syncModule.bootstrap();
+  return { agent, keys, seen };
+}
+
+describe("integration: a late joiner gets the room keys quickly", () => {
+  it("sees the room's links within 2 s of the admin noticing it (peer-joined)", async () => {
+    const server = await bootServer();
+    const roomId = "late-joiner-room";
+    const { adminKeys } = await roomWithEncryptedLinks(server.url, roomId, 5);
+
+    const { keys, seen } = await joiner(server.url, roomId);
+    assert.equal(keys.status, "pending");
+    assert.equal(store.allLinks().links.length, 0, "no keys yet, so nothing decrypts");
+
+    // The joiner's socket connects; the server tells the admin peer-joined.
+    const grantedAt = Date.now();
+    adminKeys.onPeerJoined();
+
+    await waitFor(() => seen.at > 0, "the joiner to re-read the room", 5_000);
+    assert.ok(seen.at - grantedAt < 2_000, `joiner saw links ${seen.at - grantedAt} ms after the grant`);
+    assert.equal(keys.status, "ready");
+    assert.equal(store.allLinks().links.length, 5);
+  });
+
+  it("restarts its fast re-check when a peer joins after its poll window ended", async () => {
+    const server = await bootServer();
+    const roomId = "admin-later-room";
+    const { adminKeys } = await roomWithEncryptedLinks(server.url, roomId, 3);
+
+    // A short poll window that ends before the admin grants.
+    const { keys, seen } = await joiner(server.url, roomId, [20, 20]);
+    await waitFor(() => !keys.isPolling(), "the joiner's poll window to end", 2_000);
+
+    await adminKeys.grantMissing();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(seen.at, 0, "nothing re-checks /keys after the window");
+    assert.equal(keys.status, "pending");
+
+    // The admin's socket connects: the joiner gets peer-joined.
+    const joinedAt = Date.now();
+    keys.onPeerJoined();
+
+    await waitFor(() => seen.at > 0, "the joiner to re-read the room", 3_000);
+    assert.ok(seen.at - joinedAt < 2_000, `joiner saw links ${seen.at - joinedAt} ms after peer-joined`);
+    assert.equal(store.allLinks().links.length, 3);
+  });
+
+  it("background refreshes keep their cooldown once keys are held, and defer to the poll while pending", async () => {
+    const server = await bootServer();
+    const roomId = "refresh-cooldown-room";
+    const { adminKeys } = await roomWithEncryptedLinks(server.url, roomId, 1);
+
+    assert.equal(await adminKeys.refresh(), false, "first refresh runs: nothing new");
+    assert.equal(await adminKeys.refresh(), null, "second refresh within the cooldown is skipped");
+
+    const { keys } = await joiner(server.url, roomId, [5_000]);
+    assert.equal(keys.isPolling(), true);
+    assert.equal(await keys.refresh(), null, "the pending poll owns /keys re-reads");
   });
 });

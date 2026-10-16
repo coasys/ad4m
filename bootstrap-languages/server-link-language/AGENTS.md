@@ -52,7 +52,8 @@ src/store.ts               — local link store (indexed) + sync cursor (revisio
 src/api.ts                  — typed HTTP client, one function per server endpoint
 src/auth.ts                  — DID challenge-response + JWT-expiry-driven token refresh
 src/ws-client.ts               — WebSocket lifecycle: typed dispatch, send queue, exponential-backoff reconnect
-src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound-diff choke point (applyInboundWireDiff)
+src/sync.ts                     — commit (chunked) / catch-up / bootstrap; the ONE inbound-diff choke point (applyInboundWireDiff)
+src/key-ring-manager.ts          — KeyRingManager: E2E key ring load, admin rotate/grants, pending-grant poll (instance per language, testable in Node)
 src/telepresence.ts              — online-agent roster + outbound signal/broadcast/status
 src/encryption.ts                 — X25519 derivation, sealed room-key exchange, AES-256-GCM link encryption
 tests/*.test.ts                    — node:test + tsx, one file per pure module, all use mock adapters (no real network/WS/Deno)
@@ -73,6 +74,27 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   does not break the swappable-adapter guarantee. Pure library
   imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
   anywhere — they contain no runtime coupling.
+- **Commit: the store follows the server, nothing is echoed.**
+  `sync.commit()` splits a diff into POSTs of at most `COMMIT_CHUNK_SIZE`
+  (200) links — all additions first, then removals, which is how one POST
+  applies them — encrypts each chunk just before sending it, and writes a
+  chunk to the language's store only after the server accepted it. A
+  failed commit leaves no local-only links; a failure mid-way leaves the
+  accepted chunks, and the executor's retry re-sends them, which is safe
+  (server OR-Set keyed by link hash; store keyed by link hash). The
+  committed diff is NOT emitted back to the executor: it committed those
+  links and already holds them; the echo made it re-persist, re-index and
+  re-publish every link (`diff_from_link_language`). After a commit whose
+  server sequence is exactly cursor + 1 the cursor moves past it, so
+  catch-up does not fetch our own links back; otherwise it stays.
+- **The executor runs one call at a time per language.**
+  `rust-executor/src/languages/language_runtime.rs` awaits each execute
+  before taking the next request; the JS event loop keeps running inside
+  it. The yield between commit chunks lets the language's own async work
+  (WS diffs, key poll, admin grants) run during a long commit, but
+  `sync()`/`render()`/the next commit from the executor still wait for the
+  whole commit. Keep commit cheap; anything long-running inside a call
+  blocks every other call to this perspective's language.
 - **`applyInboundWireDiff` (src/sync.ts) is the only place that calls
   `emitDiff`.** The AD4M executor discards `perspectiveSyncSync()`'s return
   value — `emitPerspectiveDiff` is the only thing that makes an inbound
@@ -104,6 +126,29 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Gotchas
 
+- **Session loss.** A 401 on HTTP drops the cached JWT and retries once
+  (`withToken`, src/sync.ts); a WS `auth-error` drops it too
+  (`invalidateToken` option of `WsClient`) before the reconnect, which
+  then authenticates afresh. Without that the dead token is reused
+  forever (link-server data reset, revoked session).
+- **No WS message for a key grant.** The link-server pushes nothing when
+  the admin grants keys, so a member whose `/keys` says "E2E room, no keys
+  for you" (`pending`) polls `/keys` itself: every 500 ms for 10 s, then
+  every 2 s up to 60 s (`PENDING_POLL_SCHEDULE_MS`), and restarts that
+  schedule on every `peer-joined` (the admin may just have come online).
+  When keys arrive it re-reads the room (bootstrap + emit). While the
+  poll runs, background refreshes (`refresh()`, 10 s cooldown) defer to
+  it. The admin grants on `peer-joined`, after every sync, at init, and
+  right after a rotation; `/keys/missing` lists members with no keys at
+  all, so new joiners are covered. Grants are single-flight; a request
+  during a run triggers one more run.
+- **Index.ts state is not loadable in Node** (it imports `ad4m:host`).
+  Logic that needs tests goes in a pure `src/` module with explicit deps
+  (see `KeyRingManager`); `tests/integration.test.ts` runs two managers
+  (admin, joiner) side by side against an in-process link-server. The
+  module singletons (adapters, auth session, store, sync) hold one agent
+  at a time, so those tests authenticate each agent with its own token
+  getter and re-point the sync module/store with `wireMember`.
 - **`httpFetch` return shape varies by executor version.**
   Executor builds before `2b65ebbf0` return a plain string on success
   and throw `"http_fetch METHOD URL -> STATUS: body"` for non-ok HTTP.
@@ -118,8 +163,9 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   (src/sync.ts) coalesces contiguous commits into segments and retries
   each segment up to 3 times with exponential backoff. If all attempts
   fail, the failed segments re-enqueue for the next flush cycle and the
-  language emits `LinkLanguageInstalledButNotSynced`. This keeps links
-  local-only until the server recovers, but a process restart loses the
+  language emits `LinkLanguageInstalledButNotSynced`. The language's store
+  only gets links the server accepted, so queued links stay out of it until
+  the server recovers, and a process restart loses the
   queue — a durable pending-commits queue (persisted in the KV store,
   retried by `sync()`) would close this gap.
 - **E2E encryption activates automatically — no plaintext mode.** The admin's
@@ -129,9 +175,10 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   ACL member's X25519 public key, and POSTs only sealed envelopes — the server
   never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
   reconnect/wake, not ACL change — rotating there would mint a new version on
-  every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
-  grant historical keys to members who lack them (idempotent). The key ring
-  loads once during `init()`'s `setupKeyRing()` and the `version` field in
+  every reconnect). `onPeerJoined` only calls `KeyRingManager.onPeerJoined()`:
+  the admin grants keys to members who lack them (idempotent), a pending
+  member restarts its `/keys` poll. The key ring
+  loads during `init()`'s `keyMgr.setup()` and the `version` field in
   `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
   re-fetch or a dedicated WS push message would close that gap.
 - **E2E encryption wire format is unified.** Both client and server use
