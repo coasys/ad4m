@@ -273,20 +273,32 @@ export const OPERATOR_PAGE_JS = `"use strict";
     var min = Number(logLevel.value);
     var atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4;
     logBox.replaceChildren();
+    logRows.clear();
     logEntries.forEach(function (entry) {
-      if (entry.level >= min) logBox.appendChild(logRow(entry));
+      if (entry.level < min) return;
+      var row = logRow(entry);
+      logRows.set(entry, row);
+      logBox.appendChild(row);
     });
     if (atBottom) logBox.scrollTop = logBox.scrollHeight;
   }
 
+  // Each shown entry keeps its row, so the row goes when its entry leaves the
+  // buffer, whatever the filter hides.
+  var logRows = new Map();
+
   function addLog(entry) {
     logEntries.push(entry);
-    if (logEntries.length > MAX_LOG_LINES) logEntries.shift();
-    if (logPause.checked) return;
-    if (logBox.childNodes.length >= MAX_LOG_LINES) logBox.removeChild(logBox.firstChild);
-    if (entry.level < Number(logLevel.value)) return;
+    if (logEntries.length > MAX_LOG_LINES) {
+      var dropped = logEntries.shift();
+      var oldRow = logRows.get(dropped);
+      if (oldRow) { oldRow.remove(); logRows.delete(dropped); }
+    }
+    if (logPause.checked || entry.level < Number(logLevel.value)) return;
     var atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4;
-    logBox.appendChild(logRow(entry));
+    var row = logRow(entry);
+    logRows.set(entry, row);
+    logBox.appendChild(row);
     if (atBottom) logBox.scrollTop = logBox.scrollHeight;
   }
 
@@ -307,6 +319,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
   logPause.addEventListener("change", function () { if (!logPause.checked) renderLogs(); });
   document.getElementById("log-clear").addEventListener("click", function () {
     logEntries = [];
+    logRows.clear();
     logBox.replaceChildren();
   });
 
