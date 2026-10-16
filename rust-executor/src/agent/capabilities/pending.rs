@@ -165,7 +165,8 @@ impl PendingRequests {
     /// or, when all are full, one for no agent, then one for the same target, then (for an
     /// agent below its share) one of the target holding the most unapproved requests, so that
     /// filling the store for a few agents does not refuse every other one. Approved requests
-    /// stay, so `Err` when nothing may go.
+    /// stay, so `Err` when nothing may go. A request for no agent that may take nothing is
+    /// dropped and answered `Ok` while an agent's request would be, so the two look alike.
     pub fn request(
         &self,
         request_id: String,
@@ -214,6 +215,16 @@ impl PendingRequests {
             match evicted {
                 Some(id) => {
                     pending.remove(&id);
+                }
+                // A request for no agent gets the answer a request for an agent with nothing
+                // waiting gets, which takes one from the fullest target while any request is
+                // unapproved: refusing it alone would tell the caller that the email has no
+                // account (D16). It reaches no one, so it is dropped rather than stored, and
+                // redeeming its id answers as for an unapproved one.
+                None if target == RequestTarget::NoAgent
+                    && pending.values().any(|r| r.code.is_none()) =>
+                {
+                    return Ok(());
                 }
                 None => {
                     return Err(
