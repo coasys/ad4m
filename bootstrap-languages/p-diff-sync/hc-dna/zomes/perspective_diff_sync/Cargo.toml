@@ -20,6 +20,7 @@ graphviz-rust = "0.9.6"
 dot-structures = "0.1.0"
 itertools = "0.10.3"
 perspective_diff_sync_integrity = { path = "../perspective_diff_sync_integrity" }
+perspective-diff-algorithm = { path = "../../../../../crates/perspective-diff-algorithm" }
 sha2 = "0.10.5"
 #getrandom = { version = "0.2", features = ["js"] }
 getrandom = { version = "0.3" }

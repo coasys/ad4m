@@ -1,4 +1,15 @@
+//! Holochain-side adapter onto the substrate-agnostic chunked-diff
+//! splitter / aggregator.
+//!
+//! The pure splitter/aggregator logic lives in
+//! `perspective_diff_algorithm::ChunkedDiffs`. This module keeps the
+//! HDK IO side (create-entry / get / DHT round-trips). Wake-23 Step 1
+//! collapsed the integrity ↔ algorithm type conversion: both crates
+//! now share a single struct from `perspective-diff-types`, so this
+//! wrapper just shuffles the IO calls.
+
 use hdk::prelude::*;
+use perspective_diff_algorithm::ChunkedDiffs as AlgoChunkedDiffs;
 use perspective_diff_sync_integrity::{
     EntryTypes, LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference,
 };
@@ -7,81 +18,52 @@ use crate::errors::SocialContextResult;
 use crate::retriever::PerspectiveDiffRetreiver;
 use crate::{Hash, CHUNK_SIZE};
 
+/// Holochain-flavored wrapper around the algorithm crate's `ChunkedDiffs`.
 #[derive(Clone)]
 pub struct ChunkedDiffs {
-    max_changes_per_chunk: u16,
-    pub chunks: Vec<PerspectiveDiff>,
+    inner: AlgoChunkedDiffs,
 }
 
 impl ChunkedDiffs {
     pub fn new(max: u16) -> Self {
         Self {
-            max_changes_per_chunk: max,
-            chunks: vec![PerspectiveDiff::new()],
+            inner: AlgoChunkedDiffs::new(max),
         }
+    }
+
+    pub fn chunks(&self) -> Vec<PerspectiveDiff> {
+        self.inner.chunks.clone()
     }
 
     pub fn add_additions(&mut self, links: Vec<LinkExpression>) {
-        let mut reverse_links = links.into_iter().rev().collect::<Vec<_>>();
-        while reverse_links.len() > 0 {
-            let len = self.chunks.len();
-            let current_chunk = self
-                .chunks
-                .get_mut(len - 1)
-                .expect("must have at least one");
-
-            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into()
-                && reverse_links.len() > 0
-            {
-                current_chunk.additions.push(reverse_links.pop().unwrap());
-            }
-
-            if reverse_links.len() > 0 {
-                self.chunks.push(PerspectiveDiff::new())
-            }
-        }
+        self.inner.add_additions(links)
     }
 
     pub fn add_removals(&mut self, links: Vec<LinkExpression>) {
-        let mut reverse_links = links.into_iter().rev().collect::<Vec<_>>();
-        while reverse_links.len() > 0 {
-            let len = self.chunks.len();
-            let current_chunk = self
-                .chunks
-                .get_mut(len - 1)
-                .expect("must have at least one");
-
-            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into()
-                && reverse_links.len() > 0
-            {
-                current_chunk.removals.push(reverse_links.pop().unwrap());
-            }
-
-            if reverse_links.len() > 0 {
-                self.chunks.push(PerspectiveDiff::new())
-            }
-        }
+        self.inner.add_removals(links)
     }
 
+    /// Write each chunk to the DHT as a `PerspectiveDiffEntryReference`
+    /// with no parents, returning the action hashes.
     pub fn into_entries<Retreiver: PerspectiveDiffRetreiver>(
         self,
     ) -> SocialContextResult<Vec<Hash>> {
         debug!("ChunkedDiffs.into_entries()");
-        self.chunks
+        self.inner
+            .chunks
             .into_iter()
             .map(|chunk_diff| {
                 debug!(
                     "ChunkedDiffs writing chunk of size: {}",
                     chunk_diff.total_diff_number()
                 );
-                let diff_entry = PerspectiveDiffEntryReference::new(
-                    chunk_diff, None, // No parents for chunk entries
-                );
+                let diff_entry = PerspectiveDiffEntryReference::new(chunk_diff, None);
                 Retreiver::create_entry(EntryTypes::PerspectiveDiffEntryReference(diff_entry))
             })
             .collect()
     }
 
+    /// Recover chunks from the DHT by their action hashes.
     pub fn from_entries<Retreiver: PerspectiveDiffRetreiver>(
         hashes: Vec<Hash>,
     ) -> SocialContextResult<Self> {
@@ -94,20 +76,20 @@ impl ChunkedDiffs {
         for (idx, hash) in hashes.iter().enumerate() {
             debug!(
                 "ChunkedDiffs::from_entries: Loading chunk {}/{} (hash: {:?})",
-                idx + 1, hashes.len(), hash
+                idx + 1,
+                hashes.len(),
+                hash
             );
 
-            // NO RETRY LOOP - fail fast if chunks aren't available
-            // Validation dependencies ensure chunks arrive before parent entry validates
-            // If this fails, the caller will retry the entire operation later
-            let diff_entry = match Retreiver::get::<PerspectiveDiffEntryReference>(hash.clone()) {
+            let diff_entry = match Retreiver::get(hash.clone()) {
                 Ok(entry) => {
                     debug!(
                         "ChunkedDiffs::from_entries: ✓ Chunk {}/{} retrieved successfully",
-                        idx + 1, hashes.len()
+                        idx + 1,
+                        hashes.len()
                     );
                     entry
-                },
+                }
                 Err(e) => {
                     warn!(
                         "ChunkedDiffs::from_entries: ✗ FAILED to retrieve chunk {}/{} (hash: {:?}) - Error: {:?}",
@@ -120,8 +102,6 @@ impl ChunkedDiffs {
                 }
             };
 
-            // Use load_diff_from_entry to handle both inline and chunked entries properly
-            // This prevents loading empty diffs if a chunk hash accidentally points to a chunked entry
             debug!(
                 "ChunkedDiffs::from_entries: Processing chunk {}/{} - is_chunked: {}, has inline diff: {}",
                 idx + 1, hashes.len(), diff_entry.is_chunked(), diff_entry.diff.total_diff_number() > 0
@@ -129,7 +109,10 @@ impl ChunkedDiffs {
             let diff = load_diff_from_entry::<Retreiver>(&diff_entry)?;
             debug!(
                 "ChunkedDiffs::from_entries: Chunk {}/{} processed - additions: {}, removals: {}",
-                idx + 1, hashes.len(), diff.additions.len(), diff.removals.len()
+                idx + 1,
+                hashes.len(),
+                diff.additions.len(),
+                diff.removals.len()
             );
             diffs.push(diff);
         }
@@ -140,31 +123,20 @@ impl ChunkedDiffs {
         );
 
         Ok(ChunkedDiffs {
-            max_changes_per_chunk: *CHUNK_SIZE,
-            chunks: diffs,
+            inner: AlgoChunkedDiffs::from_chunks(*CHUNK_SIZE, diffs),
         })
     }
 
     pub fn into_aggregated_diff(self) -> PerspectiveDiff {
-        self.chunks
-            .into_iter()
-            .reduce(|mut accum, mut item| {
-                // No need to clone - we own both accum and item from the iterator
-                accum.additions.append(&mut item.additions);
-                accum.removals.append(&mut item.removals);
-                accum
-            })
-            .unwrap_or(PerspectiveDiff::new())
+        self.inner.into_aggregated_diff()
     }
 }
 
 /// Load the diff from a PerspectiveDiffEntryReference, handling both inline and chunked storage.
-/// If the entry has diff_chunks, loads and aggregates them. Otherwise, returns the inline diff.
 pub fn load_diff_from_entry<Retriever: PerspectiveDiffRetreiver>(
     entry: &PerspectiveDiffEntryReference,
 ) -> SocialContextResult<PerspectiveDiff> {
     if entry.is_chunked() {
-        // Load chunks and aggregate them
         let chunk_hashes = entry.diff_chunks.as_ref().unwrap();
         debug!(
             "load_diff_from_entry: Entry is CHUNKED - loading {} chunk(s) from DHT",
@@ -178,10 +150,10 @@ pub fn load_diff_from_entry<Retriever: PerspectiveDiffRetreiver>(
         );
         Ok(aggregated)
     } else {
-        // Return inline diff
         debug!(
             "load_diff_from_entry: Entry is INLINE - additions: {}, removals: {}",
-            entry.diff.additions.len(), entry.diff.removals.len()
+            entry.diff.additions.len(),
+            entry.diff.removals.len()
         );
         Ok(entry.diff.clone())
     }
@@ -193,89 +165,10 @@ mod tests {
     use crate::retriever::{MockPerspectiveGraph, GLOBAL_MOCKED_GRAPH};
     use crate::utils::create_link_expression;
 
-    #[test]
-    fn can_chunk() {
-        let mut chunks = ChunkedDiffs::new(5);
-
-        chunks.add_additions(vec![
-            create_link_expression("a", "1"),
-            create_link_expression("a", "2"),
-            create_link_expression("a", "3"),
-        ]);
-
-        assert_eq!(chunks.chunks.len(), 1);
-
-        chunks.add_additions(vec![
-            create_link_expression("a", "4"),
-            create_link_expression("a", "5"),
-            create_link_expression("a", "6"),
-        ]);
-
-        assert_eq!(chunks.chunks.len(), 2);
-
-        chunks.add_removals(vec![
-            create_link_expression("a", "1"),
-            create_link_expression("a", "2"),
-            create_link_expression("a", "3"),
-            create_link_expression("a", "4"),
-            create_link_expression("a", "5"),
-            create_link_expression("a", "6"),
-        ]);
-
-        assert_eq!(chunks.chunks.len(), 3);
-    }
-
-    #[test]
-    fn can_aggregate() {
-        let mut chunks = ChunkedDiffs::new(5);
-
-        let _a1 = create_link_expression("a", "1");
-        let _a2 = create_link_expression("a", "2");
-        let _r1 = create_link_expression("r", "1");
-        let _r2 = create_link_expression("r", "2");
-        let _r3 = create_link_expression("r", "3");
-        let _r4 = create_link_expression("r", "4");
-
-        chunks.add_additions(vec![_a1.clone()]);
-        chunks.add_additions(vec![_a2.clone()]);
-        chunks.add_removals(vec![_r1.clone(), _r2.clone(), _r3.clone(), _r4.clone()]);
-
-        assert_eq!(chunks.chunks.len(), 2);
-
-        let diff = chunks.into_aggregated_diff();
-
-        assert_eq!(diff.additions, vec![_a1, _a2]);
-        assert_eq!(diff.removals, vec![_r1, _r2, _r3, _r4]);
-    }
-
-    #[test]
-    fn can_chunk_big_diffs() {
-        let mut chunks = ChunkedDiffs::new(500);
-
-        let mut big_diff_add = Vec::new();
-        for i in 0..5000 {
-            big_diff_add.push(create_link_expression("a", &format!("{}", i)));
-        }
-        chunks.add_additions(big_diff_add);
-
-        let mut big_diff_remove = Vec::new();
-        for i in 0..800 {
-            big_diff_remove.push(create_link_expression("a", &format!("{}", i)));
-        }
-        chunks.add_removals(big_diff_remove);
-
-        let mut big_diff_add = Vec::new();
-        for i in 0..213 {
-            big_diff_add.push(create_link_expression("a", &format!("{}", i)));
-        }
-        chunks.add_additions(big_diff_add);
-
-        assert_eq!(chunks.chunks.len(), 13);
-        for i in 0..12 {
-            assert_eq!(chunks.chunks[i].total_diff_number(), 500);
-        }
-        assert_eq!(chunks.chunks[12].total_diff_number(), 13);
-    }
+    // NOTE: the pure splitter/aggregator unit tests (can_chunk,
+    // can_aggregate, can_chunk_big_diffs) live in the algorithm crate
+    // alongside the `ChunkedDiffs` struct itself. The remaining tests
+    // exercise the HDK IO boundary.
 
     #[test]
     fn can_write_and_read_entries() {
@@ -294,7 +187,7 @@ mod tests {
         }
         chunks.add_additions(big_diff_add);
 
-        assert_eq!(chunks.chunks.len(), 10);
+        assert_eq!(chunks.chunks().len(), 10);
 
         let chunks_clone = chunks.clone();
         let hashes = chunks
@@ -303,17 +196,13 @@ mod tests {
         let read_chunks = ChunkedDiffs::from_entries::<MockPerspectiveGraph>(hashes)
             .expect("from_entries does not error");
 
-        assert_eq!(read_chunks.chunks.len(), 10);
+        assert_eq!(read_chunks.chunks().len(), 10);
         assert_eq!(
-            format!("{:?}", read_chunks.chunks),
-            format!("{:?}", chunks_clone.chunks)
+            format!("{:?}", read_chunks.chunks()),
+            format!("{:?}", chunks_clone.chunks())
         );
     }
 
-    /// Test that demonstrates the bug fix: from_entries can handle chunk hashes that point to chunked entries.
-    /// This simulates the scenario where snapshot.diff_chunks accidentally contains hashes of chunked entries
-    /// instead of regular chunk entries. Before the fix, this would return empty diffs and cause memcmp errors.
-    /// After the fix, it properly recursively loads the nested chunks.
     #[test]
     fn test_nested_chunked_entries_are_handled() {
         use crate::retriever::PerspectiveDiffRetreiver;
@@ -328,7 +217,6 @@ mod tests {
         }
         update();
 
-        // Create a large diff that will be chunked
         let mut chunks = ChunkedDiffs::new(50);
         let mut big_diff = Vec::new();
         for i in 0..150 {
@@ -336,40 +224,31 @@ mod tests {
         }
         chunks.add_additions(big_diff.clone());
 
-        // This creates 3 chunk entries (50 items each)
-        assert_eq!(chunks.chunks.len(), 3);
+        assert_eq!(chunks.chunks().len(), 3);
 
-        // Store the chunk entries and get their hashes
         let chunk_hashes = chunks
             .into_entries::<MockPerspectiveGraph>()
             .expect("into_entries should work");
 
-        // Now create a chunked entry that references these chunks (simulating nested chunking)
         let chunked_entry = PerspectiveDiffEntryReference {
-            diff: PerspectiveDiff::new(), // Empty inline diff
+            diff: PerspectiveDiff::new(),
             parents: None,
             diffs_since_snapshot: 0,
             diff_chunks: Some(chunk_hashes.clone()),
         };
 
-        // Store this chunked entry
         let chunked_entry_hash = MockPerspectiveGraph::create_entry(
             EntryTypes::PerspectiveDiffEntryReference(chunked_entry),
         )
         .expect("create_entry should work");
 
-        // Create a "broken" snapshot that points to the chunked entry instead of direct chunks
-        // This simulates the bug scenario
         let broken_chunk_refs = vec![chunked_entry_hash];
 
-        // Before the fix, this would return empty chunks because it would load the chunked entry's
-        // empty inline diff. After the fix, it should recursively load the nested chunks.
         let loaded_chunks = ChunkedDiffs::from_entries::<MockPerspectiveGraph>(broken_chunk_refs)
             .expect("from_entries should handle nested chunks");
 
         let aggregated = loaded_chunks.into_aggregated_diff();
 
-        // Verify we got all 150 items back, not 0 (which would happen with the bug)
         assert_eq!(
             aggregated.additions.len(),
             150,
@@ -382,7 +261,6 @@ mod tests {
         );
     }
 
-    /// Test that from_entries can handle a mix of inline and chunked entries
     #[test]
     fn test_from_entries_with_mixed_chunked_and_inline() {
         use crate::retriever::PerspectiveDiffRetreiver;
@@ -397,7 +275,6 @@ mod tests {
         }
         update();
 
-        // Create an inline entry (small diff, no chunks)
         let inline_diff = PerspectiveDiff {
             additions: vec![
                 create_link_expression("inline", "1"),
@@ -411,7 +288,6 @@ mod tests {
         )
         .expect("create inline entry");
 
-        // Create a chunked entry (large diff split into chunks)
         let mut chunks = ChunkedDiffs::new(50);
         let mut big_diff = Vec::new();
         for i in 0..100 {
@@ -433,21 +309,18 @@ mod tests {
         )
         .expect("create chunked entry");
 
-        // Load both entries - one inline, one chunked
         let mixed_hashes = vec![inline_hash, chunked_hash];
         let loaded_chunks = ChunkedDiffs::from_entries::<MockPerspectiveGraph>(mixed_hashes)
             .expect("from_entries should handle mixed entries");
 
         let aggregated = loaded_chunks.into_aggregated_diff();
 
-        // Should have data from both inline (2 items) and chunked (100 items) = 102 total
         assert_eq!(
             aggregated.additions.len(),
             102,
             "Should aggregate both inline and chunked entries"
         );
 
-        // Verify inline data is present
         assert!(aggregated
             .additions
             .contains(&create_link_expression("inline", "1")));
@@ -455,7 +328,6 @@ mod tests {
             .additions
             .contains(&create_link_expression("inline", "2")));
 
-        // Verify chunked data is present
         assert!(aggregated
             .additions
             .contains(&create_link_expression("chunked", "item_0")));
@@ -464,10 +336,6 @@ mod tests {
             .contains(&create_link_expression("chunked", "item_99")));
     }
 
-    /// Test that demonstrates the bug scenario: what happens when chunk hashes accidentally
-    /// point to empty chunked entries (the original bug). This test documents the expected
-    /// behavior - with the fix, it should return empty diffs gracefully rather than causing
-    /// memcmp errors.
     #[test]
     fn test_loading_empty_chunked_entry_returns_empty_diff() {
         use crate::retriever::PerspectiveDiffRetreiver;
@@ -482,25 +350,22 @@ mod tests {
         }
         update();
 
-        // Create an empty chunked entry (no diff_chunks)
         let empty_chunked_entry = PerspectiveDiffEntryReference {
-            diff: PerspectiveDiff::new(), // Empty
+            diff: PerspectiveDiff::new(),
             parents: None,
             diffs_since_snapshot: 0,
-            diff_chunks: None, // No chunks
+            diff_chunks: None,
         };
         let empty_hash = MockPerspectiveGraph::create_entry(
             EntryTypes::PerspectiveDiffEntryReference(empty_chunked_entry),
         )
         .expect("create empty entry");
 
-        // Loading this should return empty diffs without errors
         let loaded = ChunkedDiffs::from_entries::<MockPerspectiveGraph>(vec![empty_hash])
             .expect("from_entries should handle empty entries");
 
         let aggregated = loaded.into_aggregated_diff();
 
-        // Should be empty but not crash
         assert_eq!(aggregated.additions.len(), 0);
         assert_eq!(aggregated.removals.len(), 0);
     }
