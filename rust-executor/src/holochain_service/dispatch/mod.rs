@@ -36,6 +36,11 @@ pub(crate) const ZOME_CALL_CONCURRENCY: usize = 32;
 /// keystore answers one at a time anyway, so more would only queue inside it.
 pub(crate) const LOCAL_CONCURRENCY: usize = 4;
 
+/// How long one `InstallApp` may run before the dispatcher drops it. Above the op's own
+/// budget (`APP_INSTALL_TIMEOUT_DURATION`): at 10 s it cut cold installs the op still waited
+/// for, leaving no app, and the language constructor failed.
+pub(crate) const INSTALL_APP_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Runs one request to completion and answers it on the request's oneshot.
 ///
 /// Every implementation must answer every request it is handed (`HolochainServiceRequest::refuse`
@@ -249,12 +254,9 @@ impl RequestDispatch for ConductorDispatch {
         let new_app_ids_sender = &self.new_app_ids;
         match message {
             HolochainServiceRequest::InstallApp(payload, response) => {
-                match timeout(
-                    std::time::Duration::from_secs(10),
-                    service.install_app(payload),
-                )
-                .await
-                .map_err(|_| anyhow!("Timeout error; InstallApp call"))
+                match timeout(INSTALL_APP_TIMEOUT, service.install_app(payload))
+                    .await
+                    .map_err(|_| anyhow!("Timeout error; InstallApp call"))
                 {
                     Ok(result) => {
                         if let Ok(app_info) = &result {
