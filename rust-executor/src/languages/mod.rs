@@ -8,6 +8,8 @@ pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
 #[cfg(test)]
+mod register_dnas_tests;
+#[cfg(test)]
 mod signing_reach_tests;
 pub mod wasm_delegate;
 
