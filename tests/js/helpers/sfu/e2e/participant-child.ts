@@ -13,7 +13,7 @@
 import { Ad4mClient, type Session } from "@coasys/ad4m";
 import { Receiver, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
 import type { Command, JoinOptions, Snapshot, Remote } from "./protocol.js";
-import { installWebRtc } from "./webrtc.js";
+import { installWebRtc, selectedRemoteAddresses } from "./webrtc.js";
 
 installWebRtc();
 
@@ -56,7 +56,7 @@ function receiveAll(): void {
   }
 }
 
-function snapshot(): Snapshot {
+async function snapshot(): Promise<Snapshot> {
   receiveAll();
   const remotes: Record<string, Remote> = {};
   const live = new Set(session?.participants.map((p) => p.agentDid) ?? []);
@@ -91,6 +91,7 @@ function snapshot(): Snapshot {
     errors: state.errors,
     peerStates: state.peerStates,
     recoveries: state.recoveries,
+    selectedRemotes: await selectedRemoteAddresses(),
   };
 }
 
