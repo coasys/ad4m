@@ -304,15 +304,16 @@ impl Holds {
     }
 }
 
+/// One `where` clause: property (or `AND` / `OR` / `NOT`) → condition.
+type Clause = BTreeMap<String, WhereCondition>;
+
 /// Visit every `children` condition of `clause`, at the top and under
 /// `AND`, `OR` and `NOT`, in one fixed order. `answer` sees each and may
 /// return the clause that replaces it: the condition is removed, and the
 /// clause joins the same level's `AND`.
 fn visit_children(
-    clause: &mut BTreeMap<String, WhereCondition>,
-    answer: &mut dyn FnMut(
-        &WhereCondition,
-    ) -> Result<Option<BTreeMap<String, WhereCondition>>, Error>,
+    clause: &mut Clause,
+    answer: &mut dyn FnMut(&WhereCondition) -> Result<Option<Clause>, Error>,
 ) -> Result<(), Error> {
     if let Some(key) = clause.keys().find(|k| k.starts_with("children.")) {
         return Err(anyhow!(
@@ -413,7 +414,7 @@ pub async fn resolve_children_where(
         status: query.link_status.as_ref(),
         include_unverified: query.include_unverified,
     };
-    let mut replacements: Vec<BTreeMap<String, WhereCondition>> = Vec::new();
+    let mut replacements: Vec<Clause> = Vec::new();
     for holds in &asked {
         let (children, negated) = match holds {
             Holds::AnyOf(ids) => (Some(ids.as_slice()), false),
