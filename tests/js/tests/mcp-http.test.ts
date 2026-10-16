@@ -1813,6 +1813,98 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(resultArr.length).to.be.greaterThan(0);
         });
 
+        // Test 11 (#1446): a mention under a message held by a We-style block.
+        // The block holds the message through its own `children` relation
+        // (`we://child`), not has_child; the waker reports it as a parent and
+        // the root above it as an ancestor.
+        it("should report the block holding a mention as its parent, and the chain above it", async function() {
+            this.timeout(30000);
+            await callMcpTool(MCP_BASE_URL, 'add_model', {
+                perspective_id: wakerPerspectiveUuid,
+                class_name: "Block",
+                shacl_json: JSON.stringify({
+                    target_class: "test://Block",
+                    properties: [
+                        { path: "test://block_kind", name: "kind", has_value: "test://block", min_count: 1, max_count: 1 },
+                        {
+                            path: "we://child", name: "blocks", node_kind: "IRI", relation_kind: "hasMany", collection: true,
+                            alias: { Container: "children" },
+                            adder: [{ action: "addLink", source: "this", predicate: "we://child", target: "value", local: false }],
+                            remover: [{ action: "removeLink", source: "this", predicate: "we://child", target: "value", local: false }],
+                        },
+                    ],
+                    constructor_actions: [
+                        { action: "addLink", source: "this", predicate: "test://block_kind", target: "test://block", local: false },
+                    ],
+                    destructor_actions: [],
+                }),
+            }, mcpSessionId);
+            var block = "test://block-" + Date.now();
+            var created = await callMcpTool(MCP_BASE_URL, 'instance_create', {
+                perspective_id: wakerPerspectiveUuid,
+                class_name: "Block",
+                base_uri: block,
+                properties: {},
+                parent: "ad4m://self",
+            }, mcpSessionId);
+            expect(created.created).to.be.true;
+
+            var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: wakerPerspectiveUuid,
+            }, mcpSessionId);
+            var manager: any;
+            var mentions = await new Promise<any[]>(function(resolve, reject) {
+                var timeout = setTimeout(function() {
+                    reject(new Error("no wake for the mention under the block within 20s"));
+                }, 20000);
+                manager = new WakerSubscriptionManager({
+                    perspectiveClient: wakerClient.perspective,
+                    logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
+                    QuerySubscriptionProxy,
+                    debounceMs: 100,
+                    onWake: function(_sub: any, _result: any, found?: any[]) {
+                        var mine = (found ?? []).filter((m: any) => m.parents.includes(block));
+                        if (mine.length) {
+                            clearTimeout(timeout);
+                            resolve(mine);
+                        }
+                    },
+                });
+                manager.subscribe({
+                    id: "test-mention-block-" + Date.now(),
+                    type: "mention" as const,
+                    perspective: wakerPerspectiveUuid,
+                    channel: "",
+                    query: config.query,
+                }).then(async function() {
+                    await sleep(1000);
+                    // The block files the message through its own relation, then a peer writes it.
+                    var message = "flux://block-held-message-" + Date.now();
+                    var added = await callMcpTool(MCP_BASE_URL, 'add_child', {
+                        perspective_id: wakerPerspectiveUuid,
+                        parent: block,
+                        child: message,
+                    }, mcpSessionId);
+                    expect(added.success).to.be.true;
+                    await wakerClient.perspective.addLinkExpression(wakerPerspectiveUuid, {
+                        author: peerDid,
+                        timestamp: new Date().toISOString(),
+                        proof: { key: peerDid + "#key", signature: "not-a-real-signature" },
+                        data: { source: message, predicate: "flux://body", target: Literal.from("Hey @wakerbot, in the block").toUrl() },
+                    } as any);
+                }).catch(reject);
+            });
+            manager.disposeAll();
+            console.log("Mention under a block:", JSON.stringify(mentions));
+            expect(mentions[0].parents).to.deep.equal([block]);
+            expect(mentions[0].ancestors).to.deep.equal(["ad4m://self"]);
+            var children = await callMcpTool(MCP_BASE_URL, 'get_children', {
+                perspective_id: wakerPerspectiveUuid,
+                parent: block,
+            }, mcpSessionId);
+            expect(children.children.map((c: any) => c.id)).to.include(mentions[0].address);
+        });
+
         it("should generate_waker_query for channel children subscription", async function() {
             this.timeout(15000);
 
@@ -1823,8 +1915,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             console.log("Channel waker query:", JSON.stringify(config, null, 2));
 
-            expect(config.query).to.be.a('string');
-            expect(config.query).to.include("ad4m://has_child");
+            // A model query over the built-in Container: the channel's row,
+            // whose children are everything it holds (#1446).
+            expect(config.query_class).to.equal("ad4m://Container");
+            expect(JSON.parse(config.query).where.id).to.equal(wakerChannelAddr);
             expect(config.subscription_id).to.be.a('string');
 
             // Use WakerSubscriptionManager to subscribe and verify it works
@@ -1845,21 +1939,24 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: wakerPerspectiveUuid,
                 channel: wakerChannelAddr,
                 query: config.query,
+                className: config.query_class,
             });
 
-            // The subscription should fire with existing children (from the mention test)
-            await sleep(3000);
-
+            await sleep(1000);
+            // A new child of any class under the channel wakes it.
+            initialWake = null;
+            var child = "test://new-child-" + Date.now();
+            var added = await callMcpTool(MCP_BASE_URL, 'add_child', {
+                perspective_id: wakerPerspectiveUuid,
+                parent: wakerChannelAddr,
+                child,
+            }, mcpSessionId);
+            expect(added.success).to.be.true;
+            for (var i = 0; i < 50 && !initialWake; i++) await sleep(100);
             manager.disposeAll();
-
-            // We added a mention message earlier, so there should be at least 1 child
-            if (initialWake) {
-                var resultArr = Array.isArray(initialWake) ? initialWake : [];
-                console.log("Channel subscription fired with", resultArr.length, "existing children");
-                expect(resultArr.length).to.be.greaterThanOrEqual(1);
-            } else {
-                console.log("Channel subscription did not fire — initial result may have been empty or unchanged");
-            }
+            expect(initialWake, "a new child wakes the children subscription").to.not.equal(null);
+            var row = (initialWake.instances ?? []).find((r: any) => r.id === wakerChannelAddr);
+            expect(row?.children ?? []).to.include(child);
         });
 
         // A subscription the executor refuses used to resolve silently, which
