@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use log::debug;
 use tokio::net::UdpSocket;
-use tokio::time::timeout;
+use tokio::time::timeout_at;
 
 /// Outcome of the SFU reachability probe.
 #[derive(Debug, Clone)]
@@ -212,59 +212,25 @@ fn decode_plain(attr: &[u8]) -> Option<SocketAddr> {
 
 // ── Public API ───────────────────────────────────────────────────
 
-/// Probe the SFU server's public reachability.
+/// Ask `stun_server` (`host:port`) for the address `socket`'s packets
+/// arrive from: its server-reflexive address. Runs on the SFU's own socket,
+/// before the event loop owns it, so the mapping it reports is the SFU's.
 ///
-/// When the bind IP already falls in a private range, returns
-/// [`SfuReachability::Nat`] immediately. Otherwise, with a `stun_server`
-/// (`host:port`) configured, sends it a binding request and compares the
-/// server-reflexive address; without one, sends nothing and reports
-/// [`SfuReachability::Unknown`].
-///
-/// Timeout: 3 s per attempt, up to 3 attempts (one initial + two
-/// retries).  Non-blocking.
-pub async fn check_reachability(bind_ip: IpAddr, stun_server: Option<&str>) -> SfuReachability {
-    // Fast path — private IP can never be publicly reachable.
-    if is_private_ip(bind_ip) {
-        return SfuReachability::Nat {
-            bind_ip,
-            reflexive_ip: bind_ip,
-        };
-    }
-    let Some(stun_server) = stun_server else {
-        return SfuReachability::Unknown {
-            reason: "no STUN server configured (--sfu-stun-server)".to_string(),
-        };
-    };
-
-    // Resolve the STUN server.
-    let stun_addr: SocketAddr = match tokio::net::lookup_host(stun_server).await {
-        Ok(mut addrs) => match addrs.next() {
-            Some(a) => a,
-            None => {
-                return SfuReachability::Unknown {
-                    reason: format!("{} resolved to no addresses", stun_server),
-                }
-            }
-        },
-        Err(e) => {
-            return SfuReachability::Unknown {
-                reason: format!("DNS lookup failed: {}", e),
-            }
-        }
-    };
-
-    // Bind a temporary probe socket on the same interface.
-    let socket = match UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await {
-        Ok(s) => s,
-        Err(e) => {
-            return SfuReachability::Unknown {
-                reason: format!("probe bind failed: {}", e),
-            }
-        }
-    };
+/// Timeout: 3 s per attempt, up to 3 attempts (one initial + two retries).
+pub async fn stun_reflexive(socket: &UdpSocket, stun_server: &str) -> Result<SocketAddr, String> {
+    let v4 = socket.local_addr().map(|l| l.is_ipv4()).unwrap_or(true);
+    let stun_addr = tokio::net::lookup_host(stun_server)
+        .await
+        .map_err(|e| format!("DNS lookup of {} failed: {}", stun_server, e))?
+        .find(|a| a.is_ipv4() == v4)
+        .ok_or_else(|| {
+            format!(
+                "{} resolved to no address of the bind's family",
+                stun_server
+            )
+        })?;
 
     let (pkt, txn) = binding_request();
-
     for attempt in 0..=PROBE_RETRIES {
         if attempt > 0 {
             debug!("STUN reachability retry {}/{}", attempt, PROBE_RETRIES);
@@ -273,41 +239,143 @@ pub async fn check_reachability(bind_ip: IpAddr, stun_server: Option<&str>) -> S
             debug!("STUN send failed: {}", e);
             continue;
         }
-
+        // A fixed port can still get packets from the callers of a previous
+        // run: skip them without ending the attempt.
+        let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
         let mut buf = [0u8; 512];
-        match timeout(PROBE_TIMEOUT, socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, _))) => {
-                if let Some(reflexive) = parse_response(&buf[..n], &txn) {
-                    if reflexive.ip() == bind_ip {
-                        return SfuReachability::Public {
-                            reflexive_addr: reflexive,
-                        };
-                    }
-                    return SfuReachability::Nat {
-                        bind_ip,
-                        reflexive_ip: reflexive.ip(),
-                    };
+        loop {
+            match timeout_at(deadline, socket.recv_from(&mut buf)).await {
+                Ok(Ok((n, from))) if from == stun_addr => match parse_response(&buf[..n], &txn) {
+                    Some(reflexive) => return Ok(reflexive),
+                    None => debug!("STUN response unparseable ({} bytes)", n),
+                },
+                Ok(Ok((_, from))) => {
+                    debug!("ignoring a packet from {} during the STUN probe", from)
                 }
-                debug!("STUN response unparseable ({} bytes)", n);
+                Ok(Err(e)) => {
+                    debug!("STUN recv error: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    debug!("STUN timeout ({}ms)", PROBE_TIMEOUT.as_millis());
+                    break;
+                }
             }
-            Ok(Err(e)) => debug!("STUN recv error: {}", e),
-            Err(_) => debug!("STUN timeout ({}ms)", PROBE_TIMEOUT.as_millis()),
         }
     }
+    Err(format!(
+        "no response from {} after {} attempts",
+        stun_server,
+        PROBE_RETRIES + 1
+    ))
+}
 
-    SfuReachability::Unknown {
-        reason: format!(
-            "no response from {} after {} attempts",
-            stun_server,
-            PROBE_RETRIES + 1
-        ),
+/// Where the SFU's advertised public address comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisedSource {
+    /// `--sfu-public-addr` / `sfu_public_addr`.
+    Flag,
+    /// The STUN probe's reflexive address.
+    Stun,
+}
+
+impl std::fmt::Display for AdvertisedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AdvertisedSource::Flag => "sfu_public_addr",
+            AdvertisedSource::Stun => "STUN",
+        })
     }
+}
+
+/// The address the SFU offers callers as a server-reflexive candidate,
+/// next to its host candidate, when it binds a private address behind NAT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Advertised {
+    pub addr: SocketAddr,
+    pub source: AdvertisedSource,
+}
+
+/// Decide what the SFU advertises and how reachable it is, from its bound
+/// socket, the configuration and the STUN probe (`None`: not run).
+///
+/// - A public bind address is its own public address: nothing is
+///   advertised, and the probe confirms it (`public`) or finds NAT.
+/// - Otherwise the public IP is `public_ip` if set, else the probe's
+///   reflexive IP (when it differs from the bind address and is itself
+///   public). With a `fixed_port` the advertised port is the bound one, which
+///   the router forwards 1:1; with an ephemeral port it is the port the probe
+///   saw, which only a NAT that keeps the mapping open to anyone lets callers
+///   in through.
+/// - Reachability is `public` once the probe reports the advertised IP on a
+///   fixed (forwarded) port. An ephemeral port's address is still advertised,
+///   but stays `nat`: the probe only proves the mapping exists for the STUN
+///   server, and most routers drop a new peer's packets to it.
+pub fn assess(
+    local: SocketAddr,
+    fixed_port: bool,
+    public_ip: Option<IpAddr>,
+    probe: Option<&Result<SocketAddr, String>>,
+) -> (Option<Advertised>, SfuReachability) {
+    let no_stun = || "no STUN server configured (--sfu-stun-server)".to_string();
+    // The bind address already is the host candidate.
+    let public_ip = public_ip.filter(|ip| *ip != local.ip());
+    if public_ip.is_none() && !is_private_ip(local.ip()) {
+        let reachability = match probe {
+            None => SfuReachability::Unknown { reason: no_stun() },
+            Some(Err(e)) => SfuReachability::Unknown { reason: e.clone() },
+            Some(Ok(r)) if r.ip() == local.ip() => SfuReachability::Public { reflexive_addr: *r },
+            Some(Ok(r)) => SfuReachability::Nat {
+                bind_ip: local.ip(),
+                reflexive_ip: r.ip(),
+            },
+        };
+        return (None, reachability);
+    }
+
+    let reflexive = probe.and_then(|p| p.as_ref().ok().copied());
+    let advertised = match (public_ip, reflexive) {
+        (Some(ip), _) => Some(Advertised {
+            addr: SocketAddr::new(ip, local.port()),
+            source: AdvertisedSource::Flag,
+        }),
+        (None, Some(r)) if r.ip() != local.ip() && !is_private_ip(r.ip()) => Some(Advertised {
+            addr: if fixed_port {
+                SocketAddr::new(r.ip(), local.port())
+            } else {
+                r
+            },
+            source: AdvertisedSource::Stun,
+        }),
+        _ => None,
+    };
+
+    let reachability = match (advertised, probe) {
+        (Some(a), Some(Ok(r))) if r.ip() == a.addr.ip() && fixed_port => SfuReachability::Public {
+            reflexive_addr: a.addr,
+        },
+        (Some(a), Some(Err(e))) => SfuReachability::Unknown {
+            reason: format!("advertising {} unconfirmed: {}", a.addr, e),
+        },
+        (Some(a), None) => SfuReachability::Unknown {
+            reason: format!("advertising {} unconfirmed: {}", a.addr, no_stun()),
+        },
+        (_, Some(Ok(r))) => SfuReachability::Nat {
+            bind_ip: local.ip(),
+            reflexive_ip: r.ip(),
+        },
+        _ => SfuReachability::Nat {
+            bind_ip: local.ip(),
+            reflexive_ip: local.ip(),
+        },
+    };
+    (advertised, reachability)
 }
 
 // ── Tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -422,19 +490,155 @@ mod tests {
         assert!(parse_response(&resp, &txn).is_none());
     }
 
-    /// Without a configured server a public address is not probed: no
-    /// packet leaves, and reachability stays unknown.
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// Without a probe a public address stays unknown; a private one is NAT
+    /// with nothing to advertise — as before an operator configures one.
+    #[test]
+    fn without_a_probe_or_override_nothing_is_advertised() {
+        let (adv, reach) = assess(addr("203.0.113.5:40000"), true, None, None);
+        assert!(adv.is_none());
+        assert!(matches!(reach, SfuReachability::Unknown { .. }));
+        let (adv, reach) = assess(addr("192.168.0.10:40000"), true, None, None);
+        assert!(adv.is_none());
+        assert_eq!(reach.label(), "nat");
+    }
+
+    #[test]
+    fn a_public_bind_address_confirmed_by_stun_is_public() {
+        let probe = Ok(addr("203.0.113.5:40000"));
+        let (adv, reach) = assess(addr("203.0.113.5:40000"), true, None, Some(&probe));
+        assert!(adv.is_none(), "the host candidate is already public");
+        assert!(reach.is_public());
+
+        let bind_ip = Some("203.0.113.5".parse().unwrap());
+        let (adv, reach) = assess(addr("203.0.113.5:40000"), true, bind_ip, Some(&probe));
+        assert!(adv.is_none(), "an override equal to the bind IP is no NAT");
+        assert!(reach.is_public());
+    }
+
+    /// Behind NAT with a fixed, forwarded port: STUN finds the public IP and
+    /// the SFU advertises it on the bound port, whatever port the router
+    /// mapped its outbound traffic to.
+    #[test]
+    fn behind_nat_stun_supplies_the_public_ip_on_the_fixed_port() {
+        let probe = Ok(addr("198.51.100.7:61111"));
+        let (adv, reach) = assess(addr("192.168.0.10:40000"), true, None, Some(&probe));
+        assert_eq!(
+            adv,
+            Some(Advertised {
+                addr: addr("198.51.100.7:40000"),
+                source: AdvertisedSource::Stun,
+            })
+        );
+        assert!(reach.is_public());
+    }
+
+    /// With an ephemeral port there is no forward: the mapping STUN saw is
+    /// the only way in, so it is advertised as seen.
+    #[test]
+    fn behind_nat_an_ephemeral_port_advertises_the_mapping_as_seen() {
+        let probe = Ok(addr("198.51.100.7:61111"));
+        let (adv, reach) = assess(addr("192.168.0.10:53000"), false, None, Some(&probe));
+        assert_eq!(adv.unwrap().addr, addr("198.51.100.7:61111"));
+        // The mapping exists for the STUN server; a caller's packets to it
+        // are dropped by most routers, so `auto` must not count on it.
+        assert!(!reach.is_public(), "{reach}");
+        assert_eq!(reach.label(), "nat");
+    }
+
+    #[test]
+    fn the_override_wins_and_stun_confirms_or_contradicts_it() {
+        let local = addr("192.168.0.10:40000");
+        let public: IpAddr = "198.51.100.7".parse().unwrap();
+
+        let (adv, reach) = assess(local, true, Some(public), None);
+        assert_eq!(adv.unwrap().source, AdvertisedSource::Flag);
+        assert_eq!(adv.unwrap().addr, addr("198.51.100.7:40000"));
+        assert!(!reach.is_public(), "unconfirmed without STUN");
+
+        let agrees = Ok(addr("198.51.100.7:40000"));
+        assert!(assess(local, true, Some(public), Some(&agrees))
+            .1
+            .is_public());
+
+        let disagrees = Ok(addr("198.51.100.99:40000"));
+        let (adv, reach) = assess(local, true, Some(public), Some(&disagrees));
+        assert_eq!(adv.unwrap().addr.ip(), public, "the override still wins");
+        assert_eq!(reach.label(), "nat");
+    }
+
+    /// A private reflexive address (double NAT, CGNAT) is no public address.
+    #[test]
+    fn a_private_reflexive_address_is_not_advertised() {
+        let probe = Ok(addr("100.64.3.4:40000"));
+        let (adv, reach) = assess(addr("192.168.0.10:40000"), true, None, Some(&probe));
+        assert!(adv.is_none());
+        assert_eq!(reach.label(), "nat");
+    }
+
+    /// The probe runs on the socket it is given and reports the address a
+    /// STUN server saw it from.
     #[tokio::test]
-    async fn no_stun_server_means_no_probe() {
-        let public: IpAddr = "203.0.113.5".parse().unwrap();
-        assert!(matches!(
-            check_reachability(public, None).await,
-            SfuReachability::Unknown { .. }
-        ));
-        let private: IpAddr = "192.168.0.10".parse().unwrap();
-        assert!(matches!(
-            check_reachability(private, None).await,
-            SfuReachability::Nat { .. }
-        ));
+    async fn stun_reflexive_reads_the_servers_answer() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            let (_, from) = server.recv_from(&mut buf).await.unwrap();
+            let resp = binding_response(&buf[8..20], addr("198.51.100.7:61111"));
+            server.send_to(&resp, from).await.unwrap();
+        });
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let reflexive = stun_reflexive(&socket, &server_addr.to_string())
+            .await
+            .unwrap();
+        assert_eq!(reflexive, addr("198.51.100.7:61111"));
+    }
+
+    /// Packets from anyone but the STUN server (a previous run's callers on a
+    /// fixed port) neither end an attempt nor the probe.
+    #[tokio::test]
+    async fn stun_reflexive_skips_packets_from_others() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let caller = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        for _ in 0..=PROBE_RETRIES {
+            caller
+                .send_to(b"stray", socket.local_addr().unwrap())
+                .await
+                .unwrap();
+        }
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            let (_, from) = server.recv_from(&mut buf).await.unwrap();
+            let resp = binding_response(&buf[8..20], addr("198.51.100.7:61111"));
+            server.send_to(&resp, from).await.unwrap();
+        });
+        let reflexive = stun_reflexive(&socket, &server_addr.to_string())
+            .await
+            .unwrap();
+        assert_eq!(reflexive, addr("198.51.100.7:61111"));
+    }
+
+    /// A Binding Success Response for `txn` with an XOR-MAPPED-ADDRESS.
+    pub(crate) fn binding_response(txn: &[u8], mapped: SocketAddr) -> Vec<u8> {
+        let SocketAddr::V4(v4) = mapped else {
+            panic!("IPv4 only")
+        };
+        let mut resp = vec![0u8; 32];
+        resp[0..2].copy_from_slice(&BINDING_RESPONSE.to_be_bytes());
+        resp[2..4].copy_from_slice(&12u16.to_be_bytes());
+        resp[4..8].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
+        resp[8..20].copy_from_slice(txn);
+        resp[20..22].copy_from_slice(&ATTR_XOR_MAPPED.to_be_bytes());
+        resp[22..24].copy_from_slice(&8u16.to_be_bytes());
+        resp[25] = FAMILY_V4;
+        resp[26..28].copy_from_slice(&(v4.port() ^ (MAGIC_COOKIE >> 16) as u16).to_be_bytes());
+        resp[28..32].copy_from_slice(&(u32::from(*v4.ip()) ^ MAGIC_COOKIE).to_be_bytes());
+        resp
     }
 }

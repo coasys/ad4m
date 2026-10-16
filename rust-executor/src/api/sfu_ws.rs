@@ -423,6 +423,7 @@ async fn sfu_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         reachability: reach.label().to_string(),
         is_public: reach.is_public(),
         bind_address: svc.local_addr().to_string(),
+        advertised_address: svc.advertised_addr().map(|a| a.to_string()),
         detail: reach.to_string(),
     })?)
 }
@@ -664,6 +665,11 @@ pub struct SfuStatus {
     pub is_public: bool,
     /// The SFU server's bound UDP address (`ip:port`).
     pub bind_address: String,
+    /// The public address (`ip:port`) offered next to the bind address
+    /// behind NAT, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub advertised_address: Option<String>,
     /// Human-readable reachability detail.
     pub detail: String,
 }
@@ -772,6 +778,7 @@ mod tests {
             reachability: "nat".into(),
             is_public: false,
             bind_address: "10.0.0.1:9000".into(),
+            advertised_address: None,
             detail: "nat".into(),
         })
         .unwrap();
@@ -779,6 +786,15 @@ mod tests {
             status,
             json!({ "reachability": "nat", "isPublic": false, "bindAddress": "10.0.0.1:9000", "detail": "nat" })
         );
+        let behind_nat = serde_json::to_value(SfuStatus {
+            reachability: "public".into(),
+            is_public: true,
+            bind_address: "10.0.0.1:40000".into(),
+            advertised_address: Some("198.51.100.7:40000".into()),
+            detail: "public".into(),
+        })
+        .unwrap();
+        assert_eq!(behind_nat["advertisedAddress"], "198.51.100.7:40000");
         let cascade = serde_json::to_value(SfuCascadeStatus {
             established_count: 1,
             pipes: vec![SfuCascadePipe {
