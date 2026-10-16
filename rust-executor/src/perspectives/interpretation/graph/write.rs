@@ -281,6 +281,27 @@ pub fn plan_interpretation_ops_resolved(
     // full index.
     let mut out = Vec::with_capacity(placed.len());
     for p in &placed {
+        // Resolve relations for ALL slots (including deduplicated ones) —
+        // AddLinks is additive and the existing-link guard suppresses repeats.
+        let rel_links = resolve_relation_links(
+            p.shape,
+            p.inst,
+            &p.base,
+            &per_class,
+            &existing_ids,
+            existing_links,
+        );
+        let creating = p.emit && !p.is_update;
+        let Some(rel_links) = apply_relation_constraints(
+            p.shape,
+            &p.inst.class,
+            &p.base,
+            creating,
+            rel_links,
+            existing_links,
+        ) else {
+            continue;
+        };
         if p.emit {
             let values = scalar_values(p.shape, p.inst);
             if p.is_update {
@@ -299,16 +320,6 @@ pub fn plan_interpretation_ops_resolved(
                 });
             }
         }
-        // Resolve relations for ALL slots (including deduplicated ones) —
-        // AddLinks is additive and the existing-link guard suppresses repeats.
-        let rel_links = resolve_relation_links(
-            p.shape,
-            p.inst,
-            &p.base,
-            &per_class,
-            &existing_ids,
-            existing_links,
-        );
         if !rel_links.is_empty() {
             out.push(InterpretationOp::AddLinks {
                 source: p.base.clone(),
@@ -415,6 +426,100 @@ fn resolve_relation_links(
         }
     }
     links
+}
+
+/// Hold an instance's resolved relation links to the shape's `sh:minCount` and
+/// `sh:disjoint` declarations, after dedup has had its say.
+///
+/// The model's references are only half the story: dedup maps a `new:` slot
+/// onto an existing record, so two references written differently can resolve
+/// to the same node. That is how an edge record came to join a task to itself —
+/// the model proposed a "new" task carrying an existing task's title, and a
+/// connection from it to that existing task.
+///
+/// - **Creating**: an instance that would break either constraint is not
+///   written at all (`None`). A required relation left empty, or a disjoint
+///   pair sharing a target, means the record cannot say what it exists to say,
+///   and a half-made one is worse than none: it is drawn, counted and deduped
+///   against.
+/// - **Updating** a record the graph already holds (an upsert, or a dedup
+///   match): only the new links that would make a disjoint pair overlap —
+///   with each other or with what is already stored — are dropped. The record
+///   and its scalar update stand.
+fn apply_relation_constraints(
+    shape: &ModelShape,
+    class: &str,
+    base: &str,
+    creating: bool,
+    links: Vec<Link>,
+    existing_links: &ExistingLinks,
+) -> Option<Vec<Link>> {
+    let forward = || {
+        shape
+            .include_relations
+            .iter()
+            .filter(|r| r.direction == "forward")
+    };
+    // What each relation will hold once these links land: the new links plus,
+    // for a record that already exists, the links it carries now.
+    let holds = |predicate: &str, links: &[Link]| -> HashSet<String> {
+        let mut targets: HashSet<String> = links
+            .iter()
+            .filter(|l| l.predicate.as_deref() == Some(predicate))
+            .map(|l| l.target.clone())
+            .collect();
+        if !creating {
+            targets.extend(
+                existing_links
+                    .iter()
+                    .filter(|(s, p, _)| s == base && p == predicate)
+                    .map(|(_, _, t)| t.clone()),
+            );
+        }
+        targets
+    };
+
+    if creating {
+        if let Some(missing) =
+            forward().find(|r| r.required && holds(&r.predicate, &links).is_empty())
+        {
+            log::warn!(
+                "interpretation: not creating '{class}': required relation '{}' resolved to nothing",
+                missing.name
+            );
+            return None;
+        }
+    }
+
+    let mut kept = links;
+    for rel in forward().filter(|r| !r.disjoint.is_empty()) {
+        for other in &rel.disjoint {
+            let ours = holds(&rel.predicate, &kept);
+            let theirs = holds(other, &kept);
+            let shared: Vec<&String> = ours.intersection(&theirs).collect();
+            if shared.is_empty() {
+                continue;
+            }
+            if creating {
+                log::warn!(
+                    "interpretation: not creating '{class}': '{}' and {other} would both point at {shared:?}",
+                    rel.name
+                );
+                return None;
+            }
+            log::warn!(
+                "interpretation: dropping links from {base} that would make '{}' and {other} both point at {shared:?}",
+                rel.name
+            );
+            let shared: HashSet<String> = shared.into_iter().cloned().collect();
+            kept.retain(|l| {
+                let on_pair = l.predicate.as_deref() == Some(rel.predicate.as_str())
+                    || l.predicate.as_deref() == Some(other.as_str());
+                !(on_pair && shared.contains(&l.target))
+            });
+        }
+    }
+    Some(kept)
 }
 
 /// Normalise a relation field value into a list of raw ref strings. A single
@@ -959,6 +1064,185 @@ mod tests {
             vec![existing_base],
             "new:Task:2 (the 2nd Task in emission order = the dup) must resolve \
              to the existing Task's base, not a sibling or fresh mint"
+        );
+    }
+
+    /// A Task the graph holds, as the planner's existing-instance context.
+    fn existing_task(id: &str, title: &str) -> InstanceContext {
+        InstanceContext {
+            id: id.to_string(),
+            title: title.to_string(),
+            class: "Task".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn connection_shapes() -> Vec<ModelShape> {
+        vec![
+            shape_from_sdna("Task", TASK_SDNA),
+            shape_from_sdna("Connection", CONNECTION_SDNA),
+        ]
+    }
+
+    fn creates_of(ops: &[InterpretationOp], class: &str) -> usize {
+        ops.iter()
+            .filter(|op| matches!(op, InterpretationOp::Create { class: c, .. } if c == class))
+            .count()
+    }
+
+    #[test]
+    fn load_shape_reads_disjoint_and_required_relations() {
+        let shape = shape_from_sdna("Connection", CONNECTION_SDNA);
+        let from = shape
+            .include_relations
+            .iter()
+            .find(|r| r.name == "from")
+            .unwrap();
+        assert_eq!(from.disjoint, vec!["ns://to".to_string()]);
+        assert!(from.required);
+    }
+
+    #[test]
+    fn plan_refuses_an_edge_whose_ends_dedup_to_one_record() {
+        // What a live extraction pass wrote: the model proposed a "new" task
+        // carrying an existing task's exact title, and a connection from it to
+        // that existing task. Identity dedup turned the new task into the
+        // existing one, so both ends resolved to the same node.
+        let task = "soa://ext/task/existing";
+        let raw = format!(
+            r#"[
+              {{"class":"Task","title":"Refresh the stream"}},
+              {{"class":"Connection","label":"leads to","from":"new:Task:1","to":"{task}"}}
+            ]"#
+        );
+        let proposed = parse_interpretation_response(&raw).unwrap();
+        let resolved = vec![
+            (
+                proposed[0].clone(),
+                Resolution::DupOfExisting(task.to_string()),
+            ),
+            (proposed[1].clone(), Resolution::Keep),
+        ];
+        let known = existing_map(vec![existing_task(task, "Refresh the stream")]);
+        let ops = plan_interpretation_ops_resolved(
+            &connection_shapes(),
+            &resolved,
+            "soa://ext/",
+            &known,
+            &ExistingLinks::new(),
+        );
+
+        assert_eq!(
+            creates_of(&ops, "Connection"),
+            0,
+            "an edge from a record to itself must not be written; got {ops:#?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, InterpretationOp::AddLinks { links, .. }
+                if links.iter().any(|l| l.predicate.as_deref() == Some("ns://from")))),
+            "and none of its links either; got {ops:#?}"
+        );
+    }
+
+    #[test]
+    fn plan_writes_an_edge_between_two_different_records() {
+        let raw = r#"[
+          {"class":"Task","title":"Fix the video"},
+          {"class":"Task","title":"Refresh the stream"},
+          {"class":"Connection","label":"leads to","from":"new:Task:1","to":"new:Task:2"}
+        ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops_with_context(
+            &connection_shapes(),
+            &proposed,
+            "soa://ext/",
+            &ExistingInstances::new(),
+        );
+
+        let edge = nth_create_base(&ops, 2);
+        let links = addlinks_for(&ops, &edge);
+        assert_eq!(
+            targets_of(links, "ns://from"),
+            vec![nth_create_base(&ops, 0)]
+        );
+        assert_eq!(targets_of(links, "ns://to"), vec![nth_create_base(&ops, 1)]);
+    }
+
+    #[test]
+    fn plan_refuses_an_edge_missing_a_required_end() {
+        // Seen live: a source the model wrote as an object, or as an id it
+        // invented, is dropped as unresolved — and the record was written
+        // anyway, an edge with one end or none.
+        let task = "soa://ext/task/existing";
+        let raw = format!(
+            r#"[
+              {{"class":"Connection","label":"leads to","from":"soa://existing/event/2026-10-16T11:24:34Z","to":"{task}"}}
+            ]"#
+        );
+        let proposed = parse_interpretation_response(&raw).unwrap();
+        let known = existing_map(vec![existing_task(task, "Refresh the stream")]);
+        let ops = plan_interpretation_ops_with_context(
+            &connection_shapes(),
+            &proposed,
+            "soa://ext/",
+            &known,
+        );
+
+        assert!(
+            ops.is_empty(),
+            "nothing to write for a one-ended edge; got {ops:#?}"
+        );
+    }
+
+    #[test]
+    fn plan_drops_an_update_link_that_would_join_an_edge_to_itself() {
+        // An edge the graph holds already, from the task. A later pass naming
+        // the same edge points its other end at that task too: the new link is
+        // dropped and the stored edge left as it was.
+        let task = "soa://ext/task/existing";
+        let edge = "soa://ext/connection/existing";
+        let raw = format!(
+            r#"[
+              {{"class":"Connection","id":"{edge}","label":"follows from","to":"{task}"}}
+            ]"#
+        );
+        let proposed = parse_interpretation_response(&raw).unwrap();
+        let mut known = existing_map(vec![existing_task(task, "Refresh the stream")]);
+        known.insert(
+            edge.to_string(),
+            vec![InstanceContext {
+                id: edge.to_string(),
+                title: String::new(),
+                class: "Connection".to_string(),
+                properties: std::collections::BTreeMap::new(),
+            }],
+        );
+        let mut stored = ExistingLinks::new();
+        stored.insert((edge.to_string(), "ns://from".to_string(), task.to_string()));
+        stored.insert((
+            edge.to_string(),
+            "ns://to".to_string(),
+            "soa://ext/task/other".to_string(),
+        ));
+
+        let resolved = vec![(proposed[0].clone(), Resolution::Keep)];
+        let ops = plan_interpretation_ops_resolved(
+            &connection_shapes(),
+            &resolved,
+            "soa://ext/",
+            &known,
+            &stored,
+        );
+
+        assert!(
+            targets_of(addlinks_for(&ops, edge), "ns://to").is_empty(),
+            "the edge's `to` must not gain the task its `from` names; got {ops:#?}"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, InterpretationOp::Update { base, .. } if base == edge)),
+            "the scalar update still applies; got {ops:#?}"
         );
     }
 
