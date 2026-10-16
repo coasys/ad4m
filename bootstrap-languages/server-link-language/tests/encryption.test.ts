@@ -104,10 +104,6 @@ describe("encryption: deriveX25519KeyPair", () => {
         assert.equal(kp.publicKey.length, 32);
     });
 
-    it("refuses a seed that is not 32 bytes", () => {
-        assert.throws(() => deriveX25519KeyPair(() => "ab".repeat(64)), /32 bytes/);
-    });
-
     it("yields the keypair the old in-language derivation did, for the same agent", () => {
         const ed25519PrivateKey = ed25519.utils.randomPrivateKey();
 

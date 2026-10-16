@@ -60,14 +60,8 @@ export interface StorageAdapter {
  */
 export interface AgentAdapter {
     did(): string;
-    /** `agentSignStringHex`: hex of the agent's Ed25519 signature over sha256(payload). */
     signStringHex(payload: string): string;
-    /**
-     * `agentRoomKeySeed`: hex of the 32-byte secret seed of this agent's
-     * room-key X25519 keypair, computed by the executor. The executor refuses
-     * to sign the message the seed is derived from, so it is never available
-     * through `signStringHex`.
-     */
+    /** `agentRoomKeySeed`: hex of this agent's 32-byte room-key X25519 seed. */
     roomKeySeedHex(): string;
 }
 

@@ -95,7 +95,6 @@ pub struct AppInfo {
 // `fn __agent_sign(payload: &[u8]) -> Vec<u8>` — signs bytes, returns signature
 // `fn __agent_sign_string_hex(payload: &str) -> String` — signs hex string
 // `fn __agent_room_key_seed() -> String` — hex room-key X25519 seed of the acting agent
-//   (every signing import refuses the message that seed is derived from)
 // `fn __agent_create_signed_expression(data: JsValue) -> JsValue` — creates signed expression
 // `fn __agent_signing_key_id() -> String` — returns signing key ID
 // `fn __agent_get_all_local_user_dids() -> Vec<String>` — all local user DIDs
