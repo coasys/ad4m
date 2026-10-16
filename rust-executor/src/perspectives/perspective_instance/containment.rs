@@ -64,6 +64,22 @@ impl PerspectiveInstance {
         )
         .await
     }
+
+    /// A `where` on `children` in a query over `Container` asks about
+    /// everything a row holds, which no one of its readings sees: answer it
+    /// over the edge set before the query filters, counts and pages (see
+    /// `containment::resolve_children_where`).
+    pub(super) async fn resolve_container_children(
+        &self,
+        classes: &QueryClasses,
+        query: &mut ModelQueryInput,
+    ) -> Result<(), AnyError> {
+        if !matches!(classes, QueryClasses::One(name) if name == CONTAINER_URI) {
+            return Ok(());
+        }
+        let edges = self.containment_edges()?;
+        containment::resolve_children_where(&self.sparql_store, query, &edges).await
+    }
 }
 
 #[cfg(test)]

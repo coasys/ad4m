@@ -4001,6 +4001,8 @@ impl PerspectiveInstance {
         if let Some(edges) = &targets.containment {
             super::model_query::containment::set_containment(&mut query_input, edges);
         }
+        self.resolve_container_children(classes, &mut query_input)
+            .await?;
         let named = classes;
         let classes = &targets.classes;
         if classes.names().is_empty() {

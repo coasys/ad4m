@@ -632,3 +632,174 @@ async fn a_containment_walk_follows_every_edge_nearest_first() {
         .unwrap_err();
     assert!(refused.to_string().contains("levels"), "{refused}");
 }
+
+/// The rows and `totalCount` of a query over `classes`.
+async fn query_page(p: &PerspectiveInstance, classes: &str, q: Value) -> (Vec<String>, u64) {
+    let json = p
+        .model_query_classes(&QueryClasses::One(classes.into()), &q.to_string())
+        .await
+        .unwrap_or_else(|e| panic!("query {classes} {q}: {e}"));
+    let result: Value = serde_json::from_str(&json).unwrap();
+    (
+        ordered(result["instances"].as_array().unwrap()),
+        result["totalCount"].as_u64().unwrap(),
+    )
+}
+
+/// A Block `h` holding `a` through `we://child` and `b` through `has_child`
+/// (Lal's #1461 review): a `where` on `children` reads both edges, whichever
+/// class the row is read as. Red on 8d659d6b7, where each reading filtered
+/// its own relation and the rows were merged after: `NOT contains a` kept
+/// `h` through the `has_child` reading, and an `AND` across the two edges
+/// matched neither reading.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_children_filter_reads_every_edge() {
+    let (mut p, ctx) = setup().await;
+    let (a, b) = ("ad4m://a/f", "ad4m://b/f");
+    let h = "ad4m://block/f";
+    create(&mut p, &ctx, "Block", h).await;
+    link(&mut p, &ctx, h, "we://child", a).await;
+    link(&mut p, &ctx, h, HAS_CHILD, b).await;
+    // Holds b only, through has_child, and an empty Block.
+    let g = "ad4m://thread/f";
+    link(&mut p, &ctx, g, HAS_CHILD, b).await;
+    let empty = "ad4m://block/empty-f";
+    create(&mut p, &ctx, "Block", empty).await;
+
+    let rows = |q: Value| {
+        let p = &p;
+        async move { query_page(p, CONTAINER_URI, q).await.0 }
+    };
+    // Negative: h holds a, through we://child.
+    assert!(
+        rows(json!({"where": {"id": h, "NOT": {"children": {"contains": a}}}}))
+            .await
+            .is_empty()
+    );
+    // An AND across the two edges.
+    assert_eq!(
+        rows(json!({"where": {"id": h, "AND": [
+            {"children": {"contains": a}},
+            {"children": {"contains": b}}
+        ]}}))
+        .await,
+        vec![h.to_string()]
+    );
+    // Every spelling of "holds": a bare id, any of a list, `contains`, `eq`.
+    for holds_a in [
+        json!(a),
+        json!([a, "ad4m://nothing"]),
+        json!({"contains": a}),
+        json!({"eq": a}),
+    ] {
+        assert_eq!(
+            rows(json!({"where": {"children": holds_a}})).await,
+            vec![h.to_string()],
+            "{holds_a}"
+        );
+    }
+    let mut holding_b = rows(json!({"where": {"children": b}})).await;
+    holding_b.sort();
+    assert_eq!(holding_b, vec![h.to_string(), g.to_string()]);
+    // `children` beside `id` in one clause, and under `OR`.
+    assert_eq!(
+        rows(json!({"where": {"id": h, "children": a}})).await,
+        vec![h.to_string()]
+    );
+    assert_eq!(
+        rows(json!({"where": {"OR": [{"children": a}, {"id": empty}]}}))
+            .await
+            .len(),
+        2
+    );
+    // `some: {}` and `none: {}`: holds anything, holds nothing.
+    let mut some = rows(json!({"where": {"children": {"some": {}}}})).await;
+    some.sort();
+    assert_eq!(some, vec![h.to_string(), g.to_string()]);
+    assert_eq!(
+        rows(json!({"where": {"children": {"none": {}}}})).await,
+        vec![empty.to_string()]
+    );
+    // Nothing holds c: no row, and NOT holds every row.
+    assert!(rows(json!({"where": {"children": "ad4m://c/f"}}))
+        .await
+        .is_empty());
+    assert_eq!(
+        rows(json!({"where": {"NOT": {"children": "ad4m://c/f"}}}))
+            .await
+            .len(),
+        3
+    );
+}
+
+/// `totalCount` and pages over the same mixed holder: `h` holds `a` through
+/// `we://child` and `b` through `has_child`, `g` holds `b`, Block `k` holds
+/// `c`. "Not holding a" is `g` and `k`, counted and paged as two rows. Red
+/// on 8d659d6b7: `h` passed through its `has_child` reading, so the count
+/// was 3 and a page could hold `h`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_children_filter_counts_and_pages_every_edge() {
+    let (mut p, ctx) = setup().await;
+    let (a, b, c) = ("ad4m://a/p", "ad4m://b/p", "ad4m://c/p");
+    let (h, g, k) = ("ad4m://block/h-p", "ad4m://thread/g-p", "ad4m://block/k-p");
+    create(&mut p, &ctx, "Block", h).await;
+    link(&mut p, &ctx, h, "we://child", a).await;
+    link(&mut p, &ctx, h, HAS_CHILD, b).await;
+    link(&mut p, &ctx, g, HAS_CHILD, b).await;
+    create(&mut p, &ctx, "Block", k).await;
+    link(&mut p, &ctx, k, "we://child", c).await;
+
+    let not_a = |extra: Value| {
+        let mut q = json!({"where": {"NOT": {"children": a}}});
+        q.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        q
+    };
+    let (all, total) = query_page(&p, CONTAINER_URI, not_a(json!({}))).await;
+    assert_eq!(total, 2, "{all:?}");
+    let mut sorted = all.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec![k.to_string(), g.to_string()]);
+    let (first, total) = query_page(&p, CONTAINER_URI, not_a(json!({"limit": 1}))).await;
+    assert_eq!((first.len(), total), (1, 2), "{first:?}");
+    let (second, total) =
+        query_page(&p, CONTAINER_URI, not_a(json!({"limit": 1, "offset": 1}))).await;
+    assert_eq!((second.len(), total), (1, 2), "{second:?}");
+    let mut paged = [first, second].concat();
+    paged.sort();
+    assert_eq!(paged, sorted);
+    // A count-only read agrees.
+    let (none, total) = query_page(&p, CONTAINER_URI, not_a(json!({"limit": 0}))).await;
+    assert_eq!((none.len(), total), (0, 2));
+    // Holding a: h alone, counted once.
+    let (rows, total) = query_page(&p, CONTAINER_URI, json!({"where": {"children": a}})).await;
+    assert_eq!((rows, total), (vec![h.to_string()], 1));
+}
+
+/// The `children` conditions a Container `where` does not answer are refused,
+/// not passed to one reading: a nested clause (children are untyped), a
+/// per-link author, comparisons, a dotted key.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_children_filter_refuses_what_it_cannot_answer() {
+    let (p, _ctx) = setup().await;
+    for clause in [
+        json!({"children": {"some": {"body": "x"}}}),
+        json!({"children": {"none": {"body": "x"}}}),
+        json!({"children": {"author": "did:key:x"}}),
+        json!({"children": {"not": "ad4m://a"}}),
+        json!({"children": {"gt": 1}}),
+        json!({"children": {"contains": ["ad4m://a"]}}),
+        json!({"NOT": {"children": {"some": {"body": "x"}}}}),
+        json!({"children.body": "x"}),
+    ] {
+        let err = p
+            .model_query_classes(
+                &QueryClasses::One(CONTAINER_URI.into()),
+                &json!({ "where": clause }).to_string(),
+            )
+            .await
+            .expect_err(&clause.to_string());
+        assert!(err.to_string().contains("children"), "{clause}: {err}");
+    }
+}

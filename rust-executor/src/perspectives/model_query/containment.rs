@@ -21,8 +21,9 @@
 //! its class as the holder check. A class whose `children` is `has_child` adds
 //! nothing, because (a) covers it. Every containment read is one `UNION`
 //! branch per edge ([`contains_patterns`]): a `parent: { id }` scope, a
-//! `Traverse` with no predicate (a step, or a walk one depth at a time), and
-//! the `children` of a `Container` row ([`fill_container_rows`]).
+//! `Traverse` with no predicate (a step, or a walk one depth at a time), the
+//! `children` of a `Container` row ([`fill_container_rows`]), and a `where`
+//! on them ([`resolve_children_where`]).
 
 use super::builtin_classes::CONTAINER_URI;
 use super::links::{decorated_link, sort_link_rows, LINKS_KEY};
@@ -30,11 +31,11 @@ use super::sparql_builder::{
     link_status_filter, proof_valid_filter, rebase_into_subquery, shape_conformance_patterns,
     LinkGuard,
 };
-use super::types::{IncludeValue, ModelQueryInput, ModelShape, Scope};
+use super::types::{IncludeValue, ModelQueryInput, ModelShape, Scope, WhereCondition};
 use super::utils::{validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::LinkStatus;
-use deno_core::anyhow::Error;
+use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -224,19 +225,211 @@ pub fn watched_predicates(edges: &[ContainmentEdge]) -> Vec<String> {
     for edge in edges {
         out.push(edge.predicate.clone());
         if let Some(h) = &edge.holder {
-            out.extend(
-                h.shape
-                    .properties
-                    .iter()
-                    .filter(|p| p.is_required || p.is_flag || p.initial_value.is_some())
-                    .filter(|p| !p.predicate.is_empty())
-                    .map(|p| p.predicate.clone()),
-            );
+            out.extend(h.recognised_by());
         }
     }
     out.sort();
     out.dedup();
     out
+}
+
+impl Holder {
+    /// The predicates the holder check reads: its class's required
+    /// properties, flags and initial values.
+    pub fn recognised_by(&self) -> impl Iterator<Item = String> + '_ {
+        self.shape
+            .properties
+            .iter()
+            .filter(|p| p.is_required || p.is_flag || p.initial_value.is_some())
+            .filter(|p| !p.predicate.is_empty())
+            .map(|p| p.predicate.clone())
+    }
+}
+
+/// What one `children` condition of a `Container` `where` asks of a row.
+enum Holds {
+    /// It holds one of these.
+    AnyOf(Vec<String>),
+    /// It holds something (`some: {}`), or nothing (`none: {}`).
+    Anything { negated: bool },
+}
+
+impl Holds {
+    /// `condition` on `children`, or the error naming what is answered.
+    fn of(condition: &WhereCondition) -> Result<Holds, Error> {
+        let refused = |what: &str| {
+            anyhow!(
+                "Container: `where` on `children` does not support {what}. A Container's \
+                 children come from several relations (`has_child`, and each class's own \
+                 `children`), and a condition on them is answered over all of them: a node \
+                 id, a list of ids (holds any of them), `{{ eq }}`, `{{ contains: id }}`, \
+                 `{{ some: {{}} }}` (holds something) or `{{ none: {{}} }}` (holds nothing), \
+                 combined with AND, OR and NOT. Children have no class, so a clause on their \
+                 properties has nothing to read: query their class with `parent: {{ id }}` \
+                 instead."
+            )
+        };
+        let ops = match condition.eq_normalized() {
+            WhereCondition::String(id) => return Ok(Holds::AnyOf(vec![id.clone()])),
+            WhereCondition::StringArray(ids) => return Ok(Holds::AnyOf(ids.clone())),
+            WhereCondition::Ops(ops) => ops,
+            _ => return Err(refused("a number, a boolean or a nested clause")),
+        };
+        let named = [
+            (ops.not.is_some(), "`not`"),
+            (ops.between.is_some(), "`between`"),
+            (ops.lt.is_some(), "`lt`"),
+            (ops.lte.is_some(), "`lte`"),
+            (ops.gt.is_some(), "`gt`"),
+            (ops.gte.is_some(), "`gte`"),
+            (ops.contains.is_some(), "`contains`"),
+            (ops.some.is_some(), "`some`"),
+            (ops.none.is_some(), "`none`"),
+            (ops.eq.is_some(), "`eq`"),
+            (ops.author.is_some(), "`author`"),
+        ];
+        let set: Vec<&str> = named.iter().filter(|(s, _)| *s).map(|(_, n)| *n).collect();
+        match (&ops.contains, &ops.some, &ops.none, set.as_slice()) {
+            (Some(Value::String(id)), _, _, [_]) => Ok(Holds::AnyOf(vec![id.clone()])),
+            (_, Some(clause), _, [_]) if clause.is_empty() => {
+                Ok(Holds::Anything { negated: false })
+            }
+            (_, _, Some(clause), [_]) if clause.is_empty() => Ok(Holds::Anything { negated: true }),
+            (_, Some(_), _, [_]) | (_, _, Some(_), [_]) => {
+                Err(refused("`some` / `none` with a clause"))
+            }
+            (Some(_), _, _, [_]) => Err(refused("`contains` with anything but one id")),
+            _ => Err(refused(&set.join(" + "))),
+        }
+    }
+}
+
+/// Visit every `children` condition of `clause`, at the top and under
+/// `AND`, `OR` and `NOT`, in one fixed order. `answer` sees each and may
+/// return the clause that replaces it: the condition is removed, and the
+/// clause joins the same level's `AND`.
+fn visit_children(
+    clause: &mut BTreeMap<String, WhereCondition>,
+    answer: &mut dyn FnMut(
+        &WhereCondition,
+    ) -> Result<Option<BTreeMap<String, WhereCondition>>, Error>,
+) -> Result<(), Error> {
+    if let Some(key) = clause.keys().find(|k| k.starts_with("children.")) {
+        return Err(anyhow!(
+            "Container: `where` key '{key}' reads a property of the children. Children have \
+             no class, so there is nothing to read it from: query their class with \
+             `parent: {{ id }}` instead."
+        ));
+    }
+    for (key, condition) in clause.iter_mut() {
+        match (key.as_str(), condition) {
+            ("AND" | "OR", WhereCondition::SubClauses(branches)) => {
+                for branch in branches {
+                    visit_children(branch, answer)?;
+                }
+            }
+            ("NOT", WhereCondition::SubClause(branch)) => visit_children(branch, answer)?,
+            _ => {}
+        }
+    }
+    let Some(condition) = clause.get("children") else {
+        return Ok(());
+    };
+    let Some(replacement) = answer(condition)? else {
+        return Ok(());
+    };
+    clause.remove("children");
+    match clause
+        .entry("AND".to_string())
+        .or_insert_with(|| WhereCondition::SubClauses(vec![]))
+    {
+        WhereCondition::SubClauses(branches) => branches.push(replacement),
+        _ => return Err(anyhow!("where: `AND` takes a list of clauses")),
+    }
+    Ok(())
+}
+
+/// The nodes that hold one of `children` (anything, when `None`) over
+/// `edges`, under `guard`.
+async fn holders_of(
+    store: &SparqlStore,
+    edges: &[ContainmentEdge],
+    children: Option<&[String]>,
+    guard: LinkGuard<'_>,
+) -> Result<Vec<String>, Error> {
+    if children.is_some_and(|c| c.is_empty()) {
+        return Ok(vec![]);
+    }
+    let sparql = format!(
+        "SELECT DISTINCT ?_holder WHERE {{\n{}\n    {}\n}}",
+        contains_patterns(edges, "?_holder", "?_held", guard),
+        children
+            .map(|c| values_or_str_filter("_held", c))
+            .unwrap_or_default(),
+    );
+    let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| r["_holder"].as_str().map(str::to_string))
+        .collect())
+}
+
+/// Answer the `children` conditions of a `Container` query's `where` over
+/// `edges`, before the query runs.
+///
+/// A `Container` query reads each row through each class it is an instance
+/// of, and each reading's `children` is that class's relation alone: a Block
+/// holding `a` by `we://child` and `b` by `has_child` is two readings, one
+/// with `[a]`, one with `[b]`. Left to the readings, a `where` on `children`
+/// filtered each on its own before [`fill_container_rows`] merged them, so
+/// `NOT contains a` passed through the `has_child` reading, an `AND` over `a`
+/// and `b` passed through neither, and the count and page were cut on those
+/// rows (#1461 review).
+///
+/// So each condition becomes an `id` condition on the nodes that satisfy it
+/// over every edge: "holds one of S" is `id` in the holders of S, "holds
+/// something" `id` in all holders, "holds nothing" `NOT` that. The query then
+/// filters, counts, orders and pages on it like on any `id` condition, in
+/// every reading alike. What has no meaning over untyped children (a clause
+/// on their properties, a per-link author, a comparison, a dotted key) is
+/// refused rather than handed to one reading.
+pub async fn resolve_children_where(
+    store: &SparqlStore,
+    query: &mut ModelQueryInput,
+    edges: &[ContainmentEdge],
+) -> Result<(), Error> {
+    let Some(clause) = query.where_clause.as_mut() else {
+        return Ok(());
+    };
+    let mut asked: Vec<Holds> = Vec::new();
+    visit_children(clause, &mut |condition| {
+        asked.push(Holds::of(condition)?);
+        Ok(None)
+    })?;
+    if asked.is_empty() {
+        return Ok(());
+    }
+    let guard = LinkGuard {
+        status: query.link_status.as_ref(),
+        include_unverified: query.include_unverified,
+    };
+    let mut replacements: Vec<BTreeMap<String, WhereCondition>> = Vec::new();
+    for holds in &asked {
+        let (children, negated) = match holds {
+            Holds::AnyOf(ids) => (Some(ids.as_slice()), false),
+            Holds::Anything { negated } => (None, *negated),
+        };
+        let ids = WhereCondition::StringArray(holders_of(store, edges, children, guard).await?);
+        let in_holders = BTreeMap::from([("id".to_string(), ids)]);
+        replacements.push(if negated {
+            BTreeMap::from([("NOT".to_string(), WhereCondition::SubClause(in_holders))])
+        } else {
+            in_holders
+        });
+    }
+    let mut replacements = replacements.into_iter();
+    let clause = query.where_clause.as_mut().expect("checked above");
+    visit_children(clause, &mut |_| Ok(replacements.next()))
 }
 
 /// The `children` of `Container` rows, and their `__links` rows when asked
