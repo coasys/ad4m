@@ -86,6 +86,20 @@ pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
   ]
 }"#;
 
+/// An edge stored as a record: two required ends, declared `sh:disjoint` so
+/// they must name two different nodes.
+pub(crate) const CONNECTION_SDNA: &str = r#"{
+  "target_class":"ns://Connection",
+  "interpretation_hint":"A connection the speakers made between two things.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://connection"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://connection","min_count":1,"max_count":1},
+    {"path":"ns://label","name":"label","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://label","target":"value"}]},
+    {"path":"ns://from","name":"from","relation_kind":"hasOne","min_count":1,"max_count":1,"disjoint":["ns://to"]},
+    {"path":"ns://to","name":"to","relation_kind":"hasOne","min_count":1,"max_count":1,"disjoint":["ns://from"]}
+  ]
+}"#;
+
 /// Intention class carrying a `basedOn` hasMany relation to Belief — the
 /// relation-typed shape the harness path exercises in `interpretation_harness_e2e`.
 ///
