@@ -1118,6 +1118,12 @@ export interface RelationOptions {
      *   `describe_perspective` lists it as required.
      *
      * Writes through `Ad4mModel` are not checked.
+     *
+     * Forward relations only, stored through `through`: `@HasOne` / `@HasMany`.
+     * A getter-only relation has no stored links, so declaring it required is
+     * refused when the shape is generated — its synthetic path would make
+     * every query of the class come back empty. `@BelongsTo*` ignore it: their
+     * edge is stored on the other node.
      */
     required?: boolean;
 
@@ -1133,10 +1139,12 @@ export interface RelationOptions {
      * existing record, which is how a connection from a record to itself got
      * written. Writes through `Ad4mModel` and MCP are not checked.
      *
-     * Name forward relations only (`@HasOne` / `@HasMany` with a `through`).
-     * A `@BelongsTo*` stores its edge on the other node, so there is nothing
-     * on this one to compare, and naming one is refused when the shape is
-     * generated.
+     * Declare it on, and name, forward relations only (`@HasOne` / `@HasMany`
+     * with a `through`). A `@BelongsTo*` stores its edge on the other node,
+     * and a getter-only relation stores none, so there is nothing on this
+     * record to compare: naming either, or declaring `disjoint` on a
+     * getter-only relation, is refused when the shape is generated.
+     * `@BelongsTo*` ignore the option.
      *
      * @example
      * ```typescript

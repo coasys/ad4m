@@ -335,6 +335,18 @@ export function buildSHACL(
             relShape.maxCount = relMeta.maxCount;
         }
 
+        // Both constraints are about stored links. A getter-only relation (no
+        // `through`) has none: its path is the synthetic `ad4m://getter/...`
+        // above, which nothing writes. `disjoint` there checks nothing, and
+        // `required` is worse — conformance demands a link on that path, so
+        // every query of the class comes back empty.
+        if ((relMeta.required || relMeta.disjoint?.length) && !relMeta.predicate) {
+            throw new Error(
+                `${subjectName}.${relName}: required and disjoint need a stored relation (\`through\`); ` +
+                    `a getter-only relation has no links to check`,
+            );
+        }
+
         if (relMeta.required) {
             relShape.minCount = 1;
         }

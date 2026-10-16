@@ -398,6 +398,26 @@ describe("Decorators → SHACL writer round-trip", () => {
     expect(() => BrokenEdge.generateSHACL()).toThrow(/disjoint names 'nowhere'/);
   });
 
+  it("refuses required or disjoint on a getter-only relation, which stores no links", () => {
+    @Model({ name: "GetterRequired" })
+    class GetterRequired extends Ad4mModel {
+      @HasMany({ getter: "SELECT ?target WHERE { ?target <ns://points> <Base> . }", required: true })
+      derived: string[] = [];
+    }
+
+    @Model({ name: "GetterDisjoint" })
+    class GetterDisjoint extends Ad4mModel {
+      @HasMany({ getter: "SELECT ?target WHERE { ?target <ns://points> <Base> . }", disjoint: "to" })
+      from: string[] = [];
+
+      @HasOne({ through: "ns://to" })
+      to: string = "";
+    }
+
+    expect(() => GetterRequired.generateSHACL()).toThrow(/a getter-only relation has no links to check/);
+    expect(() => GetterDisjoint.generateSHACL()).toThrow(/a getter-only relation has no links to check/);
+  });
+
   it("refuses a disjoint naming a reverse relation, which stores its edge on the other node", () => {
     @Model({ name: "OwnedEdge" })
     class OwnedEdge extends Ad4mModel {
