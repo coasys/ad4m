@@ -5,7 +5,7 @@ use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
-use oxigraph::store::Store;
+use oxigraph::store::{Store, StoreOptions};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
@@ -420,6 +420,24 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
     (source_iri, predicate_iri, target_term)
 }
 
+/// RocksDB `max_open_files` for every persistent store.
+///
+/// Oxigraph's default derives it from the process fd limit (limit minus 48),
+/// so each of an executor's stores (one per perspective) may claim nearly the
+/// whole limit, and raising the limit at startup raises every store's share.
+///
+/// RocksDB gives `max_open_files - 10` to its table cache (open SSTs), split
+/// into 64 shards (`table_cache_numshardbits = 6`, which oxigraph does not
+/// expose) that each keep at least one SST. So 74 keeps at most 64 SSTs open,
+/// and any lower value keeps the same 64.
+pub const SPARQL_STORE_MAX_OPEN_FILES: u32 = 74;
+
+/// Most descriptors one persistent store holds: the 64 SSTs of its table
+/// cache plus its fixed files (LOCK, LOG, MANIFEST, the WAL, and one directory
+/// handle per column family: 17 on a fresh store), with room for an SST being
+/// written by a flush or compaction.
+pub const SPARQL_STORE_FD_BUDGET: usize = 88;
+
 /// Oxigraph-backed SPARQL store for AD4M link data.
 /// Uses RDF 1.2 reifiers: direct triples in default graph with metadata
 /// attached via `rdf:reifies` triple terms.
@@ -490,7 +508,11 @@ impl SparqlStore {
                     )
                 })?;
                 log::info!("Opening persistent SPARQL store at {:?}", store_path);
-                Store::open(&store_path).map_err(|e| {
+                Store::open_with_options(
+                    &store_path,
+                    StoreOptions::default().with_max_open_files(SPARQL_STORE_MAX_OPEN_FILES),
+                )
+                .map_err(|e| {
                     anyhow!(
                         "Failed to open persistent SPARQL store at {:?}: {}",
                         store_path,
@@ -4438,6 +4460,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "sparql_store_fd_tests.rs"]
+mod fd_tests;
 
 #[cfg(test)]
 mod parse_literal_tests {
