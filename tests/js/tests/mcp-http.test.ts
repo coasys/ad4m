@@ -6,7 +6,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, stopChildProcess } from "../utils/utils";
+import { sleep, startExecutor, stopChildProcess, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { EventSource } from 'eventsource';
@@ -191,10 +191,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         console.log(appDataPath);
 
         // Clean up and create test directory
-        if (fs.existsSync(appDataPath)) {
-            fs.rmSync(appDataPath, { recursive: true });
-        }
-        fs.mkdirSync(appDataPath, { recursive: true });
+        resetAppDataPath(appDataPath);
 
         // Start executor with MCP enabled, languageLanguageOnly to skip network bootstrap
         executorProcess = await startExecutor(

@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil, waitForExit, stopChildProcess } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil, resetAppDataPath, waitForExit, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess, execFileSync, spawn } from 'node:child_process';
 import type { EventMap } from "@coasys/ad4m";
@@ -152,9 +152,7 @@ describe("Authentication integration tests", () => {
         before(async () => {
             [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
             registerPorts([apiPort, hcAdminPort, hcAppPort]);
-            if (!fs.existsSync(appDataPath)) {
-                fs.mkdirSync(appDataPath, { recursive: true });
-            }
+            resetAppDataPath(appDataPath);
 
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort);
@@ -239,9 +237,7 @@ describe("Authentication integration tests", () => {
         before(async () => {
             [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
             registerPorts([apiPort, hcAdminPort, hcAppPort]);
-            if (!fs.existsSync(appDataPath)) {
-                fs.mkdirSync(appDataPath, { recursive: true });
-            }
+            resetAppDataPath(appDataPath);
 
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort, false, "123");

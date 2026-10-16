@@ -15,7 +15,7 @@ import fs from 'fs-extra'
 import path from 'path'
 import { Ad4mClient } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
-import { startExecutor, baseUrl, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, quitExecutor, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'child_process';
 import { TestContext } from './test-context';
@@ -56,8 +56,7 @@ describe("Local integration tests (no Holochain)", function () {
         }
         if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
           fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-        if(!fs.existsSync(appDataPath))
-            fs.mkdirSync(appDataPath)
+        resetAppDataPath(appDataPath);
 
         // No HC local services — executor runs with --run-holochain false.
         executorProcess = await startLocalExecutor(appDataPath, apiPort, hcAdminPort, hcAppPort);
