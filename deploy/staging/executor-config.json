@@ -13,5 +13,8 @@
   },
   "log_config": { "rust_executor": "info", "holochain": "warn" },
   "mcp_enabled": true,
-  "mcp_port": 12403
+  "mcp_port": 12403,
+  "sfu_bind_addr": "MARVIN_LAN_IP",
+  "sfu_udp_port": 40000,
+  "sfu_stun_server": "stun.l.google.com:19302"
 }

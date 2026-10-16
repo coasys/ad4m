@@ -206,6 +206,23 @@ pub struct ExecutorConfigFile {
     pub mcp_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_port: Option<u16>,
+    /// IP the SFU's UDP socket binds to, e.g. the machine's LAN address.
+    /// Unset: loopback, or the outbound interface with `localhost: false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_bind_addr: Option<String>,
+    /// UDP port the SFU binds. Unset: a free port, chosen at each start. Set
+    /// it to forward the port from a router; the executor refuses to start
+    /// when it is taken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_udp_port: Option<u16>,
+    /// Public IP the SFU offers callers next to its bind address, when it
+    /// sits behind NAT. Unset: the address the STUN probe reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_public_addr: Option<String>,
+    /// STUN server (`host:port`) the SFU asks once at startup for its public
+    /// address. Unset: no probe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_stun_server: Option<String>,
 }
 
 /// Secret keys someone may paste into the config file, as JSON pointers,
@@ -495,6 +512,10 @@ impl ExecutorConfigFile {
             log_config: self.log_config.clone(),
             enable_mcp: self.mcp_enabled,
             mcp_port: self.mcp_port,
+            sfu_bind_addr: self.sfu_bind_addr.clone(),
+            sfu_udp_port: self.sfu_udp_port,
+            sfu_public_addr: self.sfu_public_addr.clone(),
+            sfu_stun_server: self.sfu_stun_server.clone(),
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -507,6 +528,36 @@ mod tests {
 
     fn parse(json: &str) -> Result<ExecutorConfigFile, ConfigFileError> {
         ExecutorConfigFile::parse(json)
+    }
+
+    /// The SFU keys an operator behind NAT sets reach the executor's config.
+    #[test]
+    fn sfu_keys_reach_the_executor_config() {
+        let file = parse(
+            r#"{"sfu_bind_addr": "192.168.0.10", "sfu_udp_port": 40000,
+                "sfu_public_addr": "198.51.100.7", "sfu_stun_server": "stun.l.google.com:19302"}"#,
+        )
+        .unwrap();
+        let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
+        assert_eq!(config.sfu_bind_addr.as_deref(), Some("192.168.0.10"));
+        assert_eq!(config.sfu_udp_port, Some(40000));
+        assert_eq!(config.sfu_public_addr.as_deref(), Some("198.51.100.7"));
+        assert_eq!(
+            config.sfu_stun_server.as_deref(),
+            Some("stun.l.google.com:19302")
+        );
+
+        let unset = parse("{}")
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(unset.sfu_udp_port, None);
+        assert_eq!(unset.sfu_public_addr, None);
+    }
+
+    #[test]
+    fn an_out_of_range_sfu_udp_port_is_refused() {
+        assert!(parse(r#"{"sfu_udp_port": 70000}"#).is_err());
     }
 
     fn scratch_dir(name: &str) -> PathBuf {

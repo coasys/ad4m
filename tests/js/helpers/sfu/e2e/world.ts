@@ -36,6 +36,8 @@ export interface WorldSpec {
     /** The space's call policy, set by its owner. None stored means the SDK's own default. */
     call?: { mode: SfuMode; maxMeshParticipants?: number };
   }[];
+  /** Added to the executor's environment: `AD4M_<FLAG>` settings. */
+  executorEnv?: Record<string, string>;
 }
 
 export interface WorldUser {
@@ -111,6 +113,8 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
       // Multi-user mode needs an admin credential.
       false, `${spec.id}-admin`, undefined, undefined, undefined, false, undefined, undefined,
       false, // runHolochain
+      true, // sharedStores
+      spec.executorEnv,
     );
     phase("start the executor");
     const admin = new Ad4mClient(baseUrl(port), `${spec.id}-admin`);
@@ -161,7 +165,7 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
         const old = executor!;
         await gracefulShutdown(old, `${spec.id} executor`);
         // The same arguments, without the init that would wipe its data.
-        executor = await spawnExecutor(old.spawnargs.slice(1), port);
+        executor = await spawnExecutor(old.spawnargs.slice(1), port, { env: spec.executorEnv });
         await admin.agent.unlock("passphrase", true);
       },
       stop,
