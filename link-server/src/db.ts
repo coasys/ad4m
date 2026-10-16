@@ -72,7 +72,22 @@ CREATE TABLE IF NOT EXISTS acl_changes (
   at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_acl_changes_room ON acl_changes(room_id, id);
+-- DIDs that proved their key but are not in a room's ACL (allowlist mode): the
+-- operator's queue of joins to approve. A row goes when the DID is admitted.
+CREATE TABLE IF NOT EXISTS join_requests (
+  room_id TEXT NOT NULL,
+  did TEXT NOT NULL,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  attempts INTEGER NOT NULL,
+  -- Per room, rises with every attempt: orders "least recently seen" exactly.
+  touched INTEGER NOT NULL,
+  PRIMARY KEY (room_id, did)
+);
 `;
+
+/** Join requests kept per room; past this the least recently seen go, so a flood of keys cannot grow the table. */
+export const MAX_JOIN_REQUESTS_PER_ROOM = 50;
 
 export interface RoomRow {
   id: string;
@@ -99,6 +114,15 @@ export interface AclChangeRow {
   actor: string;
   source: "operator" | "room-admin";
   at: string;
+}
+
+export interface JoinRequestRow {
+  room_id: string;
+  did: string;
+  first_seen: string;
+  last_seen: string;
+  attempts: number;
+  touched: number;
 }
 
 export interface LinkRow {
@@ -172,7 +196,8 @@ export class LinkServerDB {
     return {
       getRoom: this.raw.prepare("SELECT * FROM rooms WHERE id = ?"),
       listRooms: this.raw.prepare(
-        `SELECT r.*, (SELECT COUNT(*) FROM acl a WHERE a.room_id = r.id) AS member_count
+        `SELECT r.*, (SELECT COUNT(*) FROM acl a WHERE a.room_id = r.id) AS member_count,
+                (SELECT COUNT(*) FROM join_requests j WHERE j.room_id = r.id) AS pending_count
          FROM rooms r ORDER BY r.created_at DESC`
       ),
       createRoom: this.raw.prepare(
@@ -197,6 +222,20 @@ export class LinkServerDB {
       getAclChanges: this.raw.prepare(
         "SELECT * FROM acl_changes WHERE room_id = ? ORDER BY id DESC LIMIT ?"
       ),
+      recordJoinRequest: this.raw.prepare(
+        `INSERT INTO join_requests (room_id, did, first_seen, last_seen, attempts, touched)
+         VALUES (@room, @did, @now, @now, 1, (SELECT COALESCE(MAX(touched), 0) + 1 FROM join_requests WHERE room_id = @room))
+         ON CONFLICT (room_id, did) DO UPDATE SET last_seen = excluded.last_seen, attempts = attempts + 1,
+           touched = excluded.touched`
+      ),
+      trimJoinRequests: this.raw.prepare(
+        `DELETE FROM join_requests WHERE room_id = ? AND did NOT IN
+           (SELECT did FROM join_requests WHERE room_id = ? ORDER BY touched DESC LIMIT ?)`
+      ),
+      getJoinRequests: this.raw.prepare(
+        "SELECT * FROM join_requests WHERE room_id = ? ORDER BY touched DESC"
+      ),
+      deleteJoinRequest: this.raw.prepare("DELETE FROM join_requests WHERE room_id = ? AND did = ?"),
       getLatestAdds: this.raw.prepare(
         `SELECT * FROM acl_changes WHERE id IN
            (SELECT MAX(id) FROM acl_changes WHERE room_id = ? AND action = 'add' GROUP BY did)`
@@ -281,8 +320,8 @@ export class LinkServerDB {
   }
 
   /** Every room with its ACL size, newest first. Operator listing only. */
-  listRooms(): Array<RoomRow & { member_count: number }> {
-    return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
+  listRooms(): Array<RoomRow & { member_count: number; pending_count: number }> {
+    return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number; pending_count: number }>;
   }
 
   createRoom(roomId: string, adminDid: string): RoomRow {
@@ -313,7 +352,23 @@ export class LinkServerDB {
 
   /** Returns false when the DID was already a member. */
   addAcl(roomId: string, did: string): boolean {
+    // An admitted DID no longer waits, whichever path admitted it.
+    this.stmts.deleteJoinRequest.run(roomId, did);
     return this.stmts.addAcl.run(roomId, did, new Date().toISOString()).changes > 0;
+  }
+
+  /** Records (or bumps) a refused join by a DID that proved its key. */
+  recordJoinRequest(roomId: string, did: string): void {
+    const now = new Date().toISOString();
+    this.raw.transaction(() => {
+      this.stmts.recordJoinRequest.run({ room: roomId, did, now });
+      this.stmts.trimJoinRequests.run(roomId, roomId, MAX_JOIN_REQUESTS_PER_ROOM);
+    })();
+  }
+
+  /** Most recently seen first. */
+  getJoinRequests(roomId: string): JoinRequestRow[] {
+    return this.stmts.getJoinRequests.all(roomId) as JoinRequestRow[];
   }
 
   /** Returns false when the DID was not a member. */

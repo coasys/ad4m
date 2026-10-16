@@ -128,10 +128,18 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   const operatorApp = opts.operator
     ? await buildOperatorApp(
-        { db, auth, ws, telepresence, logTail },
+        { db, auth, ws, telepresence, logTail, autoAdmit: opts.autoAdmit ?? false },
         { logger, ...opts.operator }
       )
     : undefined;
+
+  const admission = opts.autoAdmit ? "auto" : "allowlist";
+  app.log.info(
+    { admission },
+    admission === "auto"
+      ? "admission mode: auto (every DID that proves its key joins any room)"
+      : "admission mode: allowlist (a room's first DID is its admin; other DIDs wait until the room admin or the operator adds them)"
+  );
 
   // Periodic sweep of expired JWT sessions from the DB.
   const sweepInterval = setInterval(() => {

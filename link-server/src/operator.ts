@@ -43,6 +43,8 @@ export interface OperatorContext {
   telepresence: TelepresenceManager;
   /** The server's recent log lines; without it, `GET /api/logs` answers 404 (logging is off). */
   logTail?: LogTail;
+  /** Whether the public app admits every authenticated DID (else allowlist: joins wait for approval). */
+  autoAdmit: boolean;
 }
 
 /** Live log streams one listener serves at once; each holds a socket open. */
@@ -171,6 +173,12 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
       addedBy: addedBy.get(a.did) ?? null,
     })),
     history: history.map((c) => ({ did: c.did, action: c.action, actor: c.actor, source: c.source, at: c.at })),
+    pending: ctx.db.getJoinRequests(roomId).map((j) => ({
+      did: j.did,
+      firstSeen: j.first_seen,
+      lastSeen: j.last_seen,
+      attempts: j.attempts,
+    })),
   };
 }
 
@@ -236,7 +244,11 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       }
     });
 
-    api.get("/whoami", async (request) => ({ operator: operatorOf(request.headers), instance: opts.label ?? null }));
+    api.get("/whoami", async (request) => ({
+      operator: operatorOf(request.headers),
+      instance: opts.label ?? null,
+      admission: ctx.autoAdmit ? "auto" : "allowlist",
+    }));
 
     // Live logs as Server-Sent Events: the buffered lines first, then each new
     // one. A reconnect sends Last-Event-ID and gets only what it missed.
@@ -292,6 +304,7 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
         e2e: !!r.e2e_enabled,
         createdAt: r.created_at,
         memberCount: r.member_count,
+        pendingCount: r.pending_count,
       })),
     }));
 

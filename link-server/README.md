@@ -73,6 +73,25 @@ Control the server through environment variables or CLI flags:
 
 No room creation step needed. When the first agent authenticates against a room ID, the server creates that room and promotes the agent to **admin**. Every subsequent agent must pass the room's access control before they can read or write.
 
+### Admission mode
+
+The server runs in one of two modes. It logs the mode at startup (`admission mode: …`), and the operator page shows it at the top.
+
+| Mode | Set by | A DID that is not in the room's ACL |
+|---|---|---|
+| **allowlist** (default) | nothing; `AUTO_ADMIT` unset or false | is refused (`403`) and waits for approval. The language keeps retrying, so the person sees "joining space" until someone admits them. |
+| **auto** | `AUTO_ADMIT=true` or `--auto-admit` | is added to the ACL when it proves its key, and joins at once. |
+
+In both modes, the first DID to authenticate against a new room creates it and becomes its admin.
+
+### Approving DIDs (allowlist mode)
+
+1. A person who opens the space signs in to the room once. The server records the refused join: DID, first and last attempt, attempt count.
+2. The operator page lists it under **Waiting** in the room list, and under **Waiting for approval** in the room's detail. Check the DID with the person (their app shows it), then press **Admit**. The person's next retry joins.
+3. Without the operator page, the room admin admits the DID through `/acl` (below), or the operator calls `POST /api/rooms/:roomId/acl` on the operator listener.
+
+A request goes when its DID is admitted. Each room keeps at most the 50 most recent requests.
+
 ### Managing access
 
 Without `AUTO_ADMIT`, only the admin can access the room. The admin adds or removes members through the `/acl` endpoint:
@@ -248,11 +267,12 @@ Operator listener (only with `--operator-port`; all `/api/*` need the operator t
 
 ```
 GET  /                          admission page (+ /admin.js, /admin.css; CSP default-src 'self', no inline styles or scripts)
-GET  /api/whoami                -> { operator, instance }   (X-Forwarded-User, --operator-label)
-GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount }] }
+GET  /api/whoami                -> { operator, instance, admission: "allowlist" | "auto" }   (X-Forwarded-User, --operator-label)
+GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount, pendingCount }] }
 GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt,
                                      members: [{ did, addedAt, hasX25519Key, online, addedBy: { actor, source, at } | null }],
-                                     history: [{ did, action, actor, source, at }] }   (newest first, last 100)
+                                     history: [{ did, action, actor, source, at }],   (newest first, last 100)
+                                     pending: [{ did, firstSeen, lastSeen, attempts }] }   (refused joins, newest first)
 POST /api/rooms/:roomId/acl     { action: "add"|"remove", did } -> same as GET /api/rooms/:roomId
 GET  /api/logs                  -> text/event-stream; each event: id = <boot>-<sequence number>,
                                      data = { seq, level, time, msg, ...pino fields }   (Last-Event-ID resumes;

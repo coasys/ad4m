@@ -71,6 +71,7 @@ There's no dedicated "enable E2E" endpoint. **The first call to `POST /rooms/:ro
 - Every `/api` call carries the signed-in login (`X-Forwarded-User`, set by the proxy; trusted only because the listener is loopback). Every ACL change is stored in `acl_changes` with that login. The `/acl` route stores the admin DID.
 - Every POST carries an allowed `Origin` (or `Referer`), as a CSRF guard for the cookie sign-in.
 - Removal goes through `removeMember()` in `routes.ts` (ACL row, sessions and sockets together). The page script builds DOM with `textContent` only, because room ids and DIDs are client-chosen strings (log lines carry them too).
+- Admission (`tests/admission.test.ts`): allowlist unless `autoAdmit`. A refused join whose signature checked out is upserted into `join_requests` (per room, capped at `MAX_JOIN_REQUESTS_PER_ROOM`, ordered by the per-room `touched` counter, not by timestamp: inserts in one millisecond tie). `addAcl` deletes the request, whichever path admits. An unverified signature must never create a row (anyone can mint DIDs). The mode is logged at startup and returned by `/api/whoami`.
 - `GET /api/logs` (`tests/log-stream.test.ts`) streams `LogTail` as Server-Sent Events and hijacks the reply, so the `onSend` hook does not run for it: it sets its own headers. Its open streams are ended in a `preClose` hook, or `close()` would wait on them. Both apps log through one tee destination (`server.ts`); tests pass `logger: true` with a `logDestination` sink to keep stdout quiet.
 
 ## Known gotchas

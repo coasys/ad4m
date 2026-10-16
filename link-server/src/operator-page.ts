@@ -16,18 +16,24 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
 <body>
 <h1>Link server admission <span id="instance" class="tag instance"></span></h1>
 <div class="muted">Signed in as <span id="who">?</span></div>
+<p id="admission" class="note" hidden></p>
 <p class="note">A room is a neighbourhood (the server link language's UID). Its first agent is the room admin.
 An added DID can sync once it reconnects. It can read and write encrypted links only after the
 room admin's executor has been online and granted it the room keys.</p>
 <div id="error" role="alert"></div>
 <h2>Rooms</h2>
-<table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>E2E</th><th>Created</th></tr></thead><tbody></tbody></table>
+<table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>Waiting</th><th>E2E</th><th>Created</th></tr></thead><tbody></tbody></table>
 <section id="detail" hidden>
   <h2>Room <span id="detail-id" class="mono"></span></h2>
   <form id="add-form">
     <input id="add-did" type="text" placeholder="did:key:z6Mk..." autocomplete="off" spellcheck="false" required>
     <button type="submit">Admit DID</button>
   </form>
+  <section id="pending-section" hidden>
+    <h2>Waiting for approval</h2>
+    <p class="muted">These DIDs proved their key and asked to join. Check each one with the person before you admit it.</p>
+    <table id="pending"><thead><tr><th>DID</th><th>First asked</th><th>Last asked</th><th>Attempts</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
   <table id="members"><thead><tr><th>Member</th><th>Added</th><th>Added by</th><th>Keys</th><th></th></tr></thead><tbody></tbody></table>
   <h2>History</h2>
   <table id="history"><thead><tr><th>When</th><th>Change</th><th>DID</th><th>By</th></tr></thead><tbody></tbody></table>
@@ -79,6 +85,7 @@ button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
 .log-line.l50 .lvl, .log-line.l60 .lvl { color: #ff6961; }
 .log-line .fields { color: #8e8e93; }
 .tag.live { background: #c9f0d1; }
+td.waiting { font-weight: 600; color: #b25000; }
 .tag.down { background: #ffd1d1; }
 `;
 
@@ -118,7 +125,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
       if (data.rooms.length === 0) {
         var empty = el("tr");
         var cell = el("td", "No rooms yet.", "muted");
-        cell.colSpan = 5;
+        cell.colSpan = 6;
         empty.appendChild(cell);
         tbody.appendChild(empty);
       }
@@ -127,6 +134,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
         row.appendChild(el("td", room.id, "mono"));
         row.appendChild(el("td", room.admin, "mono"));
         row.appendChild(el("td", room.memberCount));
+        row.appendChild(el("td", room.pendingCount ? String(room.pendingCount) : "", room.pendingCount ? "waiting" : null));
         row.appendChild(el("td", room.e2e ? "yes" : "no"));
         row.appendChild(el("td", room.createdAt.slice(0, 16).replace("T", " ")));
         row.addEventListener("click", function () { selectRoom(room.id); });
@@ -162,7 +170,28 @@ export const OPERATOR_PAGE_JS = `"use strict";
       row.appendChild(action);
       tbody.appendChild(row);
     });
+    renderPending(room);
     renderHistory(room);
+  }
+
+  function renderPending(room) {
+    var pending = room.pending || [];
+    document.getElementById("pending-section").hidden = pending.length === 0;
+    var tbody = document.querySelector("#pending tbody");
+    tbody.replaceChildren();
+    pending.forEach(function (request) {
+      var row = el("tr");
+      row.appendChild(el("td", request.did, "mono"));
+      row.appendChild(el("td", request.firstSeen.slice(0, 16).replace("T", " ")));
+      row.appendChild(el("td", request.lastSeen.slice(0, 16).replace("T", " ")));
+      row.appendChild(el("td", String(request.attempts)));
+      var action = el("td");
+      var admit = el("button", "Admit");
+      admit.addEventListener("click", function () { changeAcl("add", request.did); });
+      action.appendChild(admit);
+      row.appendChild(action);
+      tbody.appendChild(row);
+    });
   }
 
   function actorLabel(change) {
@@ -283,6 +312,11 @@ export const OPERATOR_PAGE_JS = `"use strict";
 
   api("/whoami").then(function (data) {
     document.getElementById("who").textContent = data.operator || "(no sign-in header)";
+    var admission = document.getElementById("admission");
+    admission.textContent = data.admission === "auto"
+      ? "Admission: auto. Every DID that proves its key joins any room; nothing waits for approval."
+      : "Admission: allowlist. A room's first DID is its admin. Other DIDs wait until the room admin or you admit them: they show under “Waiting”.";
+    admission.hidden = false;
     if (data.instance) {
       document.getElementById("instance").textContent = data.instance;
       document.title = "Link server admission: " + data.instance;
