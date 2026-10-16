@@ -13,6 +13,7 @@
 
 import { execSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { randomBytes } from "node:crypto";
 
 const DEFAULT_IFACE = process.env.WT_NET_IFACE ?? "lo";
 /** How tc gets root: `sudo -n` unless overridden (empty when already root, as in a test namespace). */
@@ -165,8 +166,6 @@ export async function leaseNet(
   };
 }
 
-const PARTITION_CHAIN = "WT_PARTITION";
-
 function iptablesAvailable(): boolean {
   if (process.platform !== "linux") return false;
   try {
@@ -182,59 +181,77 @@ export function iptablesPartitionAvailable(): boolean {
   return iptablesAvailable();
 }
 
+/** A partition installed by {@link dropTcpPorts}. */
+export interface TcpPartition {
+  /** The iptables chain holding this partition's rules. */
+  chain: string;
+  ports: number[];
+  /** Remove the chain and its rules; safe to call more than once. */
+  clear(): void;
+}
+
 /**
- * Install (or reset) an iptables chain that drops loopback TCP
- * traffic to the given ports.  Used by F4 to simulate a cluster
- * partition without going through any admin RPC.
+ * Install an iptables chain that drops loopback TCP traffic to the
+ * given ports.  Used by F4 to simulate a cluster partition without
+ * going through any admin RPC.
+ *
+ * Each call makes its own chain (`WT_P_<random>`) holding one rule per
+ * port, so a concurrent run on the same host, with its own ports and
+ * its own chain, is neither partitioned nor un-partitioned by this one.
+ * The returned handle's `clear()` unhooks and deletes exactly that
+ * chain; it also runs on process exit, SIGINT and SIGTERM, so a test
+ * that dies mid-partition does not leave a DROP on a port the OS may
+ * hand to the next run.  Returns null when iptables is unavailable or
+ * installing failed (any part already installed is removed).
  */
-export function dropTcpPorts(ports: number[]): boolean {
-  if (!iptablesAvailable()) return false;
-  // Wipe + recreate the chain so repeated calls are idempotent.
+export function dropTcpPorts(ports: number[]): TcpPartition | null {
+  if (!iptablesAvailable()) return null;
+  const chain = `WT_P_${randomBytes(4).toString("hex")}`;
+  let cleared = false;
+  const onSignal = (signal: NodeJS.Signals) => {
+    clear();
+    // Re-raise when nobody else handles it, so the signal still ends the process.
+    if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+  };
+  const clear = () => {
+    if (cleared) return;
+    cleared = true;
+    process.off("exit", clear);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    try {
+      execSync(`sudo -n iptables -D INPUT -j ${chain}`, { stdio: "pipe" });
+    } catch {
+      /* not attached */
+    }
+    try {
+      execSync(`sudo -n iptables -F ${chain}`, { stdio: "pipe" });
+    } catch {
+      /* chain may not exist */
+    }
+    try {
+      execSync(`sudo -n iptables -X ${chain}`, { stdio: "pipe" });
+    } catch {
+      /* not present */
+    }
+  };
+  process.once("exit", clear);
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
-    execSync(`sudo -n iptables -D INPUT -j ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {
-    /* not yet attached */
-  }
-  try {
-    execSync(`sudo -n iptables -F ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {
-    /* chain may not exist */
-  }
-  try {
-    execSync(`sudo -n iptables -X ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {
-    /* not present */
-  }
-  if (ports.length === 0) return true;
-  try {
-    execSync(`sudo -n iptables -N ${PARTITION_CHAIN}`, { stdio: "pipe" });
+    execSync(`sudo -n iptables -N ${chain}`, { stdio: "pipe" });
     for (const port of ports) {
       execSync(
-        `sudo -n iptables -A ${PARTITION_CHAIN} -p tcp --dport ${port} -j DROP`,
+        `sudo -n iptables -A ${chain} -i lo -p tcp --dport ${port} -j DROP`,
         { stdio: "pipe" },
       );
     }
-    execSync(`sudo -n iptables -I INPUT -j ${PARTITION_CHAIN}`, { stdio: "pipe" });
-    return true;
+    execSync(`sudo -n iptables -I INPUT -j ${chain}`, { stdio: "pipe" });
+    return { chain, ports: [...ports], clear };
   } catch {
-    return false;
+    clear();
+    return null;
   }
-}
-
-/** Clear the partition chain installed by `dropTcpPorts`. */
-export function clearPartition(): void {
-  if (!iptablesAvailable()) return;
-  try {
-    execSync(`sudo -n iptables -D INPUT -j ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {
-    /* not attached */
-  }
-  try {
-    execSync(`sudo -n iptables -F ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {}
-  try {
-    execSync(`sudo -n iptables -X ${PARTITION_CHAIN}`, { stdio: "pipe" });
-  } catch {}
 }
 
 /** Whether `sudo -n iptables` can change the nat table. */
