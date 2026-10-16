@@ -102,13 +102,16 @@ pub(crate) const CONNECTION_SDNA: &str = r#"{
 
 /// A node class with a required relation — what a sibling's `new:` ref points
 /// at, unlike an edge record. Used to show refusal cascading through refs.
+/// `seeAlso` is optional, so a link through it survives resolution on a record
+/// that is refused for its missing `about`.
 pub(crate) const NOTE_SDNA: &str = r#"{
   "target_class":"ns://Note",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://note"}],
   "properties":[
     {"path":"ns://type","name":"type","has_value":"ns://note","min_count":1,"max_count":1},
     {"path":"ns://text","name":"text","identity":true,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://text","target":"value"}]},
-    {"path":"ns://about","name":"about","relation_kind":"hasOne","min_count":1,"max_count":1}
+    {"path":"ns://about","name":"about","relation_kind":"hasOne","min_count":1,"max_count":1},
+    {"path":"ns://seeAlso","name":"seeAlso","relation_kind":"hasMany"}
   ]
 }"#;
 

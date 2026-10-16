@@ -1474,10 +1474,13 @@ mod tests {
             properties: std::collections::BTreeMap::new(),
         }]);
         let run = |second_about: &str| {
+            // The duplicate also points `seeAlso` at a real record, so it
+            // carries a link that survives resolution whatever happens to
+            // the note's `about`.
             let raw = format!(
                 r#"[
                   {{"class":"Note","text":"a","about":"soa://invented/x"}},
-                  {{"class":"Note","text":"a","about":"{second_about}"}}
+                  {{"class":"Note","text":"a","about":"{second_about}","seeAlso":"{thing}"}}
                 ]"#
             );
             let proposed = parse_interpretation_response(&raw).unwrap();
@@ -1495,8 +1498,9 @@ mod tests {
             enforce_relation_constraints(ops, &shapes, &known, &ExistingLinks::new())
         };
 
-        // Neither proposal gives the note an `about`: nothing is written,
-        // links on its base included.
+        // Neither proposal gives the note an `about`: nothing is written —
+        // including the duplicate's `seeAlso`, which resolved but sits on the
+        // refused base.
         let ops = run("soa://invented/y");
         assert!(ops.is_empty(), "nothing on the refused base; got {ops:#?}");
 
