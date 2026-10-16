@@ -173,62 +173,10 @@ globalThis.__handleHolochainSignal__ = async function(signal) {
 };
 
 /**
- * Waits between install attempts in registerDNAs. An install that fails right after an
- * executor start (the conductor is still compiling wasm and starting cells while every
- * language loads at once, so the install times out before the app exists) usually works a
- * few seconds later. Without these retries the language constructor failed and the
- * language stayed unloaded until the next restart.
- */
-const REGISTER_DNA_RETRY_DELAYS_MS = [2000, 5000, 10000];
-
-/**
- * installApp, retried after each of `retryDelaysMs`. Retrying is safe: installApp on an
- * app id that is already installed does not install again, it enables the app and returns
- * its info, which also recovers an app a cancelled install left disabled. After the last
- * attempt fails, falls back to getAppInfo (the app may be installed under this exact id
- * by a concurrent install of the same language) and throws only if that finds nothing.
- */
-async function installWithRetry(appId, installPayload, retryDelaysMs) {
-    let lastError;
-    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
-        if (attempt > 0) {
-            const delay = retryDelaysMs[attempt - 1];
-            console.warn(`[registerDNAs] Install of ${appId} failed (${errorText(lastError)}); retrying in ${delay} ms (attempt ${attempt + 1} of ${retryDelaysMs.length + 1})`);
-            await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-        try {
-            // installApp recovers internally when the same DNA+agent cell is
-            // already installed under a different app_id (CellAlreadyExists,
-            // e.g. published/templated languages sharing a network seed) by
-            // returning the owning app's info instead.
-            return await HOLOCHAIN_SERVICE.installApp(installPayload);
-        } catch (e) {
-            lastError = e;
-        }
-    }
-    let appInfo = null;
-    try {
-        appInfo = await HOLOCHAIN_SERVICE.getAppInfo(appId);
-    } catch (e) {
-        console.warn(`[registerDNAs] getAppInfo(${appId}) failed after the install failed: ${errorText(e)}`);
-    }
-    if (!appInfo) {
-        throw new Error(`[registerDNAs] Conductor unavailable or install failed for ${appId} after ${retryDelaysMs.length + 1} attempts: ${errorText(lastError)}`);
-    }
-    return appInfo;
-}
-
-function errorText(e) {
-    return (e && e.message) || String(e);
-}
-
-/**
  * Creates a Holochain delegate object for a given language address.
  * Provides registerDNAs, call, and callAsync methods.
- * `options.retryDelaysMs` overrides REGISTER_DNA_RETRY_DELAYS_MS (the tests use short ones).
  */
-function createHolochainDelegate(languageAddress, options = {}) {
-    const retryDelaysMs = options.retryDelaysMs || REGISTER_DNA_RETRY_DELAYS_MS;
+function createHolochainDelegate(languageAddress) {
     // dna.nick → actual installed_app_id. Usually `${languageAddress}-${nick}`,
     // but when this language's DNA+agent cell was already installed under another
     // app (e.g. a language published/templated without changing the network seed),
@@ -278,7 +226,21 @@ function createHolochainDelegate(languageAddress, options = {}) {
                     network_seed: dna.network_seed || undefined,
                     source: source,
                 };
-                const appInfo = await installWithRetry(appId, installPayload, retryDelaysMs);
+                let appInfo;
+                try {
+                    // installApp recovers internally when the same DNA+agent cell is
+                    // already installed under a different app_id (CellAlreadyExists,
+                    // e.g. published/templated languages sharing a network seed) by
+                    // returning the owning app's info instead.
+                    appInfo = await HOLOCHAIN_SERVICE.installApp(installPayload);
+                } catch (e) {
+                    // The app may already be installed under this exact app_id
+                    // (e.g. a concurrent install of the same language)
+                    appInfo = await HOLOCHAIN_SERVICE.getAppInfo(appId);
+                    if (!appInfo) {
+                        throw new Error(`[registerDNAs] Conductor unavailable or install failed for ${appId}: ${e.message || e}`);
+                    }
+                }
                 if (appInfo.installed_app_id && appInfo.installed_app_id !== appId) {
                     console.warn(`[registerDNAs] ${appId} reuses existing app ${appInfo.installed_app_id} (same DNA+agent cell)`);
                 }

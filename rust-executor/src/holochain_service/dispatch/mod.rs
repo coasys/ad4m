@@ -36,15 +36,9 @@ pub(crate) const ZOME_CALL_CONCURRENCY: usize = 32;
 /// keystore answers one at a time anyway, so more would only queue inside it.
 pub(crate) const LOCAL_CONCURRENCY: usize = 4;
 
-/// How long one `InstallApp` may run before the dispatcher drops it. Dropping cancels
-/// `HolochainService::install_app` wherever it is: before the app is persisted (the caller's
-/// `getAppInfo` then finds nothing and the language constructor fails) or between install
-/// and enable (the app stays disabled). It used to be 10 s, shorter than a cold install
-/// (genesis and wasm compilation on a fresh executor, then up to 10 s per cell waiting for
-/// the network join) and shorter than the op's own budget, so installs a caller still
-/// waited for were cut halfway. Kept above the op's budget
-/// (`APP_INSTALL_TIMEOUT_DURATION`), so this only ends installs that are really stuck,
-/// which would otherwise hold the lifecycle lock forever.
+/// How long one `InstallApp` may run before the dispatcher drops it. Above the op's own
+/// budget (`APP_INSTALL_TIMEOUT_DURATION`): at 10 s it cut cold installs the op still waited
+/// for, leaving no app, and the language constructor failed.
 pub(crate) const INSTALL_APP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Runs one request to completion and answers it on the request's oneshot.
