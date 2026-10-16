@@ -30,6 +30,9 @@ export interface SyncDeps {
     config: RoomConfig;
     /** Resolves to a guaranteed-fresh bearer token, re-authenticating as needed. */
     getToken: () => Promise<string>;
+    /** Drops the cached token so the next getToken() re-authenticates. Called
+     *  when the server answers 401: it revoked or no longer knows the session. */
+    invalidateToken?: () => void;
     /** MUST be called for every inbound diff — see module doc above. */
     emitDiff: (diff: PerspectiveDiff) => void;
     emitSyncState?: (state: string) => void;
@@ -88,6 +91,23 @@ function deps(): SyncDeps {
         throw new Error("sync module not initialized. Call initSync() during language init().");
     }
     return _deps;
+}
+
+/**
+ * Runs `fn` with a bearer token. A 401 means the server dropped the session
+ * (revocation, expiry sweep, data reset), so the cached token is discarded
+ * and `fn` runs once more with a fresh one. Without this the dead token is
+ * reused until the executor restarts and nothing reaches the server.
+ */
+async function withToken<T>(fn: (token: string) => Promise<T>): Promise<T> {
+    const d = deps();
+    try {
+        return await fn(await d.getToken());
+    } catch (err) {
+        if (!(err instanceof api.ApiError) || err.status !== 401 || !d.invalidateToken) throw err;
+        d.invalidateToken();
+        return fn(await d.getToken());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,13 +276,13 @@ export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: nu
  * `enqueueCommitBatched` below to send the accumulated batch.
  */
 export async function commit(diff: PerspectiveDiff): Promise<void> {
-    const { config, getToken } = deps();
-    const token = await getToken();
+    const { config } = deps();
     console.log(
         `[server-link-language] POST /commit: ${diff.additions.length} adds, ` +
         `${diff.removals.length} removes → room=${config.roomId}`,
     );
-    await api.commitDiff(config, token, toWireDiff(diff));
+    const wire = toWireDiff(diff);
+    await withToken((token) => api.commitDiff(config, token, wire));
     emitSyncStateSafe("Synced");
 }
 
@@ -542,10 +562,9 @@ export async function _awaitInflightForTests(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function bootstrap(): Promise<void> {
-    const { config, getToken } = deps();
-    const token = await getToken();
+    const { config } = deps();
 
-    const rendered = await api.fetchRender(config, token);
+    const rendered = await withToken((token) => api.fetchRender(config, token));
 
     // Clear stale pending versions before re-processing the full snapshot.
     // fromWireDiff will re-track any versions that remain missing.
@@ -586,10 +605,9 @@ export async function bootstrap(): Promise<void> {
  * "skip because WS is connected" branch to get wrong.
  */
 export async function catchUp(): Promise<PerspectiveDiff> {
-    const { config, getToken } = deps();
-    const token = await getToken();
+    const { config } = deps();
     const since = store.getSequence();
-    const res = await api.fetchSync(config, token, since);
+    const res = await withToken((token) => api.fetchSync(config, token, since));
     console.log(
         `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
         `revision=${res.revision}, sequence=${res.sequence}`,

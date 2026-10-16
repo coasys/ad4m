@@ -321,6 +321,7 @@ const language = defineLanguage({
         syncModule.initSync({
             config,
             getToken: () => auth.getValidToken(),
+            invalidateToken: () => auth.invalidateSession(),
             emitDiff: (diff) => getRuntime().emitPerspectiveDiff(diff),
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
             getKeyRing: () => keyRing,
