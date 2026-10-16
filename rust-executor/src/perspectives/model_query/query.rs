@@ -933,7 +933,8 @@ pub(super) async fn execute_model_query_inner(
 ///
 /// Two things read resolved values before the strip, and keep what they read: a `where` that could
 /// not be pushed into the store runs over the hydrated instances, so then everything stays; and an
-/// `order` that was not pushed sorts them, so its keys stay.
+/// `order` that was not pushed sorts them, so its keys stay. And the strip itself keeps `include`
+/// keys beside the requested properties, so those are resolved too.
 pub(super) fn properties_to_resolve(
     query_input: &ModelQueryInput,
     shape: &ModelShape,
@@ -947,6 +948,11 @@ pub(super) fn properties_to_resolve(
     let mut keep: HashSet<String> = requested.iter().cloned().collect();
     if let Some(order) = &query_input.order {
         keep.extend(order.iter().map(|(key, _)| key.clone()));
+    }
+    // What `filter_properties` keeps beside the requested properties, so nothing it hands back is
+    // left unresolved.
+    if let Some(include) = &query_input.include {
+        keep.extend(include.keys().cloned());
     }
     Some(keep)
 }

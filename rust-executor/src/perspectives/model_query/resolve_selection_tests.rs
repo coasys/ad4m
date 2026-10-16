@@ -70,6 +70,23 @@ fn keeps_what_a_sort_reads() {
 }
 
 #[test]
+fn keeps_what_an_include_hands_back() {
+    let query: ModelQueryInput = serde_json::from_value(json!({
+        "properties": ["name"],
+        "include": { "body": true }
+    }))
+    .unwrap();
+    assert_eq!(
+        names(properties_to_resolve(
+            &query,
+            &model(),
+            &StaticShapeResolver::new()
+        )),
+        Some(vec!["body".to_string(), "name".to_string()])
+    );
+}
+
+#[test]
 fn resolves_everything_for_a_filter_run_after_hydration() {
     let mut where_clause = BTreeMap::new();
     where_clause.insert(
