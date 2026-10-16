@@ -13,3 +13,7 @@ pnpm run build
 Set-Location ../aes-flat
 pnpm install
 pnpm run build
+
+Set-Location ../local-first-store
+pnpm install
+pnpm run build

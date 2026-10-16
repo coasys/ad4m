@@ -15,3 +15,7 @@ pnpm run build
 cd ../aes-flat
 pnpm i
 pnpm run build
+
+cd ../local-first-store
+pnpm i
+pnpm run build

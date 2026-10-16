@@ -26,6 +26,7 @@ import expressionTests from "./expression";
 import runtimeTests from "./runtime";
 import shaclRpcTests from "./shacl-rpc";
 import flatLanguageTests from "./flat-language.test";
+import localFirstExpressionTests from "./local-first-expressions.test";
 import languageTests from "./language";
 import sharedLanguageStoreTests from "./shared-language-store";
 import agentLanguageTests from "./agent-language";
@@ -80,6 +81,7 @@ describe("Local integration tests (no Holochain)", function () {
     describe('Perspective', perspectiveTests(testContext))
     describe('SHACL RPC', shaclRpcTests(testContext))
     describe('Flat Language (new flat export pattern)', flatLanguageTests(testContext))
+    describe('Local-first expressions', localFirstExpressionTests(testContext))
 
     describe('with Alice and Bob', () => {
         const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob-local')

@@ -56,6 +56,8 @@ test("defineLanguage: expression capability fields", () => {
             async get(_a) { return null; },
             async create(_c) { return "addr"; },
             isImmutable(_a) { return true; },
+            async prepare(_c) { return { address: "addr", expression: {} as any }; },
+            async publish(_a, _e) {},
             icon() { return "<icon/>"; },
             constructorIcon() { return "<ctor/>"; },
         },
@@ -63,6 +65,8 @@ test("defineLanguage: expression capability fields", () => {
     assert.equal(typeof lang.expressionGet, "function");
     assert.equal(typeof lang.expressionCreate, "function");
     assert.equal(typeof lang.isImmutableExpression, "function");
+    assert.equal(typeof lang.expressionPrepare, "function");
+    assert.equal(typeof lang.expressionPublish, "function");
     assert.equal(lang.expressionIcon?.(), "<icon/>");
     assert.equal(lang.expressionConstructorIcon?.(), "<ctor/>");
 });

@@ -192,6 +192,16 @@ interface expression {
     /// conservatively return `false` for any address; hosts MUST tolerate
     /// a Language not implementing this export at all (treat as `false`).
     is-immutable: func(address: string) -> bool;
+
+    /// `create` in two halves. Sign `content` and compute its address
+    /// without storing it or touching the network; returns the address and
+    /// the signed Expression. Exported together with `publish` or not at all.
+    prepare: func(content: string) -> result<tuple<string, expression>, error>;
+
+    /// Store an Expression `prepare` returned. Idempotent: the host retries
+    /// it until it succeeds, so publishing the same address twice is not
+    /// an error.
+    publish: func(address: string, expression: expression) -> result<_, error>;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
