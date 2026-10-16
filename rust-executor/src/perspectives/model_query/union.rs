@@ -153,6 +153,15 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
 /// abstract class (#1435) checks these before it resolves its classes, so
 /// whether it is refused does not depend on what happens to be installed.
 pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
+    // The keyset is one class's `(first timestamp, id)` order in the store;
+    // the union sorts and pages its rows in the executor. An abstract class
+    // is read as a union of the classes it resolves to, so it is refused too.
+    if query.after.is_some() {
+        return Err(anyhow!(
+            "classNames / abstract class: `after` cursors are not supported over several \
+             classes. Page the union with `limit`/`offset`, or query one class at a time."
+        ));
+    }
     // A per-anchor limit and a walk pick their rows inside the store, once per
     // class, so `limitPerAnchor: 5` would keep five per anchor *per class*.
     if let Some(Scope::Traverse {
@@ -349,6 +358,7 @@ pub async fn execute_union_query_with_views(
         return Ok(ModelQueryResult {
             instances: vec![],
             total_count,
+            next_cursor: None,
         });
     }
     let page: Vec<String> = union
@@ -387,6 +397,7 @@ pub async fn execute_union_query_with_views(
             order: None,
             limit: None,
             offset: None,
+            after: None,
             count: None,
             ..query.clone()
         };
@@ -409,6 +420,7 @@ pub async fn execute_union_query_with_views(
     Ok(ModelQueryResult {
         instances: page.iter().filter_map(|id| hydrated.remove(id)).collect(),
         total_count,
+        next_cursor: None,
     })
 }
 

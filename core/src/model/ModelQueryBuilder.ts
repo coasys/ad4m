@@ -10,7 +10,7 @@ import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectivePr
 import { LiveQuery } from "../perspectives/LiveQuery";
 import type {
   Where, Order, IncludeMap, Query,
-  ResultsWithTotalCount, PaginationResult,
+  ResultsWithTotalCount, PaginationResult, CursorPage,
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
@@ -88,9 +88,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   /** Open a live model query for `params` as the current subscription.
    *  Resolves with it and the raw initial result; `onResult` gets every later one.
    *  A failed open ends only its own query: a later call may already own
-   *  `currentSubscription`. */
+   *  `currentSubscription`. A cursor (`after`) is never sent: the executor
+   *  refuses it on a subscription, which re-runs one query, not a page walk. */
   private async live(params: Query, onResult: (raw: any) => void): Promise<{ live: LiveQuery; initial: any }> {
-    const { className, queryJson } = this.prepare(params);
+    const { after: _after, ...cursorless } = params;
+    const { className, queryJson } = this.prepare(cursorless);
     const live = new LiveQuery(
       this.perspective.client, this.perspective.uuid,
       () => this.perspective.modelSubscribe(className, queryJson),
@@ -584,9 +586,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    // Page numbers page by offset; a cursor from the starting query has no meaning here.
+    const { after: _after, ...base } = this.queryParams || {};
+    const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.execute(paginationQuery);
     return { results, totalCount, pageSize, pageNumber };
+  }
+
+  /**
+   * One page in timestamp order, continued by cursor rather than by offset.
+   *
+   * Pass no `after` (or `""`) for the first page, then each page's
+   * `nextCursor`; its absence means the last page. A row created while you
+   * page cannot shift a later page the way it shifts an `offset` page. The
+   * builder's `order` must be `timestamp`, `createdAt` or `updatedAt` (either
+   * direction) or unset; the executor refuses any other order. The builder's
+   * `offset` is ignored. Use `paginate()` for page numbers or other orders.
+   *
+   * @example
+   * ```typescript
+   * const builder = Message.query(perspective).order({ createdAt: "DESC" });
+   * let page = await builder.page(50);
+   * while (page.nextCursor) page = await builder.page(50, page.nextCursor);
+   * ```
+   */
+  async page(pageSize: number, after?: string): Promise<CursorPage<T>> {
+    const { offset: _offset, ...rest } = this.queryParams || {};
+    const { results, nextCursor } = await this.execute({ ...rest, limit: pageSize, after: after ?? '' });
+    return { results, ...(nextCursor !== undefined ? { nextCursor } : {}), pageSize };
   }
 
   /**
@@ -641,9 +668,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     delete subscriptionParams.limit;
     delete subscriptionParams.offset;
 
-    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
+    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call).
+    // Page numbers are offsets, so a cursor (`after`) is not sent.
+    const { after: _after, ...cursorless } = this.queryParams || {};
     const paginatedQuery = {
-      ...(this.queryParams || {}),
+      ...cursorless,
       limit: pageSize,
       offset: pageSize * (pageNumber - 1),
       count: true,
