@@ -279,6 +279,12 @@ pub fn plan_interpretation_ops_resolved(
 
     // Pass 2: build ops for the written slots, resolving relations against the
     // full index.
+    //
+    // Relation constraints (`sh:minCount`, `sh:disjoint`) are not checked here:
+    // they are a property of the whole batch — refusing one record can empty a
+    // sibling's required relation — and the harness path builds its ops without
+    // this planner. `enforce_relation_constraints` checks both, in the shared
+    // tail.
     let mut out = Vec::with_capacity(placed.len());
     for p in &placed {
         // Resolve relations for ALL slots (including deduplicated ones) —
@@ -291,17 +297,6 @@ pub fn plan_interpretation_ops_resolved(
             &existing_ids,
             existing_links,
         );
-        let creating = p.emit && !p.is_update;
-        let Some(rel_links) = apply_relation_constraints(
-            p.shape,
-            &p.inst.class,
-            &p.base,
-            creating,
-            rel_links,
-            existing_links,
-        ) else {
-            continue;
-        };
         if p.emit {
             let values = scalar_values(p.shape, p.inst);
             if p.is_update {
@@ -484,8 +479,8 @@ fn apply_relation_constraints(
             forward().find(|r| r.required && holds(&r.predicate, &links).is_empty())
         {
             log::warn!(
-                "interpretation: not creating '{class}': required relation '{}' resolved to nothing",
-                missing.name
+                "⚠️ 🧠 interpretation: not creating {class} {base}: required relation {} resolved to nothing",
+                missing.predicate
             );
             return None;
         }
@@ -502,14 +497,16 @@ fn apply_relation_constraints(
             }
             if creating {
                 log::warn!(
-                    "interpretation: not creating '{class}': '{}' and {other} would both point at {shared:?}",
-                    rel.name
+                    "⚠️ 🧠 interpretation: not creating {class} {base}: {} and {other} would both point at {shared:?}",
+                    rel.predicate
                 );
                 return None;
             }
-            log::warn!(
-                "interpretation: dropping links from {base} that would make '{}' and {other} both point at {shared:?}",
-                rel.name
+            // The record stands; only the overlapping new links go, which is
+            // the expected outcome of a later pass re-pointing a stored edge.
+            log::debug!(
+                "🧠 interpretation: dropping links from {base} that would make {} and {other} both point at {shared:?}",
+                rel.predicate
             );
             let shared: HashSet<String> = shared.into_iter().cloned().collect();
             kept.retain(|l| {
@@ -520,6 +517,157 @@ fn apply_relation_constraints(
         }
     }
     Some(kept)
+}
+
+/// Hold a whole batch of interpretation ops to the `sh:minCount` and
+/// `sh:disjoint` its classes declare, before anything is written.
+///
+/// Run on the ops both paths produce — the single-shot planner's and the
+/// harness's drained buffer — in the shared tail, so neither can write what
+/// the other refuses. It works on ops rather than proposals because the harness
+/// has no proposals: its `Create` and the `AddLinks` that give it its ends
+/// arrive from separate tool calls, so a record's links are gathered by base
+/// across the batch.
+///
+/// A refused record is gone from the batch entirely, and so is every link to
+/// or from it: a sibling that referred to it does not get a link to a node that
+/// is never written, and a dedup slot that mapped onto it does not write links
+/// on that missing base. Losing that link can leave the sibling's own required
+/// relation empty, so refusal repeats until nothing more is refused.
+///
+/// Links on a record that already exists — an `Update`, or a dedup match onto a
+/// stored record, which emits `AddLinks` alone — keep the record and lose only
+/// the links that would make a disjoint pair overlap, with each other or with
+/// what is stored. A base whose class is not known, from this batch or from
+/// `existing`, passes through unchecked.
+pub(crate) fn enforce_relation_constraints(
+    ops: Vec<InterpretationOp>,
+    shapes: &[ModelShape],
+    existing: &ExistingInstances,
+    existing_links: &ExistingLinks,
+) -> Vec<InterpretationOp> {
+    let shape_of = |class: &str| {
+        shapes
+            .iter()
+            .find(|s| class_label(&s.target_class, shapes) == class)
+    };
+    let mut created: Vec<(String, String)> = Vec::new();
+    let mut class_of: HashMap<String, String> = HashMap::new();
+    let mut links_of: HashMap<String, Vec<Link>> = HashMap::new();
+    for op in &ops {
+        match op {
+            InterpretationOp::Create { base, class, .. } => {
+                created.push((base.clone(), class.clone()));
+                class_of.insert(base.clone(), class.clone());
+            }
+            InterpretationOp::Update { base, class, .. } => {
+                class_of.insert(base.clone(), class.clone());
+            }
+            InterpretationOp::AddLinks { source, links } => {
+                links_of
+                    .entry(source.clone())
+                    .or_default()
+                    .extend(links.iter().cloned());
+            }
+        }
+    }
+    let class_for = |base: &str| -> Option<String> {
+        class_of.get(base).cloned().or_else(|| {
+            existing.get(base).and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|e| shape_of(&e.class).is_some())
+                    .map(|e| e.class.clone())
+            })
+        })
+    };
+    let surviving = |links: &[Link], refused: &HashSet<String>| -> Vec<Link> {
+        links
+            .iter()
+            .filter(|l| !refused.contains(&l.target))
+            .cloned()
+            .collect()
+    };
+
+    // Refuse creates until the set stops growing: each refusal can take away
+    // a link a sibling's required relation was counting on.
+    let mut refused: HashSet<String> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for (base, class) in &created {
+            if refused.contains(base) {
+                continue;
+            }
+            let Some(shape) = shape_of(class) else {
+                continue;
+            };
+            let links = surviving(links_of.get(base).map_or(&[][..], |l| l), &refused);
+            if apply_relation_constraints(shape, class, base, true, links, existing_links).is_none()
+            {
+                refused.insert(base.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    // What each base may keep: everything that survives, held to the
+    // constraints as an existing record for bases this batch does not create.
+    let mut allowed: HashMap<String, HashSet<(Option<String>, String)>> = HashMap::new();
+    for (base, links) in &links_of {
+        if refused.contains(base) {
+            continue;
+        }
+        let links = surviving(links, &refused);
+        let creating = created.iter().any(|(b, _)| b == base);
+        let kept = match (creating, class_for(base)) {
+            (false, Some(class)) => match shape_of(&class) {
+                Some(shape) => {
+                    apply_relation_constraints(shape, &class, base, false, links, existing_links)
+                        .unwrap_or_default()
+                }
+                None => links,
+            },
+            _ => links,
+        };
+        allowed.insert(
+            base.clone(),
+            kept.into_iter().map(|l| (l.predicate, l.target)).collect(),
+        );
+    }
+
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            InterpretationOp::Create { ref base, .. } if refused.contains(base) => {}
+            InterpretationOp::AddLinks { source, links } => {
+                if refused.contains(&source) {
+                    continue;
+                }
+                let Some(allowed) = allowed.get(&source) else {
+                    continue;
+                };
+                let before = links.len();
+                let links: Vec<Link> = links
+                    .into_iter()
+                    .filter(|l| allowed.contains(&(l.predicate.clone(), l.target.clone())))
+                    .collect();
+                if links.len() < before {
+                    log::debug!(
+                        "🧠 interpretation: dropped {} link(s) from {source} to refused or overlapping targets",
+                        before - links.len()
+                    );
+                }
+                if !links.is_empty() {
+                    out.push(InterpretationOp::AddLinks { source, links });
+                }
+            }
+            op => out.push(op),
+        }
+    }
+    out
 }
 
 /// Normalise a relation field value into a list of raw ref strings. A single
@@ -1131,6 +1279,8 @@ mod tests {
             &known,
             &ExistingLinks::new(),
         );
+        let ops =
+            enforce_relation_constraints(ops, &connection_shapes(), &known, &ExistingLinks::new());
 
         assert_eq!(
             creates_of(&ops, "Connection"),
@@ -1158,6 +1308,12 @@ mod tests {
             &proposed,
             "soa://ext/",
             &ExistingInstances::new(),
+        );
+        let ops = enforce_relation_constraints(
+            ops,
+            &connection_shapes(),
+            &ExistingInstances::new(),
+            &ExistingLinks::new(),
         );
 
         let edge = nth_create_base(&ops, 2);
@@ -1188,6 +1344,8 @@ mod tests {
             "soa://ext/",
             &known,
         );
+        let ops =
+            enforce_relation_constraints(ops, &connection_shapes(), &known, &ExistingLinks::new());
 
         assert!(
             ops.is_empty(),
@@ -1234,6 +1392,7 @@ mod tests {
             &known,
             &stored,
         );
+        let ops = enforce_relation_constraints(ops, &connection_shapes(), &known, &stored);
 
         assert!(
             targets_of(addlinks_for(&ops, edge), "ns://to").is_empty(),
@@ -1244,6 +1403,156 @@ mod tests {
                 .any(|op| matches!(op, InterpretationOp::Update { base, .. } if base == edge)),
             "the scalar update still applies; got {ops:#?}"
         );
+    }
+
+    #[test]
+    fn enforce_refuses_a_record_whose_required_relation_names_a_refused_sibling() {
+        // data-bot on #1473: refusing one record left its minted base resolvable,
+        // so a sibling's `new:Note:1` linked a node nothing writes — and passed
+        // its own required check with it. Note 1 is refused (its `about` was
+        // invented); Note 2's only `about` is Note 1, so it goes too.
+        let raw = r#"[
+          {"class":"Note","text":"a","about":"soa://invented/x"},
+          {"class":"Note","text":"b","about":"new:Note:1"}
+        ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let shapes = vec![shape_from_sdna("Note", NOTE_SDNA)];
+        let ops = plan_interpretation_ops_with_context(
+            &shapes,
+            &proposed,
+            "soa://ext/",
+            &ExistingInstances::new(),
+        );
+        let ops = enforce_relation_constraints(
+            ops,
+            &shapes,
+            &ExistingInstances::new(),
+            &ExistingLinks::new(),
+        );
+
+        assert!(ops.is_empty(), "both notes must be refused; got {ops:#?}");
+
+        // The other way round: the note that refers comes first, so it has
+        // passed before the one it names is refused. Refusal repeats until
+        // nothing more is refused, which is what takes it out.
+        let raw = r#"[
+          {"class":"Note","text":"b","about":"new:Note:2"},
+          {"class":"Note","text":"a","about":"soa://invented/x"}
+        ]"#;
+        let proposed = parse_interpretation_response(raw).unwrap();
+        let ops = plan_interpretation_ops_with_context(
+            &shapes,
+            &proposed,
+            "soa://ext/",
+            &ExistingInstances::new(),
+        );
+        let ops = enforce_relation_constraints(
+            ops,
+            &shapes,
+            &ExistingInstances::new(),
+            &ExistingLinks::new(),
+        );
+        assert!(
+            ops.is_empty(),
+            "the forward ref is refused too; got {ops:#?}"
+        );
+    }
+
+    #[test]
+    fn enforce_writes_no_links_on_a_refused_records_dedup_slot() {
+        // data-bot on #1473: a `DupOfEarlier` of a refused slot took its base
+        // and emitted `AddLinks` on it — links on a node with no `Create`, and
+        // no type marker for any class query to find. Checked over the batch, a
+        // duplicate's links are the record's own: they count toward its
+        // required relation, and go with it when it is refused.
+        let thing = "soa://ext/thing/existing";
+        let shapes = vec![shape_from_sdna("Note", NOTE_SDNA)];
+        let known = existing_map(vec![InstanceContext {
+            id: thing.to_string(),
+            title: "x".to_string(),
+            class: "Thing".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
+        let run = |second_about: &str| {
+            let raw = format!(
+                r#"[
+                  {{"class":"Note","text":"a","about":"soa://invented/x"}},
+                  {{"class":"Note","text":"a","about":"{second_about}"}}
+                ]"#
+            );
+            let proposed = parse_interpretation_response(&raw).unwrap();
+            let resolved = vec![
+                (proposed[0].clone(), Resolution::Keep),
+                (proposed[1].clone(), Resolution::DupOfEarlier(0)),
+            ];
+            let ops = plan_interpretation_ops_resolved(
+                &shapes,
+                &resolved,
+                "soa://ext/",
+                &known,
+                &ExistingLinks::new(),
+            );
+            enforce_relation_constraints(ops, &shapes, &known, &ExistingLinks::new())
+        };
+
+        // Neither proposal gives the note an `about`: nothing is written,
+        // links on its base included.
+        let ops = run("soa://invented/y");
+        assert!(ops.is_empty(), "nothing on the refused base; got {ops:#?}");
+
+        // The duplicate supplies it: the note is written, and every link sits
+        // on a base this batch creates.
+        let ops = run(thing);
+        let note = nth_create_base(&ops, 0);
+        assert_eq!(
+            targets_of(addlinks_for(&ops, &note), "ns://about"),
+            vec![thing.to_string()]
+        );
+        assert!(
+            ops.iter().all(|op| match op {
+                InterpretationOp::AddLinks { source, .. } => source == &note,
+                _ => true,
+            }),
+            "no links on a base without a Create; got {ops:#?}"
+        );
+    }
+
+    #[test]
+    fn enforce_holds_harness_ops_whose_links_arrive_separately() {
+        // The harness builds `Create` and the `AddLinks` giving it its ends from
+        // separate tool calls (`_propose_create`, `propose_link_child`), and
+        // never runs the planner. The batch check gathers a record's links
+        // across ops, so a self-edge built that way is refused like any other.
+        let x = "soa://ext/task/x";
+        let y = "soa://ext/task/y";
+        let link = |source: &str, predicate: &str, target: &str| InterpretationOp::AddLinks {
+            source: source.to_string(),
+            links: vec![Link {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            }],
+        };
+        let create = |base: &str| InterpretationOp::Create {
+            base: base.to_string(),
+            class: "Connection".to_string(),
+            values: serde_json::Map::new(),
+        };
+        let ops = vec![
+            create("soa://ext/connection/loop"),
+            link("soa://ext/connection/loop", "ns://from", x),
+            link("soa://ext/connection/loop", "ns://to", x),
+            create("soa://ext/connection/edge"),
+            link("soa://ext/connection/edge", "ns://from", x),
+            link("soa://ext/connection/edge", "ns://to", y),
+        ];
+        let known = existing_map(vec![existing_task(x, "X"), existing_task(y, "Y")]);
+        let ops =
+            enforce_relation_constraints(ops, &connection_shapes(), &known, &ExistingLinks::new());
+
+        assert_eq!(creates_of(&ops, "Connection"), 1, "{ops:#?}");
+        assert!(addlinks_for(&ops, "soa://ext/connection/loop").is_empty());
+        assert_eq!(nth_create_base(&ops, 0), "soa://ext/connection/edge");
     }
 
     #[test]
