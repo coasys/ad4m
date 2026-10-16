@@ -70,6 +70,8 @@ mod abstract_classes;
 pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
 pub(crate) use subscriptions::result_json;
+// The pending-diffs commit queue: backoff, isolation of rejected diffs.
+mod pending_diffs;
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
 
@@ -80,6 +82,10 @@ mod subscription_tests;
 #[cfg(test)]
 #[path = "perspective_instance_abstract_tests.rs"]
 mod abstract_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_pending_diffs_tests.rs"]
+mod pending_diffs_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -611,6 +617,11 @@ pub struct PerspectiveInstance {
     /// without a running link language. Compiled out in non-test builds.
     #[cfg(test)]
     force_shape_sync_wait: Arc<AtomicBool>,
+    /// Test-only stand-in for the link language's `commit`: when set, every
+    /// commit (immediate and queued) goes to it instead of a Deno runtime.
+    /// See [`Self::set_test_link_commit`].
+    #[cfg(test)]
+    test_link_commit: Arc<std::sync::Mutex<Option<pending_diffs::TestLinkCommit>>>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -680,6 +691,8 @@ impl PerspectiveInstance {
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            test_link_commit: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1237,110 +1250,6 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn pending_diffs_loop(&self) {
-        let uuid = self.uuid.clone();
-        let mut interval = time::interval(Duration::from_millis(100));
-        let mut last_diff_time = None;
-
-        while !self.is_teardown.load(Ordering::Acquire) {
-            interval.tick().await;
-
-            if self.has_link_language().await {
-                let (_, ids) = Ad4mDb::with_global_instance(|db| {
-                    db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
-                })
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
-
-                if ids.is_empty() {
-                    continue;
-                }
-
-                if last_diff_time.is_none() {
-                    // First diff in a burst - start timer
-                    last_diff_time = Some(tokio::time::Instant::now());
-                }
-
-                // Commit if either:
-                // 1. It's been MAX_PENDING_SECONDS since first diff in burst (don't collect longer than MAX_PENDING_SECONDS)
-                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
-                    if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::debug!("💾 committed diffs after reaching 10s maximum wait time");
-                    }
-                // 2. It's been > 1s since last new diff (burst is over)
-                } else if !self.has_new_diffs_in_last_second().await {
-                    if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::debug!("💾 committed diffs after 1s of inactivity");
-                    }
-                // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
-                    && self.commit_pending_diffs().await.is_ok()
-                {
-                    last_diff_time = None;
-                    log::debug!("💾 committed diffs after collecting 100");
-                }
-            }
-        }
-    }
-
-    async fn has_new_diffs_in_last_second(&self) -> bool {
-        let timer = self.commit_debounce_timer.lock().await;
-        timer
-            .map(|instant| instant.elapsed() < tokio::time::Duration::from_secs(1))
-            .unwrap_or(false)
-    }
-
-    async fn has_link_language(&self) -> bool {
-        let link_language_guard = self.link_language.read().await;
-        link_language_guard.is_some()
-    }
-
-    async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
-        let uuid = self.uuid.clone();
-
-        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))
-        })?;
-
-        if !pending_ids.is_empty() {
-            let link_language_clone = {
-                let link_language_guard = self.link_language.read().await;
-                link_language_guard.clone()
-            };
-
-            if let Some(mut link_language) = link_language_clone {
-                log::debug!("💾 committing {} pending diffs...", pending_ids.len());
-                let commit_result = link_language.commit(pending_diffs).await;
-                match commit_result {
-                    // Spec §5.2 splits perspective-commit (write) from
-                    // perspective-sync (revision read), so a spec-compliant
-                    // flat language that implements only perspective-commit
-                    // returns Ok(None). Previously we treated Ok(None) as
-                    // an error and left the diffs pending forever, so any
-                    // language without a perspective-sync capability could
-                    // never drain its retry queue. The success signal for
-                    // the retry path is "commit didn't throw" — clear the
-                    // diffs regardless of whether a revision came back.
-                    Ok(_) => {
-                        Ad4mDb::with_global_instance(|db| {
-                            db.clear_pending_diffs(&uuid, pending_ids)
-                        })?;
-                        // Reset immediate commits counter after successful commit
-                        self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
-                        log::debug!("✅ 💾 successfully committed pending diffs");
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            } else {
-                Ok(()) // Keep diffs if no link language
-            }
-        } else {
-            Ok(())
-        }
-    }
-
     async fn notification_check_loop(&self) {
         //log::debug!("Starting notification check loop for perspective {}", self.persisted.lock().await.uuid);
         let uuid = self.uuid.clone();
@@ -1562,29 +1471,22 @@ impl PerspectiveInstance {
         }
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
-        let (_, pending_ids) =
-            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+        let pending_count =
+            Ad4mDb::with_global_instance(|db| db.count_pending_diffs(&handle.uuid)).unwrap_or(0);
 
         log::debug!(
-            "commit({}): state={:?} link_language={} pending_ids={} adds={} removes={}",
+            "commit({}): state={:?} link_language={} pending={} adds={} removes={}",
             handle.uuid,
             handle.state,
             self.has_link_language().await,
-            pending_ids.len(),
+            pending_count,
             diff.additions.len(),
             diff.removals.len(),
         );
 
-        let commit_result = if pending_ids.is_empty() {
+        let commit_result = if pending_count == 0 {
             // No pending diffs, let's try
-            // Clone link_language without holding the lock
-            let link_language_clone = {
-                let link_language_guard = self.link_language.read().await;
-                link_language_guard.clone()
-            };
-
-            if let Some(mut link_language) = link_language_clone {
+            if self.has_link_language().await {
                 // Spec §5.2 separates perspective-commit from perspective-sync,
                 // so a commit-only flat language has no meaningful notion of
                 // "current revision" — the previous `current_revision().is_some()`
@@ -1603,7 +1505,9 @@ impl PerspectiveInstance {
                 let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
                 if *immediate_commits_remaining > 0 {
                     *immediate_commits_remaining -= 1;
-                    link_language.commit(diff.clone()).await
+                    self.link_language_commit(diff.clone())
+                        .await
+                        .unwrap_or_else(|| Err(anyhow!("LinkLanguage not available")))
                 } else {
                     Err(anyhow!("Debouncing commit burst"))
                 }
