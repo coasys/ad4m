@@ -56,7 +56,7 @@ class FakePeerConnection {
     ontrack: ((e: unknown) => void) | null = null
     closed = false
 
-    constructor() {
+    constructor(readonly configuration?: RTCConfiguration) {
         FakePeerConnection.instances.push(this)
     }
     addTransceiver(trackOrKind: FakeTrack | string, init: RTCRtpTransceiverInit) {
@@ -96,6 +96,7 @@ import { SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "
 import type {
     CallSessionInfo,
     SfuCallRenegotiationOffer,
+    SfuConfig,
     SfuRoomRoster,
     TrackMapEntry,
 } from "./SfuTypes"
@@ -230,6 +231,17 @@ beforeEach(() => {
 })
 
 // ── Server events ─────────────────────────────────────────────────
+
+test("the app's ICE servers reach the connection as given, ahead of the config's", async () => {
+    const relay = {
+        urls: ["stun:relay.example.com:3478", "turn:relay.example.com:3478"],
+        username: "user",
+        credential: "pass",
+    }
+    const config = { iceServers: [{ urls: ["stun:config.example.com:3478"] }] } as unknown as SfuConfig
+    await new SfuManager(fakeApi(), ROOM, ME, URL, { servers: [relay] }, config).join(fakeStream())
+    expect(FakePeerConnection.instances[0].configuration).toEqual({ iceServers: [relay] })
+})
 
 test("subscribes to offers and the roster before sfuCallJoin", async () => {
     const api = fakeApi()

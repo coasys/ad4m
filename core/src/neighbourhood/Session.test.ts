@@ -543,24 +543,31 @@ describe("SFU path", () => {
         expect(mockSfuManagerInstance.sendData).toHaveBeenCalledWith("chat", "hello", true)
     })
 
-    it("converts iceServers to SfuManager format", async () => {
+    it("hands each ICE server to the SFU path as given", async () => {
+        // A provider's entry lists STUN and TURN URLs under one credential;
+        // splitting it left TURN URLs without one, which WebRTC refuses.
         const session = createSession(baseConfig({
             topology: "sfu",
             iceServers: [
                 { urls: ["stun:stun.example.com:3478"] },
-                { urls: ["turn:turn.example.com:3478"], username: "user", credential: "pass" },
+                {
+                    urls: ["stun:relay.example.com:3478", "turn:relay.example.com:3478", "turns:relay.example.com:5349"],
+                    username: "user",
+                    credential: "pass",
+                },
             ],
         }))
         await session.join(fakeMediaStream())
 
-        const call = (SfuManager as unknown as jest.Mock).mock.calls[0]
-        const iceConfig = call[4]
-        expect(iceConfig.stun).toEqual(["stun:stun.example.com:3478"])
-        expect(iceConfig.turn).toEqual([{
-            urls: "turn:turn.example.com:3478",
-            username: "user",
-            credential: "pass",
-        }])
+        const iceConfig = (SfuManager as unknown as jest.Mock).mock.calls[0][4]
+        expect(iceConfig.servers).toEqual([
+            { urls: ["stun:stun.example.com:3478"] },
+            {
+                urls: ["stun:relay.example.com:3478", "turn:relay.example.com:3478", "turns:relay.example.com:5349"],
+                username: "user",
+                credential: "pass",
+            },
+        ])
     })
 })
 
