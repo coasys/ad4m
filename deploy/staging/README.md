@@ -32,7 +32,7 @@ from there.
 
 | File | Installed to | What it does |
 |---|---|---|
-| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; secrets through `LoadCredential=` |
+| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; secrets through `LoadCredential=`; `LimitNOFILE=65536` |
 | `ad4m-staging-update.service` | `~/.config/systemd/user/` | Runs `update.sh` once, at the lowest CPU and IO priority |
 | `ad4m-staging-update.timer` | `~/.config/systemd/user/` | Starts the update 10 minutes after the last one finished |
 | `update.sh` | `~/.local/share/ad4m-staging/bin/` | Fetch, build, snapshot, swap, gate, roll back; writes `status.json`. `update.sh rollback` goes back one build by hand |
