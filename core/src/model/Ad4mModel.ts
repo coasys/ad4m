@@ -20,7 +20,7 @@ import {
 import type {
   Scope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
-  PaginationResult, CursorPage, PropertyMetadata, RelationMetadata, ModelMetadata,
+  PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
@@ -1163,7 +1163,6 @@ export class Ad4mModel {
     }
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
-    if (query.after !== undefined) queryInput.after = query.after;
     if (query.count !== undefined) queryInput.count = query.count;
     if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
@@ -1423,7 +1422,6 @@ export class Ad4mModel {
     return {
       results: instances,
       totalCount: result.totalCount,
-      ...(result.nextCursor !== undefined ? { nextCursor: result.nextCursor } : {}),
     };
   }
 
@@ -1548,47 +1546,9 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    // Page numbers page by offset; a cursor from the starting query has no meaning here.
-    const { after: _after, ...base } = (query ?? {}) as Query;
-    const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
     return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
-  }
-
-  /**
-   * One page in timestamp order, continued by cursor rather than by offset.
-   *
-   * Pass no `after` (or `""`) for the first page, then each page's
-   * `nextCursor`. A row created while you page cannot shift a later page the
-   * way it shifts an `offset` page. The query may order by `timestamp`,
-   * `createdAt` or `updatedAt` (either direction) or not at all; the executor
-   * refuses any other order, and `offset` is dropped. Use `paginate()` for
-   * page numbers or other orders.
-   *
-   * @example
-   * ```typescript
-   * let page = await Message.page(perspective, 50, undefined, { order: { createdAt: "DESC" } });
-   * while (page.nextCursor) {
-   *   page = await Message.page(perspective, 50, page.nextCursor, { order: { createdAt: "DESC" } });
-   * }
-   * ```
-   */
-  static async page<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T),
-    perspective: PerspectiveProxy,
-    pageSize: number,
-    after?: string,
-    query?: Q,
-    options?: CallOptions,
-  ): Promise<CursorPage<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const { offset: _offset, ...rest } = (query ?? {}) as Query;
-    const pageQuery: Query = { ...rest, limit: pageSize, after: after ?? '' };
-    const { results, nextCursor } = await this.executeModelQuery(perspective, pageQuery, undefined, options);
-    return {
-      results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[],
-      ...(nextCursor !== undefined ? { nextCursor } : {}),
-      pageSize,
-    };
   }
 
   /**

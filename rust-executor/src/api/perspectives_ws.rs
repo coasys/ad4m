@@ -12,8 +12,7 @@ use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
-    is_sparql_query, model_query_sends_cursor, result_json, MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED,
-    PROLOG_LIVE_QUERY_UNSUPPORTED,
+    is_sparql_query, result_json, PROLOG_LIVE_QUERY_UNSUPPORTED,
 };
 use crate::perspectives::{
     add_perspective, get_perspective,
@@ -1359,12 +1358,6 @@ async fn model_subscribe_handler(
 
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
-    // A subscription re-runs one query; cursor paging is `modelQuery`'s.
-    if model_query_sends_cursor(&query_json) {
-        return Err(WsRpcError::bad_request(
-            MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED,
-        ));
-    }
 
     let connection_id = connection_id(&ctx)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;

@@ -788,50 +788,6 @@ This default is a contract, not an optimisation that may change. Two options cha
 
 [Flows](/flows) depend on this default. A flow's outputs are hashed from exactly what a query by id returns through the output's class, with no other options, and every voter recomputes that hash on their own executor. If the default shape changed, executors on either side of the change would compute different hashes and refuse to co-sign.
 
-### Paging by Cursor
-
-`paginate(pageSize, pageNumber)` pages by `offset`. It can jump straight to page N, but a row added while you page shifts every later page, so a row can repeat or be skipped. A cursor page cannot jump, but rows added before the cursor do not move the next page.
-
-```typescript
-// First page: no cursor (or "")
-let page = await Message.page(perspective, 50, undefined, { order: { createdAt: "DESC" } });
-render(page.results);
-
-// Each page carries the cursor for the next one
-while (page.nextCursor) {
-  page = await Message.page(perspective, 50, page.nextCursor, { order: { createdAt: "DESC" } });
-  render(page.results);
-}
-
-// The same with the query builder
-const builder = Message.query(perspective).where({ channel: channelId }).order({ createdAt: "DESC" });
-const first = await builder.page(50);
-if (first.nextCursor) {
-  const second = await builder.page(50, first.nextCursor);
-}
-```
-
-- `Ad4mModel.page(perspective, pageSize, after?, query?)` and `ModelQueryBuilder.page(pageSize, after?)` return `{ results, nextCursor?, pageSize }`.
-- Under the hood they send `limit: pageSize` and `after` (`""` for the first page). You can send `after` yourself in a query; the result then carries `nextCursor`.
-- `nextCursor` is there while a full page came back. When it is missing, you are on the last page. If the last rows fill a whole page exactly, the page after it is empty and has no `nextCursor`.
-- A cursor is opaque. Pass it back as it came; do not build one.
-
-**Supported orders.** No `order`, or one of `timestamp`, `createdAt` or `updatedAt`, `ASC` or `DESC`. Rows are ordered by their first link's timestamp, for `updatedAt` too. The instance id breaks ties, so no row is repeated or skipped.
-
-**Refused.** The executor returns an error, rather than a wrong page, for a query that sends `after` (even `""`) and has:
-
-- an order on a property, or more than one order key,
-- no `limit`,
-- a non-zero `offset` (`page()` drops `offset` for you),
-- a cursor taken from a page in the other direction, or a malformed cursor,
-- several classes (`Ad4mModel.queryOf`), or an abstract class (it reads every class that has its properties); page those with `limit`/`offset`,
-- a `where` the store cannot evaluate,
-- a `parent` scope with `limitPerAnchor` or `levels`.
-
-Subscriptions refuse `after` too: a subscription re-runs one query, so it would re-read the same page forever. `subscribe()`, `countSubscribe()` and `paginateSubscribe()` leave it out.
-
-Use `paginate()` when you need page numbers, a total count, or another order.
-
 ### Query Builder
 
 The fluent query builder provides a chainable interface:
@@ -1367,8 +1323,7 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | `findAll` | `findAll(perspective, query?)` | Query all matching instances |
 | `findOne` | `findOne(perspective, query?)` | First matching instance or `null` |
 | `findAllAndCount` | `findAllAndCount(perspective, query?)` | Results + total count |
-| `paginate` | `paginate(perspective, pageSize, page, query?)` | Paginated results (by offset) |
-| `page` | `page(perspective, pageSize, after?, query?)` | One cursor page in timestamp order, with `nextCursor` |
+| `paginate` | `paginate(perspective, pageSize, page, query?)` | Paginated results |
 | `register` | `register(perspective)` | Install the SHACL schema in the perspective |
 | `transaction` | `transaction(perspective, fn)` | Atomic batch operation |
 | `query` | `query(perspective)` | Returns a `ModelQueryBuilder` |

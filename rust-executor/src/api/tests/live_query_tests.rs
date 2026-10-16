@@ -137,40 +137,6 @@ async fn subscribing_needs_a_socket() {
     }
 }
 
-/// A subscription re-runs one query; a cursor would re-run the same page
-/// forever, so `after` (even `""`) is a bad request on `modelSubscribe`.
-#[tokio::test]
-async fn model_subscribe_refuses_a_cursor() {
-    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
-    for (classes, after) in [
-        (json!({ "class_name": "Todo" }), json!("")),
-        (json!({ "class_name": "Todo" }), json!("c1")),
-        (json!({ "class_names": ["Todo"] }), json!("")),
-    ] {
-        let mut params = json!({
-            "uuid": p.0,
-            "query_json": json!({ "limit": 5, "after": after }).to_string(),
-        });
-        params
-            .as_object_mut()
-            .unwrap()
-            .extend(classes.as_object().unwrap().clone());
-        let err = call("perspective.modelSubscribe", params, admin_conn_ctx("c"))
-            .await
-            .expect_err("a subscription cannot page by cursor");
-        assert_eq!(err.code, 400, "{classes} after={after}");
-        assert!(err.message.contains("after"), "{}", err.message);
-    }
-    // Without a cursor the same query subscribes.
-    call(
-        "perspective.modelSubscribe",
-        json!({ "uuid": p.0, "class_name": "Todo", "query_json": r#"{"limit":5}"# }),
-        admin_conn_ctx("c"),
-    )
-    .await
-    .expect("no cursor: subscribes");
-}
-
 #[tokio::test]
 async fn dispose_query_ends_only_this_connections_subscription() {
     let p = registered_perspective(&[]).await;

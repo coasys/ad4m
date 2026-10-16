@@ -446,11 +446,6 @@ async fn an_abstract_class_is_read_on_its_own() {
         r#"{"parent":{"ids":["ad4m://p"],"predicate":"ad4m://has_child","limitPerAnchor":2}}"#;
     let err = p.model_query_classes(&one("TextContent"), scoped).await;
     assert!(err.unwrap_err().to_string().contains("limitPerAnchor"));
-
-    // An abstract class is read as a union, so a keyset cursor is refused.
-    let paged = r#"{"after":"","limit":2}"#;
-    let err = p.model_query_classes(&one("TextContent"), paged).await;
-    assert!(err.unwrap_err().to_string().contains("`after`"));
 }
 
 /// The resolution is cached (the same `Arc`) until the installed shapes

@@ -82,7 +82,6 @@
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 //! | [`union`] | One query over several classes: per-class rows, one classification, one sort and page over the union |
-//! | [`cursor`] | Keyset cursors (`after` / `nextCursor`) for the timestamp order |
 //! | [`abstract_classes`] | Abstract classes: the concrete classes one reads, and the views it reads them through |
 //! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`), addressed by URI and never stored |
 
@@ -90,7 +89,6 @@ pub(crate) mod abstract_classes;
 pub(crate) mod builtin_classes;
 #[cfg(test)]
 mod collection_provenance_tests;
-mod cursor;
 mod eval_transform;
 mod filtering;
 mod getters;
