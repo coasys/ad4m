@@ -335,6 +335,27 @@ export function buildSHACL(
             relShape.maxCount = relMeta.maxCount;
         }
 
+        if (relMeta.required) {
+            relShape.minCount = 1;
+        }
+
+        // `sh:disjoint` names a property *path*, so each sibling relation named
+        // in the decorator is resolved to its predicate here. A name that is
+        // not a relation of this class, or has no predicate, is a declaration
+        // error: refusing it is better than a constraint that silently checks
+        // nothing.
+        if (relMeta.disjoint?.length) {
+            relShape.disjoint = relMeta.disjoint.map((other) => {
+                const path = allRelationsMeta[other]?.predicate;
+                if (!path) {
+                    throw new Error(
+                        `${subjectName}.${relName}: disjoint names '${other}', which is not a relation of ${subjectName} with a predicate`,
+                    );
+                }
+                return path;
+            });
+        }
+
         // Encode opt-out of type filtering (default true; only emit when false).
         if (relMeta.filter === false) {
             relShape.filter = false;
