@@ -12,7 +12,7 @@
  * known limitations.
  */
 
-import { defineLanguage } from "@coasys/ad4m-ldk";
+import { defineLanguage, hash } from "@coasys/ad4m-ldk";
 
 import type { PerspectiveDiff } from "./src/types.js";
 import * as store from "./src/store.js";
@@ -21,8 +21,15 @@ import * as auth from "./src/auth.js";
 import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
-import { deriveX25519KeyPair } from "./src/encryption.js";
-import { KeyRingManager } from "./src/key-ring-manager.js";
+import {
+    buildKeyRing,
+    deriveX25519KeyPair,
+    generateRoomKey,
+    hexToBytes,
+    sealRoomKeyForRecipient,
+    verifyX25519Ownership,
+    type KeyRing,
+} from "./src/encryption.js";
 
 import {
     initAdapters,
@@ -39,7 +46,7 @@ import {
     DenoTransport,
     DenoWebSocketFactory,
 } from "./src/adapters-deno.js";
-import { commitNeedsKeyRetry } from "./src/key-ring-policy.js";
+import { commitNeedsKeyRetry, refreshSkippedByCooldown, type KeyRingStatus } from "./src/key-ring-policy.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables
@@ -62,39 +69,218 @@ let configured = false;
 let localAgents: string[] = [];
 let wsClient: WsClient | null = null;
 
-/** The room's E2E key ring, admin duties and the pending-grant poll (see
- *  src/key-ring-manager.ts). Created in init() once the room is configured. */
-let keys: KeyRingManager | null = null;
+/** The room's versioned key ring (version → decrypted AES-256-GCM key).
+ * Null for a plaintext room OR while E2E setup is still in flight. */
+let keyRing: KeyRing | null = null;
+/**
+ * - "none": room has no E2E — plaintext commits are fine.
+ * - "ready": key ring acquired and decrypted — encrypted commits ready.
+ * - "pending": room HAS E2E but this agent has no keys yet (freshly
+ *   added member awaiting grant). commit() refuses to send plaintext.
+ * - "error": E2E keys almost certainly exist but we could not get/open
+ *   them. commit() refuses to send plaintext.
+ */
+let keyRingStatus: KeyRingStatus = "none";
+/** True when this agent has been identified as the room admin. */
+let isRoomAdmin = false;
+/** Cooldown for key ring retries — shared across WS and HTTP paths (ms since epoch). */
+let lastKeyRingRetry = 0;
+const KEY_RING_RETRY_COOLDOWN_MS = 10_000;
+/** In-flight setupKeyRing promise for single-flight deduplication. */
+let keyRingInflight: Promise<void> | null = null;
+/** Monotonic lifecycle counter — incremented on teardown to invalidate
+ *  in-flight async operations from a previous lifecycle. */
+let lifecycleGen = 0;
 
 function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
+}
+
+function setupKeyRingCoalesced(): Promise<void> {
+    if (!keyRingInflight) {
+        const p = setupKeyRing().finally(() => {
+            if (keyRingInflight === p) keyRingInflight = null;
+        });
+        keyRingInflight = p;
+    }
+    return keyRingInflight;
 }
 
 // ---------------------------------------------------------------------------
 // Startup helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Background key-ring refresh (WS diff with an unknown key version). If new
- * versions appeared, re-reads the room so previously undecryptable links
- * appear. Returns true when new key versions were obtained.
- */
-async function refreshKeyRingIfNeeded(): Promise<boolean> {
-    if (!keys) return false;
-    const gotNew = await keys.refresh();
-    if (!gotNew) return false;
-    console.log("[server-link-language] key ring refreshed — re-bootstrapping");
-    await reReadRoom();
-    return true;
+async function setupKeyRing(): Promise<void> {
+    const gen = lifecycleGen;
+    const config = getConfig();
+    try {
+        const token = await auth.getValidToken();
+        const keysRes = await api.fetchRoomKeys(config, token);
+        if (gen !== lifecycleGen) return;
+        if (!keysRes) {
+            keyRingStatus = "none";
+            keyRing = null;
+            return;
+        }
+        if (keysRes.keys.length === 0 && keysRes.e2e_enabled) {
+            keyRingStatus = "pending";
+            keyRing = null;
+            console.log(
+                "[server-link-language] room has E2E enabled but this agent has no keys yet — " +
+                "commits blocked until the room admin grants keys",
+            );
+            return;
+        }
+        if (keysRes.keys.length === 0) {
+            keyRingStatus = "none";
+            keyRing = null;
+            return;
+        }
+        const { privateKey } = deriveX25519KeyPair((payload) => getAgent().signStringHex(payload));
+        keyRing = buildKeyRing(keysRes.keys, privateKey);
+        keyRingStatus = "ready";
+        const versions = [...keyRing.keys()].sort((a, b) => a - b);
+        console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
+    } catch (err) {
+        if (gen !== lifecycleGen) return;
+        keyRingStatus = "error";
+        keyRing = null;
+        console.error(
+            "[server-link-language] failed to acquire/decrypt E2E key ring — " +
+            "refusing to commit plaintext until this resolves:",
+            err,
+        );
+    }
 }
 
-/** Replaces the store with the server's snapshot and hands every link to
- *  the executor: links that could not be decrypted before now can. */
-async function reReadRoom(): Promise<void> {
-    await syncModule.bootstrap();
-    const recovered = syncModule.render();
-    if (recovered.links.length > 0) {
-        getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
+/**
+ * Refresh the key ring from the server. If new versions appeared,
+ * re-bootstrap the full link set so previously-undecryptable links
+ * get picked up. Returns true when new key versions were obtained.
+ */
+async function refreshKeyRingIfNeeded(): Promise<boolean> {
+    const now = Date.now();
+    if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+        return false;
+    }
+    lastKeyRingRetry = now;
+    const prevSize = keyRing?.size ?? 0;
+    await setupKeyRingCoalesced();
+    const newSize = keyRing?.size ?? 0;
+    if (newSize > prevSize) {
+        console.log("[server-link-language] key ring refreshed — re-bootstrapping");
+        await syncModule.bootstrap();
+        const recovered = syncModule.render();
+        if (recovered.links.length > 0) {
+            getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
+        }
+        return true;
+    }
+    return false;
+}
+
+/**
+ * If this agent holds admin rights and the key ring has decrypted keys,
+ * detect members missing historical key versions and re-seal those
+ * versions for them. Runs after setupKeyRing and on peer-joined events.
+ *
+ * This closes the "late-member history" problem: when a member joins an
+ * encrypted room, the admin's language instance automatically grants
+ * them every historical key version the admin holds, so the new member
+ * can decrypt the room's full link history.
+ */
+async function performAdminKeyGrants(): Promise<void> {
+    if (!isRoomAdmin || !keyRing || keyRing.size === 0) return;
+    const config = getConfig();
+    try {
+        const token = await auth.getValidToken();
+        const missingRes = await api.fetchMissingKeys(config, token);
+        const members = missingRes.membersNeedingHistoricalKeys;
+        if (members.length === 0) return;
+
+        for (const member of members) {
+            // Verify X25519 key ownership before trusting the server's ACL
+            if (member.x25519Signature) {
+                if (!verifyX25519Ownership(member.did, member.x25519PublicKey, member.x25519Signature)) {
+                    console.error(
+                        `[server-link-language] X25519 signature verification failed for ${member.did} — skipping key grant`,
+                    );
+                    continue;
+                }
+            }
+            const recipientPub = hexToBytes(member.x25519PublicKey);
+            const sealedKeys: Array<{ version: number; encryptedKey: ReturnType<typeof sealRoomKeyForRecipient> }> = [];
+            for (const version of member.missingVersions) {
+                const roomKey = keyRing.get(version);
+                if (!roomKey) continue; // admin also lacks this version — skip
+                sealedKeys.push({
+                    version,
+                    encryptedKey: sealRoomKeyForRecipient(roomKey, recipientPub),
+                });
+            }
+            if (sealedKeys.length === 0) continue;
+            const granted = await api.grantKeys(config, token, member.did, sealedKeys);
+            if (granted.length > 0) {
+                console.log(
+                    `[server-link-language] admin auto-granted key versions [${granted.join(", ")}] to ${member.did}`,
+                );
+            }
+        }
+    } catch (err) {
+        console.error("[server-link-language] admin auto-grant failed (non-fatal):", err);
+    }
+}
+
+/**
+ * Client-side key rotation — generates the room key locally, seals it to
+ * every ACL member's X25519 public key, and sends only the sealed
+ * envelopes to the server. The server never touches plaintext key
+ * material. Exposed for programmatic use but currently called from the
+ * language's init flow or admin tooling.
+ */
+async function performRotation(): Promise<void> {
+    if (!isRoomAdmin) return;
+    const config = getConfig();
+    try {
+        const token = await auth.getValidToken();
+        const aclRes = await api.fetchAclInfo(config, token);
+
+        const roomKey = generateRoomKey();
+
+        const sealedKeys: api.RotateKeyEntry[] = [];
+        for (const member of aclRes.members) {
+            if (!member.x25519PublicKey) continue;
+            // Verify X25519 key ownership before trusting the server's ACL
+            if (member.x25519Signature) {
+                if (!verifyX25519Ownership(member.did, member.x25519PublicKey, member.x25519Signature)) {
+                    console.error(
+                        `[server-link-language] X25519 signature verification failed for ${member.did} — skipping`,
+                    );
+                    continue;
+                }
+            }
+            const recipientPub = hexToBytes(member.x25519PublicKey);
+            sealedKeys.push({
+                did: member.did,
+                encryptedKey: sealRoomKeyForRecipient(roomKey, recipientPub),
+            });
+        }
+
+        if (sealedKeys.length === 0) {
+            console.log("[server-link-language] no members with X25519 keys — skipping rotation");
+            return;
+        }
+
+        const result = await api.rotateKeys(config, token, sealedKeys);
+        console.log(
+            `[server-link-language] client-side key rotation complete: version ${result.version}, ` +
+            `${result.recipients.length} recipient(s)`,
+        );
+
+        await setupKeyRing();
+    } catch (err) {
+        console.error("[server-link-language] key rotation failed:", err);
+        throw err;
     }
 }
 
@@ -118,7 +304,7 @@ const language = defineLanguage({
         });
 
         myDid = getAgent().did();
-        store.initStore();
+        store.initStore(hash);
 
         configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(UID);
         if (!configured) {
@@ -132,30 +318,28 @@ const language = defineLanguage({
         initAdapters({ config: { serverUrl: SERVER_URL, roomId: UID } });
         const config = getConfig();
 
-        const keyMgr = new KeyRingManager({
-            config,
-            getToken: () => auth.getValidToken(),
-            x25519PrivateKey: () =>
-                deriveX25519KeyPair((payload) => getAgent().signStringHex(payload)).privateKey,
-            // The pending poll got this agent's first keys: re-read the room
-            // so the links it could not decrypt reach the executor now.
-            onNewKeys: () => reReadRoom(),
-        });
-        keys = keyMgr;
-
         syncModule.initSync({
             config,
             getToken: () => auth.getValidToken(),
             invalidateToken: () => auth.invalidateSession(),
             emitDiff: (diff) => getRuntime().emitPerspectiveDiff(diff),
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
-            getKeyRing: () => keyMgr.keyRing,
-            refreshKeyRing: () => keyMgr.refresh(),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                const now = Date.now();
+                if (refreshSkippedByCooldown(keyRingStatus, now - lastKeyRingRetry, KEY_RING_RETRY_COOLDOWN_MS)) {
+                    return null;
+                }
+                lastKeyRingRetry = now;
+                const prevSize = keyRing?.size ?? 0;
+                await setupKeyRingCoalesced();
+                return (keyRing?.size ?? 0) > prevSize;
+            },
             // Periodic admin key grants — fallback for when the WS
             // `peer-joined` event never fires (WS down, CI, firewalls).
             // Each successful HTTP sync triggers a check so the admin
             // discovers new members who need historical keys.
-            onPostSync: () => keyMgr.grantMissing(),
+            onPostSync: () => performAdminKeyGrants(),
         });
 
         wsClient = new WsClient({
@@ -195,10 +379,9 @@ const language = defineLanguage({
                     // event. Rotating on presence would mint a new version
                     // on every reconnect. Rotation belongs on ACL changes
                     // or explicit admin action.
-                    // A member still waiting for its first keys restarts
-                    // its fast /keys poll instead: the peer may be the
-                    // admin coming online and granting them.
-                    keyMgr.onPeerJoined();
+                    void performAdminKeyGrants().catch((err) => {
+                        console.error("[server-link-language] peer-joined admin grant failed:", err);
+                    });
                 },
                 onPeerLeft(msg) {
                     telepresenceModule.handlePeerLeft(msg);
@@ -239,29 +422,52 @@ const language = defineLanguage({
         try {
             await auth.authenticate();
 
-            // Determine admin status — used by the admin's key grants.
-            await keyMgr.detectAdmin(myDid);
+            // Determine admin status — used by performAdminKeyGrants.
+            try {
+                const aclInfo = await api.fetchAclInfo(config, await auth.getValidToken());
+                isRoomAdmin = aclInfo.admin === myDid;
+            } catch {
+                isRoomAdmin = false;
+            }
 
-            // Reads /keys. A member the admin has not granted keys yet
-            // ends "pending" and starts the fast /keys poll, which
-            // re-reads the room as soon as the grant lands.
-            await keyMgr.setup();
+            await setupKeyRing();
 
             // E2E is mandatory — if admin and no E2E exists yet,
             // generate the initial room key. Every room gets encrypted
             // automatically; there is no plaintext mode.
-            if (keyMgr.isAdmin && keyMgr.status === "none") {
+            if (isRoomAdmin && keyRingStatus === "none") {
                 console.log(
                     "[server-link-language] admin, no E2E yet — generating initial room key",
                 );
-                await keyMgr.rotate();
+                await performRotation();
             }
 
             await syncModule.bootstrap();
 
-            // If admin and key ring ready, grant keys to any members who
-            // joined while we were offline.
-            void keyMgr.grantMissing();
+            // E2E timing fix: if keyRingStatus is still "pending" after
+            // bootstrap, the admin may have granted keys between our
+            // setupKeyRing() call and now. Retry once — if keys arrived,
+            // re-bootstrap so any encrypted links in the room's history
+            // get picked up immediately instead of waiting for the next
+            // sync cycle.
+            // Cast needed: setupKeyRing() mutates the module-level
+            // keyRingStatus across an await boundary; TS literal
+            // narrowing doesn't track that.
+            if ((keyRingStatus as KeyRingStatus) === "pending") {
+                await setupKeyRing();
+                if ((keyRingStatus as KeyRingStatus) === "ready") {
+                    console.log(
+                        "[server-link-language] keys acquired after init grant — re-bootstrapping",
+                    );
+                    await syncModule.bootstrap();
+                }
+            }
+
+            // If admin and key ring ready, grant historical keys to any
+            // members who joined while we were offline.
+            void performAdminKeyGrants().catch((err) => {
+                console.error("[server-link-language] initial admin grant check failed:", err);
+            });
         } catch (err) {
             console.error(
                 "[server-link-language] initial startup sequence failed — will keep retrying via " +
@@ -280,9 +486,7 @@ const language = defineLanguage({
     },
 
     async teardown() {
-        // Stop the /keys poll now, but keep the key ring until the queued
-        // commits are drained: they must still be encrypted.
-        keys?.stopPendingPoll();
+        lifecycleGen++;
         try {
             await syncModule.drainCommitBatch();
         } catch (err) {
@@ -299,8 +503,11 @@ const language = defineLanguage({
         myDid = "";
         configured = false;
         localAgents = [];
-        keys?.teardown();
-        keys = null;
+        keyRing = null;
+        keyRingStatus = "none";
+        isRoomAdmin = false;
+        lastKeyRingRetry = 0;
+        keyRingInflight = null;
         auth.resetAuth();
         resetAdapters();
         console.log("[server-link-language] teardown");
@@ -320,31 +527,30 @@ const language = defineLanguage({
                     "server-link-language: not configured (SERVER_URL/UID template variables unfilled)",
                 );
             }
-            const k = keys;
-            if (!k) {
-                throw new Error("server-link-language: commit before init finished");
-            }
-            if (commitNeedsKeyRetry(k.status)) {
+            if (commitNeedsKeyRetry(keyRingStatus)) {
                 console.log(
-                    `[server-link-language] retrying E2E key ring acquisition before commit (status: ${k.status})...`,
+                    `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
                 );
-                await k.loadCoalesced();
-                if (k.status === "ready") {
-                    k.stopPendingPoll();
+                await setupKeyRingCoalesced();
+                if (keyRingStatus === "ready") {
                     console.log(
                         "[server-link-language] key ring acquired — re-bootstrapping to recover skipped links",
                     );
-                    await reReadRoom();
+                    await syncModule.bootstrap();
+                    const recovered = syncModule.render();
+                    if (recovered.links.length > 0) {
+                        getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
+                    }
                 }
             }
-            if (k.status === "error") {
+            if (keyRingStatus === "error") {
                 throw new Error(
                     "server-link-language: refusing to commit — this room's E2E key ring could not be " +
                     "acquired/decrypted, and sending plaintext to a possibly-encrypted room would be unsafe. " +
                     "Retry once connectivity/auth recovers.",
                 );
             }
-            if (k.status === "pending") {
+            if (keyRingStatus === "pending") {
                 throw new Error(
                     "server-link-language: refusing to commit — this room has E2E encryption enabled " +
                     "but this agent has not received room keys yet. The room admin must grant keys " +
@@ -352,33 +558,32 @@ const language = defineLanguage({
                 );
             }
 
-            // E2E is mandatory — if admin and the status is still
-            // "none" (init's rotation failed or was skipped), retry
-            // rotation before committing. Non-admin "none" means the room
-            // genuinely has no E2E yet — plaintext is correct for the
-            // first commit that triggers the admin flow.
-            if (k.isAdmin && k.status === "none") {
+            // E2E is mandatory — if admin and keyRingStatus is still
+            // "none" (init's performRotation failed or was skipped),
+            // retry rotation before committing. Non-admin "none" means
+            // the room genuinely has no E2E yet — plaintext is correct
+            // for the first commit that triggers the admin flow.
+            if (isRoomAdmin && keyRingStatus === "none") {
                 console.log(
                     "[server-link-language] admin with keyRingStatus=none — retrying rotation before commit",
                 );
-                await k.rotate();
-                // rotate() throws on server/auth failure → executor keeps
-                // the diff for retry. If it returns (success or no-op), the
-                // status may now be "ready" or still "none" (no members
-                // with X25519 keys yet).
+                await performRotation();
+                // performRotation throws on server/auth failure →
+                // executor keeps the diff for retry. If it returns
+                // (success or no-op), keyRingStatus may now be "ready"
+                // or still "none" (no members with X25519 keys yet).
             }
 
             console.log(
                 `[server-link-language] commit: ${diff.additions.length} adds, ` +
-                `${diff.removals.length} removes (keyRingStatus=${k.status})`,
+                `${diff.removals.length} removes (keyRingStatus=${keyRingStatus})`,
             );
 
-            // Push the diff to the server, in chunks. Awaiting it ensures
-            // the executor only clears its pending-diff DB entry AFTER the
-            // server accepted the commit. syncModule.commit writes each
-            // accepted chunk to the language's store (never before the
-            // server has it) and does not echo the diff back: the executor
-            // committed these links and already holds them.
+            // Push the diff to the server; syncModule.commit stores it
+            // locally only once the server accepted it, and does not echo
+            // it back (the executor committed it and already holds it).
+            // Awaiting the POST ensures the executor only clears its
+            // pending-diff DB entry AFTER the server accepted the commit.
             await syncModule.commit(diff);
 
             return "";

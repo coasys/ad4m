@@ -619,32 +619,26 @@ describe("sync: commit", () => {
 });
 
 // ---------------------------------------------------------------------------
-// commit: the store follows the server, large diffs go in chunks
+// commit: the store follows the server
 // ---------------------------------------------------------------------------
 
 /** A link-server stand-in: an OR-Set keyed by link identity (as the real
  *  server keys by link hash), one sequence number per accepted POST. */
 class MockLinkServer {
     links = new Map<string, LinkExpression>();
-    posts: number[] = [];
     sequence = 0;
-    /** Answers the next N POSTs with this status instead of accepting them. */
+    /** Answers the next N POSTs with a 500 instead of accepting them. */
     failNext = 0;
-    failStatus = 500;
-    /** Called on every POST before it is answered (to observe interleaving). */
-    onPost: (() => void) | null = null;
 
     constructor(transport: MockTransport) {
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/commit"),
             (_url, _method, body) => {
-                this.onPost?.();
-                const diff = JSON.parse(body) as PerspectiveDiff;
-                this.posts.push(diff.additions.length + diff.removals.length);
                 if (this.failNext > 0) {
                     this.failNext--;
-                    return { status: this.failStatus, headers: {}, body: "{\"error\":\"down\"}" };
+                    return { status: 500, headers: {}, body: "{\"error\":\"down\"}" };
                 }
+                const diff = JSON.parse(body) as PerspectiveDiff;
                 for (const l of diff.additions) this.links.set(identity(l), l);
                 for (const l of diff.removals) this.links.delete(identity(l));
                 this.sequence++;
@@ -732,124 +726,6 @@ describe("sync: commit keeps the store in step with the server", () => {
         server.sequence++;
         await syncModule.commit({ additions: manyLinks(1, "t"), removals: [] });
         assert.equal(store.getSequence(), 1);
-    });
-});
-
-describe("sync: commit sends a large diff in chunks", () => {
-    it("a 1,000-link commit makes at least 5 POSTs of at most COMMIT_CHUNK_SIZE links", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        const server = new MockLinkServer(transport);
-
-        await syncModule.commit({ additions: manyLinks(1000), removals: [] });
-
-        assert.ok(syncModule.COMMIT_CHUNK_SIZE <= 200);
-        assert.ok(server.posts.length >= 5, `expected >= 5 POSTs, got ${server.posts.length}`);
-        for (const n of server.posts) assert.ok(n <= syncModule.COMMIT_CHUNK_SIZE, `POST of ${n} links`);
-        assert.equal(server.links.size, 1000);
-        assert.equal(store.allLinks().links.length, 1000);
-    });
-
-    it("sends additions before removals, as one POST would apply them", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        const server = new MockLinkServer(transport);
-        const links = manyLinks(300);
-        await syncModule.commit({ additions: links, removals: [] });
-
-        // Re-add link 0 and remove it in the same diff: one POST applies
-        // additions first, so the link ends removed. Chunks must agree.
-        await syncModule.commit({ additions: [links[0], ...manyLinks(250, "x")], removals: [links[0]] });
-
-        assert.ok(!server.links.has(identity(links[0])));
-        assert.equal(server.links.size, 299 + 250);
-        assert.equal(store.allLinks().links.length, 299 + 250);
-    });
-
-    it("yields between chunks so timers and socket handlers run during a long commit", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        const server = new MockLinkServer(transport);
-        let timerFired = false;
-        const firedAtPost: boolean[] = [];
-        server.onPost = () => firedAtPost.push(timerFired);
-        setTimeout(() => { timerFired = true; }, 0);
-
-        await syncModule.commit({ additions: manyLinks(1000), removals: [] });
-
-        assert.equal(firedAtPost[0], false);
-        assert.equal(firedAtPost[firedAtPost.length - 1], true, "a timer must run before the last chunk");
-    });
-
-    it("a failure mid-way keeps the accepted chunks, and the retry completes the diff once", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        const server = new MockLinkServer(transport);
-        const diff = { additions: manyLinks(1000), removals: [] };
-        let post = 0;
-        server.onPost = () => { if (++post === 3) server.failNext = 1; };
-
-        await assert.rejects(() => syncModule.commit(diff));
-        assert.equal(server.links.size, 2 * syncModule.COMMIT_CHUNK_SIZE);
-        assert.equal(store.allLinks().links.length, 2 * syncModule.COMMIT_CHUNK_SIZE,
-            "only the chunks the server accepted are stored");
-
-        server.onPost = null;
-        await syncModule.commit(diff);
-
-        assert.equal(server.links.size, 1000);
-        assert.equal(store.allLinks().links.length, 1000);
-    });
-});
-
-// The executor's KV rewrites its whole file on every put and delete
-// (rust-executor/src/js_core/host.js storagePut/storageDelete), so the
-// number of writes per commit is what a commit costs: one write per link
-// took 16 s for 1,833 links.
-class CountingStorage extends MockStorage {
-    calls = { get: 0, put: 0, delete: 0, listKeys: 0 };
-    get(key: string): string | null { this.calls.get++; return super.get(key); }
-    put(key: string, value: string): void { this.calls.put++; super.put(key, value); }
-    delete(key: string): void { this.calls.delete++; super.delete(key); }
-    listKeys(prefix?: string): string[] { this.calls.listKeys++; return super.listKeys(prefix); }
-}
-
-describe("sync: commit cost in storage calls", () => {
-    it("a 1,000-link commit writes storage at most 3 times per chunk, whatever the chunk size", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        const storage = new CountingStorage();
-        initAdapters({ storage, transport, config });
-        store.initStore(simpleHash);
-        const server = new MockLinkServer(transport);
-
-        await syncModule.commit({ additions: manyLinks(1000), removals: [] });
-
-        const chunks = server.posts.length;
-        const writes = storage.calls.put + storage.calls.delete;
-        const all = writes + storage.calls.get + storage.calls.listKeys;
-        assert.equal(store.allLinks().links.length, 1000);
-        assert.ok(writes <= 3 * chunks, `${writes} writes for ${chunks} chunks: ${JSON.stringify(storage.calls)}`);
-        assert.ok(all <= 5 * chunks + 2, `${all} storage calls for ${chunks} chunks: ${JSON.stringify(storage.calls)}`);
-    });
-
-    it("a commit of 1,000 removals writes storage at most 3 times per chunk", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        const storage = new CountingStorage();
-        initAdapters({ storage, transport, config });
-        store.initStore(simpleHash);
-        const server = new MockLinkServer(transport);
-        const links = manyLinks(1000);
-        await syncModule.commit({ additions: links, removals: [] });
-        storage.calls = { get: 0, put: 0, delete: 0, listKeys: 0 };
-        server.posts = [];
-
-        await syncModule.commit({ additions: [], removals: links });
-
-        const writes = storage.calls.put + storage.calls.delete;
-        assert.equal(store.allLinks().links.length, 0);
-        assert.ok(writes <= 3 * server.posts.length, `${writes} writes for ${server.posts.length} chunks`);
     });
 });
 
@@ -1126,7 +1002,7 @@ describe("sync: enqueueCommitBatched", () => {
         return { transport, posts };
     }
 
-    it("collapses a burst of 1500 addLinks into one segment, sent in chunks (the stress-test hot path)", async () => {
+    it("collapses a burst of 1500 addLinks into ONE POST (the stress-test hot path)", async () => {
         const { transport, posts } = makeCommitTransport();
         setup(transport);
         for (let i = 0; i < 1500; i++) {
@@ -1141,10 +1017,8 @@ describe("sync: enqueueCommitBatched", () => {
             });
         }
         await syncModule.drainCommitBatch();
-        // One segment, not 1,500 commits: the segment goes in
-        // COMMIT_CHUNK_SIZE-link POSTs.
-        assert.equal(posts.length, Math.ceil(1500 / syncModule.COMMIT_CHUNK_SIZE));
-        assert.equal(posts.reduce((n, p) => n + p.additions.length, 0), 1500);
+        assert.equal(posts.length, 1, "microtask flush should coalesce the burst into one POST");
+        assert.equal(posts[0].additions.length, 1500);
     });
 
     it("splits into two POSTs when remove(X) is followed by add(X)", async () => {

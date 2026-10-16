@@ -270,79 +270,29 @@ export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: nu
 // Outbound — commit
 // ---------------------------------------------------------------------------
 
-/** Most links one POST /commit carries. A larger diff goes in several POSTs. */
-export const COMMIT_CHUNK_SIZE = 200;
-
 /**
- * Splits a diff into diffs of at most `size` links, all additions first,
- * then all removals. One POST applies its additions before its removals
- * (link-server/src/db.ts::applyDiffAndAppend), so sending the additions'
- * chunks before the removals' chunks gives the same result as one POST.
- */
-export function chunkDiff(diff: PerspectiveDiff, size = COMMIT_CHUNK_SIZE): PerspectiveDiff[] {
-    const chunks: PerspectiveDiff[] = [];
-    let current: PerspectiveDiff = { additions: [], removals: [] };
-    const push = (link: LinkExpression, side: "additions" | "removals") => {
-        if (current.additions.length + current.removals.length >= size) {
-            chunks.push(current);
-            current = { additions: [], removals: [] };
-        }
-        current[side].push(link);
-    };
-    for (const link of diff.additions) push(link, "additions");
-    for (const link of diff.removals) push(link, "removals");
-    if (current.additions.length + current.removals.length > 0) chunks.push(current);
-    return chunks;
-}
-
-/** Lets timers and socket handlers run between the chunks of a long commit. */
-function yieldToEventLoop(): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-/**
- * Sends a local diff to the server, in chunks of at most
- * `COMMIT_CHUNK_SIZE` links, and rejects if any chunk fails.
+ * Direct single-shot commit. Callers that need error propagation (test
+ * harnesses, non-batching write paths) can await this. Used by
+ * `enqueueCommitBatched` below to send the accumulated batch.
  *
- * - The language's own store changes only after the server accepted a
- *   chunk, so a failed commit leaves no local-only links behind.
- * - A failure mid-way leaves the chunks already accepted on the server and
- *   in the store. The caller (the executor, or `commitSegmentWithRetries`)
- *   retries the whole diff, which re-sends those chunks. That is safe: the
- *   server's link set is an OR-Set keyed by link hash, so a link it already
- *   holds is not added twice and a removal it already applied is a no-op;
- *   the store is keyed by link hash in the same way.
- * - Nothing is emitted back to the executor: it committed these links
- *   itself and already holds them. Echoing them made it persist, re-index
- *   and re-publish every link a second time.
- * - When the server put the commit right after our sync cursor, the cursor
- *   moves past it, so the next catch-up does not fetch our own links back.
- *   Otherwise the cursor stays (another agent's diff is in between and
- *   catch-up must still fetch it).
- *
- * Every chunk is encrypted just before it is sent, and the event loop gets
- * a turn between chunks. The executor still waits for the whole commit
- * before it sends this language its next call (language_runtime.rs
- * awaits each execute), so the yield lets the language's own work (socket
- * diffs, key polls, admin grants) run, not executor calls.
+ * The store changes only after the server accepted the diff, so a failed
+ * POST leaves no local-only links. Nothing is emitted back: the executor
+ * committed these links and already holds them. When the server put the
+ * commit right after our cursor, the cursor moves past it so catch-up does
+ * not fetch our own links back (otherwise another agent's diff is between).
  */
 export async function commit(diff: PerspectiveDiff): Promise<void> {
     const { config } = deps();
-    const chunks = chunkDiff(diff);
     console.log(
         `[server-link-language] POST /commit: ${diff.additions.length} adds, ` +
-        `${diff.removals.length} removes in ${chunks.length} chunk(s) → room=${config.roomId}`,
+        `${diff.removals.length} removes → room=${config.roomId}`,
     );
-    for (let i = 0; i < chunks.length; i++) {
-        if (i > 0) await yieldToEventLoop();
-        const chunk = chunks[i];
-        const wire = toWireDiff(chunk);
-        const res = await withToken((token) => api.commitDiff(config, token, wire));
-        store.applyDiff(chunk);
-        if (typeof res.sequence === "number" && res.sequence === store.getSequence() + 1) {
-            store.setSequence(res.sequence);
-            if (res.revision) store.setRevision(res.revision);
-        }
+    const wire = toWireDiff(diff);
+    const res = await withToken((token) => api.commitDiff(config, token, wire));
+    store.applyDiff(diff);
+    if (typeof res.sequence === "number" && res.sequence === store.getSequence() + 1) {
+        store.setSequence(res.sequence);
+        if (res.revision) store.setRevision(res.revision);
     }
     emitSyncStateSafe("Synced");
 }
@@ -646,7 +596,9 @@ export async function bootstrap(): Promise<void> {
     // from a previous session, then apply the authoritative server snapshot.
     // Without this, links deleted while the language was stopped would
     // remain visible locally.
-    store.replaceAll(diff.additions);
+    const existing = store.allLinks();
+    store.applyDiff({ additions: [], removals: existing.links });
+    store.applyDiff({ additions: diff.additions, removals: [] });
 
     if (rendered.revision) store.setRevision(rendered.revision);
     if (typeof rendered.sequence === "number") store.setSequence(rendered.sequence);

@@ -48,12 +48,11 @@ esbuild.ts             — Deno build script; bundles @noble/* IN, externalizes 
 src/types.ts            — AD4M types + server wire types (WireLinkExpression, WS message unions, ...)
 src/adapters.ts          — pure interfaces + init/get singletons: Transport, StorageAdapter, AgentAdapter, RuntimeAdapter, WebSocketFactory, RoomConfig
 src/adapters-deno.ts      — ad4m:host + native WebSocket implementations of the above (only imported from index.ts)
-src/store.ts               — local link store (in-memory indexes, one KV value `links-v2`) + sync cursor (revision, sequence)
+src/store.ts               — local link store (indexed) + sync cursor (revision, sequence)
 src/api.ts                  — typed HTTP client, one function per server endpoint
 src/auth.ts                  — DID challenge-response + JWT-expiry-driven token refresh
 src/ws-client.ts               — WebSocket lifecycle: typed dispatch, send queue, exponential-backoff reconnect
-src/sync.ts                     — commit (chunked) / catch-up / bootstrap; the ONE inbound-diff choke point (applyInboundWireDiff)
-src/key-ring-manager.ts          — KeyRingManager: E2E key ring load, admin rotate/grants, pending-grant poll (instance per language, testable in Node)
+src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound-diff choke point (applyInboundWireDiff)
 src/telepresence.ts              — online-agent roster + outbound signal/broadcast/status
 src/encryption.ts                 — X25519 derivation, sealed room-key exchange, AES-256-GCM link encryption
 tests/*.test.ts                    — node:test + tsx, one file per pure module, all use mock adapters (no real network/WS/Deno)
@@ -69,51 +68,11 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   plain Node with mocks. **Import rules:** `src/adapters-deno.ts` is the only
   file allowed to import runtime-specific APIs (`ad4m:host`, Deno globals).
   Only `index.ts` is allowed to import `adapters-deno.ts`. `index.ts` also
-  imports `defineLanguage` directly from `@coasys/ad4m-ldk` — a
-  module-surface export (not an I/O adapter), so the direct import
+  imports `defineLanguage` and `hash` directly from `@coasys/ad4m-ldk` —
+  these are module-surface exports (not I/O adapters), so the direct import
   does not break the swappable-adapter guarantee. Pure library
   imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
   anywhere — they contain no runtime coupling.
-- **Commit: the store follows the server, nothing is echoed.**
-  `sync.commit()` splits a diff into POSTs of at most `COMMIT_CHUNK_SIZE`
-  (200) links — all additions first, then removals, which is how one POST
-  applies them — encrypts each chunk just before sending it, and writes a
-  chunk to the language's store only after the server accepted it. A
-  failed commit leaves no local-only links; a failure mid-way leaves the
-  accepted chunks, and the executor's retry re-sends them, which is safe
-  (server OR-Set keyed by link hash; store keyed by link hash). The
-  committed diff is NOT emitted back to the executor: it committed those
-  links and already holds them; the echo made it re-persist, re-index and
-  re-publish every link (`diff_from_link_language`). After a commit whose
-  server sequence is exactly cursor + 1 the cursor moves past it, so
-  catch-up does not fetch our own links back; otherwise it stays.
-- **The executor runs one call at a time per language.**
-  `rust-executor/src/languages/language_runtime.rs` awaits each execute
-  before taking the next request; the JS event loop keeps running inside
-  it. The yield between commit chunks lets the language's own async work
-  (WS diffs, key poll, admin grants) run during a long commit, but
-  `sync()`/`render()`/the next commit from the executor still wait for the
-  whole commit. Keep commit cheap; anything long-running inside a call
-  blocks every other call to this perspective's language.
-- **Every KV write rewrites the executor's whole KV file.** `storagePut`/
-  `storageDelete` in `rust-executor/src/js_core/host.js` sort every key,
-  `JSON.stringify` the whole store and `Deno.writeTextFileSync` it, on
-  each call. A write costs O(store size): 0.2 ms with 200 links, 5.8 ms
-  with ~2,000, 20 ms with 3,000 (3.6 MB file); `storageGet` and `hash`
-  cost microseconds. So count writes, not calls. The store (`src/store.ts`)
-  keeps the link set and its source/target/predicate indexes in memory and
-  writes the whole set as ONE value (`links-v2`) per applied diff; a
-  committed chunk is 3 writes (links, sequence, revision). The old format
-  (`links/{hash}` + three `links-by-*` index keys per link, a host `hash`
-  call each) made a 1,833-link commit 7,352 writes, 42 s in the executor's
-  isolate. The first load without `links-v2` imports the old `links/*`
-  values; the old keys stay, since deleting them is one rewrite each.
-  `tests/sync.test.ts` "commit cost in storage calls" bounds a 1,000-link
-  commit at 3 writes per chunk.
-- **Link hash is SHA-256 hex in JS** (`store.hashLink`, `@noble/hashes`)
-  of the canonical payload, equal to the wire `link_hash`
-  (`encryptLinkForWire`) and the server's `linkHash`. It is only the
-  store's key, so changing it needs no migration beyond re-keying on load.
 - **`applyInboundWireDiff` (src/sync.ts) is the only place that calls
   `emitDiff`.** The AD4M executor discards `perspectiveSyncSync()`'s return
   value — `emitPerspectiveDiff` is the only thing that makes an inbound
@@ -121,6 +80,25 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   handler (wired in `index.ts`) both funnel through this one function. If
   you add a new inbound-diff source, route it through
   `applyInboundWireDiff` — do not call `store.applyDiff` + emit separately.
+- **Commit: the store follows the server, nothing is echoed.**
+  `sync.commit()` writes a diff to the language's store only after the
+  server accepted the POST, so a failed commit leaves no local-only links.
+  It does NOT emit the diff back to the executor: the executor committed
+  those links and already holds them (the echo made it re-persist,
+  re-index and re-publish every link). When the server's answer puts the
+  commit at exactly cursor + 1 the cursor moves past it, so catch-up does
+  not fetch our own links back; otherwise another agent's diff is in
+  between and the cursor stays.
+- **A 401 replaces the session.** `commit`, `bootstrap` and `catchUp` run
+  their request through `withToken` (src/sync.ts): on a 401 it drops the
+  cached token (`invalidateToken` → `auth.invalidateSession()`),
+  re-authenticates and retries once. A WebSocket `auth-error` drops the
+  token before the reconnect for the same reason.
+- **The KV write cost is the host's.** `ad4m:host`'s KV
+  (rust-executor/src/js_core/host.js) keeps the store in memory and
+  rewrites its file once at the end of the turn that changed it, so the
+  store's one key per link is cheap within one synchronous `applyDiff`.
+  Keep store writes for a diff in one turn (no `await` between them).
 - **`sync.sync()` always does an HTTP catch-up**, regardless of WebSocket
   connection state. This is deliberate, not a missing optimization: because
   `since` only advances after a diff is actually applied, a live WebSocket
@@ -145,29 +123,6 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Gotchas
 
-- **Session loss.** A 401 on HTTP drops the cached JWT and retries once
-  (`withToken`, src/sync.ts); a WS `auth-error` drops it too
-  (`invalidateToken` option of `WsClient`) before the reconnect, which
-  then authenticates afresh. Without that the dead token is reused
-  forever (link-server data reset, revoked session).
-- **No WS message for a key grant.** The link-server pushes nothing when
-  the admin grants keys, so a member whose `/keys` says "E2E room, no keys
-  for you" (`pending`) polls `/keys` itself: every 500 ms for 10 s, then
-  every 2 s up to 60 s (`PENDING_POLL_SCHEDULE_MS`), and restarts that
-  schedule on every `peer-joined` (the admin may just have come online).
-  When keys arrive it re-reads the room (bootstrap + emit). While the
-  poll runs, background refreshes (`refresh()`, 10 s cooldown) defer to
-  it. The admin grants on `peer-joined`, after every sync, at init, and
-  right after a rotation; `/keys/missing` lists members with no keys at
-  all, so new joiners are covered. Grants are single-flight; a request
-  during a run triggers one more run.
-- **Index.ts state is not loadable in Node** (it imports `ad4m:host`).
-  Logic that needs tests goes in a pure `src/` module with explicit deps
-  (see `KeyRingManager`); `tests/integration.test.ts` runs two managers
-  (admin, joiner) side by side against an in-process link-server. The
-  module singletons (adapters, auth session, store, sync) hold one agent
-  at a time, so those tests authenticate each agent with its own token
-  getter and re-point the sync module/store with `wireMember`.
 - **`httpFetch` return shape varies by executor version.**
   Executor builds before `2b65ebbf0` return a plain string on success
   and throw `"http_fetch METHOD URL -> STATUS: body"` for non-ok HTTP.
@@ -177,15 +132,6 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   version falls out of deployment.
 
 ## Known limitations / follow-ups
-
-- **The executor's KV still rewrites its file on every write.** The store
-  keeps writes per commit chunk constant, but each write still costs
-  O(whole KV), so one commit chunk with 50,000 links in the store costs
-  three rewrites of a ~60 MB file. The fix belongs in `host.js` (flush once
-  per execute, or a batched write op) and helps every language; it needs a
-  snapshot rebuild and an executor release, so this language does not rely
-  on it. Format-1 keys of an upgraded install stay in the KV for the same
-  reason.
 
 - **Durable outbox is limited to in-memory retry.** `enqueueCommitBatched`
   (src/sync.ts) coalesces contiguous commits into segments and retries
@@ -203,10 +149,13 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   ACL member's X25519 public key, and POSTs only sealed envelopes — the server
   never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
   reconnect/wake, not ACL change — rotating there would mint a new version on
-  every reconnect). `onPeerJoined` only calls `KeyRingManager.onPeerJoined()`:
-  the admin grants keys to members who lack them (idempotent), a pending
-  member restarts its `/keys` poll. The key ring
-  loads during `init()`'s `keyMgr.setup()` and the `version` field in
+  every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
+  grant historical keys to members who lack them (idempotent). A member
+  whose key status is `pending` (no keys yet) re-reads `/keys` on every
+  sync, skipping the 10 s refresh cooldown (`refreshSkippedByCooldown`,
+  src/key-ring-policy.ts), so it sees the room on the first sync after the
+  grant. The key ring
+  loads once during `init()`'s `setupKeyRing()` and the `version` field in
   `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
   re-fetch or a dedicated WS push message would close that gap.
 - **E2E encryption wire format is unified.** Both client and server use
