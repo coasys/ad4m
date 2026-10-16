@@ -1186,7 +1186,7 @@ impl PerspectiveInstance {
         // adds them as an owner) found no link language to tell, and joins
         // now land straight after a publish. From here on the join tells it
         // itself; before here, tell it now.
-        self.register_local_agents(&mut language, Some(&registered))
+        self.register_local_agents(&mut language, registered.as_deref())
             .await;
         // Cache language→perspective mapping for fast signal routing
         {

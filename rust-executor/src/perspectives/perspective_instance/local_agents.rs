@@ -12,7 +12,8 @@ use crate::languages::language::Language;
 impl PerspectiveInstance {
     /// Tell `language` this executor's owners (the main agent's DID for a
     /// perspective without any), unless it was last told exactly `told`.
-    /// Returns the owners it read.
+    /// Returns the owners the language now has, or `None` if telling it
+    /// failed, so the next registration tries again.
     ///
     /// Reads them under `local_agents_mutex` and holds it until the language
     /// answers, so no registration lands after a later one with an older
@@ -21,19 +22,23 @@ impl PerspectiveInstance {
         &self,
         language: &mut Language,
         told: Option<&[String]>,
-    ) -> Vec<String> {
+    ) -> Option<Vec<String>> {
         let _registering = self.local_agents_mutex.lock().await;
         let agents = match self.persisted.lock().await.owners.clone() {
             Some(owners) if !owners.is_empty() => owners,
             _ => vec![crate::agent::did()],
         };
-        if told != Some(agents.as_slice()) {
-            log::info!("Setting local agents for link language: {:?}", agents);
-            if let Err(e) = language.set_local_agents(agents.clone()).await {
+        if told == Some(agents.as_slice()) {
+            return Some(agents);
+        }
+        log::info!("Setting local agents for link language: {:?}", agents);
+        match language.set_local_agents(agents.clone()).await {
+            Ok(_) => Some(agents),
+            Err(e) => {
                 log::error!("Failed to set local agents on link language: {:?}", e);
+                None
             }
         }
-        agents
     }
 }
 
@@ -190,6 +195,73 @@ mod tests {
         );
 
         crate::perspectives::unregister_perspective(&instance.uuid);
+        LanguageController::global_instance()
+            .set_runtime_for_test(&address, None)
+            .await;
+        remove_capabilities(&address);
+    }
+
+    /// A registration the link language refused is not taken as done: the
+    /// post-attach refresh sends the same owners again (CodeRabbit on #1439).
+    #[tokio::test(start_paused = true)]
+    async fn attach_retries_a_refused_registration() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+        let a = "did:key:owner-a".to_string();
+
+        let address = format!("QmRefusingPeers{}", Uuid::new_v4().simple());
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        LanguageController::global_instance()
+            .set_runtime_for_test(
+                &address,
+                Some(LanguageRuntimeHandle::from_channel(address.clone(), tx)),
+            )
+            .await;
+        register_capabilities(&address, HashSet::from([Capability::PeersLocal]));
+
+        let nh = crate::types::DecoratedNeighbourhoodExpression {
+            data: crate::types::domain::Neighbourhood {
+                link_language: address.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handle = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("refused".to_string()),
+            shared_url: Some(format!("neighbourhood://{}", Uuid::new_v4())),
+            neighbourhood: Some(nh.clone()),
+            state: PerspectiveState::NeighbourhoodJoinInitiated,
+            owners: Some(vec![a.clone()]),
+        };
+        Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
+        let instance = PerspectiveInstance::new(handle, None);
+
+        let attaching = instance.clone();
+        let language = Language::new(address.clone());
+        let attach =
+            tokio::spawn(async move { attaching.attach_link_language(&nh, language).await });
+
+        let first = SetLocal::of(requests.recv().await.unwrap());
+        assert_eq!(first.agents, [a.clone()]);
+        first
+            .reply
+            .send(Err("peersSetLocal failed".to_string()))
+            .unwrap();
+
+        let mut local = Vec::new();
+        let retry = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .expect("attach did not register the owners again")
+            .unwrap();
+        let retry = SetLocal::of(retry);
+        assert_eq!(retry.agents, [a.clone()]);
+        retry.apply(&mut local);
+        attach.await.unwrap();
+        assert!(requests.try_recv().is_err());
+        assert_eq!(local, [a]);
+
         LanguageController::global_instance()
             .set_runtime_for_test(&address, None)
             .await;
