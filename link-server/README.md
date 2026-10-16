@@ -118,6 +118,7 @@ One listener serves one instance. Run staging and prod as separate servers with 
 - CSRF: the sign-in is a cookie, so every `POST` needs an `Origin` from `--operator-origin`. When a browser sends no `Origin`, a `Referer` on that origin is accepted instead. A request with neither is refused, as is one marked `Sec-Fetch-Site: cross-site`. `POST` also needs `Content-Type: application/json`.
 - **Who admitted whom:** every admit and remove is stored in the `acl_changes` table with the login (`source: "operator"`) and logged as `operator acl change`. Changes the room admin makes through `POST /rooms/:id/acl` are stored too, with the admin DID (`source: "room-admin"`). `GET /api/rooms/:id` returns the last 100 as `history`, and each member's `addedBy` (the latest add over the whole history). A repeated add or a removal of a non-member changes nothing and is not recorded.
 - The operator only manages rooms that exist (rooms are still created by their first agent). The operator cannot remove the room admin.
+- **Live logs:** the page shows the server's log as it is written (both listeners), with a level filter and a pause. `GET /api/logs` streams it as Server-Sent Events: the last 1000 lines first, then each new one. A reconnect sends `Last-Event-ID` and gets only the lines it missed (all buffered lines if the server restarted). If the sign-in has expired, the panel shows "unavailable": reload the page. The lines are kept in memory only, at most 8 streams are open at once, and a stream sends `X-Accel-Buffering: no` and a comment line every 15 s, so nginx neither buffers it nor closes it as idle. The lines are what the server already writes to stdout: no headers, so no tokens.
 
 **Trust model.** This gives the operator no power it does not already have: the server owns the ACL (and the SQLite file). But it makes ACL changes by the operator a supported path. The admin's server-link-language grants room keys to every ACL member that lacks them, so **a DID the operator admits can read the room's encrypted history** once the admin's executor has been online. Only run this listener where the server's operator is trusted with membership. Removing a member does not rotate the room key: the removed DID keeps the keys it had, but the ACL check stops it from fetching anything new.
 
@@ -253,6 +254,9 @@ GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt,
                                      members: [{ did, addedAt, hasX25519Key, online, addedBy: { actor, source, at } | null }],
                                      history: [{ did, action, actor, source, at }] }   (newest first, last 100)
 POST /api/rooms/:roomId/acl     { action: "add"|"remove", did } -> same as GET /api/rooms/:roomId
+GET  /api/logs                  -> text/event-stream; each event: id = <boot>-<sequence number>,
+                                     data = { seq, level, time, msg, ...pino fields }   (Last-Event-ID resumes;
+                                     404 when logging is off, 429 past 8 open streams)
 ```
 
 ### WebSocket messages

@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import { didToPublicKey, type AuthManager } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
+import type { LogEntry, LogTail } from "./log-tail.js";
 import { OPERATOR_PAGE_CSS, OPERATOR_PAGE_HTML, OPERATOR_PAGE_JS } from "./operator-page.js";
 import { removeMember } from "./routes.js";
 import type { TelepresenceManager } from "./telepresence.js";
@@ -40,6 +41,31 @@ export interface OperatorContext {
   auth: AuthManager;
   ws: WsManager;
   telepresence: TelepresenceManager;
+  /** The server's recent log lines; without it, `GET /api/logs` answers 404 (logging is off). */
+  logTail?: LogTail;
+}
+
+/** Live log streams one listener serves at once; each holds a socket open. */
+export const MAX_LOG_STREAMS = 8;
+
+/** A comment line this often keeps proxies (nginx: 60 s read timeout) from closing an idle stream. */
+const LOG_STREAM_HEARTBEAT_MS = 15_000;
+
+/** Bytes a log stream may have queued for a slow client before it is dropped. */
+const MAX_LOG_STREAM_BUFFER = 1024 * 1024;
+
+/**
+ * One Server-Sent Event. Its id is `<boot>-<seq>`, so a reconnect resumes
+ * after it, and an id from before a restart (another boot) gets every line.
+ */
+function logEvent(boot: string, entry: LogEntry): string {
+  return `id: ${boot}-${entry.seq}\ndata: ${JSON.stringify(entry)}\n\n`;
+}
+
+/** The sequence number to resume after: the one in `lastEventId` if it is from this boot, else 0. */
+function resumeAfter(lastEventId: unknown, boot: string): number {
+  const match = typeof lastEventId === "string" ? /^([0-9a-f]+)-(\d+)$/.exec(lastEventId) : null;
+  return match && match[1] === boot ? Number(match[2]) : 0;
 }
 
 export const MIN_OPERATOR_TOKEN_LENGTH = 32;
@@ -159,6 +185,12 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
   }
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 16 * 1024 });
 
+  // Open log streams never finish on their own; end them so close() does not wait on them.
+  const logStreams = new Set<() => void>();
+  app.addHook("preClose", async () => {
+    for (const end of [...logStreams]) end();
+  });
+
   app.addHook("onSend", async (_request, reply) => {
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Cache-Control", "no-store");
@@ -205,6 +237,53 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
     });
 
     api.get("/whoami", async (request) => ({ operator: operatorOf(request.headers), instance: opts.label ?? null }));
+
+    // Live logs as Server-Sent Events: the buffered lines first, then each new
+    // one. A reconnect sends Last-Event-ID and gets only what it missed.
+    api.get("/logs", async (request, reply) => {
+      const tail = ctx.logTail;
+      if (!tail) return reply.code(404).send({ error: "logging is off on this server" });
+      if (logStreams.size >= MAX_LOG_STREAMS) {
+        return reply.code(429).send({ error: `at most ${MAX_LOG_STREAMS} log streams at once` });
+      }
+      const backlog = tail.since(resumeAfter(request.headers["last-event-id"], tail.boot));
+
+      reply.hijack();
+      const raw = reply.raw;
+      raw.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        // nginx buffers proxied responses unless told not to; a log stream must arrive line by line.
+        "X-Accel-Buffering": "no",
+        Connection: "keep-alive",
+      });
+      raw.write("retry: 3000\n\n" + backlog.map((entry) => logEvent(tail.boot, entry)).join(""));
+
+      let unsubscribe = () => {};
+      let heartbeat: NodeJS.Timeout | undefined;
+      const end = () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+        logStreams.delete(end);
+        if (!raw.writableEnded && !raw.destroyed) raw.end();
+      };
+      logStreams.add(end);
+      raw.on("close", end);
+      unsubscribe = tail.subscribe((entry) => {
+        // A client this far behind is dropped: destroyed, not ended, since
+        // end() would wait for it to read the queued megabyte first. It
+        // reconnects and resumes from its last id.
+        if (raw.writableLength > MAX_LOG_STREAM_BUFFER) {
+          raw.destroy();
+          end();
+          return;
+        }
+        raw.write(logEvent(tail.boot, entry));
+      });
+      heartbeat = setInterval(() => raw.write(": ping\n\n"), LOG_STREAM_HEARTBEAT_MS);
+      heartbeat.unref();
+    });
 
     api.get("/rooms", async () => ({
       rooms: ctx.db.listRooms().map((r) => ({

@@ -32,6 +32,19 @@ room admin's executor has been online and granted it the room keys.</p>
   <h2>History</h2>
   <table id="history"><thead><tr><th>When</th><th>Change</th><th>DID</th><th>By</th></tr></thead><tbody></tbody></table>
 </section>
+<section id="logs">
+  <h2>Logs <span id="log-status" class="tag">connecting</span></h2>
+  <div class="log-controls">
+    <label>Level <select id="log-level">
+      <option value="30" selected>info and up</option>
+      <option value="40">warn and up</option>
+      <option value="50">error and up</option>
+    </select></label>
+    <label><input id="log-pause" type="checkbox"> Pause</label>
+    <button id="log-clear" type="button">Clear</button>
+  </div>
+  <div id="log-lines" role="log" aria-live="off"></div>
+</section>
 <script src="admin.js"></script>
 </body>
 </html>
@@ -56,6 +69,17 @@ input[type=text] { flex: 1; font: inherit; font-family: ui-monospace, monospace;
 button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
 #error { color: #b00020; min-height: 1.2rem; }
 .note { background: #f2f2f7; padding: .5rem .75rem; border-radius: .4rem; font-size: .9rem; }
+.log-controls { display: flex; gap: 1rem; align-items: center; margin: .5rem 0; font-size: .9rem; }
+#log-lines { font-family: ui-monospace, monospace; font-size: .78rem; height: 24rem; overflow-y: auto; background: #1d1d1f; color: #e5e5ea; padding: .5rem; border-radius: .4rem; }
+.log-line { white-space: pre-wrap; word-break: break-all; }
+.log-line .lvl { display: inline-block; width: 3.2rem; }
+.log-line.l20 .lvl { color: #8e8e93; }
+.log-line.l30 .lvl { color: #64d2ff; }
+.log-line.l40 .lvl { color: #ffd60a; }
+.log-line.l50 .lvl, .log-line.l60 .lvl { color: #ff6961; }
+.log-line .fields { color: #8e8e93; }
+.tag.live { background: #c9f0d1; }
+.tag.down { background: #ffd1d1; }
 `;
 
 export const OPERATOR_PAGE_JS = `"use strict";
@@ -177,6 +201,84 @@ export const OPERATOR_PAGE_JS = `"use strict";
     var did = input.value.trim();
     if (!did) return;
     changeAcl("add", did).then(function () { if (!errorBox.textContent) input.value = ""; });
+  });
+
+  // Live logs: Server-Sent Events from api/logs. The browser reconnects by
+  // itself and the server resumes after the last line it sent.
+  var LEVELS = { 10: "trace", 20: "debug", 30: "info", 40: "warn", 50: "error", 60: "fatal" };
+  var MAX_LOG_LINES = 1000;
+  var logBox = document.getElementById("log-lines");
+  var logStatus = document.getElementById("log-status");
+  var logLevel = document.getElementById("log-level");
+  var logPause = document.getElementById("log-pause");
+  var logEntries = [];
+
+  function setLogStatus(text, className) {
+    logStatus.textContent = text;
+    logStatus.className = "tag " + className;
+  }
+
+  // The fields worth a glance; the rest of the line stays out of the way.
+  function logFields(entry) {
+    var parts = [];
+    if (entry.req) parts.push(entry.req.method + " " + entry.req.url);
+    if (entry.res) parts.push(String(entry.res.statusCode));
+    if (typeof entry.responseTime === "number") parts.push(Math.round(entry.responseTime) + " ms");
+    ["operator", "instance", "roomId", "action", "did"].forEach(function (key) {
+      if (entry[key] !== undefined && entry[key] !== null) parts.push(key + "=" + entry[key]);
+    });
+    if (entry.err && entry.err.message) parts.push("error: " + entry.err.message);
+    return parts.join(" ");
+  }
+
+  function logRow(entry) {
+    var row = el("div", null, "log-line l" + entry.level);
+    row.appendChild(el("span", new Date(entry.time).toLocaleTimeString() + " "));
+    row.appendChild(el("span", LEVELS[entry.level] || entry.level, "lvl"));
+    row.appendChild(el("span", entry.msg + " "));
+    row.appendChild(el("span", logFields(entry), "fields"));
+    return row;
+  }
+
+  function renderLogs() {
+    var min = Number(logLevel.value);
+    var atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4;
+    logBox.replaceChildren();
+    logEntries.forEach(function (entry) {
+      if (entry.level >= min) logBox.appendChild(logRow(entry));
+    });
+    if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function addLog(entry) {
+    logEntries.push(entry);
+    if (logEntries.length > MAX_LOG_LINES) logEntries.shift();
+    if (logPause.checked) return;
+    if (logBox.childNodes.length >= MAX_LOG_LINES) logBox.removeChild(logBox.firstChild);
+    if (entry.level < Number(logLevel.value)) return;
+    var atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4;
+    logBox.appendChild(logRow(entry));
+    if (atBottom) logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  if (window.EventSource) {
+    var logs = new EventSource("api/logs");
+    logs.onopen = function () { setLogStatus("live", "live"); };
+    logs.onerror = function () {
+      // A refused stream (logging off, too many streams) is closed for good; a dropped one retries.
+      setLogStatus(logs.readyState === EventSource.CLOSED ? "unavailable" : "reconnecting", "down");
+    };
+    logs.onmessage = function (event) {
+      try { addLog(JSON.parse(event.data)); } catch (e) { /* not a log line */ }
+    };
+  } else {
+    setLogStatus("not supported by this browser", "down");
+  }
+  logLevel.addEventListener("change", renderLogs);
+  logPause.addEventListener("change", function () { if (!logPause.checked) renderLogs(); });
+  document.getElementById("log-clear").addEventListener("click", function () {
+    logEntries = [];
+    logBox.replaceChildren();
   });
 
   api("/whoami").then(function (data) {
