@@ -436,6 +436,9 @@ pub struct ExtractedToolCall {
 ///   3. Fallback: treat the whole trimmed text as a single bare JSON call
 ///      (the constrained-decoding path emits exactly this).
 ///
+/// In every shape a call object may also come wrapped as
+/// `{"tool_call": {name, arguments}}` — see [`value_to_call`].
+///
 /// Anything not matching any of the above returns an empty vec — the
 /// harness reads that as "the model is done".
 pub fn extract_tool_calls(text: &str) -> Vec<ExtractedToolCall> {
@@ -546,7 +549,20 @@ fn parse_tool_call_json_array(candidate: &str) -> Option<Vec<ExtractedToolCall>>
     }
 }
 
+/// One call object: `{name, arguments}`, or that same object under a singular
+/// `tool_call` key. Gemma-3 emits `{"tool_call": {…}}` most of the time —
+/// plausibly echoing the `<tool_call>` wording of our own prompt — so the
+/// wrapper is accepted wherever a call object is: inside tags, in a fence,
+/// bare, and as each element of an array or of a `tool_calls` wrapper
+/// (#1069). One level only; a wrapped wrapper is not a call.
+///
+/// This widens nothing an attacker can reach: any `{"tool_call": {X}}` they
+/// could get a model to echo, `{X}` was already accepted in the same places.
 fn value_to_call(value: &Value) -> Option<ExtractedToolCall> {
+    let value = match value.get("tool_call") {
+        Some(inner) if value.get("name").is_none() => inner,
+        _ => value,
+    };
     let name = value.get("name")?.as_str()?.to_string();
     let arguments = match value.get("arguments") {
         Some(Value::String(s)) => s.clone(),
@@ -950,6 +966,57 @@ mod tests {
         // pulls the inner value out (unquoted), matching how the harness
         // downstream JSON-parses `arguments` back to a value.
         assert_eq!(calls[0].arguments, r#"{"x":1}"#);
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_singular_wrapper_in_every_shape() {
+        // #1069: Gemma-3's usual shape. Each of these returned [] before.
+        let wrapped = r#"{"tool_call": {"name": "f", "arguments": {"a": 1}}}"#;
+        for text in [
+            wrapped.to_string(),
+            format!("<tool_call>\n{wrapped}\n</tool_call>"),
+            format!("```json\n{wrapped}\n```"),
+        ] {
+            let calls = extract_tool_calls(&text);
+            assert_eq!(calls.len(), 1, "{text}");
+            assert_eq!(calls[0].name, "f");
+            assert_eq!(calls[0].arguments, r#"{"a":1}"#);
+        }
+    }
+
+    #[test]
+    fn extract_tool_calls_recovers_every_element_of_a_singular_wrapper_array() {
+        // n > 1 is the case #1057's content-channel fallback declines; a
+        // relation pass wants several calls in one reply.
+        let calls = extract_tool_calls(
+            r#"[{"tool_call": {"name": "a", "arguments": {}}}, {"tool_call": {"name": "b", "arguments": {}}}]"#,
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+
+        // Mixed with plain call objects, and inside the plural wrapper.
+        let calls = extract_tool_calls(
+            r#"{"tool_calls": [{"tool_call": {"name": "a", "arguments": {}}}, {"name": "b", "arguments": {}}]}"#,
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    #[test]
+    fn extract_tool_calls_unwraps_the_singular_key_one_level_only() {
+        assert!(extract_tool_calls(
+            r#"{"tool_call": {"tool_call": {"name": "f", "arguments": {}}}}"#
+        )
+        .is_empty());
+        assert!(extract_tool_calls(r#"{"tool_call": "f"}"#).is_empty());
+        // An object that is already a call keeps its own name.
+        let calls = extract_tool_calls(
+            r#"{"name": "outer", "arguments": {}, "tool_call": {"name": "inner"}}"#,
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "outer");
     }
 
     #[test]
