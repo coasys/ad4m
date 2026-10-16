@@ -777,6 +777,34 @@ async fn a_container_children_filter_counts_and_pages_every_edge() {
     assert_eq!((rows, total), (vec![h.to_string()], 1));
 }
 
+/// A count projection over `children` on the mixed holder would count one
+/// reading's children (1 of `[a, b]`), and is refused; so is an `include`.
+/// Red on 8d659d6b7: the projection answered `$n: 1`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_children_projection_is_refused() {
+    let (mut p, ctx) = setup().await;
+    let h = "ad4m://block/n";
+    create(&mut p, &ctx, "Block", h).await;
+    link(&mut p, &ctx, h, "we://child", "ad4m://a/n").await;
+    link(&mut p, &ctx, h, HAS_CHILD, "ad4m://b/n").await;
+    for (q, says) in [
+        (
+            json!({"where": {"id": h}, "projections": {"$n": {"from": "children", "count": true}}}),
+            "projection",
+        ),
+        (
+            json!({"where": {"id": h}, "include": {"children": true}}),
+            "include",
+        ),
+    ] {
+        let err = p
+            .model_query_classes(&QueryClasses::One(CONTAINER_URI.into()), &q.to_string())
+            .await
+            .expect_err(&q.to_string());
+        assert!(err.to_string().contains(says), "{q}: {err}");
+    }
+}
+
 /// The `children` conditions a Container `where` does not answer are refused,
 /// not passed to one reading: a nested clause (children are untyped), a
 /// per-link author, comparisons, a dotted key.

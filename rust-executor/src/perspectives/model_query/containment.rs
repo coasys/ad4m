@@ -393,12 +393,32 @@ async fn holders_of(
 /// filters, counts, orders and pages on it like on any `id` condition, in
 /// every reading alike. What has no meaning over untyped children (a clause
 /// on their properties, a per-link author, a comparison, a dotted key) is
-/// refused rather than handed to one reading.
+/// refused rather than handed to one reading, and so are a projection and an
+/// `include` over `children`, which would count or hydrate one reading's.
 pub async fn resolve_children_where(
     store: &SparqlStore,
     query: &mut ModelQueryInput,
     edges: &[ContainmentEdge],
 ) -> Result<(), Error> {
+    if let Some(key) = query
+        .projections
+        .iter()
+        .flatten()
+        .find(|(_, p)| p.from == "children")
+        .map(|(k, _)| k)
+    {
+        return Err(anyhow!(
+            "Container: projection '{key}' over `children` is not supported: it would count \
+             the children of one of a row's readings, not everything the row holds. Read \
+             `children` itself, or count with `parent: {{ id }}` and `limit: 0`."
+        ));
+    }
+    if query.include.iter().flatten().any(|(k, _)| k == "children") {
+        return Err(anyhow!(
+            "Container: `include` on `children` is not supported: children have no class to \
+             hydrate them as. Query them with `parent: {{ id }}` on their class."
+        ));
+    }
     let Some(clause) = query.where_clause.as_mut() else {
         return Ok(());
     };
