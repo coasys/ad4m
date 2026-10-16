@@ -884,7 +884,8 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
                 .first()
                 .map(|b| b.device_key_type.clone())
                 .unwrap_or_default(),
-        );
+        )
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
         return Ok(serde_json::to_value(vec![
             serde_json::to_value(signed).unwrap_or_default()
         ])?);
@@ -972,7 +973,8 @@ async fn entanglement_proof_preflight(
     let body: EntanglementProofPreflightRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let signed = sign_device_key(body.device_key, body.device_key_type);
+    let signed = sign_device_key(body.device_key, body.device_key_type)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(signed).unwrap_or_default())
 }
 

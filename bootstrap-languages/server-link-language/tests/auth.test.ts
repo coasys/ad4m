@@ -6,10 +6,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { x25519 } from "@noble/curves/ed25519";
 
 import type { AgentAdapter, Transport, TransportResponse } from "../src/adapters.js";
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
+import { bytesToHex, hexToBytes } from "../src/encryption.js";
+
+const ROOM_KEY_SEED_MESSAGE = "adam-server-link-language:x25519-seed:v1";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -40,9 +44,16 @@ class MockAgent implements AgentAdapter {
         return this.didValue;
     }
     signStringHex(payload: string): string {
+        // The executor refuses this message on every signing path.
+        if (payload === ROOM_KEY_SEED_MESSAGE) {
+            throw new Error("Refusing to sign the reserved room-key seed message");
+        }
         // Deterministic stand-in for EdDSA signing — auth.ts only relies on
         // determinism (same input -> same output), not on real Ed25519 math.
         return createHash("sha256").update(`${this.didValue}:${payload}`).digest("hex");
+    }
+    roomKeySeedHex(): string {
+        return createHash("sha256").update(`room-key-seed:${this.didValue}`).digest("hex");
     }
 }
 
@@ -119,9 +130,10 @@ describe("auth: authenticate", () => {
                 }
                 assert.equal(parsed.challenge, "chal-abc");
                 assert.ok(typeof parsed.signature === "string" && parsed.signature.length > 0);
-                assert.ok(
-                    typeof parsed.x25519PublicKey === "string" && parsed.x25519PublicKey.length === 64,
-                    "expected a 32-byte hex-encoded X25519 public key on step 2",
+                assert.equal(
+                    parsed.x25519PublicKey,
+                    bytesToHex(x25519.getPublicKey(hexToBytes(new MockAgent("did:key:zTestAgent").roomKeySeedHex()))),
+                    "step 2 carries the X25519 public key of the agent's room-key seed",
                 );
                 return {
                     status: 200,

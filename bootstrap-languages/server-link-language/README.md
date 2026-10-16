@@ -190,11 +190,12 @@ See the doc comment at the top of `src/encryption.ts` for the full design;
 summary:
 
 - **No raw private key in the sandbox.** The Deno language sandbox never
-  exposes the agent's Ed25519 private key — only a black-box
-  `agentSignStringHex(payload)` signing call. Since EdDSA signatures are
-  deterministic (RFC 8032), this language derives a stable X25519 keypair
-  as `x25519(sha256(sign(FIXED_DOMAIN_SEPARATED_MESSAGE)))`. Nobody without
-  the agent's cooperation (via the host's signing service) can reproduce it.
+  exposes the agent's Ed25519 private key. The agent's X25519 private key is
+  `sha256(sign(sha256(FIXED_DOMAIN_SEPARATED_MESSAGE)))`, stable because EdDSA
+  signatures are deterministic (RFC 8032). The executor computes it for the
+  calling agent behind the `agentRoomKeySeed()` host import and refuses to
+  sign the fixed message on every signing path, so no other language, client
+  or server-chosen auth challenge can obtain the signature it is derived from.
 - **Public key exchange.** There's no separate "register my E2E public key"
   endpoint in the server API this language targets, so the derived X25519
   public key rides along as an additive `x25519PublicKey` field on step 2 of

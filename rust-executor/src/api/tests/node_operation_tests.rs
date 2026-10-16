@@ -243,6 +243,67 @@ async fn the_operator_still_signs_as_the_node() {
     assert_eq!(result["publicKey"], json!(signing_key_id()));
 }
 
+/// The server link language's X25519 key is the hash of the agent's signature over
+/// this message, so no RPC may sign it, for the node or for a user.
+#[tokio::test]
+async fn no_rpc_signs_the_room_key_seed_message() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let seed_message = "adam-server-link-language:x25519-seed:v1";
+    let email = "room.key.seed.rpc@example.org";
+    AgentService::ensure_user_key_exists(email).unwrap();
+
+    for (who, session) in [
+        ("operator", operator_session()),
+        ("user", user_session(email)),
+    ] {
+        let signed = call("agent.sign", json!({ "message": seed_message }), session).await;
+        assert!(
+            signed.is_err(),
+            "agent.sign signed the room-key seed message for the {who}: {signed:?}"
+        );
+    }
+
+    let preflight = call(
+        "agent.entanglementProofPreflight",
+        json!({ "deviceKey": seed_message, "deviceKeyType": "t" }),
+        operator_session(),
+    )
+    .await;
+    assert!(
+        preflight.is_err(),
+        "agent.entanglementProofPreflight signed the room-key seed message: {preflight:?}"
+    );
+
+    let proof = json!({
+        "deviceKey": seed_message,
+        "deviceKeySignedByDid": "s",
+        "deviceKeyType": "t",
+        "did": "did:key:z6Mk",
+        "didSignedByDeviceKey": "s",
+        "didSigningKeyId": "i",
+    });
+    let add_preflight = call(
+        "agent.addEntanglementProofs",
+        json!({ "proofs": [proof], "preflight": true }),
+        operator_session(),
+    )
+    .await;
+    assert!(
+        add_preflight.is_err(),
+        "agent.addEntanglementProofs preflight signed the room-key seed message: {add_preflight:?}"
+    );
+
+    // Any other message still signs.
+    call(
+        "agent.sign",
+        json!({ "message": format!("{seed_message}.") }),
+        operator_session(),
+    )
+    .await
+    .expect("other messages still sign");
+}
+
 #[tokio::test]
 async fn a_user_sets_their_own_dm_language_not_the_nodes() {
     crate::test_utils::setup_wallet();

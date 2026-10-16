@@ -1,34 +1,49 @@
+use deno_core::error::AnyError;
+
 use crate::{
     agent::{sign_string_hex, AgentService},
     db::Ad4mDb,
     types::EntanglementProof,
 };
 
-pub fn sign_device_key(device_key: String, device_key_type: String) -> EntanglementProof {
-    let signed_device_key = sign_string_hex(device_key.clone()).unwrap();
+/// Signs `device_key` with the node's key. The device key is caller-chosen, so a
+/// refusal of the signing core (the reserved room-key seed message) comes back as
+/// an error instead of a panic.
+pub fn sign_device_key(
+    device_key: String,
+    device_key_type: String,
+) -> Result<EntanglementProof, AnyError> {
+    let signed_device_key = sign_string_hex(device_key.clone())?;
 
-    AgentService::with_global_instance(|agent_service| EntanglementProof {
-        did: agent_service.did.clone().unwrap(),
-        did_signing_key_id: agent_service.signing_key_id.clone().unwrap(),
-        device_key_type,
-        device_key,
-        device_key_signed_by_did: signed_device_key,
-        did_signed_by_device_key: None,
-    })
+    Ok(AgentService::with_global_instance(|agent_service| {
+        EntanglementProof {
+            did: agent_service.did.clone().unwrap(),
+            did_signing_key_id: agent_service.signing_key_id.clone().unwrap(),
+            device_key_type,
+            device_key,
+            device_key_signed_by_did: signed_device_key,
+            did_signed_by_device_key: None,
+        }
+    }))
 }
 
-pub fn generate_holochain_proof(holochain_key: String, signed_did: String) -> EntanglementProof {
+pub fn generate_holochain_proof(
+    holochain_key: String,
+    signed_did: String,
+) -> Result<EntanglementProof, AnyError> {
     let device_key_type = "holochain".to_string();
-    let signed_holo_key = sign_string_hex(holochain_key.clone()).unwrap();
+    let signed_holo_key = sign_string_hex(holochain_key.clone())?;
 
-    AgentService::with_global_instance(|agent_service| EntanglementProof {
-        did: agent_service.did.clone().unwrap(),
-        did_signing_key_id: agent_service.signing_key_id.clone().unwrap(),
-        device_key_type,
-        device_key: holochain_key,
-        device_key_signed_by_did: signed_holo_key,
-        did_signed_by_device_key: Some(signed_did),
-    })
+    Ok(AgentService::with_global_instance(|agent_service| {
+        EntanglementProof {
+            did: agent_service.did.clone().unwrap(),
+            did_signing_key_id: agent_service.signing_key_id.clone().unwrap(),
+            device_key_type,
+            device_key: holochain_key,
+            device_key_signed_by_did: signed_holo_key,
+            did_signed_by_device_key: Some(signed_did),
+        }
+    }))
 }
 
 pub fn add_entanglement_proofs(proofs: Vec<EntanglementProof>) {

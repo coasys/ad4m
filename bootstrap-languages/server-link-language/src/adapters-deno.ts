@@ -16,6 +16,7 @@ import {
     storageListKeys,
     agentDid,
     agentSignStringHex,
+    agentRoomKeySeed,
     emitPerspectiveDiff,
     emitSyncStateChange,
     emitTelepresenceSignal,
@@ -99,6 +100,10 @@ export class DenoAgentAdapter implements AgentAdapter {
 
     signStringHex(payload: string): string {
         return agentSignStringHex(payload);
+    }
+
+    roomKeySeedHex(): string {
+        return agentRoomKeySeed();
     }
 }
 

@@ -18,6 +18,7 @@
 
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { ed25519 } from "@noble/curves/ed25519";
 
 import type {
@@ -49,6 +50,8 @@ import {
 // ---------------------------------------------------------------------------
 // Real adapters (no mocks — talk to the real server)
 // ---------------------------------------------------------------------------
+
+const ROOM_KEY_SEED_MESSAGE = "adam-server-link-language:x25519-seed:v1";
 
 class FetchTransport implements Transport {
   async fetch(
@@ -94,11 +97,22 @@ class RealAgent implements AgentAdapter {
   did(): string { return this.didValue; }
 
   signStringHex(payload: string): string {
+    // The executor refuses the room-key seed message on every signing path.
+    if (payload === ROOM_KEY_SEED_MESSAGE) {
+      throw new Error("Refusing to sign the reserved room-key seed message");
+    }
     // The AD4M executor convention: sign(SHA-256(message)).
     // hashMessageForVerify returns the SHA-256 digest as Uint8Array.
     const hashed = hashMessageForVerify(payload);
     const sig = ed25519.sign(hashed, this.privateKey);
     return Buffer.from(sig).toString("hex");
+  }
+
+  /** The executor's `agentRoomKeySeed`: sha256 of the signature over
+   *  SHA-256(seed message), hex. */
+  roomKeySeedHex(): string {
+    const sig = ed25519.sign(hashMessageForVerify(ROOM_KEY_SEED_MESSAGE), this.privateKey);
+    return createHash("sha256").update(sig).digest("hex");
   }
 
   static create(): RealAgent {

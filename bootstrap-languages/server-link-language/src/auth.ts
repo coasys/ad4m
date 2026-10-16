@@ -46,7 +46,7 @@ export function parseJwtExpiryMs(token: string): number | null {
 function myX25519PublicKeyHex(): string {
     if (_x25519PublicKeyHex) return _x25519PublicKeyHex;
     const agent = getAgent();
-    const { publicKey } = deriveX25519KeyPair((payload) => agent.signStringHex(payload));
+    const { publicKey } = deriveX25519KeyPair(() => agent.roomKeySeedHex());
     _x25519PublicKeyHex = bytesToHex(publicKey);
     return _x25519PublicKeyHex;
 }

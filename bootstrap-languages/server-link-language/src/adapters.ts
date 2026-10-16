@@ -54,13 +54,21 @@ export interface StorageAdapter {
  * Thin wrapper around the `agent*()` ad4m:host imports this language
  * actually needs. Deliberately narrow — the language never signs
  * commits itself (the runtime signs diffs upstream before they reach
- * `commit()`); it only needs its own DID (for auth + peer filtering)
- * and a deterministic signature primitive (for auth + X25519 key
- * derivation, see src/encryption.ts).
+ * `commit()`); it only needs its own DID (for auth + peer filtering),
+ * a signature primitive (for auth) and the secret seed of its room-key
+ * X25519 keypair (see src/encryption.ts).
  */
 export interface AgentAdapter {
     did(): string;
+    /** `agentSignStringHex`: hex of the agent's Ed25519 signature over sha256(payload). */
     signStringHex(payload: string): string;
+    /**
+     * `agentRoomKeySeed`: hex of the 32-byte secret seed of this agent's
+     * room-key X25519 keypair, computed by the executor. The executor refuses
+     * to sign the message the seed is derived from, so it is never available
+     * through `signStringHex`.
+     */
+    roomKeySeedHex(): string;
 }
 
 // ---------------------------------------------------------------------------

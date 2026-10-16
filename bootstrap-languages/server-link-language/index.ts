@@ -136,7 +136,7 @@ async function setupKeyRing(): Promise<void> {
             keyRing = null;
             return;
         }
-        const { privateKey } = deriveX25519KeyPair((payload) => getAgent().signStringHex(payload));
+        const { privateKey } = deriveX25519KeyPair(() => getAgent().roomKeySeedHex());
         keyRing = buildKeyRing(keysRes.keys, privateKey);
         keyRingStatus = "ready";
         const versions = [...keyRing.keys()].sort((a, b) => a - b);

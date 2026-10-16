@@ -53,7 +53,8 @@ any language is loaded.
 | `did()` | `() => string` | Returns the agent's DID (e.g. `did:key:z6Mk...`). |
 | `signingKeyId()` | `() => string` | Returns the signing key identifier. |
 | `sign(payload)` | `(Uint8Array) => Uint8Array` | Signs raw bytes, returns the signature bytes. |
-| `signStringHex(payload)` | `(string) => string` | Signs a string payload and returns the hex-encoded signature. |
+| `signStringHex(payload)` | `(string) => string` | Signs `sha256(payload)` and returns the hex-encoded signature. |
+| `roomKeySeed()` | `() => string` | Hex of `sha256(signature over sha256("adam-server-link-language:x25519-seed:v1"))` with the acting agent's key: the secret seed of its room-key X25519 keypair. `sign` and `signStringHex` (and every other signing path of the host) must refuse that payload, so the seed is reachable only here. |
 | `createSignedExpression(data)` | `(any) => object` | Wraps `data` in an Expression envelope with `author`, `timestamp`, `data`, and `proof` fields. Returns the signed expression object. |
 | `getAllLocalUserDIDs()` | `() => string[]` | Returns DIDs of all local managed users. |
 | `createSignedExpressionForUser(email, data)` | `(string, any) => object` | Like `createSignedExpression` but signs with a managed user's key. Only the user that the current call runs for: any other email, and any call that runs for the node, throws. |

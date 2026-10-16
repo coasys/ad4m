@@ -2,7 +2,8 @@ import {
     agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_sign,
     agent_sign_string_hex, agent, agent_is_initialized, agent_is_unlocked,
     agent_create_signed_expression_stringified, agent_create_signed_expression_for_user,
-    agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user
+    agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user,
+    agent_room_key_seed
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -48,6 +49,11 @@ import {
         },
         signStringHex: (payload) => {
             return agent_sign_string_hex(payload);
+        },
+        // Hex of the secret seed of the room-key X25519 keypair of the agent the
+        // language runs for. The signature it is derived from is never handed out.
+        roomKeySeed: () => {
+            return agent_room_key_seed();
         },
         agent: () => {
             return agent();

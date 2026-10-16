@@ -134,6 +134,20 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   loads once during `init()`'s `setupKeyRing()` and the `version` field in
   `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
   re-fetch or a dedicated WS push message would close that gap.
+- **The X25519 key comes from `agentRoomKeySeed()`, never from a signature.**
+  An agent's X25519 private key is
+  `sha256(sign(sha256("adam-server-link-language:x25519-seed:v1")))`; room keys
+  are sealed to it. Whoever gets that signature can open every room key sealed
+  to the agent, so the executor refuses to sign that message on every signing
+  path (`agentSignStringHex`, `agentSign`, `agent.sign`, entanglement proofs,
+  managed users included) and computes the seed itself behind the
+  `agentRoomKeySeed()` host import (`AgentAdapter.roomKeySeedHex`,
+  `deriveX25519KeyPair(() => seedHex)`). Never sign the seed message, or any
+  message derived from it, anywhere else; never send the seed off the agent.
+  The derivation is byte-identical to the earlier in-language
+  `sha256(hexToBytes(agentSignStringHex(message)))`, pinned by a test vector in
+  `tests/encryption.test.ts` and `rust-executor/src/agent/mod.rs`: changing it
+  orphans every sealed room key.
 - **E2E encryption wire format is unified.** Both client and server use
   the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
   `data` field for encrypted rooms — no separate `encrypted` field. The
