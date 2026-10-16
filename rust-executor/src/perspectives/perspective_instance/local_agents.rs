@@ -1,4 +1,4 @@
-//! Telling the link language which agents on this node own the
+//! Telling the link language which agents on this executor own the
 //! perspective (`peersSetLocal`), so it reports them as local, not remote.
 //!
 //! Link languages differ here: p-diff-sync adds to its local list,
@@ -10,7 +10,7 @@ use super::PerspectiveInstance;
 use crate::languages::language::Language;
 
 impl PerspectiveInstance {
-    /// Tell `language` this node's owners (the main agent's DID for a
+    /// Tell `language` this executor's owners (the main agent's DID for a
     /// perspective without any), unless it was last told exactly `told`.
     /// Returns the owners it read.
     ///

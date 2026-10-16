@@ -72,7 +72,7 @@ mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
-// Registering this node's owners with the link language.
+// Registering this executor's owners with the link language.
 mod local_agents;
 
 #[cfg(test)]
@@ -4959,7 +4959,7 @@ impl PerspectiveInstance {
         }
     }
 
-    /// Tell the link language this node's owners, after a join added one.
+    /// Tell the link language this executor's owners, after a join added one.
     /// Reads them itself: a list the caller read could be older than one
     /// another registration has already sent.
     pub async fn update_local_agents(&self) {
