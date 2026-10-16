@@ -179,6 +179,9 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             const ad4mClient = testContext.ad4mClient!
             const runtimeInfo = await ad4mClient.runtime.info();
             expect(runtimeInfo.ad4mExecutorVersion).to.be.equal(process.env.npm_package_version);
+            // Full commit hash, `-dirty` when built from an unclean tree,
+            // `unknown` only for a build without git.
+            expect(runtimeInfo.ad4mExecutorCommit).to.match(/^(?:[0-9a-f]{40}(?:-dirty)?|unknown)$/);
             expect(runtimeInfo.isUnlocked).to.be.true;
             expect(runtimeInfo.isInitialized).to.be.true;
         })

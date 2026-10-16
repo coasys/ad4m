@@ -1,0 +1,15 @@
+[package]
+name = "ad4m-build-support"
+version = "0.13.0-test-interpretation-2"
+edition = "2021"
+description = "Shared build-script helpers for the ad4m workspace crates"
+license = "CAL-1.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"

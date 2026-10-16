@@ -675,8 +675,23 @@ pub struct ResourceInput {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
+    /// The commit the executor was built from: full hash, `-dirty` when the
+    /// tree had uncommitted changes, `unknown` for a build without git.
+    pub ad4m_executor_commit: String,
     pub is_initialized: bool,
     pub is_unlocked: bool,
+}
+
+impl RuntimeInfo {
+    /// Info for this build with the given agent state.
+    pub fn for_this_build(is_initialized: bool, is_unlocked: bool) -> Self {
+        Self {
+            ad4m_executor_version: crate::globals::AD4M_VERSION.clone(),
+            ad4m_executor_commit: crate::globals::AD4M_GIT_COMMIT.to_string(),
+            is_initialized,
+            is_unlocked,
+        }
+    }
 }
 
 /// Readiness status returned by the `runtimeReadiness` query.

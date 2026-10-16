@@ -8,6 +8,9 @@ export class SentMessage {
 
 export class RuntimeInfo {
     ad4mExecutorVersion: string;
+    /** The commit the executor was built from: full hash, `-dirty` appended
+     *  when the tree had uncommitted changes, `unknown` for a build without git. */
+    ad4mExecutorCommit: string;
     isInitialized: Boolean;
     isUnlocked: Boolean;
 }

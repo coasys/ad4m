@@ -174,7 +174,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'expression.interact': 'interaction-result',
 
     // ── Runtime ──
-    'runtime.info': { ad4mExecutorVersion: '0.1.0', isUnlocked: true, isInitialized: true },
+    'runtime.info': { ad4mExecutorVersion: '0.1.0', ad4mExecutorCommit: '0123456789abcdef0123456789abcdef01234567', isUnlocked: true, isInitialized: true },
     'runtime.tlsDomain': 'test.domain.com',
     'runtime.quit': true,
     'runtime.openLink': true,
@@ -1092,6 +1092,7 @@ describe('RuntimeClient', () => {
     test('info() returns runtime info', async () => {
         const info = await ad4m.runtime.info();
         expect(info.ad4mExecutorVersion).toBe('0.1.0');
+        expect(info.ad4mExecutorCommit).toBe('0123456789abcdef0123456789abcdef01234567');
     });
 
     test('tlsDomain() returns TLS domain', async () => {

@@ -40,8 +40,8 @@ mod util;
 use crate::app_state::LauncherState;
 use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, delete_agent,
-    get_app_agent_list, get_data_path, get_host_registration, get_log_config, get_mcp_config,
-    get_smtp_config, get_tls_config, open_dapp, open_tray, open_tray_message,
+    get_app_agent_list, get_build_commit, get_data_path, get_host_registration, get_log_config,
+    get_mcp_config, get_smtp_config, get_tls_config, open_dapp, open_tray, open_tray_message,
     remove_app_agent_state, set_host_registration, set_log_config, set_mcp_config,
     set_selected_agent, set_smtp_config, set_tls_config, show_main_window, test_smtp_config,
     validate_tls_config,
@@ -206,6 +206,11 @@ pub fn run() {
     };
 
     init_launcher_logging(target, log_config.as_ref()).expect("Failed to initialize logging");
+    info!(
+        "AD4M launcher {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        crate::commands::app::GIT_COMMIT
+    );
 
     let format = format::debug_fn(move |writer, _field, value| {
         debug!("TRACE: {:?}", value);
@@ -268,6 +273,7 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             get_port,
+            get_build_commit,
             request_credential,
             close_application,
             close_main_window,
