@@ -191,9 +191,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         console.log(appDataPath);
 
         // Clean up and create test directory
-        if (fs.existsSync(appDataPath)) {
-            fs.rmSync(appDataPath, { recursive: true });
-        }
+        // rmSync with force, not existsSync first: startExecutor leaves this path as a
+        // symlink into /tmp, and once the runner's /tmp cleanup removes the target,
+        // existsSync is false for the dangling link and mkdirSync throws ENOENT.
+        fs.rmSync(appDataPath, { recursive: true, force: true });
         fs.mkdirSync(appDataPath, { recursive: true });
 
         // Start executor with MCP enabled, languageLanguageOnly to skip network bootstrap
