@@ -72,6 +72,8 @@ mod subscriptions;
 pub(crate) use subscriptions::result_json;
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
+// Registering this node's owners with the link language.
+mod local_agents;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -587,6 +589,10 @@ pub struct PerspectiveInstance {
     /// language loop it wakes both call it, and two concurrent calls would
     /// each find the remote empty and commit every shared link.
     share_links_mutex: Arc<Mutex<()>>,
+    /// Serialises `register_local_agents`. server-link-language replaces its
+    /// local agent list (p-diff-sync adds to it), so a registration that
+    /// read the owners earlier must not land after one that read them later.
+    local_agents_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
     /// Wakes the background loops that wait on state changes instead of a
@@ -695,6 +701,7 @@ impl PerspectiveInstance {
             is_teardown: Arc::new(AtomicBool::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
             share_links_mutex: Arc::new(Mutex::new(())),
+            local_agents_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
             wakes: Arc::new(LoopWakes::default()),
@@ -1172,32 +1179,15 @@ impl PerspectiveInstance {
         nh: &crate::types::DecoratedNeighbourhoodExpression,
         mut language: Language,
     ) {
-        let local_agents = || async {
-            let handle = self.persisted.lock().await;
-            match &handle.owners {
-                Some(owners) if !owners.is_empty() => owners.clone(),
-                // No owners, or an empty list: the main agent's.
-                _ => vec![crate::agent::did()],
-            }
-        };
-        let registered = local_agents().await;
-        log::info!("Setting local agents for link language: {:?}", registered);
-        if let Err(e) = language.set_local_agents(registered.clone()).await {
-            log::error!("Failed to set local agents on link language: {:?}", e);
-        }
+        let registered = self.register_local_agents(&mut language, None).await;
 
         *self.link_language.write().await = Some(language.clone());
         // A user who joined while this attached (`install_neighbourhood_with_context`
         // adds them as an owner) found no link language to tell, and joins
         // now land straight after a publish. From here on the join tells it
-        // itself; before here, tell it now. Setting agents is additive.
-        let owners = local_agents().await;
-        if owners != registered {
-            log::info!("Setting local agents joined while attaching: {:?}", owners);
-            if let Err(e) = language.set_local_agents(owners).await {
-                log::error!("Failed to set local agents on link language: {:?}", e);
-            }
-        }
+        // itself; before here, tell it now.
+        self.register_local_agents(&mut language, Some(&registered))
+            .await;
         // Cache language→perspective mapping for fast signal routing
         {
             let handle = self.persisted.lock().await.clone();
@@ -4969,13 +4959,13 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn update_local_agents(&self, agents: Vec<String>) {
-        log::debug!("Updating local agents for perspective: {:?}", agents);
+    /// Tell the link language this node's owners, after a join added one.
+    /// Reads them itself: a list the caller read could be older than one
+    /// another registration has already sent.
+    pub async fn update_local_agents(&self) {
         let link_language_clone = self.link_language.read().await.clone();
         if let Some(mut link_language) = link_language_clone {
-            if let Err(e) = link_language.set_local_agents(agents).await {
-                log::error!("Failed to update local agents on link language: {:?}", e);
-            }
+            self.register_local_agents(&mut link_language, None).await;
         } else {
             log::warn!("Cannot update local agents: link language not initialized");
         }
