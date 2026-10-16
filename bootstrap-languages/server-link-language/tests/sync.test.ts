@@ -802,6 +802,57 @@ describe("sync: commit sends a large diff in chunks", () => {
     });
 });
 
+// The executor's KV rewrites its whole file on every put and delete
+// (rust-executor/src/js_core/host.js storagePut/storageDelete), so the
+// number of writes per commit is what a commit costs: one write per link
+// took 16 s for 1,833 links.
+class CountingStorage extends MockStorage {
+    calls = { get: 0, put: 0, delete: 0, listKeys: 0 };
+    get(key: string): string | null { this.calls.get++; return super.get(key); }
+    put(key: string, value: string): void { this.calls.put++; super.put(key, value); }
+    delete(key: string): void { this.calls.delete++; super.delete(key); }
+    listKeys(prefix?: string): string[] { this.calls.listKeys++; return super.listKeys(prefix); }
+}
+
+describe("sync: commit cost in storage calls", () => {
+    it("a 1,000-link commit writes storage at most 3 times per chunk, whatever the chunk size", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const storage = new CountingStorage();
+        initAdapters({ storage, transport, config });
+        store.initStore(simpleHash);
+        const server = new MockLinkServer(transport);
+
+        await syncModule.commit({ additions: manyLinks(1000), removals: [] });
+
+        const chunks = server.posts.length;
+        const writes = storage.calls.put + storage.calls.delete;
+        const all = writes + storage.calls.get + storage.calls.listKeys;
+        assert.equal(store.allLinks().links.length, 1000);
+        assert.ok(writes <= 3 * chunks, `${writes} writes for ${chunks} chunks: ${JSON.stringify(storage.calls)}`);
+        assert.ok(all <= 5 * chunks + 2, `${all} storage calls for ${chunks} chunks: ${JSON.stringify(storage.calls)}`);
+    });
+
+    it("a commit of 1,000 removals writes storage at most 3 times per chunk", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const storage = new CountingStorage();
+        initAdapters({ storage, transport, config });
+        store.initStore(simpleHash);
+        const server = new MockLinkServer(transport);
+        const links = manyLinks(1000);
+        await syncModule.commit({ additions: links, removals: [] });
+        storage.calls = { get: 0, put: 0, delete: 0, listKeys: 0 };
+        server.posts = [];
+
+        await syncModule.commit({ additions: [], removals: links });
+
+        const writes = storage.calls.put + storage.calls.delete;
+        assert.equal(store.allLinks().links.length, 0);
+        assert.ok(writes <= 3 * server.posts.length, `${writes} writes for ${server.posts.length} chunks`);
+    });
+});
+
 // ---------------------------------------------------------------------------
 // bootstrap
 // ---------------------------------------------------------------------------

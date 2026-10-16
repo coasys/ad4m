@@ -646,9 +646,7 @@ export async function bootstrap(): Promise<void> {
     // from a previous session, then apply the authoritative server snapshot.
     // Without this, links deleted while the language was stopped would
     // remain visible locally.
-    const existing = store.allLinks();
-    store.applyDiff({ additions: [], removals: existing.links });
-    store.applyDiff({ additions: diff.additions, removals: [] });
+    store.replaceAll(diff.additions);
 
     if (rendered.revision) store.setRevision(rendered.revision);
     if (typeof rendered.sequence === "number") store.setSequence(rendered.sequence);

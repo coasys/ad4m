@@ -48,7 +48,7 @@ esbuild.ts             — Deno build script; bundles @noble/* IN, externalizes 
 src/types.ts            — AD4M types + server wire types (WireLinkExpression, WS message unions, ...)
 src/adapters.ts          — pure interfaces + init/get singletons: Transport, StorageAdapter, AgentAdapter, RuntimeAdapter, WebSocketFactory, RoomConfig
 src/adapters-deno.ts      — ad4m:host + native WebSocket implementations of the above (only imported from index.ts)
-src/store.ts               — local link store (indexed) + sync cursor (revision, sequence)
+src/store.ts               — local link store (in-memory indexes, one KV value `links-v2`) + sync cursor (revision, sequence)
 src/api.ts                  — typed HTTP client, one function per server endpoint
 src/auth.ts                  — DID challenge-response + JWT-expiry-driven token refresh
 src/ws-client.ts               — WebSocket lifecycle: typed dispatch, send queue, exponential-backoff reconnect
@@ -69,8 +69,8 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   plain Node with mocks. **Import rules:** `src/adapters-deno.ts` is the only
   file allowed to import runtime-specific APIs (`ad4m:host`, Deno globals).
   Only `index.ts` is allowed to import `adapters-deno.ts`. `index.ts` also
-  imports `defineLanguage` and `hash` directly from `@coasys/ad4m-ldk` —
-  these are module-surface exports (not I/O adapters), so the direct import
+  imports `defineLanguage` directly from `@coasys/ad4m-ldk` — a
+  module-surface export (not an I/O adapter), so the direct import
   does not break the swappable-adapter guarantee. Pure library
   imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
   anywhere — they contain no runtime coupling.
@@ -95,6 +95,25 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   `sync()`/`render()`/the next commit from the executor still wait for the
   whole commit. Keep commit cheap; anything long-running inside a call
   blocks every other call to this perspective's language.
+- **Every KV write rewrites the executor's whole KV file.** `storagePut`/
+  `storageDelete` in `rust-executor/src/js_core/host.js` sort every key,
+  `JSON.stringify` the whole store and `Deno.writeTextFileSync` it, on
+  each call. A write costs O(store size): 0.2 ms with 200 links, 5.8 ms
+  with ~2,000, 20 ms with 3,000 (3.6 MB file); `storageGet` and `hash`
+  cost microseconds. So count writes, not calls. The store (`src/store.ts`)
+  keeps the link set and its source/target/predicate indexes in memory and
+  writes the whole set as ONE value (`links-v2`) per applied diff; a
+  committed chunk is 3 writes (links, sequence, revision). The old format
+  (`links/{hash}` + three `links-by-*` index keys per link, a host `hash`
+  call each) made a 1,833-link commit 7,352 writes, 42 s in the executor's
+  isolate. The first load without `links-v2` imports the old `links/*`
+  values; the old keys stay, since deleting them is one rewrite each.
+  `tests/sync.test.ts` "commit cost in storage calls" bounds a 1,000-link
+  commit at 3 writes per chunk.
+- **Link hash is SHA-256 hex in JS** (`store.hashLink`, `@noble/hashes`)
+  of the canonical payload, equal to the wire `link_hash`
+  (`encryptLinkForWire`) and the server's `linkHash`. It is only the
+  store's key, so changing it needs no migration beyond re-keying on load.
 - **`applyInboundWireDiff` (src/sync.ts) is the only place that calls
   `emitDiff`.** The AD4M executor discards `perspectiveSyncSync()`'s return
   value — `emitPerspectiveDiff` is the only thing that makes an inbound
@@ -158,6 +177,15 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   version falls out of deployment.
 
 ## Known limitations / follow-ups
+
+- **The executor's KV still rewrites its file on every write.** The store
+  keeps writes per commit chunk constant, but each write still costs
+  O(whole KV), so one commit chunk with 50,000 links in the store costs
+  three rewrites of a ~60 MB file. The fix belongs in `host.js` (flush once
+  per execute, or a batched write op) and helps every language; it needs a
+  snapshot rebuild and an executor release, so this language does not rely
+  on it. Format-1 keys of an upgraded install stay in the KV for the same
+  reason.
 
 - **Durable outbox is limited to in-memory retry.** `enqueueCommitBatched`
   (src/sync.ts) coalesces contiguous commits into segments and retries

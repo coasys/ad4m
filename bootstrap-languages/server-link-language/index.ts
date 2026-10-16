@@ -12,7 +12,7 @@
  * known limitations.
  */
 
-import { defineLanguage, hash } from "@coasys/ad4m-ldk";
+import { defineLanguage } from "@coasys/ad4m-ldk";
 
 import type { PerspectiveDiff } from "./src/types.js";
 import * as store from "./src/store.js";
@@ -118,7 +118,7 @@ const language = defineLanguage({
         });
 
         myDid = getAgent().did();
-        store.initStore(hash);
+        store.initStore();
 
         configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(UID);
         if (!configured) {
