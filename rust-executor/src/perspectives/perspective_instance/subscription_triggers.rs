@@ -27,11 +27,16 @@
 //!    in the last result this is a fast path: `scan` (a top-level record
 //!    carries its flag) or `via` (an included record is linked to its parent
 //!    in the result) matches the same write, after a store read.
-//! 4. **`scan`**: a predicate of a scanned class (the subscribed class and
+//! 4. **`holders`**: under a containment step in (`parent: { ids,
+//!    direction: "in" }` without a predicate), a predicate a holder class is
+//!    recognised by, written on a node that links an anchor through that
+//!    class's edge. This is how a node becomes a holder of an anchor when the
+//!    subscribed class does not read the holder's flag (#1461 review).
+//! 5. **`scan`**: a predicate of a scanned class (the subscribed class and
 //!    any class a `where` quantifier reads), written on a node that is an
 //!    instance of that class: it has one of the class's flag links. This is
 //!    how a record that is not in the result yet moves into a filter or a page.
-//! 5. **`via`**: a `near` predicate written on a node linked, through a
+//! 6. **`via`**: a `near` predicate written on a node linked, through a
 //!    relation the query includes, projects or orders by (`comments.text`),
 //!    to a node in the last result.
 //!    This is how an included record that was filtered out, or did not conform
@@ -51,7 +56,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::perspectives::model_query::containment::{watched_predicates, ContainmentEdge};
-use crate::perspectives::model_query::types::ShapeProperty;
+use crate::perspectives::model_query::types::{ScopeDirection, ShapeProperty};
 use crate::perspectives::model_query::{
     conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
     WhereCondition,
@@ -180,6 +185,15 @@ impl Predicates {
         }
     }
 
+    /// Every predicate either set holds.
+    fn extend(&mut self, other: Predicates) {
+        match other {
+            Predicates::All => *self = Predicates::All,
+            Predicates::None => {}
+            Predicates::Some(theirs) => theirs.iter().for_each(|p| self.add(p)),
+        }
+    }
+
     fn contains(&self, predicate: &str) -> bool {
         match self {
             Predicates::None => false,
@@ -219,6 +233,11 @@ pub(super) struct TriggerRules {
     /// A parent scope whose predicate is not known (`Scope::Model` without a
     /// `field`): any write touching an anchor re-runs.
     anchors_any_predicate: bool,
+    /// A containment step in from the anchors: predicate a holder class is
+    /// recognised by → the edge predicates that class holds through. A write
+    /// of one re-runs when its source links an anchor through one of them:
+    /// the node just became (or stopped being) a holder of an anchor.
+    holders: HashMap<String, Predicates>,
 }
 
 impl TriggerRules {
@@ -242,6 +261,7 @@ impl TriggerRules {
         let mut out: HashSet<&str> = self.any.iter().map(String::as_str).collect();
         out.extend(self.joins.keys().map(String::as_str));
         out.extend(self.scan.keys().map(String::as_str));
+        out.extend(self.holders.keys().map(String::as_str));
         for set in [&self.near, &self.via] {
             if let Predicates::Some(set) = set {
                 out.extend(set.iter().map(String::as_str));
@@ -259,13 +279,8 @@ impl TriggerRules {
         for (predicate, values) in other.joins {
             self.joins.entry(predicate).or_default().extend(values);
         }
-        for set in [(&mut self.near, other.near), (&mut self.via, other.via)] {
-            match set {
-                (mine, Predicates::All) => *mine = Predicates::All,
-                (_, Predicates::None) => {}
-                (mine, Predicates::Some(theirs)) => theirs.iter().for_each(|p| mine.add(p)),
-            }
-        }
+        self.near.extend(other.near);
+        self.via.extend(other.via);
         for (predicate, flags) in other.scan {
             let entry = self.scan.entry(predicate).or_default();
             for flag in flags {
@@ -276,6 +291,9 @@ impl TriggerRules {
         }
         self.anchors.extend(other.anchors);
         self.anchors_any_predicate |= other.anchors_any_predicate;
+        for (predicate, edges) in other.holders {
+            self.holders.entry(predicate).or_default().extend(edges);
+        }
     }
 }
 
@@ -763,8 +781,31 @@ impl Walk<'_> {
                 predicate,
                 transitive,
                 levels,
+                direction,
                 ..
             } => {
+                // One step in: the rows hold an anchor. A node that becomes a
+                // holder is not an anchor and may be in no result yet (the
+                // subscribed class does not read the holder's flag), so its
+                // flag write is related back to the anchors (`holders`).
+                if predicate.is_none()
+                    && !*transitive
+                    && levels.is_none()
+                    && *direction == ScopeDirection::In
+                {
+                    for edge in self.containment {
+                        let Some(holder) = &edge.holder else {
+                            continue;
+                        };
+                        for recognised_by in holder.recognised_by() {
+                            self.rules
+                                .holders
+                                .entry(recognised_by)
+                                .or_default()
+                                .add(&edge.predicate);
+                        }
+                    }
+                }
                 self.rules.anchors.extend(ids.iter().cloned());
                 // A containment traversal follows every edge's predicate, and
                 // a node that becomes a holder changes it too (see
@@ -883,6 +924,14 @@ impl ModelTrigger {
                 .any(|e| self.nodes.contains(*e) || rules.anchors.contains(*e))
         {
             return true;
+        }
+        // A holder's flag, on a node that links an anchor through that
+        // holder's edge. Read around the source only: the target is a flag
+        // value, which every instance links.
+        if let Some(edges) = rules.holders.get(predicate) {
+            if store.linked_through(source, edges, &rules.anchors) {
+                return true;
+            }
         }
         // The ends a write can change a record at. A target stored as an RDF
         // literal is a value on the source: no record carries a flag on it,

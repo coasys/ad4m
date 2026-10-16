@@ -803,3 +803,57 @@ async fn a_container_children_filter_refuses_what_it_cannot_answer() {
         assert!(err.to_string().contains("children"), "{clause}: {err}");
     }
 }
+
+pub(super) const REVIEWABLE_SDNA: &str = r#"{
+  "target_class":"ns://Reviewable",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"review://kind","target":"review://item"}],
+  "properties":[
+    {"path":"review://kind","name":"kind","has_value":"review://item","min_count":1,"max_count":1}
+  ]
+}"#;
+
+/// A subscription on concrete `Reviewable` with a containment step in from
+/// `m` (Lal's #1461 review). `h` is a Reviewable that already links `m` by
+/// `we://child`, but is not a Block, so it holds nothing. When it gets
+/// Block's flag it holds `m`, and enters the result: neither end of that
+/// write is the anchor or a result node, and `Reviewable` does not read
+/// `ns://type`. Red on 8d659d6b7. The same flag on a node that holds no
+/// anchor re-runs nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_containment_step_in_sees_a_holder_become_a_container() {
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Block", BLOCK_SDNA), ("Reviewable", REVIEWABLE_SDNA)]).await;
+    let m = "ad4m://m/r";
+    let h = "ad4m://h/r";
+    create(&mut p, &ctx, "Reviewable", h).await;
+    link(&mut p, &ctx, h, "we://child", m).await;
+    let (mut sub, initial) = Sub::open(
+        &p,
+        "Reviewable",
+        json!({"parent": {"ids": [m], "direction": "in"}}),
+    )
+    .await;
+    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+
+    // A Block elsewhere: holds no anchor, re-runs nothing.
+    let other = "ad4m://other/r";
+    link(&mut p, &ctx, other, "we://child", "ad4m://elsewhere/r").await;
+    link(&mut p, &ctx, other, "ns://type", "ns://block").await;
+    let before = super::super::subscription_triggers::reruns::count(&sub.id);
+    let mut writes = super::super::subscription_triggers::Writes::new();
+    writes.record(other, "ns://type", "ns://block");
+    p.check_subscribed_queries(ChangedPredicates::Specific(writes))
+        .await;
+    assert_eq!(
+        super::super::subscription_triggers::reruns::count(&sub.id),
+        before,
+        "a holder of no anchor"
+    );
+
+    link(&mut p, &ctx, h, "ns://type", "ns://block").await;
+    let update = sub
+        .pass(&p, &[(h, "ns://type", "ns://block")])
+        .await
+        .expect("the holder's flag re-runs the subscription");
+    assert!(update.contains(h), "{update}");
+}
