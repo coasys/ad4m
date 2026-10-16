@@ -150,9 +150,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         if (ctx.autoAdmit) {
           ctx.db.addAcl(roomId, body.did);
         } else {
-          // The DID proved its key: queue it for the operator or room admin to approve.
-          ctx.db.recordJoinRequest(roomId, body.did);
-          request.log.info({ roomId, did: body.did }, "join waiting for approval (allowlist)");
           return reply
             .code(403)
             .send({ error: "not authorized for this room; ask the admin to add your DID to the ACL" });

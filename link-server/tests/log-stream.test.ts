@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { get as httpGet, type ClientRequest } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { test } from "node:test";
-import { LogTail, MAX_LINE_LENGTH } from "../src/log-tail.js";
+import { LogTail } from "../src/log-tail.js";
 import { MAX_LOG_STREAMS } from "../src/operator.js";
 import { authenticateAgent, createTestAgent, startTestServer, type TestServerHandle } from "./helpers.js";
 
@@ -38,8 +38,8 @@ async function withLogging(fn: (h: Logged) => Promise<void>, logger = true): Pro
 interface LogStream {
   status: number;
   contentType: string | null;
-  /** Events read so far: id and parsed data. */
-  events: Array<{ id: string; data: Record<string, any> }>;
+  /** Events read so far: parsed data. */
+  events: Array<{ data: Record<string, any> }>;
   /** Reads until `predicate` holds for the events read so far, or fails after `timeoutMs`. */
   until(predicate: (events: LogStream["events"]) => boolean, timeoutMs?: number): Promise<void>;
   close(): void;
@@ -61,9 +61,8 @@ async function openLogs(opUrl: string, headers: Record<string, string> = SIGNED_
     while ((end = buffered.indexOf("\n\n")) >= 0) {
       const block = buffered.slice(0, end);
       buffered = buffered.slice(end + 2);
-      const id = /^id: (\S+)$/m.exec(block);
       const data = /^data: (.*)$/m.exec(block);
-      if (id && data) events.push({ id: id[1], data: JSON.parse(data[1]) });
+      if (data) events.push({ data: JSON.parse(data[1]) });
     }
   };
   return {
@@ -81,39 +80,27 @@ async function openLogs(opUrl: string, headers: Record<string, string> = SIGNED_
   };
 }
 
-test("LogTail keeps pino's lines in order, without pid and hostname, up to its capacity", () => {
+test("LogTail keeps pino's lines in order, without pid, hostname and v, up to its capacity", () => {
   const tail = new LogTail(3);
-  tail.write(`{"level":30,"time":1,"pid":7,"hostname":"h","msg":"one","roomId":"r"}\n`);
+  tail.write(`{"level":30,"time":1,"pid":7,"hostname":"h","v":1,"msg":"one","roomId":"r"}\n`);
   // Two lines in one write, and a line that is not JSON.
   tail.write(`{"level":40,"time":2,"msg":"two"}\n{"level":50,"time":3,"msg":"three"}\nplain text\n`);
-  assert.deepEqual(tail.since().map((e) => e.msg), ["two", "three", "plain text"]);
-  assert.deepEqual(tail.since(2).map((e) => e.seq), [3, 4]);
-  const [two] = tail.since(1);
-  assert.equal(two.level, 40);
-  assert.equal(tail.since(3)[0].level, 30, "a line that is not JSON is info");
+  assert.deepEqual(tail.lines(), [
+    { level: 40, time: 2, msg: "two" },
+    { level: 50, time: 3, msg: "three" },
+    { msg: "plain text" },
+  ]);
 
   const kept = new LogTail(10);
-  kept.write(`{"level":30,"time":1,"pid":7,"hostname":"h","msg":"one","roomId":"r"}\n`);
-  assert.deepEqual(kept.since()[0], { level: 30, time: 1, msg: "one", roomId: "r", seq: 1 });
-});
+  kept.write(`{"level":30,"time":1,"pid":7,"hostname":"h","v":1,"msg":"one","roomId":"r"}\n`);
+  assert.deepEqual(kept.lines(), [{ level: 30, time: 1, msg: "one", roomId: "r" }]);
 
-test("LogTail cuts an oversized line and drops a listener that throws", () => {
-  const tail = new LogTail();
-  tail.write(JSON.stringify({ level: 30, time: 1, msg: "x".repeat(MAX_LINE_LENGTH * 2) }) + "\n");
-  assert.ok(tail.since()[0].msg.length < MAX_LINE_LENGTH + 100);
-  assert.match(tail.since()[0].msg, /line cut/);
-  // A cut line keeps its level, so an error filter still shows it.
-  tail.write(JSON.stringify({ level: 50, time: 1, msg: "x".repeat(MAX_LINE_LENGTH * 2) }) + "\n");
-  assert.equal(tail.since(1)[0].level, 50);
-
-  const seen: string[] = [];
-  tail.subscribe(() => {
-    throw new Error("broken");
-  });
-  tail.subscribe((e) => seen.push(e.msg));
-  tail.write(`{"level":30,"time":2,"msg":"a"}\n`);
-  tail.write(`{"level":30,"time":3,"msg":"b"}\n`);
-  assert.deepEqual(seen, ["a", "b"], "the other listener keeps getting lines");
+  const seen: unknown[] = [];
+  const unsubscribe = kept.subscribe((e) => seen.push(e.msg));
+  kept.write(`{"msg":"a"}\n`);
+  unsubscribe();
+  kept.write(`{"msg":"b"}\n`);
+  assert.deepEqual(seen, ["a"]);
 });
 
 test("the log stream needs the operator token and a signed-in user, and is not on the public port", async () => {
@@ -151,10 +138,6 @@ test("the log stream sends the buffered lines, then each new line as it is logge
       assert.equal(change.did, joiner.did);
       assert.equal(change.pid, undefined);
 
-      const boot = server.built.logTail!.boot;
-      assert.ok(stream.events.every((e) => e.id === `${boot}-${e.data.seq}`), "each id is <boot>-<seq>");
-      const seqs = stream.events.map((e) => e.data.seq as number);
-      assert.deepEqual(seqs, [...seqs].sort((a, b) => a - b), "sequence numbers rise");
       assert.ok(!JSON.stringify(stream.events).includes(TOKEN), "the operator token is not in the stream");
       assert.ok(stdout.some((line) => line.includes("operator acl change")), "lines still reach the destination");
     } finally {
@@ -163,28 +146,16 @@ test("the log stream sends the buffered lines, then each new line as it is logge
   });
 });
 
-test("a reconnect with Last-Event-ID gets only the lines after it; an id from before a restart gets all", async () => {
+test("a reconnect gets the whole buffer again", async () => {
   await withLogging(async ({ server, opUrl }) => {
-    const tail = server.built.logTail!;
-    tail.write(`{"level":30,"time":1,"msg":"first"}\n{"level":30,"time":2,"msg":"second"}\n`);
-    const firstSeq = tail.since().find((e) => e.msg === "first")!.seq;
-
-    const resumed = await openLogs(opUrl, { ...SIGNED_IN, "last-event-id": `${tail.boot}-${firstSeq}` });
-    try {
-      await resumed.until((events) => events.some((e) => e.data.msg === "second"));
-      assert.ok(!resumed.events.some((e) => e.data.msg === "first"));
-    } finally {
-      resumed.close();
-    }
-
-    // An id from another boot (this server restarted), even with a sequence
-    // number below the current one.
-    const otherBoot = tail.boot === "00000000" ? "11111111" : "00000000";
-    const afterRestart = await openLogs(opUrl, { ...SIGNED_IN, "last-event-id": `${otherBoot}-1` });
-    try {
-      await afterRestart.until((events) => events.some((e) => e.data.msg === "first"));
-    } finally {
-      afterRestart.close();
+    server.built.logTail!.write(`{"level":30,"time":1,"msg":"first"}\n`);
+    for (let i = 0; i < 2; i++) {
+      const stream = await openLogs(opUrl);
+      try {
+        await stream.until((events) => events.some((e) => e.data.msg === "first"));
+      } finally {
+        stream.close();
+      }
     }
   });
 });
@@ -243,7 +214,7 @@ test("a client that stops reading is dropped: its connection closed, not left ho
     assert.equal(listeners.size, 1, "the stream is open");
 
     // Far more than the socket buffers and the 1 MiB limit hold.
-    const line = JSON.stringify({ level: 30, time: 1, msg: "x".repeat(MAX_LINE_LENGTH - 100) }) + "\n";
+    const line = JSON.stringify({ level: 30, time: 1, msg: "x".repeat(8000) }) + "\n";
     for (let i = 0; i < 4000 && listeners.size > 0; i++) {
       tail.write(line);
       if (i % 50 === 0) await new Promise((r) => setImmediate(r));

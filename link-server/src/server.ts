@@ -24,8 +24,6 @@ export interface ServerOptions {
    * also kept in `logTail` for the operator's live log view.
    */
   logDestination?: { write(line: string): unknown };
-  /** How many recent log lines `logTail` keeps. Default 1000. */
-  logTailSize?: number;
   /**
    * When true, any DID that passes the challenge-response flow gets
    * auto-admitted to any room's ACL on first contact. Designed for
@@ -80,7 +78,7 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   // One destination for both apps, so the operator's log view shows the
   // public app's lines and its own.
-  const logTail = opts.logger ? new LogTail(opts.logTailSize) : undefined;
+  const logTail = opts.logger ? new LogTail() : undefined;
   const logger = logTail
     ? { stream: teeDestination(opts.logDestination ?? process.stdout, logTail) }
     : false;
@@ -134,12 +132,7 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
     : undefined;
 
   const admission = opts.autoAdmit ? "auto" : "allowlist";
-  app.log.info(
-    { admission },
-    admission === "auto"
-      ? "admission mode: auto (every DID that proves its key joins any room)"
-      : "admission mode: allowlist (a room's first DID is its admin; other DIDs wait until the room admin or the operator adds them)"
-  );
+  app.log.info({ admission }, `admission mode: ${admission}`);
 
   // Periodic sweep of expired JWT sessions from the DB.
   const sweepInterval = setInterval(() => {

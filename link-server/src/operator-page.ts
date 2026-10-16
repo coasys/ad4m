@@ -16,41 +16,25 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
 <body>
 <h1>Link server admission <span id="instance" class="tag instance"></span></h1>
 <div class="muted">Signed in as <span id="who">?</span></div>
-<p id="admission" class="note" hidden></p>
+<p id="admission" class="note"></p>
 <p class="note">A room is a neighbourhood (the server link language's UID). Its first agent is the room admin.
 An added DID can sync once it reconnects. It can read and write encrypted links only after the
 room admin's executor has been online and granted it the room keys.</p>
 <div id="error" role="alert"></div>
 <h2>Rooms</h2>
-<table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>Waiting</th><th>E2E</th><th>Created</th></tr></thead><tbody></tbody></table>
+<table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>E2E</th><th>Created</th></tr></thead><tbody></tbody></table>
 <section id="detail" hidden>
   <h2>Room <span id="detail-id" class="mono"></span></h2>
   <form id="add-form">
     <input id="add-did" type="text" placeholder="did:key:z6Mk..." autocomplete="off" spellcheck="false" required>
     <button type="submit">Admit DID</button>
   </form>
-  <section id="pending-section" hidden>
-    <h2>Waiting for approval</h2>
-    <p class="muted">These DIDs proved their key and asked to join. Check each one with the person before you admit it.</p>
-    <table id="pending"><thead><tr><th>DID</th><th>First asked</th><th>Last asked</th><th>Attempts</th><th></th></tr></thead><tbody></tbody></table>
-  </section>
   <table id="members"><thead><tr><th>Member</th><th>Added</th><th>Added by</th><th>Keys</th><th></th></tr></thead><tbody></tbody></table>
   <h2>History</h2>
   <table id="history"><thead><tr><th>When</th><th>Change</th><th>DID</th><th>By</th></tr></thead><tbody></tbody></table>
 </section>
-<section id="logs">
-  <h2>Logs <span id="log-status" class="tag">connecting</span></h2>
-  <div class="log-controls">
-    <label>Level <select id="log-level">
-      <option value="30" selected>info and up</option>
-      <option value="40">warn and up</option>
-      <option value="50">error and up</option>
-    </select></label>
-    <label><input id="log-pause" type="checkbox"> Pause</label>
-    <button id="log-clear" type="button">Clear</button>
-  </div>
-  <div id="log-lines" role="log" aria-live="off"></div>
-</section>
+<h2>Logs <select id="log-level"><option value="30">info and up</option><option value="40">warn and up</option><option value="50">error and up</option></select></h2>
+<div id="log-lines" role="log"></div>
 <script src="admin.js"></script>
 </body>
 </html>
@@ -75,18 +59,9 @@ input[type=text] { flex: 1; font: inherit; font-family: ui-monospace, monospace;
 button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
 #error { color: #b00020; min-height: 1.2rem; }
 .note { background: #f2f2f7; padding: .5rem .75rem; border-radius: .4rem; font-size: .9rem; }
-.log-controls { display: flex; gap: 1rem; align-items: center; margin: .5rem 0; font-size: .9rem; }
-#log-lines { font-family: ui-monospace, monospace; font-size: .78rem; height: 24rem; overflow-y: auto; background: #1d1d1f; color: #e5e5ea; padding: .5rem; border-radius: .4rem; }
-.log-line { white-space: pre-wrap; word-break: break-all; }
-.log-line .lvl { display: inline-block; width: 3.2rem; }
-.log-line.l20 .lvl { color: #8e8e93; }
-.log-line.l30 .lvl { color: #64d2ff; }
-.log-line.l40 .lvl { color: #ffd60a; }
-.log-line.l50 .lvl, .log-line.l60 .lvl { color: #ff6961; }
-.log-line .fields { color: #8e8e93; }
-.tag.live { background: #c9f0d1; }
-td.waiting { font-weight: 600; color: #b25000; }
-.tag.down { background: #ffd1d1; }
+#log-lines { font: .78rem ui-monospace, monospace; height: 24rem; overflow-y: auto; background: #1d1d1f; color: #e5e5ea; padding: .5rem; white-space: pre-wrap; word-break: break-all; }
+.l40 { color: #ffd60a; }
+.l50, .l60 { color: #ff6961; }
 `;
 
 export const OPERATOR_PAGE_JS = `"use strict";
@@ -125,7 +100,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
       if (data.rooms.length === 0) {
         var empty = el("tr");
         var cell = el("td", "No rooms yet.", "muted");
-        cell.colSpan = 6;
+        cell.colSpan = 5;
         empty.appendChild(cell);
         tbody.appendChild(empty);
       }
@@ -134,7 +109,6 @@ export const OPERATOR_PAGE_JS = `"use strict";
         row.appendChild(el("td", room.id, "mono"));
         row.appendChild(el("td", room.admin, "mono"));
         row.appendChild(el("td", room.memberCount));
-        row.appendChild(el("td", room.pendingCount ? String(room.pendingCount) : "", room.pendingCount ? "waiting" : null));
         row.appendChild(el("td", room.e2e ? "yes" : "no"));
         row.appendChild(el("td", room.createdAt.slice(0, 16).replace("T", " ")));
         row.addEventListener("click", function () { selectRoom(room.id); });
@@ -170,28 +144,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
       row.appendChild(action);
       tbody.appendChild(row);
     });
-    renderPending(room);
     renderHistory(room);
-  }
-
-  function renderPending(room) {
-    var pending = room.pending || [];
-    document.getElementById("pending-section").hidden = pending.length === 0;
-    var tbody = document.querySelector("#pending tbody");
-    tbody.replaceChildren();
-    pending.forEach(function (request) {
-      var row = el("tr");
-      row.appendChild(el("td", request.did, "mono"));
-      row.appendChild(el("td", request.firstSeen.slice(0, 16).replace("T", " ")));
-      row.appendChild(el("td", request.lastSeen.slice(0, 16).replace("T", " ")));
-      row.appendChild(el("td", String(request.attempts)));
-      var action = el("td");
-      var admit = el("button", "Admit");
-      admit.addEventListener("click", function () { changeAcl("add", request.did); });
-      action.appendChild(admit);
-      row.appendChild(action);
-      tbody.appendChild(row);
-    });
   }
 
   function actorLabel(change) {
@@ -232,104 +185,35 @@ export const OPERATOR_PAGE_JS = `"use strict";
     changeAcl("add", did).then(function () { if (!errorBox.textContent) input.value = ""; });
   });
 
-  // Live logs: Server-Sent Events from api/logs. The browser reconnects by
-  // itself and the server resumes after the last line it sent.
-  var LEVELS = { 10: "trace", 20: "debug", 30: "info", 40: "warn", 50: "error", 60: "fatal" };
-  var MAX_LOG_LINES = 1000;
+  // Live logs (Server-Sent Events): the server's buffered lines, then each new
+  // one. Every (re)connect resends the buffer, so the list starts over, and it
+  // keeps as many rows as the server's buffer (LogTail: 1000).
   var logBox = document.getElementById("log-lines");
-  var logStatus = document.getElementById("log-status");
   var logLevel = document.getElementById("log-level");
-  var logPause = document.getElementById("log-pause");
-  var logEntries = [];
-
-  function setLogStatus(text, className) {
-    logStatus.textContent = text;
-    logStatus.className = "tag " + className;
-  }
-
-  // The fields worth a glance; the rest of the line stays out of the way.
-  function logFields(entry) {
-    var parts = [];
-    if (entry.req) parts.push(entry.req.method + " " + entry.req.url);
-    if (entry.res) parts.push(String(entry.res.statusCode));
-    if (typeof entry.responseTime === "number") parts.push(Math.round(entry.responseTime) + " ms");
-    ["operator", "instance", "roomId", "action", "did"].forEach(function (key) {
-      if (entry[key] !== undefined && entry[key] !== null) parts.push(key + "=" + entry[key]);
-    });
-    if (entry.err && entry.err.message) parts.push("error: " + entry.err.message);
-    return parts.join(" ");
-  }
-
-  function logRow(entry) {
-    var row = el("div", null, "log-line l" + entry.level);
-    row.appendChild(el("span", new Date(entry.time).toLocaleTimeString() + " "));
-    row.appendChild(el("span", LEVELS[entry.level] || entry.level, "lvl"));
-    row.appendChild(el("span", entry.msg + " "));
-    row.appendChild(el("span", logFields(entry), "fields"));
-    return row;
-  }
-
-  function renderLogs() {
-    var min = Number(logLevel.value);
+  function filterLog(row) { row.hidden = row.level < Number(logLevel.value); }
+  var logs = new EventSource("api/logs");
+  logs.onopen = function () { logBox.replaceChildren(); };
+  logs.onmessage = function (event) {
+    var entry = JSON.parse(event.data);
+    var row = el("div", null, "l" + (entry.level || 30));
+    row.level = entry.level || 30;
+    var head = (entry.time ? new Date(entry.time).toISOString().slice(11, 19) + " " : "") +
+      ({ 40: "WARN ", 50: "ERROR ", 60: "FATAL " }[row.level] || "") + (entry.msg || "");
+    delete entry.level; delete entry.time; delete entry.msg;
+    row.textContent = Object.keys(entry).length ? head + " " + JSON.stringify(entry) : head;
+    filterLog(row);
     var atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4;
-    logBox.replaceChildren();
-    logRows.clear();
-    logEntries.forEach(function (entry) {
-      if (entry.level < min) return;
-      var row = logRow(entry);
-      logRows.set(entry, row);
-      logBox.appendChild(row);
-    });
-    if (atBottom) logBox.scrollTop = logBox.scrollHeight;
-  }
-
-  // Each shown entry keeps its row, so the row goes when its entry leaves the
-  // buffer, whatever the filter hides.
-  var logRows = new Map();
-
-  function addLog(entry) {
-    logEntries.push(entry);
-    if (logEntries.length > MAX_LOG_LINES) {
-      var dropped = logEntries.shift();
-      var oldRow = logRows.get(dropped);
-      if (oldRow) { oldRow.remove(); logRows.delete(dropped); }
-    }
-    if (logPause.checked || entry.level < Number(logLevel.value)) return;
-    var atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4;
-    var row = logRow(entry);
-    logRows.set(entry, row);
     logBox.appendChild(row);
+    if (logBox.childElementCount > 1000) logBox.firstChild.remove();
     if (atBottom) logBox.scrollTop = logBox.scrollHeight;
-  }
-
-  if (window.EventSource) {
-    var logs = new EventSource("api/logs");
-    logs.onopen = function () { setLogStatus("live", "live"); };
-    logs.onerror = function () {
-      // A refused stream (logging off, too many streams) is closed for good; a dropped one retries.
-      setLogStatus(logs.readyState === EventSource.CLOSED ? "unavailable" : "reconnecting", "down");
-    };
-    logs.onmessage = function (event) {
-      try { addLog(JSON.parse(event.data)); } catch (e) { /* not a log line */ }
-    };
-  } else {
-    setLogStatus("not supported by this browser", "down");
-  }
-  logLevel.addEventListener("change", renderLogs);
-  logPause.addEventListener("change", function () { if (!logPause.checked) renderLogs(); });
-  document.getElementById("log-clear").addEventListener("click", function () {
-    logEntries = [];
-    logRows.clear();
-    logBox.replaceChildren();
-  });
+  };
+  logLevel.addEventListener("change", function () { Array.prototype.forEach.call(logBox.children, filterLog); });
 
   api("/whoami").then(function (data) {
     document.getElementById("who").textContent = data.operator || "(no sign-in header)";
-    var admission = document.getElementById("admission");
-    admission.textContent = data.admission === "auto"
-      ? "Admission: auto. Every DID that proves its key joins any room; nothing waits for approval."
-      : "Admission: allowlist. A room's first DID is its admin. Other DIDs wait until the room admin or you admit them: they show under “Waiting”.";
-    admission.hidden = false;
+    document.getElementById("admission").textContent = data.admission === "auto"
+      ? "Admission: auto (--auto-admit). Every DID that proves its key joins any room."
+      : "Admission: allowlist (the default). A room's first DID is its admin; anyone else joins once the room admin or you admit their DID.";
     if (data.instance) {
       document.getElementById("instance").textContent = data.instance;
       document.title = "Link server admission: " + data.instance;

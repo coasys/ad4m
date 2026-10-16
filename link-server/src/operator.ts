@@ -43,7 +43,7 @@ export interface OperatorContext {
   telepresence: TelepresenceManager;
   /** The server's recent log lines; without it, `GET /api/logs` answers 404 (logging is off). */
   logTail?: LogTail;
-  /** Whether the public app admits every authenticated DID (else allowlist: joins wait for approval). */
+  /** Whether the public app admits every authenticated DID (else allowlist). */
   autoAdmit: boolean;
 }
 
@@ -56,18 +56,9 @@ const LOG_STREAM_HEARTBEAT_MS = 15_000;
 /** Bytes a log stream may have queued for a slow client before it is dropped. */
 const MAX_LOG_STREAM_BUFFER = 1024 * 1024;
 
-/**
- * One Server-Sent Event. Its id is `<boot>-<seq>`, so a reconnect resumes
- * after it, and an id from before a restart (another boot) gets every line.
- */
-function logEvent(boot: string, entry: LogEntry): string {
-  return `id: ${boot}-${entry.seq}\ndata: ${JSON.stringify(entry)}\n\n`;
-}
-
-/** The sequence number to resume after: the one in `lastEventId` if it is from this boot, else 0. */
-function resumeAfter(lastEventId: unknown, boot: string): number {
-  const match = typeof lastEventId === "string" ? /^([0-9a-f]+)-(\d+)$/.exec(lastEventId) : null;
-  return match && match[1] === boot ? Number(match[2]) : 0;
+/** One Server-Sent Event carrying one log line. */
+function logEvent(entry: LogEntry): string {
+  return `data: ${JSON.stringify(entry)}\n\n`;
 }
 
 export const MIN_OPERATOR_TOKEN_LENGTH = 32;
@@ -173,12 +164,6 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
       addedBy: addedBy.get(a.did) ?? null,
     })),
     history: history.map((c) => ({ did: c.did, action: c.action, actor: c.actor, source: c.source, at: c.at })),
-    pending: ctx.db.getJoinRequests(roomId).map((j) => ({
-      did: j.did,
-      firstSeen: j.first_seen,
-      lastSeen: j.last_seen,
-      attempts: j.attempts,
-    })),
   };
 }
 
@@ -251,14 +236,13 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
     }));
 
     // Live logs as Server-Sent Events: the buffered lines first, then each new
-    // one. A reconnect sends Last-Event-ID and gets only what it missed.
-    api.get("/logs", async (request, reply) => {
+    // one. A reconnect gets the whole buffer again; the page starts over.
+    api.get("/logs", async (_request, reply) => {
       const tail = ctx.logTail;
       if (!tail) return reply.code(404).send({ error: "logging is off on this server" });
       if (logStreams.size >= MAX_LOG_STREAMS) {
         return reply.code(429).send({ error: `at most ${MAX_LOG_STREAMS} log streams at once` });
       }
-      const backlog = tail.since(resumeAfter(request.headers["last-event-id"], tail.boot));
 
       reply.hijack();
       const raw = reply.raw;
@@ -270,7 +254,7 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
         "X-Accel-Buffering": "no",
         Connection: "keep-alive",
       });
-      raw.write("retry: 3000\n\n" + backlog.map((entry) => logEvent(tail.boot, entry)).join(""));
+      raw.write("retry: 3000\n\n" + tail.lines().map(logEvent).join(""));
 
       let unsubscribe = () => {};
       let heartbeat: NodeJS.Timeout | undefined;
@@ -284,14 +268,13 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       raw.on("close", end);
       unsubscribe = tail.subscribe((entry) => {
         // A client this far behind is dropped: destroyed, not ended, since
-        // end() would wait for it to read the queued megabyte first. It
-        // reconnects and resumes from its last id.
+        // end() would wait for it to read the queued megabyte first.
         if (raw.writableLength > MAX_LOG_STREAM_BUFFER) {
           raw.destroy();
           end();
           return;
         }
-        raw.write(logEvent(tail.boot, entry));
+        raw.write(logEvent(entry));
       });
       heartbeat = setInterval(() => raw.write(": ping\n\n"), LOG_STREAM_HEARTBEAT_MS);
       heartbeat.unref();
@@ -304,7 +287,6 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
         e2e: !!r.e2e_enabled,
         createdAt: r.created_at,
         memberCount: r.member_count,
-        pendingCount: r.pending_count,
       })),
     }));
 
