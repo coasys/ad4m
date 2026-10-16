@@ -19,8 +19,31 @@
 
 import { wrtc } from "./media.js";
 
+/** The peer connections this process holds open. */
+const open = new Set<RTCPeerConnection>();
+
+/**
+ * Where this process's media goes: for each open connection, the remote
+ * address (`ip:port`) of its selected candidate pair, read from WebRTC's own
+ * stats.
+ */
+export async function selectedRemoteAddresses(): Promise<string[]> {
+  const addresses: string[] = [];
+  for (const pc of open) {
+    const stats = (await pc.getStats().catch(() => new Map())) as Map<string, any>;
+    const transport = [...stats.values()].find((s) => s.type === "transport");
+    const pair =
+      stats.get(transport?.selectedCandidatePairId) ??
+      [...stats.values()].find((s) => s.type === "candidate-pair" && s.nominated && s.state === "succeeded");
+    const remote = pair && stats.get(pair.remoteCandidateId);
+    if (remote) addresses.push(`${remote.ip ?? remote.address}:${remote.port}`);
+  }
+  return addresses;
+}
+
 export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPeerConnection {
   const pc = new wrtc.RTCPeerConnection({ ...configuration, iceServers: [] });
+  open.add(pc);
   const setLocal = pc.setLocalDescription.bind(pc);
   const setRemote = pc.setRemoteDescription.bind(pc);
   const addCandidate = pc.addIceCandidate.bind(pc);
@@ -58,6 +81,7 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
   pc.close = () => {
     if (closed) return;
     closed = true;
+    open.delete(pc);
     void operations.then(closeNative);
   };
   if (process.env.E2E_DEBUG) trace(pc);
