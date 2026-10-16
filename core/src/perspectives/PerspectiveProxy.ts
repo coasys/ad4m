@@ -673,9 +673,10 @@ export class PerspectiveProxy {
      *   query over their union, whose rows carry `__subjectClass` and
      *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
-     * @returns Object with `instances` array, and `totalCount` when the query sets `count: true`
+     * @returns Object with `instances` array, `totalCount` when the query sets `count: true`,
+     *   and `nextCursor` when the query sends `after` and a full page came back
      */
-    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number, nextCursor?: string }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
@@ -743,7 +744,8 @@ export class PerspectiveProxy {
      * socket closes.
      *
      * @param className - The model class name, or several (same as modelQuery)
-     * @param queryJson - JSON-serialized query parameters (same as modelQuery)
+     * @param queryJson - JSON-serialized query parameters (same as modelQuery,
+     *   except `after`: a subscription re-runs one query, so a cursor is refused)
      * @returns `subscriptionId`, initial `result` and `revision` (0)
      */
     async modelSubscribe(className: string | string[], queryJson: string): Promise<Subscribed> {
