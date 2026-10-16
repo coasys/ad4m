@@ -5,6 +5,11 @@
 
 use super::*;
 
+/// Most descriptors one persistent store may hold: the 64 SSTs of its table
+/// cache, its fixed files (LOCK, LOG, MANIFEST, WAL, one directory handle per
+/// column family: 17 on a fresh store), and one SST being written.
+const SPARQL_STORE_FD_BUDGET: usize = 88;
+
 fn open_fd_targets() -> Vec<String> {
     std::fs::read_dir("/proc/self/fd")
         .expect("read /proc/self/fd")
