@@ -222,9 +222,10 @@ export class PerspectiveClient {
      *
      * `existingScope` and `mintScope` match the AutoProcessor semantics:
      * `existingScope` constrains the dedup lookup to instances under a
-     * subtree; `mintScope` links every FRESHLY-created base as a child of
-     * `mintScope.id` via its predicate (upserts of pre-existing instances
-     * are NOT re-parented — same rule as the watcher).
+     * subtree; `mintScope` (one scope or a list) links every FRESHLY-created
+     * base as a child of each scope's `id` via its predicate, in the same
+     * write as the base itself (upserts of pre-existing instances are NOT
+     * re-parented — same rule as the watcher).
      */
     async runInterpretation(
         uuid: string,
@@ -232,7 +233,7 @@ export class PerspectiveClient {
         basePrefix: string,
         classes?: string[],
         existingScope?: RawScope,
-        mintScope?: RawScope,
+        mintScope?: RawScope | RawScope[],
         observe?: RunInterpretationObserveOptions,
         options?: CallOptions,
     ): Promise<string[]> {

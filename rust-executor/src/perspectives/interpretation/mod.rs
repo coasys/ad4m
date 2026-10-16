@@ -39,6 +39,7 @@
 
 mod dedup;
 mod graph;
+mod mint_scope;
 pub(crate) mod overlay;
 mod parse;
 mod prompt;
@@ -47,6 +48,7 @@ mod types;
 
 pub use dedup::*;
 pub use graph::*;
+pub use mint_scope::MintScopes;
 pub use overlay::InterpretationRunCursor;
 pub(crate) use overlay::*;
 pub use parse::*;

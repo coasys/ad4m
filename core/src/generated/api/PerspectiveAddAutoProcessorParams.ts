@@ -8,4 +8,8 @@ export type PerspectiveAddAutoProcessorParams = { uuid: string, processorId: str
 /**
  * SPARQL `SELECT ?speaker ?text ?timestamp` over the source items.
  */
-sourceScopeQuery: string, basePrefix?: string, interpretationClasses: Array<string>, flows?: Array<string>, debounceMs: number, batchMin?: number, batchMax: number, maxWaitMs?: number, claimTtlMs: number, dedupStrategyJson?: string, sourceWindowMs?: number, existingScope?: any, mintScope?: any, maxToolCalls?: number, emitDebugEvents?: boolean, };
+sourceScopeQuery: string, basePrefix?: string, interpretationClasses: Array<string>, flows?: Array<string>, debounceMs: number, batchMin?: number, batchMax: number, maxWaitMs?: number, claimTtlMs: number, dedupStrategyJson?: string, sourceWindowMs?: number, existingScope?: any, 
+/**
+ * One `Raw` scope or a list of them; see `RunInterpretationRequest.mintScope`.
+ */
+mintScope?: any, maxToolCalls?: number, emitDebugEvents?: boolean, };

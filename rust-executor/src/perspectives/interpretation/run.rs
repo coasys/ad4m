@@ -4,7 +4,7 @@ use super::{
     identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
     ExistingInstances, ExistingLinks, InterpretationOp, InterpretationOutput,
-    InterpretationRunCursor, TranscriptTurn,
+    InterpretationRunCursor, MintScopes, TranscriptTurn,
 };
 use crate::agent::AgentContext;
 use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitionProposeProvider};
@@ -498,6 +498,7 @@ pub async fn run_interpretation_observed(
     context: &AgentContext,
     scope: Option<&Scope>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    mint_scopes: &MintScopes,
 ) -> anyhow::Result<Vec<String>> {
     run_interpretation_with_strategy_and_model(
         perspective,
@@ -512,6 +513,7 @@ pub async fn run_interpretation_observed(
         false,
         emit_ctx,
         None,
+        mint_scopes,
     )
     .await
     .map(|out| out.bases)
@@ -548,6 +550,7 @@ pub async fn run_interpretation_with_strategy(
         false,
         None,
         None,
+        &MintScopes::default(),
     )
     .await
     .map(|out| out.bases)
@@ -599,7 +602,9 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_debug_events: bool,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
+    mint_scopes: &MintScopes,
 ) -> anyhow::Result<InterpretationOutcome> {
+    mint_scopes.validate()?;
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override).await?;
@@ -817,6 +822,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             &llm_proposals,
             &flow_subjects,
             flow_filter,
+            mint_scopes,
         )
         .await?;
 
@@ -878,6 +884,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
     flow_subjects: &[String],
     flow_filter: Option<&[String]>,
+    mint_scopes: &MintScopes,
 ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
     // Captured before `ops` moves into the apply: the spawn pass below is
     // scoped to *created* instances (design §10 v1), and the returned
@@ -893,6 +900,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
         context,
         cursor,
         debug,
+        mint_scopes,
     )
     .await?;
 
@@ -1045,7 +1053,9 @@ pub async fn run_interpretation_with_harness_and_model(
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
     flow_filter: Option<&[String]>,
+    mint_scopes: &MintScopes,
 ) -> anyhow::Result<InterpretationOutcome> {
+    mint_scopes.validate()?;
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
@@ -1259,6 +1269,7 @@ pub async fn run_interpretation_with_harness_and_model(
         &flow_buffer.drain(),
         &flow_subjects,
         flow_filter,
+        mint_scopes,
     )
     .await?;
 
@@ -1944,6 +1955,19 @@ mod tests {
         ops: Vec<InterpretationOp>,
         flow_filter: Option<&[String]>,
     ) -> (Vec<String>, Vec<String>) {
+        try_run_tail(p, shapes, ctx, ops, flow_filter, &MintScopes::default())
+            .await
+            .expect("apply_ops_and_run_flow_passes failed")
+    }
+
+    async fn try_run_tail(
+        p: &mut PerspectiveInstance,
+        shapes: &[ModelShape],
+        ctx: &AgentContext,
+        ops: Vec<InterpretationOp>,
+        flow_filter: Option<&[String]>,
+        mint_scopes: &MintScopes,
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         apply_ops_and_run_flow_passes(
             p,
             shapes,
@@ -1957,9 +1981,119 @@ mod tests {
             &[],
             &[],
             flow_filter,
+            mint_scopes,
         )
         .await
-        .expect("apply_ops_and_run_flow_passes failed")
+    }
+
+    async fn targets_of(p: &PerspectiveInstance, source: &str, predicate: &str) -> Vec<String> {
+        let mut targets: Vec<String> = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(predicate.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links")
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        targets.sort();
+        targets
+    }
+
+    fn two_parents() -> MintScopes {
+        MintScopes(vec![
+            Scope::Raw {
+                id: "app://collection/1".into(),
+                predicate: "app://child".into(),
+            },
+            Scope::Raw {
+                id: "app://conversation/7".into(),
+                predicate: "app://source_of".into(),
+            },
+        ])
+    }
+
+    /// Every created base is linked under every mint scope by the time the
+    /// tail returns; an upsert in the same pass is linked under none, and the
+    /// parents never show up among the returned bases.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_links_created_bases_under_every_mint_scope() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let existing = "soa://tail/task/existing";
+        seed_instance(&mut perspective, &ctx, &shapes[0], existing, "already here").await;
+
+        let created = "soa://tail/task/minted";
+        let (mut bases, _) = try_run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![
+                tail_create_task_op(created),
+                InterpretationOp::Update {
+                    base: existing.to_string(),
+                    class: "Task".to_string(),
+                    values: serde_json::Map::from_iter([(
+                        "title".to_string(),
+                        serde_json::json!("edited title"),
+                    )]),
+                },
+            ],
+            None,
+            &two_parents(),
+        )
+        .await
+        .expect("tail");
+
+        assert_eq!(
+            targets_of(&perspective, "app://collection/1", "app://child").await,
+            vec![created.to_string()],
+            "the created base, and only it, is a child of the first scope"
+        );
+        assert_eq!(
+            targets_of(&perspective, "app://conversation/7", "app://source_of").await,
+            vec![created.to_string()],
+            "and of the second"
+        );
+        bases.sort();
+        assert_eq!(
+            bases,
+            vec![existing.to_string(), created.to_string()],
+            "the scope parents are not reported as written bases"
+        );
+    }
+
+    /// A scope nothing can be linked under fails the pass before any record
+    /// is written, so no instance lands without its parents.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_refuses_a_non_raw_mint_scope_before_writing() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let created = "soa://tail/task/refused";
+        let scopes = MintScopes(vec![Scope::Model {
+            model: "Project".into(),
+            id: "app://project/1".into(),
+            field: None,
+        }]);
+        let err = try_run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![tail_create_task_op(created)],
+            None,
+            &scopes,
+        )
+        .await
+        .expect_err("a Model scope cannot be minted under");
+        assert!(format!("{err:#}").contains("must be a `Raw` scope"));
+        let written = perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(created.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(written.is_empty(), "nothing was written: {written:?}");
     }
 
     async fn live_on(p: &PerspectiveInstance, base: &str) -> Vec<FlowInstanceRecord> {

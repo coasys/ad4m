@@ -360,7 +360,8 @@ export class PerspectiveProxy {
         classes?: string[],
         options?: CallOptions & {
             existingScope?: RawScope,
-            mintScope?: RawScope,
+            /** One parent scope or a list; every freshly created base is linked under each. */
+            mintScope?: RawScope | RawScope[],
             /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
             observe?: RunInterpretationObserveOptions,
         },

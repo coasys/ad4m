@@ -24,11 +24,11 @@ classes?: Array<string>,
  */
 existingScope?: any, 
 /**
- * Optional parent-scope target for newly minted instances: when set,
- * every base URI the pass CREATES is additionally linked as a child of
- * `mintScope.id` via the scope's predicate. Upserts of pre-existing
- * instances are NOT linked (would multi-parent unrelated graph state).
- * Must be the `Raw` variant of `Scope` (id + predicate). Same semantics
+ * Optional parent scopes for newly minted instances: one `Raw` scope
+ * (id + predicate) or a list of them. Every base URI the pass CREATES is
+ * linked as a child of each scope's `id` via its predicate, in the same
+ * batch as the instance itself. Upserts of pre-existing instances are
+ * NOT linked (would multi-parent unrelated graph state). Same semantics
  * as `AutoProcessorConfig.mintScope`.
  */
 mintScope?: any, 

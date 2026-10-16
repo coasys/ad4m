@@ -536,15 +536,15 @@ pub struct RunInterpretationRequest {
     #[serde(default)]
     #[ts(optional, type = "any")]
     pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
-    /// Optional parent-scope target for newly minted instances: when set,
-    /// every base URI the pass CREATES is additionally linked as a child of
-    /// `mintScope.id` via the scope's predicate. Upserts of pre-existing
-    /// instances are NOT linked (would multi-parent unrelated graph state).
-    /// Must be the `Raw` variant of `Scope` (id + predicate). Same semantics
+    /// Optional parent scopes for newly minted instances: one `Raw` scope
+    /// (id + predicate) or a list of them. Every base URI the pass CREATES is
+    /// linked as a child of each scope's `id` via its predicate, in the same
+    /// batch as the instance itself. Upserts of pre-existing instances are
+    /// NOT linked (would multi-parent unrelated graph state). Same semantics
     /// as `AutoProcessorConfig.mintScope`.
     #[serde(default)]
     #[ts(optional, type = "any")]
-    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    pub mint_scope: Option<crate::perspectives::interpretation::MintScopes>,
     /// Opt into live observability for this one-shot pass, under an id the
     /// **caller** chooses.
     ///
