@@ -38,27 +38,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
   item 1). Prefer `model_query` for reads.
-- Pending-diffs queue (`perspective_instance/pending_diffs.rs`, table `perspective_diff`).
-  `commit()` sends a diff straight to the link language only while the queue is empty (and
-  20 immediate commits remain since the last queued success); otherwise, or on failure, it
-  appends the diff. `pending_diffs_loop` (100 ms tick) drains it:
-  - First batch of a burst waits for 1 s quiet, 3 s since the burst began, or 150 queued.
-    After a success, and while retrying, the next batch goes on the next tick: arrivals
-    never starve the drain.
-  - Batch: up to 150 diffs / 3 MB, in id order, sent as one merged diff (all additions, then
-    all removals), so a batch ends before a diff touching a link already in it. A failed batch backs off 100 ms doubling to
-    30 s (reset on success), one warn per failure with the error. After 3 failures it is
-    bisected (halved on each further failure, no wait) to find the diff the language rejects.
-  - A single diff rejected 3 times becomes a *suspect*: later diffs that share no
-    LinkExpression (author, timestamp, source, predicate, target) with a suspect go ahead
-    of it, so add/remove of the same link never reorder. After each success elsewhere the
-    suspects are retried; one that fails again right after the language accepted another
-    commit is set aside: `failed_at`/`last_error` set on its row, warn logged, never deleted
-    (`Ad4mDb::get_failed_pending_diffs`). An outage (nothing succeeds) sets nothing aside.
-    At most 32 suspects; past that the queue waits at the backoff cap.
-  - Queue length is logged when it crosses 100/1,000/10,000 and when it drains to 0.
-  - Tests: `perspective_instance_pending_diffs_tests.rs` (scripted language via
-    `set_test_link_commit`, paused clock).
+- `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
+  100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.

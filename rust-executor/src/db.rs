@@ -434,12 +434,6 @@ impl Ad4mDb {
         // the same on a fresh table and on one migrated via ALTER.
         alter_add_column("ALTER TABLE models ADD COLUMN api_max_num_ctx INTEGER")?;
 
-        // A pending diff the link language keeps rejecting is set aside, never
-        // deleted (perspectives/perspective_instance/pending_diffs.rs): when
-        // (unix ms) and the language's last error.
-        alter_add_column("ALTER TABLE perspective_diff ADD COLUMN failed_at INTEGER")?;
-        alter_add_column("ALTER TABLE perspective_diff ADD COLUMN last_error TEXT")?;
-
         // Host rates table — stores per-item pricing used for credit deduction
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS host_rates (
@@ -1955,19 +1949,42 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// The diffs waiting to be committed, oldest first, merged into one diff.
-    /// Rows set aside by [`Self::set_pending_diff_failed`] are not included.
     pub fn get_pending_diffs(
         &self,
         perspective_uuid: &str,
         max_count: Option<usize>,
     ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
-        let rows = self.get_pending_diff_rows(perspective_uuid, &[], max_count)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
+        )?;
+        let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
+            let additions: Vec<LinkExpression> =
+                serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
+            let removals: Vec<LinkExpression> =
+                serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
+            let id = row.get::<_, u64>(2).unwrap();
+            Ok((
+                PerspectiveDiff {
+                    additions,
+                    removals,
+                },
+                id,
+            ))
+        })?;
+        let mut diffs = Vec::new();
+        let mut ids = Vec::new();
+        for (count, diff_result) in diffs_iter.enumerate() {
+            let (diff, id) = diff_result?;
+            diffs.push(diff);
+            ids.push(id);
+            if max_count.map(|max| count >= max - 1).unwrap_or(false) {
+                break;
+            }
+        }
+        // Assuming we want to concatenate all additions and removals from different diffs
         let mut all_additions = Vec::new();
         let mut all_removals = Vec::new();
-        let mut ids = Vec::new();
-        for (id, diff) in rows {
-            ids.push(id);
+        for diff in diffs {
             all_additions.extend(diff.additions);
             all_removals.extend(diff.removals);
         }
@@ -1978,125 +1995,6 @@ impl Ad4mDb {
             },
             ids,
         ))
-    }
-
-    /// The diffs waiting to be committed, oldest first, one per row, skipping
-    /// the ids in `exclude` and rows set aside as failed.
-    pub fn get_pending_diff_rows(
-        &self,
-        perspective_uuid: &str,
-        exclude: &[u64],
-        max_count: Option<usize>,
-    ) -> Ad4mDbResult<Vec<(u64, PerspectiveDiff)>> {
-        let exclude_list = exclude
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<String>>()
-            .join(",");
-        // LIMIT -1 is SQLite's "no limit".
-        let limit = max_count.map(|m| m as i64).unwrap_or(-1);
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT additions, removals, id FROM perspective_diff
-             WHERE perspective = ?1 AND is_pending = ?2 AND failed_at IS NULL
-               AND id NOT IN ({})
-             ORDER BY id LIMIT ?3",
-            exclude_list
-        ))?;
-        let rows = stmt.query_map(params![perspective_uuid, true, limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u64>(2)?,
-            ))
-        })?;
-        let mut diffs = Vec::new();
-        for row in rows {
-            let (additions, removals, id) = row?;
-            diffs.push((
-                id,
-                PerspectiveDiff {
-                    additions: serde_json::from_str(&additions)?,
-                    removals: serde_json::from_str(&removals)?,
-                },
-            ));
-        }
-        Ok(diffs)
-    }
-
-    /// How many diffs wait to be committed (rows set aside not counted).
-    pub fn count_pending_diffs(&self, perspective_uuid: &str) -> Ad4mDbResult<usize> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM perspective_diff
-             WHERE perspective = ?1 AND is_pending = ?2 AND failed_at IS NULL",
-            params![perspective_uuid, true],
-            |row| row.get(0),
-        )?;
-        Ok(count as usize)
-    }
-
-    /// Whether row `id` still waits to be committed.
-    pub fn is_pending_diff(&self, perspective_uuid: &str, id: u64) -> Ad4mDbResult<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM perspective_diff
-             WHERE perspective = ?1 AND id = ?2 AND is_pending = ?3 AND failed_at IS NULL",
-            params![perspective_uuid, id, true],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
-    /// Set a pending diff aside: the link language keeps rejecting it. The row
-    /// and its links stay; it is no longer committed or counted as pending.
-    pub fn set_pending_diff_failed(
-        &self,
-        perspective_uuid: &str,
-        id: u64,
-        error: &str,
-    ) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "UPDATE perspective_diff SET failed_at = ?3, last_error = ?4
-             WHERE perspective = ?1 AND id = ?2",
-            params![
-                perspective_uuid,
-                id,
-                chrono::Utc::now().timestamp_millis(),
-                error
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// The diffs set aside by [`Self::set_pending_diff_failed`], oldest first,
-    /// with the language's last error.
-    pub fn get_failed_pending_diffs(
-        &self,
-        perspective_uuid: &str,
-    ) -> Ad4mDbResult<Vec<(u64, PerspectiveDiff, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT additions, removals, id, COALESCE(last_error, '') FROM perspective_diff
-             WHERE perspective = ?1 AND failed_at IS NOT NULL ORDER BY id",
-        )?;
-        let rows = stmt.query_map(params![perspective_uuid], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        let mut failed = Vec::new();
-        for row in rows {
-            let (additions, removals, id, error) = row?;
-            failed.push((
-                id,
-                PerspectiveDiff {
-                    additions: serde_json::from_str(&additions)?,
-                    removals: serde_json::from_str(&removals)?,
-                },
-                error,
-            ));
-        }
-        Ok(failed)
     }
 
     pub fn get_pending_diffs_by_size(
