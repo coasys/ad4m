@@ -1596,9 +1596,17 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         "both seeded turns should drain in one batch"
     );
 
-    let outcome = run_one_pass(&mut perspective, cfg_loaded, &batch, drain_at, &ctx, false)
-        .await
-        .expect("run_one_pass");
+    let outcome = run_one_pass(
+        &mut perspective,
+        cfg_loaded,
+        &batch,
+        drain_at,
+        &ctx,
+        false,
+        0,
+    )
+    .await
+    .expect("run_one_pass");
     let bases = match outcome {
         PassOutcome::Won { bases } => bases,
         other => panic!(
@@ -1807,7 +1815,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             "each processor's batch must contain both turns; got {batch:?} for `{}`",
             cfg_ref.processor_id
         );
-        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false)
+        let outcome = run_one_pass(&mut perspective, cfg_ref, &batch, drain_at, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         let bases = match outcome {
@@ -2315,7 +2323,7 @@ async fn auto_processor_election_only_online_participants_process() {
             timestamp: "t2".into(),
         },
     ];
-    let out = run_one_pass(&mut perspective, &cfg, &batch, 1_000, &ctx_alice, false)
+    let out = run_one_pass(&mut perspective, &cfg, &batch, 1_000, &ctx_alice, false, 0)
         .await
         .expect("alice pass");
     assert!(
@@ -2332,7 +2340,7 @@ async fn auto_processor_election_only_online_participants_process() {
         text: "solo".into(),
         timestamp: "t".into(),
     }];
-    let out2 = run_one_pass(&mut perspective, &cfg, &batch2, 2_000, &ctx_dave, false)
+    let out2 = run_one_pass(&mut perspective, &cfg, &batch2, 2_000, &ctx_dave, false, 0)
         .await
         .expect("dave pass");
     assert!(

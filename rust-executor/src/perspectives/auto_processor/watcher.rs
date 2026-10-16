@@ -27,7 +27,7 @@ use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{batch_key, renew_claim, try_claim, ClaimOutcome};
+use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
@@ -596,6 +596,9 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
 ///    Empty `turns` = [`PassOutcome::EmptyTranscript`].
 /// 4. [`run_interpretation_with_strategy`] with the deserialized dedup.
 ///
+/// `settle_ms` is how long a local claim win waits for a same-round peer
+/// claim to sync before the pass starts. `0` re-reads once and does not sleep.
+///
 /// The pass always uses the executor's default LLM (via `AIService`).
 /// `AutoProcessorConfig` is a neighbourhood-shared record and must not carry
 /// per-peer LLM overrides — each peer picks a model that matches its local
@@ -607,6 +610,7 @@ pub async fn run_one_pass(
     now_ms: i64,
     context: &AgentContext,
     escalate_past_election: bool,
+    settle_ms: u64,
 ) -> anyhow::Result<PassOutcome> {
     // Step signals (P-B2c): observable pass lifecycle for tests + the WS layer.
     // `me` (the acting agent's DID) is resolved up front so every signal is
@@ -752,6 +756,69 @@ pub async fn run_one_pass(
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
+    // Renew before the wait. A claim_ttl_ms shorter than the settle window
+    // would otherwise expire while we poll, and the next read would not
+    // see our own lease. The heartbeat then keeps it alive through the wait.
+    let _lease = LeaseGuard::spawn(
+        perspective.clone(),
+        cfg.processor_id.clone(),
+        batch_key_hex.clone(),
+        me.clone(),
+        cfg.claim_ttl_ms,
+        context.clone(),
+    );
+    // One renewal now, not after the first heartbeat. The heartbeat skips its
+    // first tick, and a TTL shorter than the settle wait would expire before
+    // that tick.
+    if let Err(e) = renew_claim(
+        perspective,
+        &cfg.processor_id,
+        &batch_key_hex,
+        &me,
+        cfg.claim_ttl_ms,
+        context,
+    )
+    .await
+    {
+        log::warn!(
+            "⚙️ auto_processor `{}`: could not extend the claim before settling: {e:#}",
+            cfg.processor_id
+        );
+        signal!(
+            AutoProcessorStep::BackedOff,
+            detail = "claim renewal failed".to_string()
+        );
+        return Ok(PassOutcome::BackedOff {
+            holder: "claim renewal failed".to_string(),
+        });
+    }
+    // The local read above cannot see a peer that claimed in this same sync
+    // round. Wait for that claim, then apply the min-DID rule again, before
+    // this pass spends an LLM call or emits `Processed`. Each read uses the
+    // clock now, not the pass-start timestamp.
+    let settled = settle_claim(
+        perspective,
+        &cfg.processor_id,
+        &item_ids,
+        context,
+        settle_ms,
+        super::claim::CLAIM_SETTLE_POLL_MS,
+        || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64
+        },
+    )
+    .await?;
+    if let ClaimOutcome::BackedOff { holder } = settled {
+        log::debug!(
+            "⚙️ auto_processor `{}`: backed off after claim settle — holder `{holder}`",
+            cfg.processor_id
+        );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
     // Signal-based Claimed (and the neighbourhood-state Claimed row below)
     // are DID- / perspective-scoped events with their own Abandoned /
     // Finished companions on every exit path, so they can fire here right
@@ -788,19 +855,8 @@ pub async fn run_one_pass(
         }
     }
 
-    // Spawn the lease-renewal heartbeat. Fires every `claim_ttl_ms / 3` ms,
-    // rewriting the expiry so the TTL acts as a crash-detection window rather
-    // than a capacity limit. Dropped at every exit path (RAII) — the Drop impl
-    // cancels the task so the claim expires naturally after one more TTL window
-    // once the pass ends (fix for #1009).
-    let _lease = LeaseGuard::spawn(
-        perspective.clone(),
-        cfg.processor_id.clone(),
-        batch_key_hex.clone(),
-        me.clone(),
-        cfg.claim_ttl_ms,
-        context.clone(),
-    );
+    // The lease heartbeat was started before the settle wait, so a TTL
+    // shorter than that wait does not expire the claim we are still holding.
 
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
@@ -1066,6 +1122,53 @@ pub async fn run_one_pass(
             uuid
         );
         let holder = String::from("(claim lost during interpretation)");
+        // The interpretation already wrote its bases and the cursor. Link the
+        // fresh ones before leaving, or they stay outside mint_scope and the
+        // cursor keeps the turns from being repaired.
+        link_fresh_bases(
+            perspective,
+            cfg.mint_scope.as_ref(),
+            &bases,
+            &pre_existing_uris,
+            context,
+            &cfg.processor_id,
+        )
+        .await?;
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
+    // A peer claim that synced during the pass. The bases and the cursor are
+    // already committed. Link the fresh bases, then refuse `Processed` so the
+    // other executor's retirement is not counted twice.
+    let now_confirm = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    if let ClaimOutcome::BackedOff { holder } = confirm_claim(
+        perspective,
+        &cfg.processor_id,
+        &item_ids,
+        now_confirm,
+        context,
+    )
+    .await?
+    {
+        log::warn!(
+            "❌ ⚙️ auto-processor lost the claim during the pass — holder `{holder}` \
+             processor={} items={} perspective={}: linking fresh bases, not emitting Processed",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
+        );
+        link_fresh_bases(
+            perspective,
+            cfg.mint_scope.as_ref(),
+            &bases,
+            &pre_existing_uris,
+            context,
+            &cfg.processor_id,
+        )
+        .await?;
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
@@ -1128,6 +1231,25 @@ pub async fn run_one_pass(
         pass_started.elapsed().as_millis()
     );
     Ok(PassOutcome::Won { bases })
+}
+
+/// Link freshly created bases under `mint_scope` before a late back-off.
+/// The interpretation has already committed them and the processed-turn
+/// cursor. Leaving without these links keeps them out of the subtree, and
+/// the cursor then suppresses the turns, so a later pass does not repair it.
+async fn link_fresh_bases(
+    perspective: &mut PerspectiveInstance,
+    mint_scope: Option<&crate::perspectives::model_query::types::Scope>,
+    bases: &[String],
+    pre_existing: &HashSet<String>,
+    context: &AgentContext,
+    processor_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mint_scope) = mint_scope else {
+        return Ok(());
+    };
+    let created = partition_created(bases, pre_existing);
+    write_mint_scope_links(perspective, mint_scope, &created, context, processor_id).await
 }
 
 /// Add a `mint_scope.id --predicate--> new_base_uri` link for every URI in
@@ -1758,7 +1880,7 @@ mod tests {
             .await
             .expect("seed incumbent");
 
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         assert!(
@@ -1777,7 +1899,7 @@ mod tests {
         let mut cfg = cfg("proc", 100, 32);
         cfg.interpretation_classes = vec!["ns://Unregistered".into()];
         let items = vec![pt("i1")];
-        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false)
+        let outcome = run_one_pass(&mut p, &cfg, &items, 1_000, &ctx, false, 0)
             .await
             .expect("run_one_pass");
         match outcome {
@@ -1828,6 +1950,42 @@ mod tests {
         for l in &links {
             assert_eq!(l.status, Some(LinkStatus::Shared), "child link must sync");
         }
+    }
+
+    /// A late back-off still links the bases the interpretation already
+    /// committed. Skipping that leaves them outside mint_scope, and the
+    /// cursor then keeps a later pass from repairing them.
+    #[tokio::test]
+    async fn late_backoff_still_links_fresh_bases() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let scope = Scope::Raw {
+            id: "soa://project/42".into(),
+            predicate: "soa://contains".into(),
+        };
+        let bases = vec!["ad4m://base/a".into(), "ad4m://base/b".into()];
+        link_fresh_bases(
+            &mut p,
+            Some(&scope),
+            &bases,
+            &std::collections::HashSet::new(),
+            &ctx,
+            "test-proc",
+        )
+        .await
+        .expect("link_fresh_bases");
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some("soa://project/42".into()),
+                predicate: Some("soa://contains".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(
+            links.len(),
+            2,
+            "both fresh bases must be reachable from mint_scope"
+        );
     }
 
     /// Empty base list → no writes; a no-op is still success.
