@@ -398,6 +398,19 @@ describe("Decorators → SHACL writer round-trip", () => {
     expect(() => BrokenEdge.generateSHACL()).toThrow(/disjoint names 'nowhere'/);
   });
 
+  it("refuses a disjoint naming a reverse relation, which stores its edge on the other node", () => {
+    @Model({ name: "OwnedEdge" })
+    class OwnedEdge extends Ad4mModel {
+      @HasOne({ through: "ns://about", disjoint: "owner" })
+      about: string = "";
+
+      @BelongsToOne({ through: "ns://owns" })
+      owner: string = "";
+    }
+
+    expect(() => OwnedEdge.generateSHACL()).toThrow(/disjoint names 'owner', which is not a forward relation/);
+  });
+
   it("round-trips ordering through toJSON/fromJSON", () => {
     @Model({ name: "JsonOrderedItem" })
     class JsonOrderedItem extends Ad4mModel {}

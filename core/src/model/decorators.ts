@@ -1102,12 +1102,22 @@ export interface RelationOptions {
 
     /**
      * Every instance holds at least one value here. Emitted as `sh:minCount 1`
-     * on the property shape.
+     * on the property shape, which the executor reads as a required property
+     * in three places:
      *
-     * The interpreter refuses to create an instance it could not give a value
-     * for — a reference to a record the model invented, or one it left out —
-     * rather than writing one with the relation missing. Writes through the
-     * model API are not checked.
+     * - **Interpretation**, on both the single-shot and the tool-calling
+     *   path, refuses to create an instance it could not give a value for — a
+     *   reference to a record the model invented, or one it left out — rather
+     *   than writing one with the relation missing.
+     * - **Conformance**: a record is only read as this class while it holds a
+     *   value here. Model queries leave out, and classification does not
+     *   recognise, a stored record without one — so declaring a relation
+     *   required on a class with existing records can take some of them out of
+     *   every query.
+     * - **MCP** `instance_create` refuses a create that leaves it out, and
+     *   `describe_perspective` lists it as required.
+     *
+     * Writes through `Ad4mModel` are not checked.
      */
     required?: boolean;
 
@@ -1117,11 +1127,16 @@ export interface RelationOptions {
      * to that relation's path.
      *
      * For a record standing for an edge, whose two ends must be two different
-     * things. The interpreter refuses to write a link that would break it —
-     * including where dedup resolves two references the model wrote
-     * differently to one existing record, which is how a connection from a
-     * record to itself got written. Writes through the model API are not
-     * checked.
+     * things. Interpretation, on both the single-shot and the tool-calling
+     * path, refuses to write a link that would break it — including where
+     * dedup resolves two references the model wrote differently to one
+     * existing record, which is how a connection from a record to itself got
+     * written. Writes through `Ad4mModel` and MCP are not checked.
+     *
+     * Name forward relations only (`@HasOne` / `@HasMany` with a `through`).
+     * A `@BelongsTo*` stores its edge on the other node, so there is nothing
+     * on this one to compare, and naming one is refused when the shape is
+     * generated.
      *
      * @example
      * ```typescript

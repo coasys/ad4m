@@ -341,18 +341,22 @@ export function buildSHACL(
 
         // `sh:disjoint` names a property *path*, so each sibling relation named
         // in the decorator is resolved to its predicate here. A name that is
-        // not a relation of this class, or has no predicate, is a declaration
-        // error: refusing it is better than a constraint that silently checks
-        // nothing.
+        // not a forward relation of this class with a predicate is a
+        // declaration error: refusing it is better than a constraint that
+        // silently checks nothing. A `@BelongsTo*` is the case that looks
+        // valid — it has a predicate — but stores its edge on the other node,
+        // so the executor would look for links this record never holds.
         if (relMeta.disjoint?.length) {
             relShape.disjoint = relMeta.disjoint.map((other) => {
-                const path = allRelationsMeta[other]?.predicate;
-                if (!path) {
+                const sibling = allRelationsMeta[other];
+                const forward = sibling?.kind === 'hasOne' || sibling?.kind === 'hasMany';
+                if (!sibling?.predicate || !forward) {
                     throw new Error(
-                        `${subjectName}.${relName}: disjoint names '${other}', which is not a relation of ${subjectName} with a predicate`,
+                        `${subjectName}.${relName}: disjoint names '${other}', which is not a forward relation ` +
+                            `(@HasOne / @HasMany with a predicate) of ${subjectName}`,
                     );
                 }
-                return path;
+                return sibling.predicate;
             });
         }
 
