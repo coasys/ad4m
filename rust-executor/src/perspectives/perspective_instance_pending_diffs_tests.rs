@@ -20,6 +20,8 @@ struct FakeLanguage {
     down: AtomicBool,
     /// Answer every commit holding `throttled_target` with the link server's 429.
     throttled_target: std::sync::Mutex<Option<String>>,
+    /// The permanent rejection's text, when set (default: a plain 400).
+    reject_message: std::sync::Mutex<Option<String>>,
     committed: std::sync::Mutex<Vec<String>>,
     /// Links per accepted commit, in order.
     batches: std::sync::Mutex<Vec<usize>>,
@@ -44,9 +46,15 @@ impl FakeLanguage {
             .chain(diff.removals.iter())
             .any(|l| l.author == REJECTED_AUTHOR)
         {
-            return Err(anyhow!(
-                "400: cannot remove a link authored by another agent"
-            ));
+            let message = self
+                .reject_message
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| {
+                    "400: cannot remove a link authored by another agent".to_string()
+                });
+            return Err(anyhow!(message));
         }
         self.batches
             .lock()
@@ -205,6 +213,40 @@ async fn a_rejected_diff_at_the_head_does_not_block_the_diffs_behind_it() {
         "{}",
         aside[0].1
     );
+}
+
+/// A permanent rejection is not taken for "try later" because its text
+/// happens to hold a status code or a word a transient error uses: here a DID
+/// with "429" in it and a validation message about the network.
+#[tokio::test(start_paused = true)]
+async fn a_rejection_quoting_429_or_network_is_still_set_aside() {
+    let fake = Arc::new(FakeLanguage::default());
+    *fake.reject_message.lock().unwrap() = Some(
+        "400: did:key:z6Mk429QpNetwork may not remove a link of another agent; network \
+         membrane validation rejected it"
+            .to_string(),
+    );
+    let perspective = neighbourhood_perspective(&fake);
+    enqueue(&perspective, &rejected("someone-elses-link"));
+    let later = targets("ok", 20);
+    for t in &later {
+        enqueue(&perspective, &add(t));
+    }
+
+    let task = start_loop(&perspective);
+    let emptied = run_until(Duration::from_secs(180), || pending(&perspective) == 0).await;
+    task.abort();
+    assert_eq!(
+        fake.committed().len(),
+        later.len(),
+        "the diffs behind it must commit"
+    );
+    assert!(
+        emptied.is_some(),
+        "the rejected diff must be set aside, not retried forever ({} pending)",
+        pending(&perspective)
+    );
+    assert_eq!(set_aside(&perspective).len(), 1);
 }
 
 #[tokio::test(start_paused = true)]

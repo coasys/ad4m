@@ -56,27 +56,22 @@ const QUEUE_THRESHOLDS: [usize; 3] = [100, 1_000, 10_000];
 /// removes, so two diffs touching the same key must commit in order.
 type LinkKey = (String, String, String, Option<String>, String);
 
-/// Error texts that mean "not now", not "not this diff": the link server
-/// pacing us (its 429), or not reachable. They only back off; they never count
-/// toward setting a diff aside, so a good diff is never set aside because the
-/// server was busy or away.
-const TRANSIENT_ERRORS: &[&str] = &[
-    "rate limit",
-    "too many requests",
-    "429",
-    "unreachable",
-    "timed out",
-    "timeout",
-    "connection refused",
-    "connection reset",
-    "error sending request",
-    "fetch failed",
-    "network",
-];
+lazy_static::lazy_static! {
+    /// Error texts that mean "not now", not "not this diff": the link server
+    /// pacing us (its 429), or not reachable. They only back off; they never
+    /// count toward setting a diff aside, so a good diff is never set aside
+    /// because the server was busy or away. Phrases, and status codes only as
+    /// whole words in a status position: a permanent rejection may quote a
+    /// DID, hash or message that contains "429" or "network", and taking it
+    /// for transient would let it block the queue again.
+    static ref TRANSIENT_ERROR: regex::Regex = regex::Regex::new(
+        r"(?i)rate limit|too many requests|\b(?:status|http|code)[ :=]*429\b|^\s*429\b|unreachable|timed out|timeout error|connection (?:refused|reset|closed)|error sending request|fetch failed|network error"
+    )
+    .unwrap();
+}
 
 fn is_transient(error: &AnyError) -> bool {
-    let text = format!("{:#}", error).to_lowercase();
-    TRANSIENT_ERRORS.iter().any(|needle| text.contains(needle))
+    TRANSIENT_ERROR.is_match(&format!("{:#}", error))
 }
 
 fn link_keys(diff: &PerspectiveDiff) -> HashSet<LinkKey> {
@@ -547,5 +542,36 @@ mod tests {
         assert_eq!(backoff_delay(8), Duration::from_millis(25_600));
         assert_eq!(backoff_delay(9), BACKOFF_CAP);
         assert_eq!(backoff_delay(40), BACKOFF_CAP);
+    }
+
+    #[test]
+    fn only_rate_limits_and_unreachable_servers_are_transient() {
+        for text in [
+            r#"ApiError: {"error":"rate limit exceeded","retryAfterSec":12}"#,
+            "HTTP 429 from POST /rooms/x/commit",
+            "status: 429",
+            "link server unreachable",
+            "operation timed out",
+            "Timeout error; InstallApp call",
+            "error sending request for url (http://x/commit): connection refused",
+            "TypeError: fetch failed",
+            "NetworkError: network error",
+        ] {
+            assert!(
+                is_transient(&deno_core::anyhow::anyhow!(text.to_string())),
+                "{text}"
+            );
+        }
+        for text in [
+            "400: cannot remove a link authored by another agent",
+            "400: did:key:z6Mk429QpNetwork may not remove a link of another agent",
+            "network membrane validation rejected the link",
+            "invalid link target test://429",
+        ] {
+            assert!(
+                !is_transient(&deno_core::anyhow::anyhow!(text.to_string())),
+                "{text}"
+            );
+        }
     }
 }
