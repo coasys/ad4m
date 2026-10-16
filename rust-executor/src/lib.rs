@@ -6,6 +6,7 @@ pub mod config;
 pub mod config_file;
 pub mod email_service;
 pub mod entanglement_service;
+pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
@@ -333,6 +334,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(config.log_config.as_ref());
+    // Before anything opens files: one RocksDB store per perspective, Holochain,
+    // SQLite and sockets outgrow a 256/1024 soft limit.
+    crate::fd_limit::raise_nofile_limit_and_log();
     config.prepare();
 
     if let Err(message) = config.check_admin_credential() {

@@ -51,6 +51,12 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   Do not add new ones; spec item 11 introduces `AppContext`.
 - **Perspective links live in the per-perspective `SparqlStore`** (oxigraph), not SQLite.
   `PerspectiveInstance` is `Clone` and cheap: all state is behind `Arc`. `get_perspective()` returns a clone.
+- **Open file limit.** `run` raises the soft `RLIMIT_NOFILE` to the hard limit before anything
+  opens files (`fd_limit.rs`; logs `soft before -> after, hard` at info). It clamps to
+  `fs.nr_open` on Linux and to `kern.maxfilesperproc` on macOS (hard limit `RLIM_INFINITY`
+  there; fallback `OPEN_MAX` 10240), never lowers the limit, and does nothing off Unix. Each
+  perspective's RocksDB store costs up to 88 descriptors (see `perspectives/AGENTS.md`), so a
+  256 soft limit ran out at about a dozen perspectives ("Too many open files").
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.

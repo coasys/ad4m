@@ -41,6 +41,18 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
+- **File descriptors.** Every perspective keeps one RocksDB store open
+  (`SparqlStore::new`), and only `PerspectiveInstance` holds it: the store's descriptors close
+  when the last clone of the removed instance drops, i.e. once its background loops have seen
+  `is_teardown`. A store holds 17 fixed descriptors (LOCK, LOG, MANIFEST, WAL, one directory
+  handle per column family) plus the SSTs in its table cache. `SparqlStore::new` opens with
+  `SPARQL_STORE_MAX_OPEN_FILES` (74): oxigraph's default is the process fd limit minus 48 *per
+  store*. RocksDB splits the table cache over 64 shards that each keep one SST, so 74 means at
+  most 64 SSTs and lower values change nothing (oxigraph exposes `max_open_files` and
+  `fd_reserve`, not the shard bits). Budget: `SPARQL_STORE_FD_BUDGET` = 88 per store; a small
+  store settles near 20-30. `sparql_store_fd_tests.rs` (Linux, `/proc/self/fd`) pins the
+  option, the budget and the release on drop. Never open a second `SparqlStore` on a path that
+  is already open: RocksDB's LOCK refuses it, and `PerspectiveInstance::new` panics.
 
 ## Do / don't
 
