@@ -1837,7 +1837,11 @@ describe("ad4mPlugin", () => {
     expect(getDoc!.parameters.$defs.DocTopic.oneOf.map((o: any) => o.const))
       .toEqual(["overview", "architecture", "usage", "flux", "models"]);
     const transcript = registeredTools.find((t) => t.name === "ad4m_instance_transcript");
-    expect(transcript!.parameters.required).toEqual(["perspective_id", "class_name", "parent"]);
+    // The transcript reads through the built-in TextContent (#1446): no
+    // class, no text property to pick.
+    expect(transcript!.parameters.required).toEqual(["perspective_id", "parent"]);
+    expect(transcript!.parameters.properties).not.toHaveProperty("class_name");
+    expect(transcript!.parameters.properties).not.toHaveProperty("text_property");
     expect(transcript!.parameters.properties).not.toHaveProperty("parent_address");
     const query = registeredTools.find((t) => t.name === "ad4m_instance_query");
     expect(query!.parameters.properties).not.toHaveProperty("order");
@@ -2918,83 +2922,45 @@ describe("ad4mPlugin", () => {
     mcpService!.stop();
   });
 
-  it("auto-signup and retry login when email/password login returns user-not-found", async () => {
-    const registeredServices: Array<{
-      id: string;
-      start: Function;
-      stop: Function;
-    }> = [];
-
+  /**
+   * Drive the plugin's runtime email/password auth against a fake executor.
+   * `login` answers each login_email call in turn (the last answer repeats);
+   * `signup` answers every signup call. Returns the tool calls made, in order.
+   */
+  async function runEmailAuth(
+    login: Array<Record<string, unknown>>,
+    signup: Record<string, unknown>,
+  ) {
+    const registeredServices: Array<{ id: string; start: Function; stop: Function }> = [];
+    const calls: string[] = [];
     let loginAttempt = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
       const body = JSON.parse((opts as any).body as string);
       if (body.method === "initialize") {
         return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: body.id,
-            result: { serverInfo: { name: "ad4m" } },
-          }),
-          {
-            status: 200,
-            headers: {
-              "Content-Type": "application/json",
-              "Mcp-Session-Id": "sess-su",
-            },
-          },
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { serverInfo: { name: "ad4m" } } }),
+          { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-su" } },
         );
       }
       if (body.method === "notifications/initialized") {
         return new Response(null, { status: 200 });
       }
-      if (
-        body.method === "tools/call" &&
-        body.params?.name === "login_email"
-      ) {
-        loginAttempt++;
-        if (loginAttempt === 1) {
-          // First attempt: user not found
-          return fakeJsonResponse({
-            jsonrpc: "2.0",
-            id: body.id,
-            result: {
-              content: [
-                { type: "text", text: JSON.stringify({ error: "User not found" }) },
-              ],
-            },
-          });
-        }
-        // Second attempt: success after signup
-        return fakeJsonResponse({
+      const reply = (data: Record<string, unknown>) =>
+        fakeJsonResponse({
           jsonrpc: "2.0",
           id: body.id,
-          result: {
-            content: [
-              { type: "text", text: JSON.stringify({ token: "jwt-after-signup" }) },
-            ],
-          },
+          result: { content: [{ type: "text", text: JSON.stringify(data) }] },
         });
+      if (body.method === "tools/call" && body.params?.name === "login_email") {
+        calls.push("login_email");
+        return reply(login[Math.min(loginAttempt++, login.length - 1)]);
       }
-      if (
-        body.method === "tools/call" &&
-        body.params?.name === "signup"
-      ) {
-        return fakeJsonResponse({
-          jsonrpc: "2.0",
-          id: body.id,
-          result: {
-            content: [
-              { type: "text", text: JSON.stringify({ did: "did:key:z6Mk-new" }) },
-            ],
-          },
-        });
+      if (body.method === "tools/call" && body.params?.name === "signup") {
+        calls.push("signup");
+        return reply(signup);
       }
       if (body.method === "tools/list") {
-        return fakeJsonResponse({
-          jsonrpc: "2.0",
-          id: body.id,
-          result: { tools: [] },
-        });
+        return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: { tools: [] } });
       }
       return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
     });
@@ -3011,19 +2977,50 @@ describe("ad4mPlugin", () => {
       registerService: vi.fn((svc: any) => registeredServices.push(svc)),
       registerCli: vi.fn(),
     };
-
     await ad4mPlugin(mockApi);
-
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
     expect(mcpService).toBeDefined();
     await mcpService!.start(makeServiceCtx());
-
-    const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
-    expect(infoMsgs.some((m: string) => m.includes("User not found"))).toBe(true);
-    expect(infoMsgs.some((m: string) => m.includes("Signup successful"))).toBe(true);
-    expect(infoMsgs.some((m: string) => m.includes("Login after signup successful"))).toBe(true);
-
     mcpService!.stop();
+    return {
+      calls,
+      info: mockApi.logger.info.mock.calls.map((c: any[]) => String(c[0])),
+      warn: mockApi.logger.warn.mock.calls.map((c: any[]) => String(c[0])),
+    };
+  }
+
+  it("auto-signs up when login answers 'Invalid credentials' for an unknown user", async () => {
+    // The executor never says "user not found": login answers "Invalid
+    // credentials" whether the user is unknown or the password wrong (#989).
+    // e2e 2026-10-15: the plugin waited for "user not found" and never signed up.
+    const { calls, info } = await runEmailAuth(
+      [{ success: false, error: "Invalid credentials" }, { success: true, token: "jwt-after-signup" }],
+      { success: true, did: "did:key:z6Mk-new" },
+    );
+    expect(calls).toEqual(["login_email", "signup", "login_email"]);
+    expect(info.some((m) => m.includes("Signup successful"))).toBe(true);
+    expect(info.some((m) => m.includes("Login after signup successful"))).toBe(true);
+  });
+
+  it("reports the login error, not the signup one, when the user exists (wrong password)", async () => {
+    const { calls, info, warn } = await runEmailAuth(
+      [{ success: false, error: "Invalid credentials" }],
+      { success: false, error: "User already exists" },
+    );
+    // One signup probe, no second login, no loop.
+    expect(calls).toEqual(["login_email", "signup"]);
+    expect(info.some((m) => m.includes("Login after signup successful"))).toBe(false);
+    const failure = warn.find((m) => m.includes("Email login failed"));
+    expect(failure).toContain("Invalid credentials");
+    expect(failure).not.toContain("already exists");
+  });
+
+  it("does not sign up when login fails for a reason other than credentials", async () => {
+    const { calls } = await runEmailAuth(
+      [{ success: false, error: "Executor is locked" }],
+      { success: true, did: "did:key:z6Mk-new" },
+    );
+    expect(calls).toEqual(["login_email"]);
   });
 
   it("setup config snippet does NOT persist the password (security regression guard)", async () => {

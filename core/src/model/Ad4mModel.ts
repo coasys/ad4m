@@ -1074,12 +1074,23 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * The name the executor knows this class by: its class name, or a
+   * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
+   * the class's own static only: a subclass is a class of its own.
+   * @internal
+   */
+  static queriedAs(): string {
+    const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
+    return builtinUri || this.getModelMetadata().className;
+  }
+
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
   ): { className: string; queryJson: string; metadata: ModelMetadata } {
     const metadata = this.getModelMetadata();
-    const className = classNameOverride || metadata.className;
+    const className = classNameOverride || this.queriedAs();
 
     // Expand includeAll: true to a full IncludeMap covering every forward relation.
     if (query.includeAll) {
@@ -1258,7 +1269,7 @@ export class Ad4mModel {
       merged.parent = JSON.parse(scopes[0]);
     }
     return {
-      classNames: classes.map((c) => c.getModelMetadata().className),
+      classNames: classes.map((c) => c.queriedAs()),
       queryJson: JSON.stringify(merged),
     };
   }
@@ -1831,11 +1842,12 @@ export class Ad4mModel {
     }
   }
 
-  /** The class's name when it is abstract (#1435). Through an abstract
-   *  class, the executor writes to the record's own classes. */
+  /** The name the executor knows the class by when it is abstract (#1435):
+   *  a built-in's URI (#1446). Through an abstract class, the executor
+   *  writes to the record's own classes. */
   private abstractName(): string | undefined {
-    const ctor = this.constructor as { isAbstract?: boolean; className?: string };
-    return ctor.isAbstract ? ctor.className : undefined;
+    const ctor = this.constructor as typeof Ad4mModel & { isAbstract?: boolean };
+    return ctor.isAbstract ? ctor.queriedAs() : undefined;
   }
 
   private changedValues(): Record<string, any> {

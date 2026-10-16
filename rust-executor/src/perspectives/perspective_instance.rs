@@ -3987,6 +3987,10 @@ impl PerspectiveInstance {
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
         for class_name in classes.names() {
+            // A built-in abstract class is not stored (#1446).
+            if super::model_query::builtin_classes::builtin(class_name).is_some() {
+                continue;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             self.get_shape_or_wait(class_name, remaining).await?;
         }

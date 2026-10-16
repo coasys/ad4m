@@ -73,6 +73,25 @@ const TAGGED_SDNA: &str = r#"{
   "properties":[{"path":"ns://tags","name":"tags","setter":[{"action":"addLink","source":"this","predicate":"ns://tags","target":"value"}]}]
 }"#;
 
+/// `(id, __subjectClass, text)` per row, sorted.
+fn rows(json: &str) -> Vec<(String, String, String)> {
+    let v: Value = serde_json::from_str(json).unwrap();
+    let mut rows: Vec<_> = v["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_string(),
+                r["__subjectClass"].as_str().unwrap_or("").to_string(),
+                r["text"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
 const ALL: &str = r#"{"includeUnverified":true}"#;
 
 async fn install(p: &mut PerspectiveInstance, ctx: &AgentContext, class: &str, sdna: &str) {
@@ -605,4 +624,127 @@ async fn a_failed_resolution_is_tried_again_on_the_next_pass() {
         .await
         .expect("the class installed meanwhile");
     assert!(update.contains("ad4m://message/1"), "{update}");
+}
+
+/// The built-in TextContent (#1446) is read by its URI, never from the
+/// store: an app class registered under the name `TextContent`, here with
+/// another property, changes neither what the built-in reads, nor that it
+/// cannot be created, nor where an update through it lands. Aliases name it
+/// `TextContent`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_builtin_text_content_is_read_by_its_uri() {
+    use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
+    const APP_TEXT_CONTENT_SDNA: &str = r#"{
+      "target_class":"app://TextContent",
+      "abstract":true,
+      "properties":[{"path":"app://title","name":"title","max_count":1}]
+    }"#;
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("TextContent", APP_TEXT_CONTENT_SDNA),
+        ("Chat", CHAT_SDNA),
+        ("Message", MESSAGE_SDNA),
+    ])
+    .await;
+    create(
+        &mut perspective,
+        &ctx,
+        "Chat",
+        "ad4m://chat/b",
+        serde_json::json!({"text": "chat text"}),
+    )
+    .await
+    .unwrap();
+    create(
+        &mut perspective,
+        &ctx,
+        "Message",
+        "ad4m://message/b",
+        serde_json::json!({"body": "message body"}),
+    )
+    .await
+    .unwrap();
+
+    let builtin = perspective
+        .model_query_classes(&one(TEXT_CONTENT_URI), ALL)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&builtin),
+        vec![
+            ("ad4m://chat/b".into(), "Chat".into(), "chat text".into()),
+            (
+                "ad4m://message/b".into(),
+                "Message".into(),
+                "message body".into()
+            ),
+        ]
+    );
+
+    // The app's own `TextContent` asks for `title`: nothing has it.
+    let app: Value = serde_json::from_str(
+        &perspective
+            .model_query_classes(&one("TextContent"), ALL)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(app["totalCount"], 0, "{app}");
+
+    let refused = create(
+        &mut perspective,
+        &ctx,
+        TEXT_CONTENT_URI,
+        "ad4m://text/b",
+        serde_json::json!({"text": "x"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.to_string().contains("abstract class"), "{refused}");
+    // An update through it dispatches to the record's own class, under the
+    // name the class aliases to `TextContent`; never to the built-in's
+    // predicate.
+    perspective
+        .update_subject(
+            SubjectClassOption {
+                class_name: Some(TEXT_CONTENT_URI.into()),
+                query: None,
+            },
+            "ad4m://message/b".into(),
+            serde_json::json!({"text": "edited"}),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&perspective, "Message", "ad4m://message/b", "body").await,
+        "edited"
+    );
+    assert_eq!(links_on(&perspective, "ad4m://message/b", "ad4m://text"), 0);
+    // A delete through it runs the record's own destructor.
+    perspective
+        .remove_subject(
+            SubjectClassOption {
+                class_name: Some(TEXT_CONTENT_URI.into()),
+                query: None,
+            },
+            "ad4m://message/b".into(),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let classes = perspective
+        .subject_classes_of(&["ad4m://message/b".to_string(), "ad4m://chat/b".to_string()])
+        .unwrap();
+    assert_eq!(classes.get("ad4m://message/b"), None, "{classes:?}");
+    assert_eq!(classes["ad4m://chat/b"], vec!["Chat".to_string()]);
+    let err = perspective
+        .model_query_classes(
+            &QueryClasses::union(vec![TEXT_CONTENT_URI.into(), "Chat".into()]),
+            ALL,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("abstract class"), "{err}");
 }
