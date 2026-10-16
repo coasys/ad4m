@@ -165,7 +165,8 @@ impl PendingRequests {
     /// or, when all are full, one for no agent, then one for the same target, then (for an
     /// agent below its share) one of the target holding the most unapproved requests, so that
     /// filling the store for a few agents does not refuse every other one. Approved requests
-    /// stay, so `Err` when nothing may go.
+    /// stay, so `Err` when nothing may go. A request for no agent that may take nothing is
+    /// dropped and answered `Ok` while an agent's request would be, so the two look alike.
     pub fn request(
         &self,
         request_id: String,
@@ -214,6 +215,16 @@ impl PendingRequests {
             match evicted {
                 Some(id) => {
                     pending.remove(&id);
+                }
+                // A request for no agent gets the answer a request for an agent with nothing
+                // waiting gets, which takes one from the fullest target while any request is
+                // unapproved: refusing it alone would tell the caller that the email has no
+                // account (D16). It reaches no one, so it is dropped rather than stored, and
+                // redeeming its id answers as for an unapproved one.
+                None if target == RequestTarget::NoAgent
+                    && pending.values().any(|r| r.code.is_none()) =>
+                {
+                    return Ok(());
                 }
                 None => {
                     return Err(
@@ -702,7 +713,64 @@ mod tests {
                 RequestTarget::NoAgent,
                 2
             )
-            .is_err());
+            .is_ok());
+        assert!(!pending.contains("none"));
+        assert!(pending.contains("bob") && pending.contains("carol"));
+        assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
+    }
+
+    // With the store full of requests for agents, a request for an email without an account
+    // gets the answer one for an email with an account gets, so the answer does not tell an
+    // anonymous caller which emails have accounts (D16). Only a store where nothing may go
+    // refuses both.
+    #[test]
+    fn a_full_store_answers_an_email_without_an_account_like_one_with() {
+        let pending = PendingRequests::default();
+        let agent = |a: usize| AgentContext::managed(format!("did:key:z6MkKnown{a}"));
+        for a in 0..MAX_PENDING_REQUESTS / MAX_PENDING_REQUESTS_PER_TARGET {
+            for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+                pending
+                    .request(format!("k{a}-{i}"), AuthInfo::default(), agent(a), 1)
+                    .unwrap();
+            }
+        }
+        let with_account = AgentContext::managed("did:key:z6MkWithAccount".into());
+        let answers = |pending: &PendingRequests| {
+            (
+                pending
+                    .request(
+                        "no-account".into(),
+                        AuthInfo::default(),
+                        RequestTarget::NoAgent,
+                        2,
+                    )
+                    .is_ok(),
+                pending
+                    .request(
+                        "account".into(),
+                        AuthInfo::default(),
+                        with_account.clone(),
+                        2,
+                    )
+                    .is_ok(),
+            )
+        };
+        assert_eq!(answers(&pending), (true, true));
+        assert!(!pending.contains("no-account"));
+
+        let approved_only = PendingRequests::default();
+        for a in 0..MAX_PENDING_REQUESTS / MAX_PENDING_REQUESTS_PER_TARGET {
+            for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
+                let id = format!("k{a}-{i}");
+                approved_only
+                    .request(id.clone(), AuthInfo::default(), agent(a), 1)
+                    .unwrap();
+                approved_only
+                    .approve(&id, AuthInfo::default(), "123456".into(), 1)
+                    .unwrap();
+            }
+        }
+        assert_eq!(answers(&approved_only), (false, false));
     }
 
     // When every target is full, a new request evicts one for no agent first, then the oldest
@@ -737,7 +805,8 @@ mod tests {
         assert!(pending.contains("a1-0"));
 
         // A new agent takes the oldest unapproved request of the target holding the most
-        // (all hold 64; a0-1 is the oldest of them). No agent: nothing it may evict.
+        // (all hold 64; a0-1 is the oldest of them). No agent: nothing it may evict, so it is
+        // answered as stored and dropped.
         let new_agent = AgentContext::managed("did:key:z6MkNew".into());
         pending
             .request("new".into(), AuthInfo::default(), new_agent, 2)
@@ -751,7 +820,9 @@ mod tests {
                 RequestTarget::NoAgent,
                 2
             )
-            .is_err());
+            .is_ok());
+        assert!(!pending.contains("none"));
+        assert!(pending.contains("a1-0"));
         assert_eq!(pending.len(), MAX_PENDING_REQUESTS);
 
         // An approved request is never evicted.
