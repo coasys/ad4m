@@ -2186,40 +2186,53 @@ impl PerspectiveInstance {
             .map(|l| create_signed_expression(l.normalize(), context))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
-        let removals = mutations
+        // `status` applies to the additions. A removal keeps the status of the
+        // link as stored, so removing a Local link never reaches the link
+        // language, and it commits the stored expression, as `remove_link`
+        // does. A removal that matches no stored link is dropped, as
+        // `remove_links` drops it: nothing is removed, so nothing is
+        // persisted, published, committed or returned. The lookup is exact on
+        // author and timestamp, so a Local link sent back with its timestamp
+        // spelled differently must not go out under the call's status.
+        let removals: Vec<LinkExpression> = mutations
             .removals
             .into_iter()
-            .map(LinkExpression::try_from)
-            .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+            .map(|removal| {
+                let link = LinkExpression::try_from(removal)?;
+                let stored = self.sparql_store.get_link(
+                    &link.data.source,
+                    link.data.predicate.as_deref(),
+                    &link.data.target,
+                    &link.author,
+                    &link.timestamp,
+                )?;
+                Ok(stored.map(|stored| {
+                    let link_status = stored.status.clone().unwrap_or(LinkStatus::Local);
+                    let mut stored = LinkExpression::from(stored);
+                    stored.status = Some(link_status);
+                    stored
+                }))
+            })
+            .collect::<Result<Vec<Option<LinkExpression>>, AnyError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let additions: Vec<LinkExpression> = additions
+            .into_iter()
+            .map(|mut l| {
+                l.status = Some(status.clone());
+                l
+            })
+            .collect();
 
-        let store_diff = PerspectiveDiff::from(
-            additions
-                .iter()
-                .cloned()
-                .map(|mut l| {
-                    l.status = Some(status.clone());
-                    l
-                })
-                .collect(),
-            removals
-                .iter()
-                .cloned()
-                .map(|mut l| {
-                    l.status = Some(status.clone());
-                    l
-                })
-                .collect(),
-        );
+        let store_diff = PerspectiveDiff::from(additions.clone(), removals.clone());
+        let decorated = |l: LinkExpression| {
+            let link_status = l.status.clone().unwrap_or(LinkStatus::Local);
+            DecoratedLinkExpression::from((l, link_status))
+        };
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: additions
-                .into_iter()
-                .map(|l| DecoratedLinkExpression::from((l, status.clone())))
-                .collect::<Vec<DecoratedLinkExpression>>(),
-            removals: removals
-                .clone()
-                .into_iter()
-                .map(|l| DecoratedLinkExpression::from((l, status.clone())))
-                .collect::<Vec<DecoratedLinkExpression>>(),
+            additions: additions.into_iter().map(decorated).collect(),
+            removals: removals.into_iter().map(decorated).collect(),
         };
 
         // Write to SPARQL store (primary storage for links)
@@ -2228,8 +2241,17 @@ impl PerspectiveInstance {
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
-        if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&store_diff);
+        let shared = |links: &[LinkExpression]| -> Vec<LinkExpression> {
+            links
+                .iter()
+                .filter(|l| l.status == Some(LinkStatus::Shared))
+                .cloned()
+                .collect()
+        };
+        let shared_diff =
+            PerspectiveDiff::from(shared(&store_diff.additions), shared(&store_diff.removals));
+        if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
+            self.spawn_commit_and_handle_error(&shared_diff);
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
@@ -7079,6 +7101,146 @@ mod tests {
             target: format!("https://{}.org", Faker.fake::<String>()),
             predicate: Some(format!("https://{}.net", Faker.fake::<String>())),
         }
+    }
+
+    /// A removal through `link_mutations` keeps the stored link's status, whatever
+    /// status the call names. WS `perspective.removeLinks` (no batch) calls it
+    /// with `Shared`, so removing a Local link sent that link to the link language.
+    #[tokio::test]
+    async fn link_mutations_removal_commits_only_shared_links() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap();
+        let shared = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap();
+
+        // A neighbourhood without a link language: every commit lands in the
+        // pending-diff queue, which is exactly what would reach peers.
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        let uuid = perspective.uuid.clone();
+
+        let input = |l: &DecoratedLinkExpression| {
+            serde_json::from_value(serde_json::to_value(LinkExpression::from(l.clone())).unwrap())
+                .unwrap()
+        };
+        let diff = perspective
+            .link_mutations(
+                LinkMutations {
+                    additions: vec![],
+                    removals: vec![input(&local), input(&shared)],
+                },
+                LinkStatus::Shared,
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let status_of = |l: &DecoratedLinkExpression| {
+            diff.removals
+                .iter()
+                .find(|r| r.data == l.data)
+                .and_then(|r| r.status.clone())
+        };
+        assert_eq!(status_of(&local), Some(LinkStatus::Local));
+        assert_eq!(status_of(&shared), Some(LinkStatus::Shared));
+
+        let mut pending = PerspectiveDiff::empty();
+        for _ in 0..100 {
+            (pending, _) =
+                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            if !pending.removals.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let committed: Vec<_> = pending.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(
+            committed,
+            vec![shared.data.clone()],
+            "only the Shared removal is committed"
+        );
+        assert!(perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A removal that matches no stored link is not committed, even when the
+    /// call names `Shared`. Here a Local link comes back with its timestamp
+    /// spelled differently (same instant, `+00:00` for `Z`), so the exact
+    /// lookup misses it.
+    #[tokio::test]
+    async fn link_mutations_unmatched_removal_is_not_committed() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap();
+        let shared = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        let uuid = perspective.uuid.clone();
+
+        let input = |l: &DecoratedLinkExpression| -> serde_json::Value {
+            serde_json::to_value(LinkExpression::from(l.clone())).unwrap()
+        };
+        let mut respelled = input(&local);
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&local.timestamp)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, false);
+        assert_ne!(timestamp, local.timestamp);
+        respelled["timestamp"] = serde_json::Value::String(timestamp);
+
+        let diff = perspective
+            .link_mutations(
+                LinkMutations {
+                    additions: vec![],
+                    removals: vec![
+                        serde_json::from_value(respelled).unwrap(),
+                        serde_json::from_value(input(&shared)).unwrap(),
+                    ],
+                },
+                LinkStatus::Shared,
+                &context,
+            )
+            .await
+            .unwrap();
+        // The unmatched removal removed nothing, so it is not returned either.
+        let returned: Vec<_> = diff.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(returned, vec![shared.data.clone()]);
+
+        // The Shared removal is committed in the same diff, so once it is
+        // queued the unmatched one would be too.
+        let mut pending = PerspectiveDiff::empty();
+        for _ in 0..100 {
+            (pending, _) =
+                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            if !pending.removals.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let committed: Vec<_> = pending.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(committed, vec![shared.data.clone()]);
+        let remaining: Vec<_> = perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data)
+            .collect();
+        assert_eq!(remaining, vec![local.data.clone()]);
     }
 
     /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
