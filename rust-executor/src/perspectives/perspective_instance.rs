@@ -1273,13 +1273,13 @@ impl PerspectiveInstance {
                 let reason = if last_diff_time.unwrap().elapsed()
                     >= Duration::from_secs(MAX_PENDING_SECONDS)
                 {
-                    "after reaching 10s maximum wait time"
+                    format!("after the {}s maximum wait", MAX_PENDING_SECONDS)
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
-                    "after 1s of inactivity"
-                // 3. We have collected more than 100 diffs
+                    "after 1s of inactivity".to_string()
+                // 3. We have collected MAX_PENDING_DIFFS_COUNT diffs
                 } else if ids.len() >= MAX_PENDING_DIFFS_COUNT {
-                    "after collecting 100"
+                    format!("after collecting {}", MAX_PENDING_DIFFS_COUNT)
                 } else {
                     continue;
                 };

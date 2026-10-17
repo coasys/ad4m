@@ -212,11 +212,42 @@ async fn a_failing_language_is_retried_with_backoff() {
 
     let attempts = fake.attempts();
     // 100 ms doubling to a 30 s cap: about 9 attempts in the first minute,
-    // then 2 a minute. Retrying every 100 ms would be ~6,000.
+    // then 2 a minute (28 in all). Retrying every 100 ms would be ~6,000;
+    // without the cap the wait grows to 51.2 s and gives about 20.
     assert!(
-        (10..=60).contains(&attempts),
+        (25..=60).contains(&attempts),
         "10 simulated minutes against a dead language made {} commit attempts",
         attempts
     );
     assert_eq!(pending(&perspective), 10, "an outage loses nothing");
+}
+
+/// A success resets the backoff: a second outage starts again from 100 ms
+/// instead of the 30 s the first one reached.
+#[tokio::test(start_paused = true)]
+async fn the_backoff_starts_again_after_a_success() {
+    let fake = Arc::new(FakeLanguage::default());
+    fake.down.store(true, Ordering::SeqCst);
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("first"));
+    let task = start_loop(&perspective);
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    fake.down.store(false, Ordering::SeqCst);
+    run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains once the language is back");
+
+    fake.down.store(true, Ordering::SeqCst);
+    enqueue(&perspective, &add("second"));
+    let before = fake.attempts();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    task.abort();
+
+    let attempts = fake.attempts() - before;
+    assert!(
+        attempts >= 4,
+        "a second outage got {} attempts in its first 10 s: the backoff did not reset",
+        attempts
+    );
 }
