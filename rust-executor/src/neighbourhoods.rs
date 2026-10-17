@@ -225,5 +225,7 @@ mod tests {
                 "lost {did} in the db"
             );
         }
+        // Other tests expect the global perspective map to start empty.
+        crate::perspectives::remove_perspective(&handle.uuid).await;
     }
 }
