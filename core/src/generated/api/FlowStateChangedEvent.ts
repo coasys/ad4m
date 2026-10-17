@@ -12,8 +12,8 @@
  */
 export type FlowStateChangedEvent = { perspectiveUuid: string, 
 /**
- * The agent whose replica derived this. The delivery filter matches it
- * against the socket's agent; nobody else receives the event.
+ * The agent whose replica derived this: the event's only recipient,
+ * when it owns the perspective.
  */
 agentDid: string, instance: string, 
 /**

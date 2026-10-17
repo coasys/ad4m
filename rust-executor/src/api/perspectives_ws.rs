@@ -894,7 +894,7 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let reply = perspective
-        .subscribe_and_query(body.query, connection_id)
+        .subscribe_and_query(body.query, connection_id, subscriber(&ctx))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     subscribed(reply)
@@ -906,6 +906,12 @@ fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
     ctx.connection_id.clone().ok_or_else(|| {
         WsRpcError::bad_request("Subscriptions need a WebSocket connection (/api/v1/ws)")
     })
+}
+
+/// The agent a subscription runs as, whose sessions alone get its updates: the
+/// managed agent the caller acts as, `None` for the main agent.
+fn subscriber(ctx: &RequestContext) -> Option<String> {
+    ctx.user_did().map(str::to_string)
 }
 
 /// Reply to a subscribe call: the result as JSON at its revision (0 unless
@@ -1267,7 +1273,7 @@ async fn model_subscribe_handler(
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let reply = perspective
-        .model_subscribe_and_query(classes, query_json, connection_id)
+        .model_subscribe_and_query(classes, query_json, connection_id, subscriber(&ctx))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     subscribed(reply)

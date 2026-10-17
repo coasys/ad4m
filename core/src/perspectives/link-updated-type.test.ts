@@ -8,7 +8,7 @@ import { PerspectiveClient } from './PerspectiveClient';
 import { PerspectiveHandle } from './PerspectiveHandle';
 import { PerspectiveProxy } from './PerspectiveProxy';
 import type { DecoratedLinkExpression } from '../generated/api/DecoratedLinkExpression';
-import type { PerspectiveLinkUpdatedWithOwner } from '../generated/api/PerspectiveLinkUpdatedWithOwner';
+import type { PerspectiveLinkUpdatedEvent } from '../generated/api/PerspectiveLinkUpdatedEvent';
 
 /** Captures the socket ApiClient opens, so the test can push an event. */
 class FakeWebSocket {
@@ -47,7 +47,7 @@ describe('link-updated handler type', () => {
     // link-added keeps its `{ link }` payload
     proxy.on('link-added', ({ link }: { link: DecoratedLinkExpression }) => {});
 
-    const event: PerspectiveLinkUpdatedWithOwner = { perspectiveUuid: 'test-uuid', owner: 'did:test:1', oldLink: link('old'), newLink: link('new') };
+    const event: PerspectiveLinkUpdatedEvent = { perspectiveUuid: 'test-uuid', oldLink: link('old'), newLink: link('new') };
     FakeWebSocket.last.onmessage?.({ data: JSON.stringify({ type: 'link-updated', ...event }) });
     expect(seen).toEqual(['old->new']);
     api.closeAll();

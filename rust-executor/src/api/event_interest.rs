@@ -1,6 +1,5 @@
-//! Event interest: `events.watch` / `events.unwatch`, on both the RPC socket
-//! and the events socket. A socket gets no events until it calls
-//! `events.watch`.
+//! Event interest: `events.watch` / `events.unwatch` on the RPC socket. A
+//! socket gets no events until it calls `events.watch`.
 //!
 //! Request: `{ "id": "...", "type": "events.watch", "params": { "<event type>": null | ["<perspective uuid>", ...] } }`
 //! Reply:   `{ "id": "...", "result": true }`
@@ -9,42 +8,28 @@
 //!   clears it.
 //! - `null` takes every event of that type; a list takes only events about
 //!   those perspectives.
-//! - Live query updates (`query-subscription-update`) are not filtered: they
-//!   only ever reach the connection that opened the subscription.
+//! - Live query updates (`query-subscription-update`) are not filtered: a
+//!   connection gets the updates of the live queries it opened without a
+//!   watch, and no other connection gets them (`Event::connection`).
+//! - A list matches an event about a listed perspective (`Event::perspective`, the
+//!   payload's `perspectiveUuid`). Events about no perspective carry none, so a list
+//!   never takes them.
 
-use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use super::ws_handler::ParamExt;
+use crate::events::{Event, Topic};
 
 pub const WATCH: &str = "events.watch";
 pub const UNWATCH: &str = "events.unwatch";
 
-/// Event type → the perspectives wanted (`None`: all).
-pub type EventInterest = HashMap<String, Option<HashSet<String>>>;
+/// Event topic → the perspectives wanted (`None`: all).
+pub type EventInterest = HashMap<Topic, Option<HashSet<String>>>;
 
 /// Per-connection interest; empty = no events.
 pub type SharedInterest = Arc<RwLock<EventInterest>>;
-
-/// The event types that carry `perspectiveUuid` (`EventSpec.scoped`).
-static SCOPED: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    super::events_ws::event_specs()
-        .into_iter()
-        .filter(|s| s.scoped)
-        .map(|s| s.name)
-        .collect()
-});
-
-/// The perspective an event is about. `None` for events that are not
-/// perspective-scoped.
-fn event_perspective<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> {
-    if !SCOPED.contains(event_type) {
-        return None;
-    }
-    event.get("perspectiveUuid").and_then(Value::as_str)
-}
 
 /// The TypeScript type of `events.watch` params: event name → the
 /// perspectives wanted (`null`: all). `EventName` comes from `Events.ts`.
@@ -65,40 +50,41 @@ fn parse(params: &Value) -> Result<EventInterest, String> {
     let types = params
         .as_object()
         .ok_or("`events.watch` params must map event types to perspectives or null")?;
-    types
-        .keys()
-        .map(|t| Ok((t.clone(), params.opt_str_set(t).map_err(|e| e.message)?)))
-        .collect()
+    let mut interest = EventInterest::new();
+    for name in types.keys() {
+        let perspectives = params.opt_str_set(name).map_err(|e| e.message)?;
+        // A name that is no event type is accepted and matches nothing.
+        if let Some(topic) = Topic::from_wire(name) {
+            interest.insert(topic, perspectives);
+        }
+    }
+    Ok(interest)
 }
 
-/// Should this socket forward `event_json`?
-pub fn wants(interest: &SharedInterest, event_json: &str) -> bool {
-    let Ok(event) = serde_json::from_str::<Value>(event_json) else {
-        return false;
-    };
-    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
-    if event_type == super::events_ws::events::QUERY_SUBSCRIPTION_UPDATE {
+/// Should this socket forward `event`? Reads its topic and perspective; parses nothing.
+pub(crate) fn wants(interest: &SharedInterest, event: &Event) -> bool {
+    if event.topic == Topic::PerspectiveQuerySubscription {
         return true;
     }
     match interest
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .get(event_type)
+        .get(&event.topic)
     {
         None => false,
         Some(None) => true,
-        Some(Some(wanted)) => {
-            event_perspective(event_type, &event).is_some_and(|p| wanted.contains(p))
-        }
+        Some(Some(wanted)) => event
+            .perspective
+            .as_deref()
+            .is_some_and(|p| wanted.contains(p)),
     }
 }
 
-/// `stream` minus the events this socket did not ask for.
-pub fn filter_stream<S>(stream: S, interest: SharedInterest) -> impl Stream<Item = String>
-where
-    S: Stream<Item = String>,
-{
-    stream.filter(move |event| futures::future::ready(wants(&interest, event)))
+/// An interest in every event, every perspective.
+#[cfg(test)]
+pub fn watching_all() -> SharedInterest {
+    let all = Topic::ALL.map(|t| (t, None));
+    Arc::new(RwLock::new(all.into_iter().collect()))
 }
 
 /// Handle `events.watch` / `events.unwatch`. Returns `None` for any other
@@ -130,12 +116,25 @@ pub fn handle_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::Audience;
 
-    const LINK_A: &str = r#"{"type":"link-added","perspectiveUuid":"A","owner":"did:x","link":{}}"#;
-    const LINK_B: &str = r#"{"type":"link-added","perspectiveUuid":"B","owner":"did:x","link":{}}"#;
-    const UPDATED_B: &str = r#"{"type":"perspective-updated","perspectiveUuid":"B","perspective":{"uuid":"B"},"owner":"did:x"}"#;
-    const QUERY_A: &str = r#"{"type":"query-subscription-update","perspectiveUuid":"A","uuid":"A","subscriptionId":"s","revision":1}"#;
-    const AGENT: &str = r#"{"type":"agent-updated","agent":{"did":"did:x"}}"#;
+    fn event(topic: Topic, payload: Value) -> Event {
+        Event::new(topic, Audience::Everyone, payload)
+    }
+
+    fn link(perspective: &str) -> Event {
+        let payload = json!({ "perspectiveUuid": perspective, "link": {} });
+        event(Topic::LinkAdded, payload)
+    }
+
+    fn updated_b() -> Event {
+        let payload = json!({ "perspectiveUuid": "B", "perspective": { "uuid": "B" } });
+        event(Topic::PerspectiveUpdated, payload)
+    }
+
+    fn agent() -> Event {
+        event(Topic::AgentUpdated, json!({ "did": "did:x" }))
+    }
 
     fn watch(i: &SharedInterest, params: Value) -> Value {
         serde_json::from_str(&handle_control(WATCH, &json!("1"), &params, i).unwrap()).unwrap()
@@ -144,10 +143,14 @@ mod tests {
     #[test]
     fn without_watch_no_event_passes_but_query_updates_do() {
         let i = SharedInterest::default();
-        for e in [LINK_A, LINK_B, UPDATED_B, AGENT] {
-            assert!(!wants(&i, e), "{e}");
+        for e in [link("A"), link("B"), updated_b(), agent()] {
+            assert!(!wants(&i, &e), "{e:?}");
         }
-        assert!(wants(&i, QUERY_A));
+        let query = json!({ "perspectiveUuid": "A", "subscriptionId": "s", "revision": 1 });
+        assert!(wants(
+            &i,
+            &event(Topic::PerspectiveQuerySubscription, query)
+        ));
     }
 
     #[test]
@@ -158,12 +161,29 @@ mod tests {
             json!({ "link-added": ["A"], "perspective-updated": null, "agent-updated": ["A"] }),
         );
         assert_eq!(reply, json!({ "id": "1", "result": true }));
-        assert!(wants(&i, LINK_A));
-        assert!(!wants(&i, LINK_B), "other perspective");
-        assert!(wants(&i, UPDATED_B), "null: every perspective");
+        assert!(wants(&i, &link("A")));
+        assert!(!wants(&i, &link("B")), "other perspective");
+        assert!(wants(&i, &updated_b()), "null: every perspective");
         assert!(
-            !wants(&i, AGENT),
+            !wants(&i, &agent()),
             "a list excludes events without a perspective"
+        );
+    }
+
+    // A name that is no event type was always accepted and matched nothing.
+    #[test]
+    fn a_watch_of_an_unknown_event_type_is_accepted_and_matches_nothing() {
+        let i = SharedInterest::default();
+        let reply = watch(
+            &i,
+            json!({ "link-added-topic": null, "agent-updated": null }),
+        );
+        assert_eq!(reply, json!({ "id": "1", "result": true }));
+        assert!(wants(&i, &agent()));
+        assert!(!wants(&i, &link("A")));
+        assert_eq!(
+            watch(&i, json!({ "no-such-event": 1 }))["error"]["code"],
+            400
         );
     }
 
@@ -172,14 +192,14 @@ mod tests {
         let i = SharedInterest::default();
         watch(&i, json!({ "agent-updated": null }));
         watch(&i, json!({ "link-added": null }));
-        assert!(!wants(&i, AGENT));
-        assert!(wants(&i, LINK_B));
+        assert!(!wants(&i, &agent()));
+        assert!(wants(&i, &link("B")));
         let reply = handle_control(UNWATCH, &json!("2"), &json!({}), &i).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&reply).unwrap(),
             json!({ "id": "2", "result": true })
         );
-        assert!(!wants(&i, LINK_B));
+        assert!(!wants(&i, &link("B")));
     }
 
     #[test]
@@ -193,7 +213,43 @@ mod tests {
         ] {
             assert_eq!(watch(&i, bad)["error"]["code"], 400);
         }
-        assert!(wants(&i, AGENT));
+        assert!(wants(&i, &agent()));
+    }
+
+    // Every topic, with and without a perspective, under every kind of watch: `null` takes
+    // the topic whole; a list takes the topic's events about a listed perspective only (an
+    // unscoped topic's payload names none: `events_ws::event_spec_tests`).
+    #[test]
+    fn each_kind_of_watch_narrows_every_topic() {
+        for topic in Topic::ALL {
+            let t = topic.as_str();
+            let query = topic == Topic::PerspectiveQuerySubscription;
+            for (payload, about_a) in [
+                (json!({ "perspectiveUuid": "A" }), true),
+                (json!({}), false),
+            ] {
+                let e = event(topic, payload);
+                for (params, expected) in [
+                    (json!({}), false),
+                    (json!({ t: null }), true),
+                    (json!({ t: ["A"] }), about_a),
+                    (json!({ t: ["B", "A"] }), about_a),
+                    (json!({ t: ["B"] }), false),
+                ] {
+                    let i = SharedInterest::default();
+                    watch(&i, params.clone());
+                    assert_eq!(wants(&i, &e), expected || query, "{t} {e:?} under {params}");
+                }
+            }
+        }
+        let i = SharedInterest::default();
+        watch(&i, json!({ "link-added": ["A"] }));
+        let unnamed = event(Topic::LinkAdded, json!({}));
+        assert!(
+            !wants(&i, &unnamed),
+            "a list excludes an event without a perspective"
+        );
+        assert!(wants(&i, &unnamed.for_perspective("A")));
     }
 
     #[test]
@@ -201,45 +257,49 @@ mod tests {
         assert!(handle_control("ping", &Value::Null, &json!({}), &Default::default()).is_none());
     }
 
+    // The perspective comes from the flat `perspectiveUuid`, not from a nested one.
     #[test]
     fn perspective_extraction_per_event_type() {
+        use Topic::*;
         let cases = [
-            (r#"{"type":"signal","perspectiveUuid":"P"}"#, true),
+            (NeighbourhoodSignal, json!({ "perspectiveUuid": "P" }), true),
+            (PerspectiveAdded, json!({ "perspectiveUuid": "P" }), true),
             (
-                r#"{"type":"perspective-added","perspectiveUuid":"P"}"#,
+                PerspectiveSyncStateChange,
+                json!({ "perspectiveUuid": "P", "state": "x" }),
                 true,
             ),
             (
-                r#"{"type":"sync-state-change","perspectiveUuid":"P","state":"x"}"#,
+                PerspectiveRemoved,
+                json!({ "perspectiveUuid": "P", "uuid": "P" }),
                 true,
             ),
             (
-                r#"{"type":"perspective-removed","perspectiveUuid":"P","uuid":"P","owner":"o"}"#,
+                RuntimeNotificationTriggered,
+                json!({ "perspectiveUuid": "P", "notification": { "perspectiveId": "P" } }),
                 true,
             ),
             (
-                r#"{"type":"notification-triggered","perspectiveUuid":"P","notification":{"perspectiveId":"P"}}"#,
-                true,
-            ),
-            (r#"{"type":"signal","perspective":{"uuid":"P"}}"#, false),
-            (
-                r#"{"type":"auto-processor-event","perspectiveUuid":"P"}"#,
-                true,
-            ),
-            (
-                r#"{"type":"exception-occurred","exception":{"uuid":"P"}}"#,
+                NeighbourhoodSignal,
+                json!({ "perspective": { "uuid": "P" } }),
                 false,
             ),
-            (r#"{"type":"agent-updated","perspectiveUuid":"P"}"#, false),
+            (AutoProcessorEvent, json!({ "perspectiveUuid": "P" }), true),
+            (
+                ExceptionOccurred,
+                json!({ "exception": { "uuid": "P" } }),
+                false,
+            ),
+            (AgentUpdated, json!({ "did": "P" }), false),
         ];
-        for (event, scoped) in cases {
-            let t = serde_json::from_str::<Value>(event).unwrap()["type"]
-                .as_str()
-                .unwrap()
-                .to_string();
+        for (topic, payload, scoped) in cases {
             let i = SharedInterest::default();
-            watch(&i, json!({ t: ["P"] }));
-            assert_eq!(wants(&i, event), scoped, "{event}");
+            watch(&i, json!({ topic.as_str(): ["P"] }));
+            assert_eq!(
+                wants(&i, &event(topic, payload.clone())),
+                scoped,
+                "{topic} {payload}"
+            );
         }
     }
 }

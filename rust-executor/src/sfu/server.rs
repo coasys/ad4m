@@ -26,12 +26,12 @@ use super::simulcast::{is_keyframe, LayerSelector};
 /// uniformly:
 ///
 /// - **Client peer** — `is_pipe = false`. `agent_did` is the user's
-///   DID; renegotiation offers go out via the events_ws pubsub topic
-///   for the client's events subscription to receive.
+///   DID; renegotiation offers go out as an `sfu-call-renegotiation-offer`
+///   event to that agent.
 /// - **Pipe peer** — `is_pipe = true`. Represents the local end of a
 ///   pipe transport to a remote SFU node. `agent_did` is the remote
 ///   node's DID; renegotiation offers go out via the cascade gossip
-///   transport instead of pubsub so the remote node receives them.
+///   transport instead (through `pipe_bus`) so the remote node receives them.
 pub struct SfuPeer {
     pub id: ParticipantId,
     pub room_id: RoomId,
@@ -143,7 +143,7 @@ pub enum SfuCommand {
     /// gossip transport, addressed to our local end of an existing
     /// pipe.  The event loop applies the offer through the pipe's
     /// `sdp_api()`, produces an answer, and republishes it to
-    /// `SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC` so the cascade router
+    /// the pipe bus (`pipe_bus::publish_answer`) so the cascade router
     /// can ship it back over gossip.
     ApplyPipeRenegotiationOffer {
         participant_id: ParticipantId,
@@ -614,12 +614,7 @@ impl SfuServer {
                                         room_id,
                                         sdp_answer: answer_json,
                                     };
-                                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                                            &crate::pubsub::SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC,
-                                            &payload_json,
-                                        );
-                                    }
+                                    super::pipe_bus::publish_answer(payload);
                                     info!(
                                         "SFU: pipe renegotiation answer published for {}",
                                         participant_id
@@ -717,12 +712,9 @@ impl SfuServer {
                             binary,
                             &data,
                         );
-                        if let Ok(payload_json) = serde_json::to_string(&payload) {
-                            crate::pubsub::get_global_pubsub_sync().publish_sync(
-                                &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,
-                                &payload_json,
-                            );
-                        }
+                        let recipients = data_recipients(&peers, &origin_room, &origin_did);
+                        crate::pubsub::get_global_pubsub_sync()
+                            .publish_event(crate::events::Event::sfu_data(&payload, recipients));
                     }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
@@ -802,6 +794,8 @@ impl SfuServer {
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
             let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
+            // Data channel messages, published once the poll loop no longer borrows `peers`.
+            let mut data_received: Vec<crate::sfu::types::SfuDataMessage> = Vec::new();
 
             for (pid, peer) in peers.iter_mut() {
                 loop {
@@ -864,9 +858,8 @@ impl SfuServer {
                                     let relay_data = data.data;
 
                                     // Can't relay inside this loop (borrows
-                                    // peers mutably), so push for deferred
-                                    // relay below.  Simpler: publish via
-                                    // pubsub so events_ws fans it out.
+                                    // peers mutably): published after it, to
+                                    // the room's agents, as `sfu-data`.
                                     let payload = crate::sfu::types::SfuDataMessage::new(
                                         origin_did,
                                         origin_room.neighbourhood_url,
@@ -875,12 +868,7 @@ impl SfuServer {
                                         relay_binary,
                                         &relay_data,
                                     );
-                                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                                            &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,
-                                            &payload_json,
-                                        );
-                                    }
+                                    data_received.push(payload);
                                 }
                             }
                             Event::ChannelClose(cid) => {
@@ -896,6 +884,15 @@ impl SfuServer {
                             break;
                         }
                     }
+                }
+            }
+
+            if !data_received.is_empty() {
+                let pubsub = crate::pubsub::get_global_pubsub_sync();
+                for payload in data_received {
+                    let room = RoomId::new(&payload.neighbourhood_url, &payload.room_name);
+                    let recipients = data_recipients(&peers, &room, &payload.sender_did);
+                    pubsub.publish_event(crate::events::Event::sfu_data(&payload, recipients));
                 }
             }
 
@@ -1168,12 +1165,7 @@ impl SfuServer {
                         room_id: room_id.to_string(),
                         sdp_offer: sdp_offer_json,
                     };
-                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                            &crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC,
-                            &payload_json,
-                        );
-                    }
+                    super::pipe_bus::publish_offer(payload);
                 } else {
                     let payload = crate::sfu::SfuCallRenegotiationOffer {
                         target_did: target_peer.agent_did.clone(),
@@ -1182,12 +1174,8 @@ impl SfuServer {
                         sdp_offer: sdp_offer_json,
                         track_mapping,
                     };
-                    if let Ok(payload_json) = serde_json::to_string(&payload) {
-                        crate::pubsub::get_global_pubsub_sync().publish_sync(
-                            &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
-                            &payload_json,
-                        );
-                    }
+                    crate::pubsub::get_global_pubsub_sync()
+                        .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
                 }
             }
 
@@ -1351,9 +1339,27 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
     Some((sdp_offer_json, track_mapping))
 }
 
+/// The agents that get a data channel message `sender` sent in `room`: the agent of every
+/// client peer in that room on this executor but the sender, which has what it sent. Pipe
+/// peers stand for other SFU nodes, not agents, so none of them is in it.
+fn data_recipients(
+    peers: &HashMap<ParticipantId, SfuPeer>,
+    room: &RoomId,
+    sender: &str,
+) -> Vec<String> {
+    let mut dids: Vec<String> = peers
+        .values()
+        .filter(|p| !p.is_pipe && p.room_id == *room && p.agent_did != sender)
+        .map(|p| p.agent_did.clone())
+        .collect();
+    dids.sort();
+    dids.dedup();
+    dids
+}
+
 /// Publish a renegotiation offer for a peer's deferred tracks.
-/// Routes to the appropriate pubsub topic based on whether the peer
-/// represents a client or a pipe transport.
+/// A client peer gets an `sfu-call-renegotiation-offer` event; a pipe
+/// transport's offer goes to the cascade router through the pipe bus.
 fn publish_renegotiation_offer(
     peer: &SfuPeer,
     pid: &ParticipantId,
@@ -1366,12 +1372,7 @@ fn publish_renegotiation_offer(
             room_id: peer.room_id.to_string(),
             sdp_offer: sdp_offer_json,
         };
-        if let Ok(payload_json) = serde_json::to_string(&payload) {
-            crate::pubsub::get_global_pubsub_sync().publish_sync(
-                &crate::pubsub::SFU_PIPE_RENEGOTIATION_OFFER_TOPIC,
-                &payload_json,
-            );
-        }
+        super::pipe_bus::publish_offer(payload);
     } else {
         let payload = crate::sfu::SfuCallRenegotiationOffer {
             target_did: peer.agent_did.clone(),
@@ -1380,12 +1381,8 @@ fn publish_renegotiation_offer(
             sdp_offer: sdp_offer_json,
             track_mapping,
         };
-        if let Ok(payload_json) = serde_json::to_string(&payload) {
-            crate::pubsub::get_global_pubsub_sync().publish_sync(
-                &crate::pubsub::SFU_CALL_RENEGOTIATION_OFFER_TOPIC,
-                &payload_json,
-            );
-        }
+        crate::pubsub::get_global_pubsub_sync()
+            .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
     }
     info!(
         "SFU: deferred-track renegotiation offer published for peer {}",

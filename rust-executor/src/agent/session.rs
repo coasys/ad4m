@@ -30,6 +30,7 @@ use super::capabilities::{
 };
 use super::grants::{Grants, LiveGrant};
 use super::{did_for_context, AgentContext, AgentService};
+use crate::events::{Audience, Event};
 
 /// The id of a JWT: its `nonce` claim, a fresh v4 UUID per token. It names the token's grant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -272,8 +273,9 @@ impl Session {
         }
     }
 
-    /// The DID of the agent the session acts as. `None` for an anonymous caller, and for the
-    /// main agent until it has a DID.
+    /// The DID of the agent the session acts as: a managed agent's own DID, the main
+    /// agent's for the operator and for grants on the main agent. `None` for an anonymous
+    /// caller, and for the main agent until it has a DID.
     pub fn acts_as_did(&self) -> Option<&str> {
         if self.principal == Principal::Anonymous {
             return None;
@@ -284,6 +286,23 @@ impl Session {
             }
         }
         self.did.get().map(String::as_str)
+    }
+
+    /// Whether this session's event stream delivers `event`: the session is in the event's
+    /// audience (everyone, or it acts as one of the DIDs) and holds the event's capability
+    /// (#1284): the one that reads the topic's data, or AGENT_PERMIT for an approval request.
+    /// A grant on the main agent acts as the main agent, so the audience alone let it read
+    /// every perspective the main agent owns. The operator acts as the main agent too: it gets
+    /// the main agent's events, not every agent's. The stream itself ends once
+    /// [`Session::check`] fails.
+    pub(crate) fn may_receive(&self, event: &Event) -> bool {
+        let in_audience = match &event.audience {
+            Audience::Everyone => true,
+            Audience::Dids(dids) => self
+                .acts_as_did()
+                .is_some_and(|did| dids.iter().any(|d| d == did)),
+        };
+        in_audience && self.may(&event.capability)
     }
 }
 

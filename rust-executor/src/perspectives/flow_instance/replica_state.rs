@@ -27,7 +27,8 @@
 //! and the `flow-state-changed` event, all scoped to the caller's own agent.
 
 use crate::db::{Ad4mDb, FlowReplicaStateRow};
-use crate::pubsub::{get_global_pubsub, FLOW_STATE_CHANGED_TOPIC};
+use crate::events::{Audience, Event, Topic};
+use crate::pubsub::get_global_pubsub;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,8 +61,8 @@ pub struct FlowStateEntry {
 #[serde(rename_all = "camelCase")]
 pub struct FlowStateChangedEvent {
     pub perspective_uuid: String,
-    /// The agent whose replica derived this. The delivery filter matches it
-    /// against the socket's agent; nobody else receives the event.
+    /// The agent whose replica derived this: the event's only recipient,
+    /// when it owns the perspective.
     pub agent_did: String,
     pub instance: String,
     /// The state this agent had recorded before; for a seeded row, the
@@ -87,6 +88,26 @@ pub enum PriorRow {
     /// Seeded at mint, not derived yet.
     Minted,
     Derived(String),
+}
+
+/// Who receives a `flow-state-changed`: the agent whose bookkeeping moved
+/// (`agent_did`), and nobody else. Bookkeeping is per agent, so a co-owner, or
+/// another user of the same executor, never gets it. The agent need not own
+/// the perspective: a non-owner that may query it (the operator, a member)
+/// keeps bookkeeping once it votes, and is told about its own.
+pub(crate) fn state_changed_audience(agent_did: &str) -> Audience {
+    Audience::Dids(vec![agent_did.to_string()])
+}
+
+/// The `flow-state-changed` event for `event`: to [`state_changed_audience`],
+/// needing the query capability on the perspective (`perspective.flowStates`
+/// reads the same rows).
+pub(crate) fn state_changed_event(event: &FlowStateChangedEvent) -> Event {
+    Event::new(
+        Topic::FlowStateChanged,
+        state_changed_audience(&event.agent_did),
+        event,
+    )
 }
 
 impl From<Option<FlowReplicaStateRow>> for PriorRow {
@@ -316,18 +337,12 @@ impl FlowReplicaState {
             .map_err(|e| anyhow::anyhow!("removing flow bookkeeping of {perspective}: {e}"))
     }
 
-    /// Publish `event` on the `flow-state-changed` topic. The event stream
-    /// delivers it to `event.agent_did`'s sockets only.
+    /// Publish `event` as `flow-state-changed` to [`state_changed_audience`]: the agent
+    /// whose bookkeeping moved.
     pub async fn publish_state_changed(event: &FlowStateChangedEvent) {
-        match serde_json::to_string(event) {
-            Ok(json) => {
-                get_global_pubsub()
-                    .await
-                    .publish(&FLOW_STATE_CHANGED_TOPIC, &json)
-                    .await;
-            }
-            Err(e) => log::warn!("flow-state-changed: could not serialise the event: {e}"),
-        }
+        get_global_pubsub()
+            .await
+            .publish_event(state_changed_event(event));
     }
 
     fn rows(

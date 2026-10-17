@@ -1,7 +1,5 @@
 use self::error::AIServiceError;
-use crate::pubsub::AI_MODEL_LOADING_STATUS;
-#[allow(unused_imports)]
-use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
+use crate::events::{Audience, Event, Topic};
 use crate::types::ModelInput;
 use crate::types::RequestContext;
 #[allow(unused_imports)]
@@ -340,13 +338,12 @@ async fn publish_model_status(
         )
     });
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &AI_MODEL_LOADING_STATUS,
-            &serde_json::to_string(&model).expect("AIModelLoading must be serializable"),
-        )
-        .await;
+    // Model names and progress only: every session sees them.
+    get_global_pubsub().await.publish_event(Event::new(
+        Topic::AiModelLoadingStatus,
+        Audience::Everyone,
+        &model,
+    ));
 }
 
 async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
@@ -2214,22 +2211,18 @@ impl AIService {
                             let stream_id_for_pubsub = stream_id_clone.clone();
                             let user_did_for_pubsub = user_did.clone();
                             rt.spawn(async move {
-                                let _ = get_global_pubsub()
-                                    .await
-                                    .publish(
-                                        &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                        &serde_json::to_string(
-                                            &TranscriptionTextFilter {
-                                                stream_id: stream_id_for_pubsub,
-                                                text: text_for_pubsub,
-                                                user_did: user_did_for_pubsub,
-                                            },
-                                        )
-                                        .expect(
-                                            "TranscriptionTextFilter must be serializable",
-                                        ),
-                                    )
-                                    .await;
+                                // The stream owner's sessions only.
+                                let audience = Audience::agent(user_did_for_pubsub.as_deref());
+                                let text = TranscriptionTextFilter {
+                                    stream_id: stream_id_for_pubsub,
+                                    text: text_for_pubsub,
+                                    user_did: user_did_for_pubsub,
+                                };
+                                get_global_pubsub().await.publish_event(Event::new(
+                                    Topic::AiTranscriptionText,
+                                    audience,
+                                    text,
+                                ));
                             });
 
                             // Also broadcast via per-stream channel for SSE feed responses
