@@ -13,8 +13,7 @@
 //!   one without an active grant (`agent::grants`): grants are the allowlist, so a revoked,
 //!   removed or never-recorded token is refused.
 //! - A grant on a managed agent acts as that agent, by its DID, whose key must derive that
-//!   DID. The token's `sub` must name the grant's agent: its DID, or, in tokens minted before
-//!   agents were keyed by DID, the email of the user who owns it. Any other grant acts as the
+//!   DID. The token's `sub` must name the grant's agent by its DID. Any other grant acts as the
 //!   main agent. Both are limited to the grant's capabilities.
 //!
 //! A token that opens no session is refused where it arrives. [`Session::check`] runs again
@@ -326,18 +325,10 @@ pub(crate) fn grant_for(claims: &super::capabilities::Claims) -> Result<Arc<Live
     Ok(grant)
 }
 
-/// Whether a token's `sub` names the agent of its grant: none for the main agent; for a
-/// managed agent its DID, or the email of the user who owns it (tokens minted before agents
-/// were keyed by DID).
+/// Whether a token's `sub` names the agent of its grant: none for the main agent, the DID for
+/// a managed agent.
 fn sub_names_agent(sub: Option<&str>, agent: &AgentContext) -> bool {
-    match (sub, agent.managed_did()) {
-        (None, None) => true,
-        (Some(sub), Some(did)) if sub == did => true,
-        (Some(sub), Some(did)) if !sub.starts_with("did:") => {
-            AgentService::did_for_email(sub).is_ok_and(|owner| owner == did)
-        }
-        _ => false,
-    }
+    sub == agent.managed_did()
 }
 
 #[cfg(test)]
@@ -692,42 +683,42 @@ mod resolution_tests {
         );
     }
 
-    /// D16: user tokens minted before agents were keyed by DID carry the user's email in
-    /// `sub`; tokens minted since carry the agent's DID. Both open a session acting as the
-    /// same agent.
+    /// D16: a user token names its agent by DID in `sub` and acts as that agent. A token
+    /// whose `sub` is the user's email instead opens no session.
     #[test]
-    fn an_old_email_token_and_a_new_did_token_act_as_the_same_agent() {
+    fn a_user_token_acts_as_the_agent_its_sub_names() {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let email = "session.both.forms@example.org";
+        let email = "session.did.sub@example.org";
         let did = crate::test_utils::create_test_user(email);
 
-        let new_token = crate::user_management::generate_user_jwt(email, "test").unwrap();
-        let new_claims = crate::agent::capabilities::decode_jwt(new_token.clone()).unwrap();
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let claims = crate::agent::capabilities::decode_jwt(token.clone()).unwrap();
         assert_eq!(
-            new_claims.sub.as_deref(),
+            claims.sub.as_deref(),
             Some(did.as_str()),
-            "new tokens name the DID"
+            "tokens name the DID"
         );
-        let old_token = crate::test_utils::resigned_token(&new_token, |claims| {
+
+        let session = Session::open(&token, &admin(), ListenerReach::Network).unwrap();
+        assert_eq!(
+            session.principal,
+            Principal::Agent(AgentContext::managed(did.clone()))
+        );
+        assert_eq!(session.acts_as_did(), Some(did.as_str()));
+        let signed = crate::agent::create_signed_expression(
+            serde_json::json!({ "x": 1 }),
+            &session.acts_as(),
+        )
+        .unwrap();
+        assert_eq!(signed.author, did, "the session signs as the user's agent");
+
+        let email_token = crate::test_utils::resigned_token(&token, |claims| {
             claims["sub"] = serde_json::json!(email)
         });
-
-        for token in [&old_token, &new_token] {
-            let session = Session::open(token, &admin(), ListenerReach::Network).unwrap();
-            assert_eq!(
-                session.principal,
-                Principal::Agent(AgentContext::managed(did.clone()))
-            );
-            assert_eq!(session.acts_as_did(), Some(did.as_str()));
-            let signed = crate::agent::create_signed_expression(
-                serde_json::json!({ "x": 1 }),
-                &session.acts_as(),
-            )
-            .unwrap();
-            assert_eq!(signed.author, did, "the session signs as the user's agent");
-        }
+        let err = Session::open(&email_token, &admin(), ListenerReach::Network).unwrap_err();
+        assert_eq!(err, AuthError::Revoked);
     }
 
     #[test]

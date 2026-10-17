@@ -128,111 +128,6 @@ fn derived_did(wallet: &dyn crate::wallet::WalletBackend, name: &str) -> Option<
     wallet.get_did_document(name).map(|doc| doc.id)
 }
 
-/// The outcome of [`migrate_managed_key_names`] for one user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KeyNameMigration {
-    /// The key was already named by the DID, and no key carries the old name.
-    AlreadyNamedByDid,
-    /// The key was copied under the DID, and the old name removed.
-    Renamed,
-    /// Both names held the same key: the old name was removed.
-    RemovedDuplicate,
-    /// The key is named by the DID, and the old name holds another key (deriving `derived`).
-    /// That key is left alone: it is not this agent's, and removing it could lose it.
-    KeptOtherKey { derived: String },
-    /// The user has no key under either name.
-    NoKey,
-    /// The key under the old name derives another DID than the user's: it stays under its
-    /// old name, and the user's sessions fail with `NoIdentity` until an operator fixes it.
-    Mismatch { derived: String },
-    /// The wallet refused the copy or the removal.
-    Failed(String),
-    /// The user's name is the name of one of the executor's own keys (see
-    /// [`is_executor_key_name`]): that key is never copied or removed, and the user's sessions
-    /// fail with `NoIdentity`.
-    ExecutorKey,
-}
-
-/// Names every managed agent's key by its DID (D16): for each `(username, did)` from the
-/// `users` table, a key named `username` is copied under `did`, the copy is checked to derive
-/// `did`, and the old name is removed. `persist` writes the wallet to disk; it runs after
-/// every copy and before any old name goes, so a crash at any point leaves the key reachable
-/// under the old name, the new one, or both, and the next run finishes the job. With both
-/// names present, the old one goes only if both hold the same key.
-///
-/// Idempotent: a second run on a migrated wallet changes nothing and persists nothing.
-pub fn migrate_managed_key_names(
-    wallet: &dyn crate::wallet::WalletBackend,
-    users: &[(String, String)],
-    mut persist: impl FnMut() -> Result<(), AnyError>,
-) -> Vec<(String, KeyNameMigration)> {
-    let mut outcomes = Vec::new();
-    let mut to_remove = Vec::new();
-    for (username, did) in users {
-        if did.is_empty() || username == did {
-            continue;
-        }
-        if is_executor_key_name(username) || is_executor_key_name(did) {
-            outcomes.push((username.clone(), KeyNameMigration::ExecutorKey));
-            continue;
-        }
-        let old_key = derived_did(wallet, username);
-        let new_key = derived_did(wallet, did);
-        let outcome = match (old_key, new_key) {
-            (_, Some(new_did)) if &new_did != did => {
-                KeyNameMigration::Mismatch { derived: new_did }
-            }
-            (None, Some(_)) => KeyNameMigration::AlreadyNamedByDid,
-            (Some(old_did), Some(_)) if &old_did == did => {
-                to_remove.push(username.clone());
-                KeyNameMigration::RemovedDuplicate
-            }
-            (Some(old_did), Some(_)) => KeyNameMigration::KeptOtherKey { derived: old_did },
-            (None, None) => KeyNameMigration::NoKey,
-            (Some(derived), None) if &derived != did => KeyNameMigration::Mismatch { derived },
-            (Some(_), None) => match wallet.copy_key(username, did) {
-                Ok(()) if derived_did(wallet, did).as_deref() == Some(did.as_str()) => {
-                    to_remove.push(username.clone());
-                    KeyNameMigration::Renamed
-                }
-                Ok(()) => {
-                    // A copy that derives another DID must not stay under the user's DID.
-                    let _ = wallet.remove_key(did);
-                    KeyNameMigration::Failed("the copy derives another DID".to_string())
-                }
-                Err(e) => KeyNameMigration::Failed(e.to_string()),
-            },
-        };
-        outcomes.push((username.clone(), outcome));
-    }
-
-    if to_remove.is_empty() {
-        return outcomes;
-    }
-    // The copies reach the disk before any old name goes.
-    if let Err(e) = persist() {
-        log::error!(
-            "🔑 Could not save the wallet after naming keys by DID; the old names stay: {}",
-            e
-        );
-        return outcomes;
-    }
-    for username in &to_remove {
-        if let Err(e) = wallet.remove_key(username) {
-            log::error!("🔑 Could not remove the key named {}: {}", username, e);
-        }
-    }
-    if let Err(e) = persist() {
-        log::warn!(
-            "🔑 Could not save the wallet after removing the old key names; the next unlock \
-             removes them again: {}",
-            e
-        );
-    }
-    forget_managed_key_names();
-    outcomes
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentStore {
     did: String,
@@ -772,17 +667,13 @@ impl AgentService {
         Ok(AgentContext::managed(did))
     }
 
-    /// The managed agent a user token's `sub` names. Tokens minted since agents are keyed by
-    /// DID carry the DID; tokens minted before carry the user's email. `email_hint` is the
-    /// token's `userEmail`, which imports a user created on another executor of a shared
-    /// database. Fails if no user owns the agent or the wallet holds no key for it.
+    /// The managed agent a user token's `sub` names: its DID. `email_hint` is the token's
+    /// `userEmail`, which imports a user created on another executor of a shared database.
+    /// Fails if no user owns the agent or the wallet holds no key for it.
     pub fn managed_agent_for_subject(
         sub: &str,
         email_hint: Option<&str>,
     ) -> Result<AgentContext, AnyError> {
-        if !sub.starts_with("did:") {
-            return Self::managed_agent_for_email(sub);
-        }
         if Self::email_for_did(sub).is_err() {
             let imported = match email_hint {
                 Some(email) => crate::user_management::import_user_from_shared_db(email)?,
@@ -796,10 +687,10 @@ impl AgentService {
         Ok(AgentContext::managed(sub.to_string()))
     }
 
-    /// The name of the wallet key of the managed agent `did`. Keys are named by the DID (D16).
-    /// A key under the user's email (a shared wallet, which cannot rename keys, or a wallet
-    /// whose migration kept the old name) is used only if it derives `did`. Fails if neither
-    /// name holds a key that derives `did`: the agent has no identity on this executor.
+    /// The name of the wallet key of the managed agent `did`: the DID itself (D16). A shared
+    /// wallet cannot name keys, so there the key sits under the user's email and is used only
+    /// if it derives `did`. Fails if no key derives `did`: the agent has no identity on this
+    /// executor.
     pub fn wallet_key_for_did(did: &str) -> Result<String, AnyError> {
         if let Some(name) = MANAGED_KEY_NAMES
             .read()
@@ -809,7 +700,7 @@ impl AgentService {
             return Ok(name);
         }
         let backend = wallet_backend();
-        let name = if derived_did(backend.as_ref(), did).as_deref() == Some(did) {
+        let name = if backend.can_rename_keys() {
             did.to_string()
         } else {
             let email = Self::email_for_did(did)?;
@@ -819,81 +710,15 @@ impl AgentService {
                     email
                 ));
             }
-            if derived_did(backend.as_ref(), &email).as_deref() != Some(did) {
-                return Err(anyhow!("No key in the wallet derives the agent {}", did));
-            }
             email
         };
+        if derived_did(backend.as_ref(), &name).as_deref() != Some(did) {
+            return Err(anyhow!("No key in the wallet derives the agent {}", did));
+        }
         if let Ok(mut names) = MANAGED_KEY_NAMES.write() {
             names.insert(did.to_string(), name.clone());
         }
         Ok(name)
-    }
-
-    /// Names every managed agent's key by its DID; see [`migrate_managed_key_names`]. Runs
-    /// on unlock, the only time the keys are in memory. Does nothing on a wallet that cannot
-    /// rename keys.
-    fn migrate_managed_key_names_on_unlock(&self, password: &str) {
-        // The unlocked keystore replaces the keys in memory: resolve names afresh.
-        forget_managed_key_names();
-        let backend = wallet_backend();
-        if !backend.can_rename_keys() {
-            return;
-        }
-        // While the legacy backup exists, `unlock_from_legacy_backup` needs the agent file to
-        // hold exactly the backup's keys, names included. The unlock that retires the backup
-        // runs this again.
-        if path::Path::new(&self.legacy_backup_file()).exists() {
-            return;
-        }
-        let users = match Ad4mDb::global_instance().lock() {
-            Ok(db) => match db.as_ref().map(|db| db.list_users()) {
-                Some(Ok(users)) => users,
-                Some(Err(e)) => {
-                    log::error!("🔑 Could not list users to name their keys by DID: {}", e);
-                    return;
-                }
-                // No database yet (some tests): no users.
-                None => return,
-            },
-            Err(_) => return,
-        };
-        let pairs: Vec<(String, String)> = users.into_iter().map(|u| (u.username, u.did)).collect();
-        let outcomes =
-            migrate_managed_key_names(backend.as_ref(), &pairs, || self.try_save(password));
-        for (username, outcome) in outcomes {
-            match outcome {
-                KeyNameMigration::AlreadyNamedByDid => {}
-                KeyNameMigration::Renamed | KeyNameMigration::RemovedDuplicate => {
-                    log::info!("🔑 The key of {} is now named by its DID", username)
-                }
-                KeyNameMigration::KeptOtherKey { derived } => log::warn!(
-                    "🔑 The key of {} is named by its DID; the key under the old name derives \
-                     {} and was left in place",
-                    username,
-                    derived
-                ),
-                KeyNameMigration::NoKey => {
-                    log::warn!("🔑 The wallet holds no key for the user {}", username)
-                }
-                KeyNameMigration::Mismatch { derived } => log::error!(
-                    "🔑 The key of the user {} derives {}, not the user's DID; it keeps its old \
-                     name and the user's sessions fail until an operator fixes it",
-                    username,
-                    derived
-                ),
-                KeyNameMigration::Failed(e) => log::error!(
-                    "🔑 Could not name the key of {} by its DID: {}",
-                    username,
-                    e
-                ),
-                KeyNameMigration::ExecutorKey => log::error!(
-                    "🔑 The user {} is named like one of the executor's own keys; that key stays \
-                     where it is and the user's sessions fail until an operator fixes the account",
-                    username
-                ),
-            }
-        }
     }
 
     /// The file that holds a user's agent profile. Profiles sit in a directory named by the
@@ -1164,7 +989,8 @@ impl AgentService {
                     ),
                 }
             }
-            self.migrate_managed_key_names_on_unlock(&password);
+            // The unlocked keystore replaces the keys in memory: resolve names afresh.
+            forget_managed_key_names();
             self.passphrase = Some(password);
             let key_count = backend.list_key_names().len();
             log::debug!("🔑 Wallet unlocked. {} key(s) present.", key_count);
@@ -1925,328 +1751,10 @@ mod tests {
         setup_agent();
     }
 
-    // ---- D16: managed agents' keys are named by their DID ----------------
-
-    /// A wallet of its own, with a key named `name`; returns the key's DID.
-    fn wallet_with_key(wallet: &crate::wallet::LocalWallet, name: &str) -> String {
-        use crate::wallet::WalletBackend;
-        wallet.generate_keypair(name).unwrap();
-        wallet.get_did_document(name).unwrap().id
-    }
-
-    fn key_names(wallet: &dyn crate::wallet::WalletBackend) -> Vec<String> {
-        let mut names = wallet.list_key_names();
-        names.sort();
-        names
-    }
-
-    /// Before D16 a user could sign up as `main` (or, on a shared wallet, `platform`) and was
-    /// handed the executor's own key under that name, so the `users` row names the executor's
-    /// DID. The migration never moves an executor key: it keeps its name.
-    #[test]
-    fn the_key_name_migration_never_moves_an_executor_key() {
-        let wallet = crate::wallet::LocalWallet::new();
-        let main = wallet_with_key(&wallet, crate::wallet::KEY_NAME_MAIN);
-        let platform = wallet_with_key(&wallet, crate::wallet::KEY_NAME_PLATFORM);
-        let users = vec![
-            (crate::wallet::KEY_NAME_MAIN.to_string(), main),
-            (crate::wallet::KEY_NAME_PLATFORM.to_string(), platform),
-        ];
-
-        let outcomes = migrate_managed_key_names(&wallet, &users, || Ok(()));
-
-        assert_eq!(
-            outcomes,
-            vec![
-                (
-                    crate::wallet::KEY_NAME_MAIN.to_string(),
-                    KeyNameMigration::ExecutorKey
-                ),
-                (
-                    crate::wallet::KEY_NAME_PLATFORM.to_string(),
-                    KeyNameMigration::ExecutorKey
-                ),
-            ]
-        );
-        assert_eq!(
-            key_names(&wallet),
-            vec![
-                crate::wallet::KEY_NAME_MAIN.to_string(),
-                crate::wallet::KEY_NAME_PLATFORM.to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn the_key_name_migration_copies_persists_then_removes() {
-        let wallet = crate::wallet::LocalWallet::new();
-        let alice = wallet_with_key(&wallet, "alice@example.org");
-        let users = vec![("alice@example.org".to_string(), alice.clone())];
-
-        let mut seen_at_persist = Vec::new();
-        let outcomes = migrate_managed_key_names(&wallet, &users, || {
-            seen_at_persist.push(key_names(&wallet));
-            Ok(())
-        });
-
-        assert_eq!(
-            outcomes,
-            vec![("alice@example.org".to_string(), KeyNameMigration::Renamed)]
-        );
-        assert_eq!(
-            seen_at_persist.first(),
-            Some(&vec!["alice@example.org".to_string(), alice.clone()]),
-            "the copy reaches the disk while the old name still holds the key"
-        );
-        assert_eq!(key_names(&wallet), vec![alice.clone()], "the old name goes");
-        assert_eq!(
-            seen_at_persist.last(),
-            Some(&vec![alice.clone()]),
-            "the removal is persisted too"
-        );
-        assert_eq!(wallet_did(&wallet, &alice), Some(alice.clone()));
-
-        // Idempotent: nothing to do, nothing written.
-        let mut persisted_again = 0;
-        let again = migrate_managed_key_names(&wallet, &users, || {
-            persisted_again += 1;
-            Ok(())
-        });
-        assert_eq!(
-            again,
-            vec![(
-                "alice@example.org".to_string(),
-                KeyNameMigration::AlreadyNamedByDid
-            )]
-        );
-        assert_eq!(persisted_again, 0);
-        assert_eq!(key_names(&wallet), vec![alice]);
-    }
-
-    fn wallet_did(wallet: &dyn crate::wallet::WalletBackend, name: &str) -> Option<String> {
-        wallet.get_did_document(name).map(|doc| doc.id)
-    }
-
-    #[test]
-    fn the_key_name_migration_finishes_after_a_crash_and_keeps_keys_it_cannot_vouch_for() {
-        use crate::wallet::WalletBackend;
-        let wallet = crate::wallet::LocalWallet::new();
-        // Crashed after the copy was persisted: both names hold the same key.
-        let bob = wallet_with_key(&wallet, "bob@example.org");
-        wallet.copy_key("bob@example.org", &bob).unwrap();
-        // A key under the old name that is not the user's: it derives another DID.
-        let carol_key = wallet_with_key(&wallet, "carol@example.org");
-        let carol = wallet_with_key(&wallet, "carol-agent");
-        wallet.copy_key("carol-agent", &carol).unwrap();
-        wallet.remove_key("carol-agent").unwrap();
-        // The user's row names a DID the key under its email does not derive.
-        let dave_key = wallet_with_key(&wallet, "dave@example.org");
-        let dave = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
-        let users = vec![
-            ("bob@example.org".to_string(), bob.clone()),
-            ("carol@example.org".to_string(), carol.clone()),
-            ("dave@example.org".to_string(), dave.clone()),
-            ("erin@example.org".to_string(), "did:key:erin".to_string()),
-            ("frank@example.org".to_string(), String::new()),
-        ];
-
-        let outcomes = migrate_managed_key_names(&wallet, &users, || Ok(()));
-
-        assert_eq!(
-            outcomes,
-            vec![
-                (
-                    "bob@example.org".to_string(),
-                    KeyNameMigration::RemovedDuplicate
-                ),
-                (
-                    "carol@example.org".to_string(),
-                    KeyNameMigration::KeptOtherKey {
-                        derived: carol_key.clone()
-                    }
-                ),
-                (
-                    "dave@example.org".to_string(),
-                    KeyNameMigration::Mismatch {
-                        derived: dave_key.clone()
-                    }
-                ),
-                ("erin@example.org".to_string(), KeyNameMigration::NoKey),
-            ]
-        );
-        assert_eq!(wallet_did(&wallet, &bob), Some(bob.clone()));
-        assert!(!wallet.key_exists("bob@example.org"), "the duplicate goes");
-        assert_eq!(
-            wallet_did(&wallet, "carol@example.org"),
-            Some(carol_key),
-            "a key that is not the user's is never removed"
-        );
-        assert_eq!(
-            wallet_did(&wallet, "dave@example.org"),
-            Some(dave_key),
-            "a mismatched key keeps its old name"
-        );
-        assert!(
-            !wallet.key_exists(&dave),
-            "nothing is named by a DID no key derives"
-        );
-    }
-
-    #[test]
-    fn a_failed_save_keeps_the_old_key_names() {
-        let wallet = crate::wallet::LocalWallet::new();
-        let alice = wallet_with_key(&wallet, "alice@example.org");
-        let users = vec![("alice@example.org".to_string(), alice.clone())];
-
-        migrate_managed_key_names(&wallet, &users, || Err(anyhow!("disk full")));
-
-        assert_eq!(
-            wallet_did(&wallet, "alice@example.org"),
-            Some(alice.clone()),
-            "without a saved copy the old name stays"
-        );
-    }
-
-    /// An executor whose agent file still names a managed agent's key by the user's email.
-    /// Returns the agent file's path. Leaves the global `AgentService` on `app_path`.
-    fn executor_with_a_key_named_by_email(
-        app_path: &str,
-        passphrase: &str,
-        email: &str,
-        users_did: Option<&str>,
-    ) -> (String, String) {
-        let backend = wallet_backend();
-        backend.generate_keypair(email).unwrap();
-        let key_did = backend.get_did_document(email).unwrap().id;
-        let did = users_did.map(str::to_string).unwrap_or(key_did);
-        Ad4mDb::with_global_instance(|db| db.add_user(email, &did, "pw")).unwrap();
-        let global = AgentService::global_instance();
-        let mut lock = global.lock().unwrap();
-        *lock = Some(AgentService::new(app_path.to_string()));
-        let svc = lock.as_mut().unwrap();
-        svc.create_new_keys();
-        svc.save(passphrase.to_string());
-        (format!("{}/ad4m/agent.json", app_path), did)
-    }
-
-    /// Unlocks the agent file on disk: the keys it holds replace the ones in memory.
-    fn unlock_from_disk(passphrase: &str) {
-        AgentService::with_mutable_global_instance(|svc| {
-            svc.load();
-            svc.unlock(passphrase.to_string()).expect("unlock");
-        });
-    }
-
-    /// D16: restart on pre-migration data (a managed agent's key named by the user's email).
-    /// The unlock names the key by the DID, removes the old name, saves both steps, and the
-    /// user still signs as the same DID. A second unlock changes nothing.
-    #[test]
-    fn unlock_names_a_managed_agents_key_by_its_did() {
-        ensure_setup();
-        let _db = crate::test_utils::MultiUserMode::on();
-        let tmp = tempfile::tempdir().unwrap();
-        let app_path = tmp.path().to_str().unwrap().to_string();
-        std::fs::create_dir_all(format!("{}/ad4m", app_path)).unwrap();
-        let passphrase = "d16 migration";
-        let email = format!("migrate.{}@example.org", uuid::Uuid::new_v4());
-        let (agent_file, did) =
-            executor_with_a_key_named_by_email(&app_path, passphrase, &email, None);
-        let backend = wallet_backend();
-        assert!(backend.key_exists(&email) && !backend.key_exists(&did));
-
-        unlock_from_disk(passphrase);
-
-        assert_eq!(wallet_did(backend.as_ref(), &did), Some(did.clone()));
-        assert!(!backend.key_exists(&email), "the old name is gone");
-        // What the unlock saved, read back from the agent file.
-        let saved = std::fs::read_to_string(&agent_file).unwrap();
-        unlock_from_disk(passphrase);
-        assert_eq!(wallet_did(backend.as_ref(), &did), Some(did.clone()));
-        assert!(
-            !backend.key_exists(&email),
-            "the agent file holds the new name only"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&agent_file).unwrap(),
-            saved,
-            "a second unlock writes nothing: every export draws a fresh salt"
-        );
-
-        let agent = AgentService::managed_agent_for_email(&email).unwrap();
-        assert_eq!(agent, AgentContext::managed(did.clone()));
-        let signed = create_signed_expression(json!({ "after": "migration" }), &agent).unwrap();
-        assert_eq!(signed.author, did, "the user signs as the same DID");
-        assert!(signatures::verify(&signed).unwrap());
-
-        setup_agent();
-    }
-
-    /// D16: a key whose DID is not the user's keeps its old name, and the user's sessions
-    /// fail with `NoIdentity` until an operator fixes it.
-    #[test]
-    fn unlock_keeps_a_mismatched_key_and_its_users_sessions_fail() {
-        use crate::agent::capabilities::ListenerReach;
-        use crate::agent::session::{AuthError, Session};
-        ensure_setup();
-        let _db = crate::test_utils::MultiUserMode::on();
-        let tmp = tempfile::tempdir().unwrap();
-        let app_path = tmp.path().to_str().unwrap().to_string();
-        std::fs::create_dir_all(format!("{}/ad4m", app_path)).unwrap();
-        let passphrase = "d16 mismatch";
-        let email = format!("mismatch.{}@example.org", uuid::Uuid::new_v4());
-        let recorded = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-        let (_, did) =
-            executor_with_a_key_named_by_email(&app_path, passphrase, &email, Some(recorded));
-        let backend = wallet_backend();
-        let key_did = wallet_did(backend.as_ref(), &email).unwrap();
-        assert_ne!(key_did, did);
-
-        unlock_from_disk(passphrase);
-
-        assert_eq!(
-            wallet_did(backend.as_ref(), &email),
-            Some(key_did),
-            "the key keeps its old name"
-        );
-        assert!(!backend.key_exists(&did));
-        let token = crate::user_management::generate_user_jwt(&email, "test").unwrap();
-        let old_token =
-            crate::test_utils::resigned_token(&token, |claims| claims["sub"] = json!(email));
-        for token in [token, old_token] {
-            let err = Session::open(&token, &None, ListenerReach::Network).unwrap_err();
-            assert!(matches!(err, AuthError::NoIdentity(_)), "{err:?}");
-        }
-
-        setup_agent();
-    }
-
-    /// A user signed up as `main` before D16 has a `users` row naming the main agent's DID,
-    /// whose key sits under the user's name. That user never acts as the main agent: the
-    /// email fallback refuses an executor key, so the user's sessions fail with `NoIdentity`.
-    /// No new user gets an executor key's name.
+    /// D16: no managed agent gets the name of one of the executor's own keys.
     #[test]
     fn a_user_named_like_an_executor_key_never_gets_that_key() {
-        use crate::agent::capabilities::ListenerReach;
-        use crate::agent::session::{AuthError, Session};
         ensure_setup();
-        let _db = crate::test_utils::MultiUserMode::on();
-        let main_did = did();
-        Ad4mDb::with_global_instance(|db| {
-            db.add_user(crate::wallet::KEY_NAME_MAIN, &main_did, "pw")
-        })
-        .unwrap();
-        forget_managed_key_names();
-
-        assert!(AgentService::wallet_key_for_did(&main_did).is_err());
-        assert!(AgentService::managed_agent_for_email(crate::wallet::KEY_NAME_MAIN).is_err());
-        let token = crate::user_management::generate_user_jwt(crate::wallet::KEY_NAME_MAIN, "test")
-            .unwrap();
-        let err = Session::open(&token, &None, ListenerReach::Network).unwrap_err();
-        assert!(matches!(err, AuthError::NoIdentity(_)), "{err:?}");
-        // MCP resolves the same token without a `Session` (until PR 6): it refuses it too.
-        assert!(AgentContext::from_auth_token(token.clone(), false).is_err());
-        assert!(crate::agent::capabilities::capabilities_from_token(token, None).is_err());
-
         for name in [
             crate::wallet::KEY_NAME_MAIN,
             crate::wallet::KEY_NAME_PLATFORM,
@@ -2532,47 +2040,6 @@ mod tests {
         assert_eq!(
             wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN),
             main_key
-        );
-
-        setup_agent();
-    }
-
-    /// D16 on a legacy keystore that names a managed agent's key by the user's email. The
-    /// rewrite unlock keeps the key names, so the agent file still holds exactly the backup's
-    /// keys and the fallback stays open. The unlock that retires the backup names the key by
-    /// its DID.
-    #[test]
-    fn the_legacy_fallback_stays_open_until_the_backup_goes_then_keys_are_named_by_did() {
-        ensure_setup();
-        let _db = crate::test_utils::MultiUserMode::on();
-        let email = format!("legacy.{}@example.org", uuid::Uuid::new_v4());
-        let backend = wallet_backend();
-        backend.generate_keypair(&email).unwrap();
-        let user_did = wallet_did(backend.as_ref(), &email).unwrap();
-        Ad4mDb::with_global_instance(|db| db.add_user(&email, &user_did, "pw")).unwrap();
-        let (_tmp, agent_file) = legacy_agent_file(OWNER);
-        let backup_file = format!("{}.legacy", agent_file);
-
-        restart_and_unlock(VARIANT).expect("the variant opens the legacy file");
-        assert!(std::path::Path::new(&backup_file).exists());
-        assert!(
-            backend.key_exists(&email),
-            "no rename while the backup exists"
-        );
-
-        restart_and_unlock(OWNER).expect("the real passphrase still opens the executor");
-        assert!(std::path::Path::new(&backup_file).exists());
-        assert!(backend.key_exists(&email));
-
-        restart_and_unlock(OWNER).expect("the rewritten file opens under the real passphrase");
-        assert!(!std::path::Path::new(&backup_file).exists());
-        assert_eq!(
-            wallet_did(backend.as_ref(), &user_did),
-            Some(user_did.clone())
-        );
-        assert!(
-            !backend.key_exists(&email),
-            "named by its DID once the backup is gone"
         );
 
         setup_agent();

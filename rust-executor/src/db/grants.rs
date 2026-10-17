@@ -50,69 +50,7 @@ impl Ad4mDb {
              );
              DROP TABLE IF EXISTS revoked_tokens;",
         )?;
-        Self::migrate_grants_to_agent_did(conn)?;
         conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_grants_agent_did ON grants(agent_did);")
-    }
-
-    /// Grants made before agents were keyed by DID name a managed agent by its user's email
-    /// (`agent_email`, `NULL` for the main agent) and carry a DID for every grant
-    /// (`agent_did NOT NULL`, the main agent's own DID on its grants). Rebuilds the table keyed
-    /// by `agent_did` alone: `NULL` for the main agent's grants; a managed agent's DID, taken
-    /// from the `users` row of its email where the grant has none. A grant on a managed agent
-    /// that no user owns is logged and dropped: no session could act through it. The table is
-    /// rebuilt, not altered, because `agent_did` loses its `NOT NULL`. Runs once: the rebuilt
-    /// table has no `agent_email`.
-    fn migrate_grants_to_agent_did(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-        let has_agent_email: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('grants') WHERE name = 'agent_email'",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_agent_email {
-            return Ok(());
-        }
-        let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(
-            "CREATE TABLE grants_by_did (
-                id TEXT PRIMARY KEY,
-                request_id TEXT NOT NULL,
-                agent_did TEXT,
-                auth_info TEXT NOT NULL,
-                state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
-                expires_at INTEGER NOT NULL,
-                created_at INTEGER NOT NULL
-             );
-             INSERT INTO grants_by_did
-                (id, request_id, agent_did, auth_info, state, expires_at, created_at)
-             SELECT id, request_id, did, auth_info, state, expires_at, created_at
-             FROM (
-                SELECT grants.*,
-                    CASE WHEN agent_email IS NULL THEN NULL
-                    ELSE COALESCE(
-                        NULLIF(agent_did, ''),
-                        (SELECT NULLIF(users.did, '') FROM users
-                         WHERE users.username = grants.agent_email)
-                    ) END AS did
-                FROM grants
-             )
-             WHERE agent_email IS NULL OR did IS NOT NULL;",
-        )?;
-        let total: i64 = tx.query_row("SELECT COUNT(*) FROM grants", [], |row| row.get(0))?;
-        let kept: i64 = tx.query_row("SELECT COUNT(*) FROM grants_by_did", [], |row| row.get(0))?;
-        tx.execute_batch(
-            "DROP INDEX IF EXISTS idx_grants_agent_email;
-             DROP TABLE grants;
-             ALTER TABLE grants_by_did RENAME TO grants;",
-        )?;
-        tx.commit()?;
-        if total > kept {
-            log::warn!(
-                "Dropped {} grant(s) on a managed agent no user owns: no session could act through them",
-                total - kept
-            );
-        }
-        log::info!("grants: rows now name their agent by DID");
-        Ok(())
     }
 
     /// Adds a grant. A row with the same id stays as it is.
