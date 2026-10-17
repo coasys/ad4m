@@ -239,6 +239,18 @@ function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined)
   return out;
 }
 
+/** Snapshot each top-level instance for dirty tracking, so `save()` on any
+ *  hydrated instance (query, union or subscription push) takes the update
+ *  path. Only the included relations (not `$` projections) are recorded.
+ *  Rows of a query by class name are base `Ad4mModel`s: nothing to track. */
+function snapshotHydrated(instances: any[], include?: IncludeMap): void {
+  const relations = include && Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')));
+  const recorded = relations && Object.keys(relations).length > 0 ? relations : undefined;
+  for (const inst of instances) {
+    if (inst instanceof Ad4mModel && inst.constructor !== Ad4mModel) (inst as any).takeSnapshot(recorded);
+  }
+}
+
 function jsonToModelInstance<T extends Ad4mModel>(
   ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
   perspective: PerspectiveProxy,
@@ -980,50 +992,48 @@ export class Ad4mModel {
     return changed;
   }
 
-  private async getData(opts?: GetOptions) {
-    // Route through the Rust model query endpoint — same pipeline as executeModelQuery
-    // but for a single instance by ID.
-    try {
-      const ctor = this.constructor as typeof Ad4mModel;
-      const query: Query = {
-        where: { id: this._baseExpression },
-        limit: 1,
-        deepQuery: true,  // Single-instance get() always evaluates property getters
-      };
-      if (opts?.properties) query.properties = opts.properties;
-      if (opts?.include) query.include = opts.include;
+  /** Hydrate this instance from the executor. `null` when no instance has this ID. */
+  private async getData(opts?: GetOptions): Promise<this | null> {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const query: Query = {
+      where: { id: this._baseExpression },
+      limit: 1,
+      deepQuery: true,  // Single-instance get() always evaluates property getters
+    };
+    if (opts?.properties) query.properties = opts.properties;
+    if (opts?.include) query.include = opts.include;
 
-      const { results } = await (ctor as any).executeModelQuery(
-        this._perspective, query, null
-      );
+    const { results } = await (ctor as any).executeModelQuery(
+      this._perspective, query, null
+    );
+    if (results.length === 0) return null;
 
-      if (results.length > 0) {
-        const hydrated = results[0];
-        // Copy all hydrated values from the Rust-side result onto this instance
-        for (const [key, value] of Object.entries(hydrated as any)) {
-          if (key === '_baseExpression' || key === '_perspective' || key === '_snapshot') continue;
-          if (key.startsWith('_')) continue;
-          // Check for readonly getters
-          let isReadonly = false;
-          let proto = Object.getPrototypeOf(this);
-          while (proto) {
-            const desc = Object.getOwnPropertyDescriptor(proto, key);
-            if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
-            proto = Object.getPrototypeOf(proto);
-          }
-          if (isReadonly) continue;
-          (this as any)[key] = value;
-        }
+    // Copy all hydrated values from the executor's result onto this instance
+    for (const [key, value] of Object.entries(results[0] as any)) {
+      if (key.startsWith('_')) continue;
+      // Check for readonly getters
+      let isReadonly = false;
+      let proto = Object.getPrototypeOf(this);
+      while (proto) {
+        const desc = Object.getOwnPropertyDescriptor(proto, key);
+        if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+        proto = Object.getPrototypeOf(proto);
       }
-
-      // Property getters and relation conformance getters are now evaluated
-      // Rust-side via evaluate_getters() in model_query.rs.
-    } catch (e) {
-      console.error(`getData via Rust model query failed for ${this._baseExpression}:`, e);
+      if (isReadonly) continue;
+      (this as any)[key] = value;
     }
 
     this.takeSnapshot(opts?.include);
     return this;
+  }
+
+  /**
+   * Re-read this instance after a write. A model whose instances leave no
+   * links of their own (all-optional, nothing set) reads back as missing;
+   * it still gets a snapshot, so the next save() updates instead of creating.
+   */
+  private async refresh() {
+    if (!(await this.getData())) this.takeSnapshot();
   }
 
   /**
@@ -1069,6 +1079,28 @@ export class Ad4mModel {
   }
 
   /**
+   * `query` with `includeAll` expanded to an `include` of every forward
+   * (has-many / has-one) relation of `classes`; explicit `include` entries win.
+   * @internal
+   */
+  static withIncludeAll(classes: (typeof Ad4mModel)[], query: Query): Query {
+    if (!query.includeAll) return query;
+    const { includeAll, ...rest } = query;
+    if (classes.some((c) => c === Ad4mModel)) {
+      // A query by class name runs on the undecorated base class: the client
+      // does not know the named model's relations, so it cannot expand them.
+      throw new Error("includeAll needs a decorated model class; for a query by class name, list the relations in `include`");
+    }
+    const expanded: IncludeMap = {};
+    for (const c of classes) {
+      for (const [name, rel] of Object.entries(c.getModelMetadata().relations)) {
+        if (rel.direction !== 'reverse') expanded[name] = true;
+      }
+    }
+    return { ...rest, include: { ...expanded, ...query.include } };
+  }
+
+  /**
    * Build the JSON parameters needed for a model query/subscription endpoint.
    * Returns the className and queryJson that the Rust executor expects.
    * Shape resolution happens server-side from the perspective's SHACL triples.
@@ -1088,21 +1120,12 @@ export class Ad4mModel {
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
-  ): { className: string; queryJson: string; metadata: ModelMetadata } {
-    const metadata = this.getModelMetadata();
+  ): { className: string; queryJson: string } {
+    // A query by class name runs on the undecorated base class: no metadata,
+    // so queriedAs() (which may read it) only runs without an override.
     const className = classNameOverride || this.queriedAs();
 
-    // Expand includeAll: true to a full IncludeMap covering every forward relation.
-    if (query.includeAll) {
-      const allRelMeta = getRelationsMetadata(this as any);
-      const expanded: IncludeMap = {};
-      for (const [relName, relMeta] of Object.entries(allRelMeta)) {
-        if ((relMeta as any).direction !== 'reverse') {
-          expanded[relName] = true;
-        }
-      }
-      query = { ...query, include: { ...expanded, ...query.include } };
-    }
+    query = Ad4mModel.withIncludeAll([this], query);
 
     const queryInput: any = {};
     if (query.parent) {
@@ -1170,7 +1193,6 @@ export class Ad4mModel {
     return {
       className,
       queryJson: JSON.stringify(queryInput),
-      metadata,
     };
   }
 
@@ -1189,7 +1211,9 @@ export class Ad4mModel {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+    const instances = arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
+    snapshotHydrated(instances, include);
+    return instances;
   }
 
 
@@ -1290,10 +1314,12 @@ export class Ad4mModel {
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
     const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
-    return arr.map((json: any) => {
+    const instances = arr.map((json: any) => {
       const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
       return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
     });
+    snapshotHydrated(instances, include);
+    return instances;
   }
 
   /** @internal */
@@ -1303,17 +1329,10 @@ export class Ad4mModel {
     query: Query = {},
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+    query = Ad4mModel.withIncludeAll(classes, query);
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of results) {
-      (inst as any).takeSnapshot?.(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
     return { results, totalCount: result.totalCount };
   }
 
@@ -1389,32 +1408,16 @@ export class Ad4mModel {
     classNameOverride?: string | null,
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T>> {
-    // Delegate query input building to the shared prepareModelQueryParams
-    // helper.  The executor resolves the shape from SHACL server-side.
+    // The executor resolves the shape from SHACL server-side.
+    query = Ad4mModel.withIncludeAll([this], query);
     const { className, queryJson } = this.prepareModelQueryParams(
       query, classNameOverride,
     );
 
     const result = await perspective.modelQuery(className, queryJson, options);
 
-    // Convert JSON instances to model class instances, recursively constructing
-    // class instances for any included relations resolved by Rust.
-    const instances: T[] = result.instances.map((json: any) => {
-      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
-    });
-
-    // Take snapshots for dirty tracking (exclude $-prefixed projection keys)
-    const snapshotRelations = query.include
-      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    for (const inst of instances) {
-      (inst as Ad4mModel).takeSnapshot(
-        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
-      );
-    }
-
     return {
-      results: instances,
+      results: this.parseModelResult(perspective, result, query.include, query.properties),
       totalCount: result.totalCount,
     };
   }
@@ -1760,7 +1763,7 @@ export class Ad4mModel {
         // saves within the same batch diff correctly.
         this.takeSnapshot();
       } else {
-        await this.getData();
+        await this.refresh();
       }
       return;
     }
@@ -1774,12 +1777,33 @@ export class Ad4mModel {
         `a class that has its properties; querying '${abstractName}' reads it.`
       );
     }
-    let batchCreatedHere = false;
-    if(!batchId) {
-      batchId = await this.perspective.createBatch()
-      batchCreatedHere = true;
+
+    // With a caller's batch, the caller commits; take a snapshot so a later
+    // save() in the same batch updates instead of creating again (two
+    // competing "title" values).
+    if (batchId) {
+      await this.createIn(batchId);
+      this.takeSnapshot();
+      return;
     }
 
+    // Otherwise the create gets its own batch, discarded if any step fails.
+    const ownBatch = await this.perspective.createBatch();
+    try {
+      await this.createIn(ownBatch);
+      await this.perspective.commitBatch(ownBatch);
+    } catch (e) {
+      await this.perspective.discardBatch(ownBatch).catch(() => {});
+      throw e;
+    }
+    // The record now exists: snapshot first, so if the re-read below fails a
+    // retried save() updates instead of creating a second copy.
+    this.takeSnapshot();
+    await this.refresh();
+  }
+
+  /** Stage the writes that create this instance in `batchId`. */
+  private async createIn(batchId: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
 
     // Track properties resolved through expression_create — a signed literal
@@ -1826,19 +1850,6 @@ export class Ad4mModel {
       if (value !== undefined && value !== null) {
         await this.setProperty(key, value, batchId);
       }
-    }
-
-    // If we got a batchId passed in, we let the caller decide when to commit.
-    // We can't call getData() since the instance won't exist in the perspective
-    // until the batch is committed.
-    if (batchCreatedHere) {
-      await this.perspective.commitBatch(batchId)
-      await this.getData();
-    } else {
-      // Take a snapshot so that a subsequent save() within the same batch
-      // routes through the UPDATE path instead of CREATE, avoiding duplicate
-      // links (e.g. two competing "title" values).
-      this.takeSnapshot();
     }
   }
 
@@ -2084,13 +2095,13 @@ export class Ad4mModel {
    * @param optsOrInclude - Optional hydration options. Accepts two forms:
    *   - `GetOptions` wrapper: `{ include: { comments: true }, properties: ['title'] }`
    *   - `IncludeMap` shorthand: `{ comments: true }` (equivalent to `{ include: { comments: true } }`)
-   * @returns The populated model instance
-   * @throws Will throw if data retrieval fails
+   * @returns This instance, populated, or `null` when no instance has this ID
+   * @throws If the read fails
    *
    * @example
    * ```typescript
    * const recipe = new Recipe(perspective, existingId);
-   * await recipe.get();
+   * if (!(await recipe.get())) throw new Error('not found');
    * console.log(recipe.name, recipe.ingredients);
    *
    * // Shorthand — pass IncludeMap directly:
@@ -2100,7 +2111,7 @@ export class Ad4mModel {
    * await recipe.get({ include: { ingredients: true }, properties: ['name'] });
    * ```
    */
-  async get(optsOrInclude?: GetOptions | IncludeMap) {
+  async get(optsOrInclude?: GetOptions | IncludeMap): Promise<this | null> {
     // Normalise: if the caller passed a plain IncludeMap shorthand (no `include`
     // or `properties` key at the top level) wrap it in GetOptions automatically.
     let opts: GetOptions | undefined;
@@ -2117,9 +2128,15 @@ export class Ad4mModel {
 
   /**
    * Deletes the model instance from the perspective.
+   *
+   * Also removes every incoming link (any link whose target is this
+   * instance, e.g. a parent's `@HasMany` link to it), so no reference to the
+   * deleted instance is left behind. Incoming links are read from committed
+   * state: a link to this instance added earlier in the same batch is not
+   * removed.
    * 
    * @param batchId - Optional batch ID for batch operations
-   * @throws Will throw if removal fails
+   * @throws Will throw if removing the instance's links or its incoming links fails
    * 
    * @example
    * ```typescript
@@ -2153,39 +2170,37 @@ export class Ad4mModel {
       //
       // Instead we only remove outgoing links whose predicate is declared
       // by THIS model's schema (properties + relations).
-      try {
-        const knownPredicates = new Set<string>();
-        for (const p of Object.values(metadata.properties)) {
-          if (p.predicate) knownPredicates.add(p.predicate);
-        }
-        for (const r of Object.values(metadata.relations)) {
-          if (r.predicate) knownPredicates.add(r.predicate);
-        }
+      const knownPredicates = new Set<string>();
+      for (const p of Object.values(metadata.properties)) {
+        if (p.predicate) knownPredicates.add(p.predicate);
+      }
+      for (const r of Object.values(metadata.relations)) {
+        if (r.predicate) knownPredicates.add(r.predicate);
+      }
 
-        const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
-        const ownLinks = outgoingLinks.filter(
-          (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
-        );
-        if (ownLinks.length > 0) {
-          await this._perspective.removeLinks(ownLinks, batchId);
-        }
-      } catch (e) {
-        console.warn(`delete(): failed to remove outgoing links for ${this._baseExpression}:`, e);
+      const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
+      const ownLinks = outgoingLinks.filter(
+        (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
+      );
+
+      if (ownLinks.length > 0) {
+        await this._perspective.removeLinks(ownLinks, batchId);
       }
     }
 
-    // Clean up incoming links — remove any links that point **to** this instance.
-    // Unlike outgoing links (scoped above), incoming links originate from OTHER
-    // nodes.  Removing them doesn't damage sibling models on this node; it
-    // prevents dangling references elsewhere (e.g. a parent's has_child link).
-    try {
-      const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
-      if (incomingLinks.length > 0) {
-        await this._perspective.removeLinks(incomingLinks, batchId);
-      }
-    } catch (e) {
-      // Non-fatal: the subject was already deleted; incoming link cleanup is best-effort
-      console.warn(`delete(): failed to clean up incoming links for ${this._baseExpression}:`, e);
+    // Remove every incoming link — any link that points **to** this instance,
+    // whatever model or relation it belongs to (including polymorphic
+    // relations, which name no single target class, e.g. a parent's child
+    // link). Unlike outgoing links (scoped above), incoming links have OTHER
+    // subjects as their source. Removing them doesn't damage sibling models
+    // on this base expression; leaving them would leave dangling references.
+    // A failed read or removal rejects delete(): a delete that silently leaves
+    // references behind is worse than one that reports its failure.
+    // The read sees committed links only: links staged earlier in the same
+    // batch (`batchId`) are not returned by `get()` and so are not removed.
+    const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
+    if (incomingLinks.length > 0) {
+      await this._perspective.removeLinks(incomingLinks, batchId);
     }
   }
 
@@ -2235,23 +2250,30 @@ export class Ad4mModel {
 
     // When a parent scope is provided without a caller-supplied batch, open a
     // new batch ourselves so that the instance creation and the parent→child
-    // link are committed atomically.  If either step throws, commitBatch is
-    // never reached and the batch is implicitly abandoned (rollback).
+    // link are committed atomically.  If any step throws, the batch is
+    // discarded (nothing is written, and it does not stay open on the
+    // executor) and the original error is rethrown.
     if (options?.parent && !options?.batchId) {
-      const batchId = await perspective.createBatch();
-      await instance.save(batchId);
       const parent = requireSingleParent(options.parent);
       const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', batchId);
-      await perspective.commitBatch(batchId);
+      const batchId = await perspective.createBatch();
+      try {
+        await instance.save(batchId);
+        const link = new Link({
+          source: parent.id,
+          predicate,
+          target: instance.id,
+        });
+        await perspective.add(link, 'shared', batchId);
+        await perspective.commitBatch(batchId);
+      } catch (e) {
+        // A failed discard must not hide the original error.
+        await perspective.discardBatch(batchId).catch(() => {});
+        throw e;
+      }
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
-      await instance.get();
+      await instance.refresh();
       return instance;
     }
 
@@ -2282,6 +2304,7 @@ export class Ad4mModel {
    * @param id - The expression URI of the instance to update
    * @param data - Property values to merge before saving
    * @returns The updated model instance
+   * @throws If no instance has this `id` (nothing is written)
    *
    * @example
    * ```typescript
@@ -2297,7 +2320,9 @@ export class Ad4mModel {
     data: Record<string, any>,
   ): Promise<T> {
     const instance = new this(perspective, id) as T;
-    await instance.get();
+    if (!(await instance.get())) {
+      throw new Error(`${this.getModelMetadata().className} not found: ${id}`);
+    }
     Object.assign(instance, data);
     await instance.save();
     return instance;
@@ -2306,10 +2331,11 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also cleans up any incoming links that point to this instance.
+   * Also removes every incoming link that points to this instance.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
+   * @throws Will throw if removing the instance's links or its incoming links fails
    *
    * @example
    * ```typescript
@@ -2329,10 +2355,11 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also cleans up any incoming links that point to this instance.
+   * Also removes every incoming link that points to this instance.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
+   * @throws Will throw if removing the instance's links or its incoming links fails
    *
    * @example
    * ```typescript
@@ -2395,8 +2422,8 @@ export class Ad4mModel {
    *
    * All `save`, `update`, and `delete` calls made via the provided `batchId`
    * are buffered and flushed atomically when the callback completes.
-   * If the callback throws, the batch is **not** committed, preventing
-   * partial writes.
+   * If the callback throws, the batch is discarded, not committed, and the
+   * error is rethrown: no partial writes.
    *
    * @param perspective - The perspective to operate on
    * @param fn - Async callback that receives a `TransactionContext` object.
@@ -2422,7 +2449,14 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    const result = await fn({ batchId });
+    let result: R;
+    try {
+      result = await fn({ batchId });
+    } catch (e) {
+      // A failed discard must not hide the callback's error.
+      await perspective.discardBatch(batchId).catch(() => {});
+      throw e;
+    }
     await perspective.commitBatch(batchId);
     return result;
   }

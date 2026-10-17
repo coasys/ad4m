@@ -70,7 +70,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /** Build model instances from a raw result pushed by a subscription. */
   private parse(raw: any): T[] {
-    const { include, properties } = this.queryParams;
+    const { include, properties } = (this.ctor as any).withIncludeAll(this.unionClasses ?? [this.ctor], this.queryParams);
     if (this.unionClasses) {
       return (this.ctor as any).parseUnionResult(this.unionClasses, this.perspective, raw, include, properties);
     }
@@ -375,7 +375,20 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     return this;
   }
 
+  /** Query the class registered under `className` instead of this builder's
+   *  class (how `Ad4mModel.query(p).overrideModelClassName(name)` queries a
+   *  model known only by name). On an undecorated `Ad4mModel` builder the rows
+   *  hydrate as plain `Ad4mModel`s, and `includeAll` is not available (list
+   *  the relations in `include`).
+   *  @throws On a `queryOf()` builder: a union already names its classes, and
+   *  its result type promises instances of them. */
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
+    if (this.unionClasses) {
+      throw new Error(
+        `overrideModelClassName("${className}") cannot be used on a queryOf() builder; ` +
+        `use Ad4mModel.query(perspective).overrideModelClassName("${className}") instead`,
+      );
+    }
     this.modelClassName = className;
     return this;
   }
@@ -484,12 +497,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     });
     const initialResults = parseResults(initial);
     lastFingerprint = fingerprint(initialResults);
-
-    // Take snapshots for dirty tracking
-    for (const inst of initialResults) {
-      (inst as any).takeSnapshot?.(this.queryParams.include);
-    }
-
     return initialResults;
   }
 

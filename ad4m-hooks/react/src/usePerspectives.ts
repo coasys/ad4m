@@ -38,6 +38,12 @@ export function usePerspectives(client: Ad4mClient) {
                     cb(p, link);
                 });
             });
+
+            // An update replaces a link: the old one leaves, the new one arrives.
+            p.on("link-updated", ({ oldLink, newLink }) => {
+                onRemovedLinkCbs.current.forEach((cb) => cb(p, oldLink));
+                onAddedLinkCbs.current.forEach((cb) => cb(p, newLink));
+            });
         };
 
         const perspectiveUpdatedListener = async ({ perspective: handle }: EventMap["perspective-updated"]) => {

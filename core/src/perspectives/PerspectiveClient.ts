@@ -556,6 +556,12 @@ export class PerspectiveClient {
         return LinkExpressionMutations.fromWire(diff)
     }
 
+    /** Drops an open batch without applying it. `true` if it was open,
+     *  `false` if it was already committed, discarded or timed out. */
+    async discardBatch(uuid: string, batchId: string): Promise<boolean> {
+        return this.#apiClient.call('perspective.discardBatch', { uuid, batchId })
+    }
+
     /** Register a callback that fires after a successful WebSocket reconnect.
      *  Passes through to ApiClient.onReconnect(). Returns an unsubscribe function. */
     onReconnect(callback: () => void): () => void {

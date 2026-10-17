@@ -439,6 +439,22 @@ describe('PerspectiveProxy.addFlow replace', () => {
   });
 });
 
+describe('PerspectiveProxy.getSingleTarget', () => {
+  it('queries without the target and leaves its argument unchanged', async () => {
+    const found = LinkExpression.fromWire({
+      author: 'did:test', timestamp: '2026-01-01T00:00:00Z',
+      data: { source: 's://1', predicate: 'p://name', target: 'literal://found' },
+      proof: { key: 'k', signature: 's' },
+    } as any);
+    const client = { queryLinks: jest.fn().mockResolvedValue([found]) } as any;
+    const query = new LinkQuery({ source: 's://1', predicate: 'p://name', target: 'literal://old' });
+
+    await expect(createProxy(client).getSingleTarget(query)).resolves.toBe('literal://found');
+    expect(client.queryLinks.mock.calls[0][1].target).toBeUndefined();
+    expect(query.target).toBe('literal://old');
+  });
+});
+
 // A read right after an awaited write must not be served from the query
 // cache: `updateSubject` and `removeSubject` through an abstract class (#1435)
 // write in the executor, so they invalidate it like the other writes.
