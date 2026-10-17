@@ -321,8 +321,8 @@ describe('WakerSubscriptionManager', () => {
 
   it('names the operator as the fix for a locked executor, on both message shapes', () => {
     // Current executor message (post-#973) and the older internal error must
-    // both map to the same hint, and the hint must point at the node operator —
-    // a remote agent cannot unlock someone else's node.
+    // both map to the same hint, and the hint must point at the executor's operator —
+    // a remote agent cannot unlock someone else's executor.
     const current = hintFor('RPC error 403: Executor is locked: the wallet has not been unlocked since the last restart.');
     const legacy = hintFor('RPC error 403: main key not found');
     for (const hint of [current, legacy]) {

@@ -50,7 +50,7 @@ Call `ad4m_get_sample_config` any time you need to see the exact config shape fo
 - **No `ad4m_*` tools yet** (you were handed a tarball, or the gateway has not loaded the plugin): you *cannot* call `ad4m_get_documentation` — it is a plugin tool, and there is no plugin. Your sources are this file and `references/setup.md`, in that order. Install, configure, authenticate, restart the gateway; then switch to the other half. **Read the skill files from the tarball you just installed, not any other copy already on the machine** (e.g. `~/.openclaw/plugin-skills/ad4m/` may be an older version from a prior install and will describe a different surface).
 - **Tools present:** call `ad4m_get_documentation(topic="overview")` **before you read further here, and before you grep this file**.
 
-`get_documentation` needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, and the traps. `topic="models"` is authoring your own subject classes. `topic="flux"` is there for spaces created by the Flux app, whose classes carry conventions of their own. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. Older executors serve only `overview` / `usage` / `architecture`; `overview` always lists what that node actually has. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
+`get_documentation` needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, and the traps. `topic="models"` is authoring your own subject classes. `topic="flux"` is there for spaces created by the Flux app, whose classes carry conventions of their own. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. Older executors serve only `overview` / `usage` / `architecture`; `overview` always lists what that executor actually has. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the executor in front of you.
 
 **Whatever any document says, the classes in a perspective are whatever `ad4m_describe_perspective(perspective_id)` returns.** A shared space may have no `Channel` class at all, and two spaces that both have one may shape it differently. Check before you assume a shape — this skill deliberately names no class as given.
 
@@ -62,8 +62,8 @@ Call `ad4m_get_sample_config` any time you need to see the exact config shape fo
 
 **Which of these you need depends on whose executor it is.** If you were given an
 address to connect to, you need no binary and no prerequisite — skip to *Multi-user*
-below. Only if you are standing up your own node do you need the `ad4m-executor` binary
-([GitHub releases](https://github.com/coasys/ad4m/releases)) — node-operator setup (init, run, unlock) is outside this skill's scope.
+below. Only if you are standing up your own executor do you need the `ad4m-executor` binary
+([GitHub releases](https://github.com/coasys/ad4m/releases)) — executor-operator setup (init, run, unlock) is outside this skill's scope.
 
 ### Single-agent (you own the executor)
 
@@ -73,7 +73,7 @@ openclaw ad4m-setup
 
 Discovers the binary, starts it, generates an agent identity, prints a config snippet. Handles both **managed mode** (plugin manages the executor) and **external mode** (connecting to one already running).
 
-### Multi-user (your human runs a shared node, or you're joining one)
+### Multi-user (your human runs a shared executor, or you're joining one)
 
 **This is one command, not a manual protocol dance.** Set these two config fields first, then run setup:
 
@@ -106,11 +106,11 @@ Setup resolves the password (env var → `config.password` → interactive promp
 
 **It does not edit `openclaw.json`.** It writes the finished config, token included, to `ad4m-setup-config.json` beside that profile's config file (mode `0600`) and prints the path; you copy it in, restart, and delete the file. Do not copy the token out of the log — OpenClaw elides credentials there, so what you see is `"eyJ0eX…kf94"` and not a usable JWT. **Do not fall back to raw MCP calls unless `ad4m-setup` genuinely can't run** — see `references/setup.md` → "Calling MCP tools without the plugin" for that last resort and its safety rules.
 
-Treat provisioning (signup, you're creating a new account) and joining (login, an account already exists for your email) as separate concerns — don't assume you own an email just because you're joining a neighbourhood on someone else's node.
+Treat provisioning (signup, you're creating a new account) and joining (login, an account already exists for your email) as separate concerns — don't assume you own an email just because you're joining a neighbourhood on someone else's executor.
 
 **Runtime re-auth (automatic, also undocumented until now):** the plugin retries `login_email` (with auto-signup on "user not found") on every restart, using the same `AD4M_PASSWORD` → `config.password` resolution. Keep that env var in sync with the account's actual password — a stale value fails re-auth and leaves you unauthenticated, with only a `[ad4m] Email login failed: …` warning in the plugin log to say so (see Troubleshooting).
 
-For plugin setup and authentication (managed vs external, the TLS guard), see `references/setup.md`. Standing up a bare executor (init, run, unlock) is node-operator work outside this skill's scope.
+For plugin setup and authentication (managed vs external, the TLS guard), see `references/setup.md`. Standing up a bare executor (init, run, unlock) is executor-operator work outside this skill's scope.
 
 ---
 
@@ -130,7 +130,7 @@ The MCP server uses Streamable HTTP transport and always responds with `text/eve
 
 **3a. `openclaw ad4m-setup` is the whole flow, both modes.** For a single-agent executor it
 performs the capability handshake for you — `request_capability`, reads back the
-`request_id` and `code`, calls `generate_jwt`. For a multi-user node it signs you up and
+`request_id` and `code`, calls `generate_jwt`. For a multi-user executor it signs you up and
 logs you in. Either way it leaves the resulting JWT in `ad4m-setup-config.json` next to
 that profile's config file, for you to paste into `plugins.entries.ad4m.config`; it does
 not edit the config itself. One command, either way; see Quick Setup above.
@@ -153,7 +153,7 @@ password out of `argv`, and the `Authorization` header form are in
 `references/setup.md` → "Calling MCP tools without the plugin". Do not use raw `curl`
 (Rule 2), and never put a password or JWT in a command argument.
 
-Some test/dev executors don't enforce email verification even though `signup` says "check your email" — check the `signup`/`login_email` response and your node's actual behavior rather than assuming verification is required.
+Some test/dev executors don't enforce email verification even though `signup` says "check your email" — check the `signup`/`login_email` response and your executor's actual behavior rather than assuming verification is required.
 
 ### 4. Work on the level of classes, not links
 
@@ -173,7 +173,7 @@ Which classes a space uses, which of them you may write into, and which are gene
 
 ### 8. Dynamic per-class tools are opt-in — not your default
 
-The executor can still generate one tool per (class × action) — `channel_create`, `message_set_body`, etc. — the way it always did. This is now **off by default** (`dynamicClassTools: false`) because it doesn't scale: ~45 tools with one social DNA loaded, ~85 with two, growing at runtime as neighbourhoods are joined, degrading LLM tool selection well before any hard limit. Even when a node enables it server-side, the tool names still need individual entries in `contracts.tools` client-side to reach you as native tools — there is no wildcard/pattern support for this.
+The executor can still generate one tool per (class × action) — `channel_create`, `message_set_body`, etc. — the way it always did. This is now **off by default** (`dynamicClassTools: false`) because it doesn't scale: ~45 tools with one social DNA loaded, ~85 with two, growing at runtime as neighbourhoods are joined, degrading LLM tool selection well before any hard limit. Even when an executor enables it server-side, the tool names still need individual entries in `contracts.tools` client-side to reach you as native tools — there is no wildcard/pattern support for this.
 
 If you genuinely need this mode (e.g. an existing integration built against it), it uses `expression_address` (not `base_uri`) and the naming convention `{class_lower}_{action}` / `{class_lower}_{action}_{property_lower}`. Full reference in `ad4m_get_documentation(topic="architecture")`, section "Generated MCP Tools", plus the plugin-side manifest caveat in `references/architecture.md` — don't teach this as the default path to a fresh bot.
 
@@ -206,7 +206,7 @@ Update it immediately after joining, before subscribing to mentions, and after e
 
 Call `ad4m_set_agent_profile(username: "...")` before `ad4m_subscribe_to_mentions`, or the subscription fails with `Failed to get agent: User profile not found for <email>`. Why a profile is needed and what else it affects: `ad4m_get_documentation(topic="usage")`. (`ad4m_set_profile_picture_from_file(file_path: "/path/to/square-image.png")` is the plugin's file-based wrapper for the picture — optional, crop to square first.)
 
-**A profile alone is necessary but not sufficient.** The executor can reject a subscription registration for reasons outside the profile — most commonly, the node hasn't been unlocked by its operator yet (see Troubleshooting) — or accept the waker's connection and then never answer it, which the plugin treats the same way once the 15s handshake timeout passes. The plugin handles both honestly: `subscribe_to_mentions`/`subscribe_to_children` returns a clear "not listening yet, retrying" response rather than a false success, and keeps re-attempting the registration every 30s in the background until the executor accepts it, without you needing to call subscribe again. `ad4m_list_waker_subscriptions()` reports a **Pending** section separately from active subscriptions — a pending entry that clears within a minute or two is normal (the node was mid-startup); one that stays pending indefinitely means the node genuinely hasn't been unlocked (see Troubleshooting).
+**A profile alone is necessary but not sufficient.** The executor can reject a subscription registration for reasons outside the profile — most commonly, the executor hasn't been unlocked by its operator yet (see Troubleshooting) — or accept the waker's connection and then never answer it, which the plugin treats the same way once the 15s handshake timeout passes. The plugin handles both honestly: `subscribe_to_mentions`/`subscribe_to_children` returns a clear "not listening yet, retrying" response rather than a false success, and keeps re-attempting the registration every 30s in the background until the executor accepts it, without you needing to call subscribe again. `ad4m_list_waker_subscriptions()` reports a **Pending** section separately from active subscriptions — a pending entry that clears within a minute or two is normal (the executor was mid-startup); one that stays pending indefinitely means the executor genuinely hasn't been unlocked (see Troubleshooting).
 
 ### 12. Subscribe to mentions on every new neighbourhood join
 
@@ -214,7 +214,7 @@ Call `ad4m_set_agent_profile(username: "...")` before `ad4m_subscribe_to_mention
 ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions your name or DID. If the node isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
+The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions your name or DID. If the executor isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
 
 For monitoring an entire channel (not just mentions):
 
@@ -283,11 +283,11 @@ These are the symptoms specific to the OpenClaw plugin — bridging, the manifes
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, or any `{class}_*` tool | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Check whether your node's plugin build has added it; otherwise see `references/setup.md` → "Calling MCP tools without the plugin". |
+| `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, or any `{class}_*` tool | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Check whether your plugin build has added it; otherwise see `references/setup.md` → "Calling MCP tools without the plugin". |
 | `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_list_link_language_templates`, `ad4m_get_documentation`, `ad4m_instance_transcript`, `ad4m_instance_remove_from_collection`, `ad4m_add_child` or `ad4m_get_children` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then see `references/setup.md` → "Calling MCP tools without the plugin". |
 | `tool not found` for something `contracts.tools` *does* list | The manifest declares a name the executor has no tool for — a manifest/executor mismatch, not a bridging gap. (`ad4m_remove_link` and `ad4m_agent_status` were exactly this until they were dropped from the manifest; a test now fails the build on any new one.) | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
 | `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is failing the auto-relogin on every restart (Rule 3b's runtime re-auth) — look for `[ad4m] Email login failed:` in the plugin log. | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
 | `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 11). | Call `ad4m_set_agent_profile` first. |
-| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on a node that's still starting up, or genuinely correct if the node hasn't been unlocked yet (a locked wallet — see `ad4m_get_documentation(topic="usage")`) — the plugin retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the node not being unlocked — that's the node operator's problem, not something to fix from your side. If the error says the handshake **timed out**, the executor accepted the waker's connection but never answered: the error names the URL the waker used (`executorUrl`, separate from `mcpEndpoint`) — check it is the operator's real API host and port. |
+| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on an executor that's still starting up, or genuinely correct if the executor hasn't been unlocked yet (a locked wallet — see `ad4m_get_documentation(topic="usage")`) — the plugin retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the executor not being unlocked — that's the executor operator's problem, not something to fix from your side. If the error says the handshake **timed out**, the executor accepted the waker's connection but never answered: the error names the URL the waker used (`executorUrl`, separate from `mcpEndpoint`) — check it is the operator's real API host and port. |
 | `ad4m_channel_query`/`ad4m_message_create`/etc. return "tool not found" | You're reading old instructions or an old memory of this skill — these are dynamic per-class tools, opt-in only (Rule 8), not the default surface anymore. | Use `instance_query`/`instance_create` with `class_name` instead. |
 | `instance_query` or `instance_transcript` returns a SPARQL parse error instead of results | The class URI (or a value used internally as an IRI) is not a valid IRI — e.g. contains spaces or other disallowed characters (known case: `bots://Message` fails the SPARQL backend). This is an executor-side issue, not a plugin issue. | Use a class registered with a well-formed URI. `describe_perspective` reports the registered class names; use those exactly as returned. |

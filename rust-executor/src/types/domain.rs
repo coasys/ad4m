@@ -15,9 +15,6 @@ use ts_rs::TS;
 /// per request (`api::auth`).
 #[derive(Clone)]
 pub struct RequestContext {
-    /// The token the session opened with. Read only by the interpretation pass, which
-    /// hands it to the harness's MCP client; Plan 20 PR 6 passes the `Session` instead.
-    pub auth_token: String,
     /// Per-request cancellation token, populated by the WS RPC dispatcher
     /// when the client may send `request.cancel`.  Handlers that want to
     /// support mid-flight cancellation can clone this and pass it to
@@ -50,7 +47,6 @@ impl RequestContext {
     ) -> Result<Self, crate::agent::session::AuthError> {
         let session = crate::agent::session::Session::open(token, admin_credential, reach)?;
         Ok(RequestContext {
-            auth_token: token.to_string(),
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,
@@ -87,7 +83,6 @@ impl RequestContext {
     /// A context for `session`, with no token.
     pub(crate) fn for_session(session: crate::agent::session::Session) -> RequestContext {
         RequestContext {
-            auth_token: String::new(),
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,

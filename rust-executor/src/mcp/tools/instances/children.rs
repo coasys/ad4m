@@ -5,12 +5,15 @@
 //! class-aware side of the tree. These two are for the raw link: parents
 //! that are not subject-class instances at all (`ad4m://self`, the plain-string
 //! ids some apps hand out), and listing children regardless of class.
+//!
+//! They call the RPC methods `perspective.addLink` and `perspective.queryLinks` through the
+//! handler map, so those methods' guards apply.
 
 use super::{
     error_json, link_target, pretty, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD,
     MAX_QUERY_LIMIT,
 };
-use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
+use crate::types::DecoratedLinkExpression;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -43,23 +46,6 @@ pub struct GetChildrenParams {
     pub limit: Option<usize>,
 }
 
-/// All `ad4m://has_child` links from `parent`, oldest first.
-pub(super) async fn child_links(
-    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
-    parent: &str,
-) -> Result<Vec<DecoratedLinkExpression>, String> {
-    let mut links = perspective
-        .get_links(&LinkQuery {
-            source: Some(link_target(parent)),
-            predicate: Some(HAS_CHILD.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    links.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-    Ok(links)
-}
-
 impl Ad4mMcpHandler {
     /// Link a child node under a parent via `ad4m://has_child`.
     #[tool(
@@ -67,25 +53,26 @@ impl Ad4mMcpHandler {
     )]
     pub async fn add_child(&self, params: Parameters<AddChildParams>) -> String {
         let p = &params.0;
-        let (mut perspective, agent_context) =
-            match self.get_writable_perspective(&p.perspective_id).await {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
         let parent = p.parent.trim();
         let child = p.child.trim();
         if parent.is_empty() || child.is_empty() {
             return error_json("parent and child must both be non-empty URIs");
         }
-        let link = Link {
-            source: link_target(parent),
-            predicate: Some(HAS_CHILD.to_string()),
-            target: link_target(child),
-        };
-        match perspective
-            .add_link(link, LinkStatus::Shared, None, &agent_context)
-            .await
-        {
+        let params = json!({
+            "uuid": p.perspective_id,
+            "link": {
+                "source": link_target(parent),
+                "predicate": HAS_CHILD,
+                "target": link_target(child),
+            },
+            "status": "shared",
+        });
+        let added = self
+            .call::<DecoratedLinkExpression>("perspective.addLink", params, |e| {
+                error_json(format!("Error adding child: {}", e.message))
+            })
+            .await;
+        match added {
             Ok(decorated) => pretty(&json!({
                 "success": true,
                 "link": {
@@ -95,7 +82,7 @@ impl Ad4mMcpHandler {
                     "timestamp": decorated.timestamp,
                 },
             })),
-            Err(e) => error_json(format!("Error adding child: {e:#}")),
+            Err(e) => e,
         }
     }
 
@@ -105,18 +92,25 @@ impl Ad4mMcpHandler {
     )]
     pub async fn get_children(&self, params: Parameters<GetChildrenParams>) -> String {
         let p = &params.0;
-        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => perspective,
-            Err(e) => return e,
-        };
         let parent = p.parent.trim();
         if parent.is_empty() {
             return error_json("parent must be a non-empty URI");
         }
-        let mut links = match child_links(&perspective, parent).await {
+        let params = json!({
+            "uuid": p.perspective_id,
+            "source": link_target(parent),
+            "predicate": HAS_CHILD,
+        });
+        let queried = self
+            .call::<Vec<DecoratedLinkExpression>>("perspective.queryLinks", params, |e| {
+                error_json(format!("Error getting children: {}", e.message))
+            })
+            .await;
+        let mut links = match queried {
             Ok(links) => links,
-            Err(e) => return error_json(format!("Error getting children: {e}")),
+            Err(e) => return e,
         };
+        links.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         let total = links.len();
         let limit = p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT);
         if links.len() > limit {

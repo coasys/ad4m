@@ -380,14 +380,12 @@ mod tests {
         use crate::mcp::server::McpContext;
         use crate::mcp::tools::{Ad4mMcpHandler, AUTH_TOOLS};
         use rmcp::ServerHandler;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
 
-        let handler = Ad4mMcpHandler::new(McpContext {
-            admin_credential: Some("secret".into()),
-            auth_token: Arc::new(RwLock::new(None)),
-            dynamic_class_tools: false,
-        });
+        let handler = Ad4mMcpHandler::new(McpContext::new(
+            Some("secret".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+            false,
+        ));
         let instructions = handler.get_info().instructions.expect("instructions set");
         assert!(instructions.contains("get_documentation(topic=\"overview\")"));
         for topic in DocTopic::ALL {
@@ -414,14 +412,12 @@ mod tests {
     #[tokio::test]
     async fn get_documentation_serves_every_topic() {
         use crate::mcp::server::McpContext;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
 
-        let handler = Ad4mMcpHandler::new(McpContext {
-            admin_credential: None,
-            auth_token: Arc::new(RwLock::new(None)),
-            dynamic_class_tools: false,
-        });
+        let handler = Ad4mMcpHandler::new(McpContext::new(
+            None,
+            crate::agent::capabilities::ListenerReach::Loopback,
+            false,
+        ));
 
         let mut served = Vec::new();
         for topic in DocTopic::ALL {

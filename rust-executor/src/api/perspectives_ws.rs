@@ -1488,17 +1488,10 @@ async fn run_interpretation_with_harness_handler(
         })
         .collect();
 
-    // Thread the caller's auth token into the harness so `Ad4mMcpHandler`'s
-    // tool dispatch executes with the caller's capabilities — same
-    // principle as the `/v1` openai-compat path. Empty string means an
-    // unauthenticated caller: don't propagate that as a phantom token
-    // (Ad4mMcpHandler treats `None` as "no user session; fall back to
-    // admin credential if configured").
-    let auth_token = if ctx.auth_token.is_empty() {
-        None
-    } else {
-        Some(ctx.auth_token.clone())
-    };
+    // The harness's `Ad4mMcpHandler` dispatches its tools as the caller's
+    // session, so the pass reaches what the caller reaches — same principle
+    // as the `/v1` openai-compat path (`interpretation::run::pass_mcp_context`).
+    let caller = Some(ctx.session.clone());
 
     // Live-debug event surface: same shape as the classic single-shot
     // handler. `observation_id` names both `processor_id` and `batch_key`
@@ -1551,7 +1544,7 @@ async fn run_interpretation_with_harness_handler(
             body.existing_scope.as_ref(),
             None,
             body.max_tool_calls,
-            auth_token,
+            caller,
             emit_ctx.as_ref(),
             // WS-RPC is the one-shot path — dedup-on-drain stays off; the
             // caller reaches for the harness specifically to trust the LLM

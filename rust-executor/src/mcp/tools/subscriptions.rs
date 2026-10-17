@@ -92,11 +92,6 @@ impl Ad4mMcpHandler {
         description = "Generate a SPARQL query config for watching changes to a subject class in a perspective. This does NOT create a live subscription — it returns a query and config that you pass to an external waker process. The waker uses perspective query subscriptions for live updates. Flow: 1) Call this tool to get the query config, 2) Store subscription_id + context in memory, 3) Add waker_config to the waker's config file and restart it, 4) When woken, use MCP tools to fetch the latest data. The query is derived from the SHACL class definition — no hardcoded type predicates."
     )]
     pub async fn generate_waker_query(&self, params: Parameters<SubscribeToModelParams>) -> String {
-        let _capabilities = match self.get_capabilities().await {
-            Ok(c) => c,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
         let p = &params.0;
 
         let perspective = match self.get_readable_perspective(&p.perspective_id).await {
@@ -191,10 +186,16 @@ impl Ad4mMcpHandler {
         &self,
         params: Parameters<MentionWakerConfigParams>,
     ) -> String {
-        let token = self.get_auth_token().await.unwrap_or_default();
+        let perspective = match self
+            .get_readable_perspective(&params.0.perspective_id)
+            .await
+        {
+            Ok(perspective) => perspective,
+            Err(e) => return e,
+        };
 
         // Resolve agent
-        let context = match self.agent_context_for(&token) {
+        let context = match self.get_agent_context().await {
             Ok(context) => context,
             Err(e) => return json!({"error": e}).to_string(),
         };
@@ -204,14 +205,6 @@ impl Ad4mMcpHandler {
         };
 
         let did = agent.did.clone();
-
-        // Validate perspective
-        if let Err(e) = self
-            .get_readable_perspective(&params.0.perspective_id)
-            .await
-        {
-            return json!({"error": format!("Perspective not accessible: {}", e)}).to_string();
-        }
 
         // Collect all profile names from the agent's public perspective.
         // Note on profile ontology: sioc:// predicates are currently shared with Flux;
@@ -246,20 +239,12 @@ impl Ad4mMcpHandler {
 
         // Discover the body property predicate from SHACL to scope the query.
         // Without this, the query scans ALL links which is very slow on large perspectives.
-        let perspective = self
-            .get_readable_perspective(&params.0.perspective_id)
+        let body_predicate = shacl::load_class_properties(&perspective, "Message")
             .await
-            .ok();
-        let body_predicate = if let Some(ref p) = perspective {
-            let props = shacl::load_class_properties(p, "Message").await;
-            props
-                .iter()
-                .find(|prop| prop.name.to_lowercase() == "body")
-                .and_then(|prop| prop.predicate.clone())
-                .filter(|p| validate_sparql_iri(p).is_ok())
-        } else {
-            None
-        };
+            .iter()
+            .find(|prop| prop.name.to_lowercase() == "body")
+            .and_then(|prop| prop.predicate.clone())
+            .filter(|p| validate_sparql_iri(p).is_ok());
 
         if body_predicate.is_none() {
             log::warn!("get_mention_waker_config: no body predicate found in SHACL for Message class, falling back to unscoped (but ontology-excluded) query");

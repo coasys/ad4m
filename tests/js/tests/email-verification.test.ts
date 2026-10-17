@@ -28,6 +28,9 @@ describe("Email Verification with Mock Service", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
     const appDataPath = path.join(TEST_DIR, "agents", "email-verification");
     const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
+    // Multi-user mode needs an admin credential: without one a caller with no token is the
+    // operator, which a multi-user executor must not have.
+    const adminCredential = "email-verification-admin";
     let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
@@ -64,13 +67,13 @@ describe("Email Verification with Mock Service", () => {
 
         executorProcess = proxyUrl && bootstrapUrl
             ? await startExecutor(appDataPath, bootstrapSeedPath,
-                apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl,
+                apiPort, hcAdminPort, hcAppPort, false, adminCredential, proxyUrl, bootstrapUrl,
                 undefined, false, undefined, undefined, runHolochain)
             : await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort, false,
-                undefined, undefined, undefined, undefined, false, undefined, undefined, runHolochain);
+                adminCredential, undefined, undefined, undefined, false, undefined, undefined, runHolochain);
 
-        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`)
+        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -89,7 +92,7 @@ describe("Email Verification with Mock Service", () => {
         }
 
         if (executorProcess) {
-            await quitExecutor(executorProcess, apiPort);
+            await quitExecutor(executorProcess, apiPort, adminCredential);
         }
         if (localServicesProcess) {
             localServicesProcess.kill('SIGKILL');

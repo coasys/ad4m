@@ -30,12 +30,16 @@ use crate::api::perspectives_ws::PerspectiveUuidParams;
 use crate::api::ws_handler::{build_handler_map, HandlerMap, NoParams, WsRpcError};
 use crate::types::{PerspectiveHandle, RequestContext};
 
-const USER_DID: &str = "did:key:matrix-user";
-const OTHER_USER_DID: &str = "did:key:matrix-other-user";
+/// The matrix's user: its login name (the email) and its agent (the DID, D16). The world
+/// records the account, so the email resolves to the DID where a caller names a user by email.
+pub(super) const USER_EMAIL: &str = "user@example.org";
+pub(super) const USER_DID: &str = "did:key:matrix-user";
+pub(super) const OTHER_USER_EMAIL: &str = "other@example.org";
+pub(super) const OTHER_USER_DID: &str = "did:key:matrix-other-user";
 
 /// Who calls.
 #[derive(Clone, Copy, Debug)]
-enum Caller {
+pub(super) enum Caller {
     Operator,
     /// An app token on the main agent without the guard's capability.
     AppWithout,
@@ -55,7 +59,7 @@ enum Caller {
 
 /// The resource a call names.
 #[derive(Clone, Copy, Debug)]
-enum Target {
+pub(super) enum Target {
     /// Owned by [`Caller::User`]'s agent.
     UsersOwn,
     /// Owned by the executor's main agent.
@@ -67,7 +71,7 @@ enum Target {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Expect {
+pub(super) enum Expect {
     Granted,
     /// 403: the capability, or the rule of `Operator` and `Executor`.
     Forbidden,
@@ -78,7 +82,7 @@ enum Expect {
 /// What [`Caller::UserAppWithout`] holds: querying one perspective that no row names. No
 /// guard checks it: a perspective guard builds its capability from the row's uuid, and every
 /// other perspective capability names `*`, which a single pointer does not cover.
-fn unrelated_capability() -> Capability {
+pub(super) fn unrelated_capability() -> Capability {
     perspective_query_capability(vec!["matrix-unrelated-perspective".to_string()])
 }
 
@@ -89,7 +93,7 @@ fn anonymous_holds(cap: &Capability) -> bool {
 
 /// Guards that name no resource: who passes each. `Guard::Owns` has its own rows
 /// ([`owns_rows`]).
-fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
+pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
     use Caller::*;
     use Expect::*;
     match guard {
@@ -140,7 +144,7 @@ fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
 }
 
 /// `Guard::Owns` on a perspective: who reaches which.
-fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
+pub(super) fn perspective_rows() -> &'static [(Caller, Target, Expect)] {
     use Caller::*;
     use Expect::*;
     use Target::*;
@@ -195,7 +199,7 @@ fn agent_resource_rows() -> &'static [(Caller, Target, Expect)] {
 }
 
 /// The rows of `Guard::Owns` on `owner`.
-fn owns_rows(owner: Owner) -> &'static [(Caller, Target, Expect)] {
+pub(super) fn owns_rows(owner: Owner) -> &'static [(Caller, Target, Expect)] {
     match owner {
         Owner::Perspective => perspective_rows(),
         Owner::Task | Owner::Grant | Owner::Request => agent_resource_rows(),
@@ -703,7 +707,7 @@ fn context(caller: Caller, capability: Option<Capability>) -> RequestContext {
 
 /// The perspectives, AI tasks, grants and capability requests the rows name;
 /// [`World::remove`] removes them.
-struct World {
+pub(super) struct World {
     users_own: String,
     main_agents: String,
     unowned: String,
@@ -716,7 +720,7 @@ struct World {
 }
 
 impl World {
-    async fn new() -> World {
+    pub(super) async fn new() -> World {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         if crate::db::Ad4mDb::global_instance()
@@ -725,6 +729,11 @@ impl World {
             .is_none()
         {
             crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        // The two users' accounts: an email names its user's agent only through `users`.
+        for (email, did) in [(USER_EMAIL, USER_DID), (OTHER_USER_EMAIL, OTHER_USER_DID)] {
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_user_prehashed(email, did, ""))
+                .expect("a user account");
         }
         let main_did = AgentService::with_global_instance(|a| a.did.clone()).expect("main DID");
         let run = uuid::Uuid::new_v4();
@@ -790,7 +799,7 @@ impl World {
     }
 
     /// The id of the `owner` resource a row names.
-    fn id(&self, owner: Owner, target: Target) -> String {
+    pub(super) fn id(&self, owner: Owner, target: Target) -> String {
         let missing = || format!("{}-missing", uuid::Uuid::new_v4());
         let (users, main_agents) = match owner {
             Owner::Perspective => (&self.users_own, &self.main_agents),
@@ -806,7 +815,7 @@ impl World {
         }
     }
 
-    async fn remove(self) {
+    pub(super) async fn remove(self) {
         for uuid in [&self.users_own, &self.main_agents, &self.unowned] {
             crate::perspectives::remove_perspective(uuid).await;
         }

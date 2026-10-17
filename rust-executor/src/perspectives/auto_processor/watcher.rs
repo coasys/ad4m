@@ -985,9 +985,10 @@ pub async fn run_one_pass(
                     cfg.existing_scope.as_ref(),
                     Some(&cursor),
                     n,
-                    // Auto-processor is an internal caller — no per-pass user
-                    // token to bill. MCP admin credential (if configured) is
-                    // read from env inside the harness path.
+                    // Auto-processor is an internal caller — no caller session
+                    // to bill. Without one the pass's tools act as the
+                    // perspective's owner, never as the operator
+                    // (`interpretation::run::pass_mcp_context`).
                     None,
                     // `emit_debug_events` gates the same event stream the
                     // classic path uses; `None` when disabled means the

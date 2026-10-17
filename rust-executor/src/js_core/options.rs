@@ -43,7 +43,7 @@ pub fn language_main_module_url() -> Url {
 /// misaligns the op registry.
 ///
 /// The wallet extension no longer appears here. It exposed `globalThis.WALLET` — the
-/// node's main private key, keystore export and lock — to every language, which no
+/// main agent's private key, keystore export and lock — to every language, which no
 /// language uses. Languages sign through `signature_service` / `agent_service` instead,
 /// and `agent_service` carries no unlock, lock, reload or profile-write op.
 pub fn ad4m_language_extensions() -> Vec<deno_core::Extension> {
@@ -94,7 +94,7 @@ pub fn language_worker_options() -> WorkerOptions {
 mod tests {
     use super::ad4m_language_extensions;
 
-    /// The wallet extension exposed the node's main private key and keystore export to
+    /// The wallet extension exposed the main agent's private key and keystore export to
     /// every language. No language uses it, so the runtime must not register it.
     #[test]
     fn the_language_runtime_does_not_expose_the_wallet() {
@@ -129,11 +129,11 @@ mod tests {
         assert!(signature.contains("object"), "SIGNATURE is {signature}");
     }
 
-    /// `AGENT.unlock` let any language probe the node's passphrase, `AGENT.lock` lock the
-    /// node under a passphrase of its choosing, `AGENT.load` reload the keystore, and
-    /// `AGENT.save_agent_profile` overwrite the node's profile. Signing stays.
+    /// `AGENT.unlock` let any language probe the executor's passphrase, `AGENT.lock` lock the
+    /// executor under a passphrase of its choosing, `AGENT.load` reload the keystore, and
+    /// `AGENT.save_agent_profile` overwrite the main agent's profile. Signing stays.
     #[tokio::test]
-    async fn a_language_runtime_cannot_unlock_lock_reload_or_rewrite_the_node() {
+    async fn a_language_runtime_cannot_unlock_lock_reload_or_rewrite_the_executor() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = crate::languages::language_runtime::LanguageRuntime::new(
             "agent-ops-check".to_string(),

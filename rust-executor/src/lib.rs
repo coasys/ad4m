@@ -495,6 +495,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .expect("Failed to enable multi-user mode");
         }
     }
+    // `check_admin_credential` refused `--enable-multi-user` without a credential; the mode
+    // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
+    if let Err(reason) = crate::config::refuse_multi_user_from_db(
+        &config.admin_credential,
+        crate::user_management::is_multi_user_enabled(),
+    ) {
+        return failed_start(reason);
+    }
 
     info!("Initializing AI service...");
     AIService::init_global_instance()
@@ -562,6 +570,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         warn!("║  A caller with no token gets ALL_CAPABILITY (full admin      ║");
         warn!("║  access) on a loopback listener. On --localhost false, TLS,  ║");
         warn!("║  or a request with a forwarding header it is anonymous.      ║");
+        warn!("║  Multi-user mode is refused: it needs an admin credential.   ║");
         warn!("║  This mode is intended for local testing ONLY.               ║");
         warn!("╚══════════════════════════════════════════════════════════════╝");
     }
@@ -812,11 +821,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 tls: mcp_tls,
                 ..Default::default()
             };
-            if let Err(e) = runtime.block_on(mcp::start_mcp_server(
-                admin_credential,
-                None, // No pre-set auth token
-                mcp_config,
-            )) {
+            if let Err(e) = runtime.block_on(mcp::start_mcp_server(admin_credential, mcp_config)) {
                 error!("MCP server error: {:?}", e);
             }
         });

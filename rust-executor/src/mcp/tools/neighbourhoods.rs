@@ -2,20 +2,14 @@
 //!
 //! High-level tools for P2P collaboration. Agents select from known link language
 //! templates; the system handles cloning and unique instance creation automatically.
+//! The tools call the RPC methods `runtime.linkLanguageTemplates`, `neighbourhood.publish` and
+//! `neighbourhood.join` through the handler map, so their guards apply.
 
-use super::Ad4mMcpHandler;
-use crate::agent::capabilities::{
-    check_capability,
-    defs::{
-        NEIGHBOURHOOD_CREATE_CAPABILITY, NEIGHBOURHOOD_READ_CAPABILITY,
-        RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY,
-    },
-};
+use super::{labelled_json, method_error, Ad4mMcpHandler};
 use crate::agent::AgentContext;
+use crate::api::ws_handler::WsRpcError;
 use crate::languages::LanguageController;
-use crate::neighbourhoods;
-use crate::runtime_service::RuntimeService;
-use crate::types::Perspective;
+use crate::types::{Perspective, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -62,21 +56,16 @@ impl Ad4mMcpHandler {
         description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language` when calling `neighbourhood_publish_from_perspective`."
     )]
     pub async fn list_link_language_templates(&self) -> String {
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) =
-            check_capability(&capabilities, &RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY)
+        let addresses: Vec<String> = match self
+            .call(
+                "runtime.linkLanguageTemplates",
+                json!({}),
+                labelled_json("Failed to get link language templates"),
+            )
+            .await
         {
-            return format!("Capability error: {}", e);
-        }
-
-        let addresses = match RuntimeService::with_global_instance(|runtime_service| {
-            Ok::<Vec<String>, String>(runtime_service.get_know_link_languages())
-        }) {
-            Ok(addrs) => addrs,
-            Err(e) => {
-                return json!({"error": format!("Failed to get link language templates: {}", e)})
-                    .to_string()
-            }
+            Ok(addresses) => addresses,
+            Err(e) => return e,
         };
 
         // Fetch meta information for each template
@@ -126,29 +115,36 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
+        // `neighbourhood.publish` decides who may publish this perspective, and
+        // `language.applyTemplate` who may clone and publish a language, the work of
+        // `clone_link_language`. Both guards run first, so a refused caller clones nothing.
+        let publish = |link_language: &str| {
+            json!({
+                "perspectiveUuid": p.perspective_uuid,
+                "linkLanguage": link_language,
+                "meta": Perspective::default(),
+            })
+        };
+        if let Err(e) = self
+            .admit_method("neighbourhood.publish", &publish(&p.link_language))
+            .await
+        {
+            return method_error(e);
+        }
+        let apply_template = json!({
+            "sourceLanguageHash": p.link_language,
+            "templateData": json!({ "name": p.name }).to_string(),
+        });
+        if let Err(e) = self
+            .admit_method("language.applyTemplate", &apply_template)
+            .await
+        {
+            return method_error(e);
+        }
         let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
+            Err(e) => return method_error(WsRpcError::unauthorized(e)),
         };
-
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        // Check perspective access
-        let perspective = match crate::perspectives::get_perspective(&p.perspective_uuid) {
-            Some(p) => p,
-            None => {
-                return json!({"error": format!("Perspective not found: {}", p.perspective_uuid)})
-                    .to_string()
-            }
-        };
-
-        let handle = perspective.persisted.lock().await.clone();
-        if !self.can_access_perspective(&handle).await {
-            return json!({"error": "Perspective not found or not accessible"}).to_string();
-        }
 
         // Clone the link language template
         let cloned_address =
@@ -157,16 +153,14 @@ impl Ad4mMcpHandler {
                 Err(e) => return json!({"error": e}).to_string(),
             };
 
-        let meta = Perspective::default();
-
-        match neighbourhoods::neighbourhood_publish_from_perspective_with_context(
-            &p.perspective_uuid,
-            cloned_address.clone(),
-            meta,
-            &agent_context,
-        )
-        .await
-        {
+        let published = self
+            .call::<String>(
+                "neighbourhood.publish",
+                publish(&cloned_address),
+                labelled_json("Failed to publish neighbourhood"),
+            )
+            .await;
+        match published {
             Ok(url) => json!({
                 "success": true,
                 "neighbourhood_url": url,
@@ -176,9 +170,7 @@ impl Ad4mMcpHandler {
                 "message": "Perspective published as neighbourhood. Share the neighbourhood_url for others to join."
             })
             .to_string(),
-            Err(e) => {
-                json!({"error": format!("Failed to publish neighbourhood: {}", e)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 
@@ -192,19 +184,14 @@ impl Ad4mMcpHandler {
     ) -> String {
         let p = &params.0;
 
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let capabilities = self.get_capabilities().await;
-        if let Err(e) = check_capability(&capabilities, &NEIGHBOURHOOD_READ_CAPABILITY) {
-            return format!("Capability error: {}", e);
-        }
-
-        match neighbourhoods::install_neighbourhood_with_context(p.url.clone(), &agent_context)
-            .await
-        {
+        let joined = self
+            .call::<PerspectiveHandle>(
+                "neighbourhood.join",
+                json!({ "url": p.url }),
+                labelled_json("Failed to join neighbourhood"),
+            )
+            .await;
+        match joined {
             Ok(handle) => json!({
                 "success": true,
                 "perspective_uuid": handle.uuid,
@@ -213,15 +200,13 @@ impl Ad4mMcpHandler {
                 "message": "Successfully joined neighbourhood. Use the perspective_uuid to interact with it."
             })
             .to_string(),
-            Err(e) => {
-                json!({"error": format!("Failed to join neighbourhood: {}", e)}).to_string()
-            }
+            Err(e) => e,
         }
     }
 }
 
 /// Clone a link language template and publish the cloned instance as `agent_context`: a
-/// user's neighbourhood publishes its link language as the user, never as the node.
+/// user's neighbourhood publishes its link language as the user, never as the main agent.
 /// Returns the new language address.
 pub(crate) async fn clone_link_language(
     template_address: &str,
@@ -365,6 +350,84 @@ fn build_clone_template_map(
         serde_json::Value::String(name.to_string()),
     );
     m
+}
+
+/// Publishing runs both of its methods' guards before any clone (#851): the order the method
+/// matrix through MCP does not pin.
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::agent::capabilities::{
+        ALL_CAPABILITY, LANGUAGE_CREATE_CAPABILITY, NEIGHBOURHOOD_CREATE_CAPABILITY,
+    };
+    use crate::mcp::tools::test_support::{
+        app, handler_as, operator, perspective, setup, status, user,
+    };
+    use rmcp::handler::server::wrapper::Parameters;
+
+    async fn publish(handler: &Ad4mMcpHandler, uuid: &str) -> String {
+        handler
+            .neighbourhood_publish_from_perspective(Parameters(NeighbourhoodPublishParams {
+                perspective_uuid: uuid.to_string(),
+                link_language: "QmNoSuchTemplate".into(),
+                name: "n".into(),
+            }))
+            .await
+    }
+
+    // The tool checked the user's own perspectives and NEIGHBOURHOOD_CREATE; the operator could
+    // not publish a user's perspective, and a refusal named no status.
+    #[tokio::test]
+    async fn publishing_follows_the_perspective_guard_before_any_clone() {
+        setup();
+        let owner_did = "did:key:mcp-publisher";
+        let uuid = perspective(Some(vec![owner_did.into()])).await;
+
+        let other = handler_as(user(
+            "did:key:mcp-other-publisher",
+            vec![ALL_CAPABILITY.clone()],
+        ));
+        let refused = publish(&other, &uuid).await;
+        assert_eq!(status(&refused), Some(404), "{refused}");
+        assert!(refused.contains("not found"), "{refused}");
+
+        let without = publish(&handler_as(app(vec![])), &uuid).await;
+        assert_eq!(status(&without), Some(403), "{without}");
+
+        // Past the guard the tool clones the template, which this test executor cannot do.
+        for session in [
+            operator(),
+            user(
+                owner_did,
+                vec![
+                    NEIGHBOURHOOD_CREATE_CAPABILITY.clone(),
+                    LANGUAGE_CREATE_CAPABILITY.clone(),
+                ],
+            ),
+        ] {
+            let answer = publish(&handler_as(session), &uuid).await;
+            assert_eq!(status(&answer), None, "{answer}");
+            assert!(answer.contains("error"), "{answer}");
+        }
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
+
+    // Cloning applies a template and publishes a language: `language.applyTemplate`'s work,
+    // which needs LANGUAGE_CREATE. Publishing the perspective alone did not check it.
+    #[tokio::test]
+    async fn publishing_needs_the_language_create_capability_before_any_clone() {
+        setup();
+        let owner_did = "did:key:mcp-publisher-without-language";
+        let uuid = perspective(Some(vec![owner_did.into()])).await;
+        let owner = handler_as(user(
+            owner_did,
+            vec![NEIGHBOURHOOD_CREATE_CAPABILITY.clone()],
+        ));
+        let refused = publish(&owner, &uuid).await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+        assert!(!refused.contains("template"), "no clone ran: {refused}");
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
 }
 
 #[cfg(test)]

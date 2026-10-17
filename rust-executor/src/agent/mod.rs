@@ -56,25 +56,6 @@ impl AgentContext {
         }
     }
 
-    /// The agent a token acts as.
-    ///
-    /// The empty token, the admin credential and operator tokens act as the main agent. A user
-    /// token acts as its user, whatever the multi-user setting says. Any other token, such as
-    /// an expired, revoked or unreadable one, acts as nobody: this returns an error, never the
-    /// main agent. The caller says whether the token is the admin credential, because only the
-    /// caller knows it. Only MCP uses it: every other caller asks its request's `acts_as()`.
-    pub fn from_auth_token(
-        auth_token: String,
-        is_admin_credential: bool,
-    ) -> Result<Self, AnyError> {
-        if is_admin_credential || auth_token.is_empty() {
-            return Ok(Self::main_agent());
-        }
-        let claims = capabilities::decode_jwt(auth_token)?;
-        let grant = capabilities::granted(&claims).map_err(|e| anyhow!(e))?;
-        Ok(grant.agent.clone())
-    }
-
     /// The main agent.
     pub fn main_agent() -> Self {
         AgentContext::Main
@@ -2232,12 +2213,21 @@ mod tests {
 
 #[cfg(test)]
 mod agent_context_tests {
-    use super::AgentContext;
+    use super::{capabilities, AgentContext};
+    use crate::agent::session::{AuthError, Session};
     use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+
+    const ADMIN: &str = "the-admin-credential";
 
     fn setup() {
         setup_wallet();
         setup_agent();
+    }
+
+    /// The agent a caller presenting `token` acts as, on an executor with an admin credential.
+    fn acts_as(token: &str) -> Result<AgentContext, AuthError> {
+        let admin = Some(crate::secret::Secret::from(ADMIN));
+        Session::open(token, &admin, capabilities::ListenerReach::Network).map(|s| s.acts_as())
     }
 
     /// A login of `email`, whose agent gets a key and a `users` row first: a login's grant
@@ -2253,14 +2243,14 @@ mod agent_context_tests {
         setup();
         let _multi_user = MultiUserMode::on();
         let token = expired_user_token("expired@example.org");
-        assert!(AgentContext::from_auth_token(token, false).is_err());
+        assert!(acts_as(&token).is_err());
     }
 
     #[test]
     fn an_unreadable_token_acts_as_nobody() {
         setup();
         let _multi_user = MultiUserMode::on();
-        assert!(AgentContext::from_auth_token("not-a-jwt".to_string(), false).is_err());
+        assert!(acts_as("not-a-jwt").is_err());
     }
 
     #[test]
@@ -2268,8 +2258,7 @@ mod agent_context_tests {
         setup();
         let _multi_user = MultiUserMode::on();
         let did = crate::test_utils::create_test_user("alice@example.org");
-        let token = login("alice@example.org");
-        let context = AgentContext::from_auth_token(token, false).unwrap();
+        let context = acts_as(&login("alice@example.org")).unwrap();
         assert!(!context.is_main_agent());
         assert_eq!(context, AgentContext::managed(did));
     }
@@ -2278,10 +2267,8 @@ mod agent_context_tests {
     fn the_admin_credential_and_the_empty_token_act_as_the_main_agent() {
         setup();
         let _multi_user = MultiUserMode::on();
-        let admin = AgentContext::from_auth_token("the-admin-credential".to_string(), true);
-        assert!(admin.unwrap().is_main_agent());
-        let empty = AgentContext::from_auth_token(String::new(), false);
-        assert!(empty.unwrap().is_main_agent());
+        assert!(acts_as(ADMIN).unwrap().is_main_agent());
+        assert!(acts_as("").unwrap().is_main_agent());
     }
 
     // A user token used to act as the main agent once multi-user mode read as off
@@ -2291,8 +2278,7 @@ mod agent_context_tests {
         setup();
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
         let did = crate::test_utils::create_test_user("alice@example.org");
-        let token = login("alice@example.org");
-        let context = AgentContext::from_auth_token(token, false).unwrap();
+        let context = acts_as(&login("alice@example.org")).unwrap();
         assert!(!context.is_main_agent());
         assert_eq!(context, AgentContext::managed(did));
     }
@@ -2301,10 +2287,10 @@ mod agent_context_tests {
     fn a_revoked_token_acts_as_nobody() {
         setup();
         let token = login("revoked@example.org");
-        assert!(AgentContext::from_auth_token(token.clone(), false).is_ok());
+        assert!(acts_as(&token).is_ok());
         let grants = super::grants::Grants::global();
         grants.revoke(&grants.find(&token)).unwrap();
-        assert!(AgentContext::from_auth_token(token, false).is_err());
+        assert_eq!(acts_as(&token).unwrap_err(), AuthError::Revoked);
     }
 
     #[test]

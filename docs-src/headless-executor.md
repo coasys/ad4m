@@ -97,7 +97,7 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
 
    Expected: no output. `multi_user_config.enabled` cannot be turned off
    again on the same data directory; leave it `false` for a single-user
-   node.
+   executor.
 
 4. **The admin credential**, generated into its file (mode 0600, never
    printed):
@@ -114,7 +114,7 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    python3 -c 'import os,secrets,sys; fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600); os.write(fd, secrets.token_urlsafe(32).encode()); os.close(fd)' ~/.config/ad4m/secrets/unlock-passphrase
    ```
 
-   Expected: no output. For an agent that already exists (a node moved off
+   Expected: no output. For an agent that already exists (an executor moved off
    the launcher), write its passphrase into the file with an editor instead
    and `chmod 600` it. Check both files:
 
@@ -208,7 +208,7 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    ```
 
    Expected: `{"status":"ok"}`. This only shows that the HTTP server is up;
-   the next check shows that the node is usable.
+   the next check shows that the executor is usable.
 
 3. The agent:
 
@@ -324,13 +324,13 @@ start fail to unlock. Keep the passphrase of an agent that holds data.
 Rotating it means a new, empty agent: stop the service, move the data
 directory aside, write a new passphrase file as in setup step 5, run
 `~/.local/share/ad4m/current/ad4m-executor init --data-path ~/.ad4m`, start
-the service and repeat setup step 9. All data and accounts of the node are
+the service and repeat setup step 9. All data and accounts of the executor are
 gone after that.
 
 ## Accounts in multi-user mode without SMTP
 
 With `multi_user_config.enabled` and no `smtp_config`, sign-up sends no
-email and needs no code. A user connects a multi-user client to the node
+email and needs no code. A user connects a multi-user client to the executor
 and gives an email address and a password; no operator step is needed. Over
 the RPC the flow is:
 
@@ -342,9 +342,9 @@ the RPC the flow is:
 | `user.login {email, password}` | a JWT; a wrong password gets `Invalid credentials` |
 
 Nothing checks that the address belongs to the person, so anyone who can
-reach the node can create an account; the address is only a login name.
+reach the executor can create an account; the address is only a login name.
 An account holder gets a user agent of their own, not operator access. For
-a public node, either configure SMTP or put the node behind something that
+a public executor, either configure SMTP or put the executor behind something that
 limits who can reach it.
 
 ## Behind a reverse proxy
@@ -358,18 +358,18 @@ stay open. Set `X-Forwarded-For` and `X-Forwarded-Proto`. Return 404 for
 port. Set the proxy's maximum request body to at least the executor's own
 limits (10 MB, 50 MB for audio transcriptions); at a smaller limit the
 proxy refuses larger bodies itself with a 413 that carries no CORS headers,
-which a browser reports only as `Failed to fetch`. If the node is not meant
+which a browser reports only as `Failed to fetch`. If the executor is not meant
 to be indexed, send `X-Robots-Tag: noindex`. An example vhost for nginx is
 `deploy/staging/nginx.conf.example`.
 
-## Moving a node off the launcher
+## Moving an executor off the launcher
 
-The ADAM Launcher runs the same executor; moving a node to a headless
+The ADAM Launcher runs the same executor; moving it to a headless
 service keeps its agent and data. Its settings are in
 `~/.ad4m/launcher-state.json`, and the config file uses the same key names.
 The launcher generates a new admin credential at every start, so no client
 depends on the old one. Everything before step 5 has no effect on the
-running node.
+running executor.
 
 1. Write the config file from the launcher's state: `app_data_path` = the
    path of the launcher's selected agent, the launcher's `port`,

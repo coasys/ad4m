@@ -17,8 +17,11 @@
 //!   main agent. Both are limited to the grant's capabilities.
 //!
 //! A token that opens no session is refused where it arrives. [`Session::check`] runs again
-//! on every request and every delivered event. MCP still resolves its tokens itself
-//! (`capabilities_from_token`, `AgentContext::from_auth_token`).
+//! on every request and every delivered event. MCP opens one per MCP session the same way
+//! (`mcp::caller`) and checks it on every tool call.
+//!
+//! [`Session::in_process`] is the exception: a session the executor opens for its own work
+//! as one of its agents, with no token and no grant.
 
 use std::sync::{Arc, OnceLock};
 
@@ -168,13 +171,33 @@ impl Session {
         })
     }
 
-    /// A session without a token: the operator or an anonymous caller.
+    /// A session without a token: the operator, an anonymous caller, or an in-process agent.
     fn without_token(principal: Principal, caps: Vec<Capability>) -> Session {
         Session {
             principal,
             caps,
             grant: None,
             did: OnceLock::new(),
+        }
+    }
+
+    /// A session for work the executor runs as `agent` without a token from it, limited to
+    /// `caps`. The interpretation pass of the auto-processor acts as the owner of its
+    /// perspective this way: never as the operator, so the guards treat it as that agent.
+    ///
+    /// No token and no grant stand behind it: nothing to revoke or expire, so
+    /// [`Session::check`] always passes and [`Session::ended`] never fires. It lives only as
+    /// long as the work that holds it, and `user.logout` finds no grant in it to revoke.
+    pub fn in_process(agent: AgentContext, caps: Vec<Capability>) -> Session {
+        Session::without_token(Principal::Agent(agent), caps)
+    }
+
+    /// This session with `did` as the DID of the agent it acts as: for an in-process session
+    /// whose caller knows the DID already (a perspective's owner list names it).
+    pub(crate) fn with_did(self, did: &str) -> Session {
+        Session {
+            did: OnceLock::from(did.to_string()),
+            ..self
         }
     }
 
@@ -310,8 +333,7 @@ impl Session {
 /// The grant that the decoded token `claims` acts within. The allowlist: a token works only
 /// while its grant does, so a token without one (revoked and removed, or a user token from
 /// before grants) is refused. Its `sub` must name the grant's agent, and a managed agent's
-/// key must derive that agent's DID. [`Session::open`] and MCP (`capabilities::granted`, until
-/// PR 6) both ask here, so the two cannot accept different tokens.
+/// key must derive that agent's DID.
 pub(crate) fn grant_for(claims: &super::capabilities::Claims) -> Result<Arc<LiveGrant>, AuthError> {
     let grant = Grants::global()
         .get(&TokenId(claims.nonce().to_string()))
@@ -359,14 +381,6 @@ impl Session {
     /// This session with `caps` as its capabilities.
     pub(crate) fn with_caps(self, caps: Vec<Capability>) -> Session {
         Session { caps, ..self }
-    }
-
-    /// This session with `did` as the DID of the agent it acts as.
-    pub(crate) fn with_did(self, did: &str) -> Session {
-        Session {
-            did: OnceLock::from(did.to_string()),
-            ..self
-        }
     }
 
     /// This session within `grant`.
@@ -654,13 +668,10 @@ mod resolution_tests {
         assert!(crate::user_management::generate_user_jwt("ghost@example.org", "test").is_err());
     }
 
-    // MCP resolves its tokens without a `Session` until PR 6 (`AgentContext::from_auth_token`,
-    // `capabilities_from_token`), and must refuse every token `Session::open` refuses. Here:
-    // a grant on the main agent whose token names a user, as an app approved with
-    // `userEmail` before grants has (its token's `sub` is the user; the migration puts its
-    // grant on the main agent). Acting on it would turn a user's app into a main-agent app.
+    // A grant on the main agent whose token names a user is refused: acting on it would turn
+    // a user's app into a main-agent app. MCP opens the same `Session`.
     #[test]
-    fn mcp_refuses_a_token_whose_sub_names_another_agent_than_its_grant() {
+    fn a_token_whose_sub_names_another_agent_than_its_grant_is_refused() {
         setup_wallet();
         setup_agent();
         let email = crate::test_utils::managed_user("session.mcp.sub");
@@ -674,14 +685,6 @@ mod resolution_tests {
         });
         let err = Session::open(&legacy, &admin(), ListenerReach::Network).unwrap_err();
         assert_eq!(err, AuthError::Revoked);
-        assert!(
-            AgentContext::from_auth_token(legacy.clone(), false).is_err(),
-            "MCP acts as the main agent on a token that names a user"
-        );
-        assert!(
-            crate::agent::capabilities::capabilities_from_token(legacy, &admin()).is_err(),
-            "MCP grants the main agent's app capabilities to a token that names a user"
-        );
     }
 
     /// D16: a user token names its agent by DID in `sub` and acts as that agent. A token
@@ -985,5 +988,33 @@ mod resolution_tests {
         assert!(Session::for_test(Principal::Operator)
             .require(&PERSPECTIVE_CREATE_CAPABILITY)
             .is_ok());
+    }
+
+    // An in-process session acts as its agent within no grant: it is never the operator,
+    // revoking every grant of its agent leaves it working, and logout finds nothing in it.
+    #[test]
+    fn an_in_process_session_is_its_agent_never_the_operator_and_has_no_grant() {
+        let agent = AgentContext::managed("did:key:in-process".to_string());
+        let user = Session::in_process(agent.clone(), get_user_default_capabilities());
+        assert!(!user.is_operator());
+        assert!(user.is_authenticated());
+        assert_eq!(user.acts_as(), agent);
+        assert_eq!(caps(&user), caps_of(get_user_default_capabilities()));
+        assert!(user.grant().is_none());
+        assert!(
+            user.user_grant().is_none(),
+            "nothing for user.logout to revoke"
+        );
+
+        let read = crate::agent::capabilities::perspective_query_capability(vec!["p".into()]);
+        let main = Session::in_process(AgentContext::main_agent(), vec![read.clone()]);
+        assert!(!main.is_operator());
+        assert!(main.may(&read));
+        assert!(!main.may(&ALL_CAPABILITY));
+
+        let _ = Grants::global().revoke_agent(&agent);
+        assert!(user.check().is_ok());
+        assert!(main.check().is_ok());
+        assert!(!user.ended().is_cancelled());
     }
 }

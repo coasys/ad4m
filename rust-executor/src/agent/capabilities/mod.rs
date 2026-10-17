@@ -73,12 +73,6 @@ impl ListenerReach {
     }
 }
 
-/// [`is_admin_credential_token_on`] for a caller on a loopback listener: for the MCP server,
-/// where [`capabilities_from_token`] explains why loopback holds.
-pub fn is_admin_credential_token(token: &str, admin_credential: &Option<Secret>) -> bool {
-    is_admin_credential_token_on(token, admin_credential, ListenerReach::Loopback)
-}
-
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
 /// When admin_credential is Some, the token must match it exactly (constant-time).
 /// When admin_credential is None (legacy single-user mode), an empty token is treated as admin,
@@ -129,14 +123,6 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
             && (cap.can.contains(&WILD_CARD.to_string())
                 || expected.can.iter().all(|c| cap.can.contains(c)))
     })
-}
-
-/// The grant of a decoded token while it lets the token act; `Err` when the token has no
-/// grant, its grant was revoked, removed or expired, its `sub` names another agent, or its
-/// agent has no identity. For MCP, which resolves its tokens without a `Session`; it applies
-/// the checks `Session::open` applies ([`crate::agent::session::grant_for`]).
-pub fn granted(claims: &Claims) -> Result<std::sync::Arc<crate::agent::grants::LiveGrant>, String> {
-    crate::agent::session::grant_for(claims).map_err(|e| e.to_string())
 }
 
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
@@ -277,18 +263,6 @@ pub async fn track_last_seen(agent_did: &str) {
     }
 }
 
-/// [`capabilities_on`] for a caller on a loopback listener.
-///
-/// For the MCP server. Loopback holds there because `mcp::server::resolve_host`
-/// binds an MCP server with no admin credential to loopback, and its HTTPS listener does not
-/// start without one. The exception is an explicit `MCP_HOST`, which it warns about.
-pub fn capabilities_from_token(
-    token: String,
-    admin_credential: &Option<Secret>,
-) -> Result<Vec<Capability>, String> {
-    capabilities_on(token, admin_credential, ListenerReach::Loopback)
-}
-
 /// What a caller without a token may do: request a capability and read whether multi-user
 /// mode is on, plus sign up, log in and verify an email when it is. Reading users is left out,
 /// so anonymous callers cannot list them.
@@ -315,27 +289,6 @@ pub fn anonymous_capabilities_when(multi_user_enabled: bool) -> Vec<Capability> 
             RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
         ]
     }
-}
-
-/// The capabilities of a caller that presents `token` on a listener with this reach.
-pub fn capabilities_on(
-    token: String,
-    admin_credential: &Option<Secret>,
-    reach: ListenerReach,
-) -> Result<Vec<Capability>, String> {
-    // The same test that decides `is_admin_credential`, so the two cannot disagree.
-    if is_admin_credential_token_on(&token, admin_credential, reach) {
-        return Ok(vec![ALL_CAPABILITY.clone()]);
-    }
-
-    if token.is_empty() {
-        // An anonymous caller: the executor has an admin credential, or the listener is on the
-        // network.
-        return Ok(anonymous_capabilities());
-    }
-
-    let claims = decode_jwt(token).map_err(|e| e.to_string())?;
-    Ok(granted(&claims)?.caps.clone())
 }
 
 /// The agent that a capability request names (#1399, D11, D16): `agent` is a managed user's
@@ -500,8 +453,8 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
 /// Approves a pending request with `auth_info_extended.auth`, which may grant less than the
 /// app asked for, and returns the code the app redeems: for the approver only. The request's
 /// agent stays the one it named. The caller has checked that the approver owns that agent
-/// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`; MCP's
-/// `caller_can_permit`). An approver grants no more than it holds itself (`approver`, its
+/// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`, which MCP's auto-permit
+/// calls through as its caller). An approver grants no more than it holds itself (`approver`, its
 /// session's capabilities): an app with AGENT_PERMIT approves only within its own grant, so
 /// it cannot mint a wider one.
 pub fn permit_capability_within(
@@ -795,14 +748,14 @@ mod tests {
             ListenerReach::Network
         ));
 
-        let local = Ok(capabilities_on(empty.clone(), &None, ListenerReach::Loopback).unwrap());
-        assert!(check_capability(&local, &AGENT_READ_CAPABILITY).is_ok());
+        let open = |reach| crate::agent::session::Session::open(&empty, &None, reach).unwrap();
+        assert!(open(ListenerReach::Loopback).may(&AGENT_READ_CAPABILITY));
 
         // The anonymous set reads the multi-user setting.
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
-        let remote = Ok(capabilities_on(empty, &None, ListenerReach::Network).unwrap());
-        assert!(check_capability(&remote, &AGENT_READ_CAPABILITY).is_err());
-        assert!(check_capability(&remote, &AGENT_AUTH_CAPABILITY).is_ok());
+        let remote = open(ListenerReach::Network);
+        assert!(!remote.may(&AGENT_READ_CAPABILITY));
+        assert!(remote.may(&AGENT_AUTH_CAPABILITY));
     }
 
     // The admin credential works on any listener: it is what makes a network listener safe.
@@ -819,51 +772,28 @@ mod tests {
             &credential,
             ListenerReach::Network
         ));
-        let capabilities = capabilities_on(
-            "the-admin-credential".to_string(),
+        let session = crate::agent::session::Session::open(
+            "the-admin-credential",
             &credential,
             ListenerReach::Network,
-        );
-        assert!(check_capability(&capabilities, &AGENT_READ_CAPABILITY).is_ok());
+        )
+        .unwrap();
+        assert!(session.may(&AGENT_READ_CAPABILITY));
     }
 
+    // A caller without a token may always check the multi-user setting and request a
+    // capability, and may log in, sign up and verify an email only in multi-user mode.
     #[test]
-    fn unauthenticated_users_can_check_multi_user_enabled() {
-        // Empty token (unauthenticated) should have capability to check if multi-user is enabled
-        let capabilities = capabilities_from_token(String::new(), &None).unwrap();
-        assert!(
-            check_capability(
-                &Ok(capabilities),
-                &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY
-            )
-            .is_ok(),
-            "Unauthenticated users should be able to check if multi-user mode is enabled"
-        );
-    }
-
-    #[test]
-    fn unauthenticated_users_get_login_capability_in_multi_user_mode() {
-        // Empty token (unauthenticated) should have the right capabilities
-        let capabilities = capabilities_from_token(String::new(), &None).unwrap();
-
-        // Should have read enabled capability (to check if multi-user is on)
-        assert!(
-            check_capability(
-                &Ok(capabilities.clone()),
-                &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY
-            )
-            .is_ok(),
-            "Unauthenticated users should be able to check if multi-user mode is enabled"
-        );
-
-        // Should have auth capability (for standard capability request flow)
-        assert!(
-            check_capability(&Ok(capabilities.clone()), &AGENT_AUTH_CAPABILITY).is_ok(),
-            "Unauthenticated users should have auth capability"
-        );
-
-        // Note: We can't easily test the multi-user mode grant of LOGIN and CREATE capabilities
-        // without setting up the database, but the logic is tested by integration tests
+    fn anonymous_callers_may_check_the_mode_and_log_in_only_in_multi_user_mode() {
+        for multi_user in [false, true] {
+            let caps = anonymous_capabilities_when(multi_user);
+            let may = |cap: &Capability| check_capability(&Ok(caps.clone()), cap).is_ok();
+            assert!(may(&RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY));
+            assert!(may(&AGENT_AUTH_CAPABILITY));
+            assert_eq!(may(&RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY), multi_user);
+            assert_eq!(may(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY), multi_user);
+            assert!(!may(&AGENT_READ_CAPABILITY));
+        }
     }
 }
 
@@ -949,8 +879,16 @@ mod app_token_tests {
         if code == "100000" { "100001" } else { "100000" }.to_string()
     }
 
+    /// Whether `token` opens a session.
+    fn opens(token: &str) -> bool {
+        crate::agent::session::Session::open(token, &None, ListenerReach::Loopback).is_ok()
+    }
+
     fn grant_of(token: &str) -> std::sync::Arc<crate::agent::grants::LiveGrant> {
-        granted(&decode_jwt(token.to_string()).unwrap()).unwrap()
+        let claims = decode_jwt(token.to_string()).unwrap();
+        Grants::global()
+            .get(&crate::agent::session::TokenId(claims.nonce().to_string()))
+            .expect("the token has an active grant")
     }
 
     fn caps_text(caps: &[Capability]) -> Vec<String> {
@@ -1098,7 +1036,7 @@ mod app_token_tests {
             .expect("the same code redeems once the database takes the grant")
             .expose_once();
         assert_eq!(Grants::global().find(&request_id).len(), 1);
-        assert!(capabilities_from_token(token, &None).is_ok());
+        assert!(opens(&token));
     }
 
     // The `apps-changed` event and the app list reach sessions other than the app, so
@@ -1153,31 +1091,28 @@ mod app_token_tests {
         assert!(rows.iter().any(|row| row.request_id == request_id));
         assert!(!format!("{rows:?}").contains(&token));
 
-        assert!(capabilities_from_token(token.clone(), &None).is_ok());
+        assert!(opens(&token));
         let grants = Grants::global();
         grants.revoke(&grants.find(&request_id)).unwrap();
-        assert!(capabilities_from_token(token, &None).is_err());
+        assert!(!opens(&token));
     }
 
-    // MCP resolves tokens without a `Session`, by the same grants: a removed app's token
-    // has no grant and is refused (#396), and so is a token that never had one.
+    // A removed app's token has no grant and opens no session (#396), and neither does a
+    // token that never had one. MCP opens its sessions the same way.
     #[test]
-    fn mcp_refuses_a_token_without_an_active_grant() {
+    fn a_token_without_an_active_grant_opens_no_session() {
         setup();
         let token = crate::test_utils::granted_token(test_auth_info());
-        assert!(capabilities_from_token(token.clone(), &None).is_ok());
-        assert!(crate::agent::AgentContext::from_auth_token(token.clone(), false).is_ok());
+        assert!(opens(&token));
 
         let grants = Grants::global();
         let found = grants.find(&token);
         grants.revoke(&found).unwrap();
         grants.remove(&found).unwrap();
-        assert!(capabilities_from_token(token.clone(), &None).is_err());
-        assert!(crate::agent::AgentContext::from_auth_token(token, false).is_err());
+        assert!(!opens(&token));
 
         let (ungranted, _) = token::sign_token("no grant".to_string(), 3600, None).unwrap();
-        assert!(capabilities_from_token(ungranted.clone(), &None).is_err());
-        assert!(crate::agent::AgentContext::from_auth_token(ungranted, false).is_err());
+        assert!(!opens(&ungranted));
     }
 
     // #1399 (D11, D13, D14): a request names a managed agent. Its approval request goes to

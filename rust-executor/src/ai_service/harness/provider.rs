@@ -225,9 +225,10 @@ impl<P: ToolProvider + ?Sized + 'static> ToolProvider for FilteredProvider<P> {
 /// Behaviour:
 /// - `tools()` — for each inner schema, strip the bound parameter names from
 ///   `properties` and `required`. Non-object schemas pass through unchanged.
-/// - `call()` — merge the bound values into `args` (bound values do NOT
-///   override an argument the LLM already supplied; the strip step keeps the
-///   LLM from seeing them, so this is defense-in-depth) and delegate.
+/// - `call()` — write the bound values into `args` and delegate. A bound value
+///   always replaces an argument of the same name that the LLM sent: the
+///   binding states the scope of the pass (the perspective it runs on), and
+///   transcript content must not steer a call outside it.
 pub struct BoundArgsProvider<P: ToolProvider + ?Sized> {
     inner: Arc<P>,
     bindings: std::collections::BTreeMap<String, Value>,
@@ -291,7 +292,7 @@ fn merge_bound_into_args(args: &mut Value, bindings: &std::collections::BTreeMap
     }
     if let Value::Object(map) = args {
         for (k, v) in bindings {
-            map.entry(k.clone()).or_insert_with(|| v.clone());
+            map.insert(k.clone(), v.clone());
         }
     }
 }
@@ -690,21 +691,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bound_args_does_not_override_llm_supplied_value() {
-        // Defense-in-depth: the schema hides the param, but if an out-of-band
-        // arg smuggles it in, respect the LLM's value rather than clobbering.
+    async fn bound_args_replace_an_llm_supplied_value() {
+        // The schema hides the param, but a model steered by transcript content
+        // can still send it. The bound perspective wins, so the pass stays on it.
         let inner = Arc::new(MockProvider::new(vec![schema_with_perspective_id()]));
         let recorder = inner.clone();
         let bound = BoundArgsProvider::new(inner, perspective_id_bound());
         let out = bound
             .call(
                 "extbelief_query",
-                json!({"perspective_id": "override", "limit": 1}),
+                json!({"perspective_id": "another-users-perspective", "limit": 1}),
             )
             .await;
         assert!(out.is_ok());
         let calls = recorder.recorded_calls();
-        assert_eq!(calls[0].1["perspective_id"], "override");
+        assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
+        assert_eq!(calls[0].1["limit"], 1);
     }
 
     #[tokio::test]

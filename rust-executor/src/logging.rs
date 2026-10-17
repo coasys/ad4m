@@ -93,15 +93,40 @@ pub fn build_rust_log_from_config(
     parts.join(",")
 }
 
+/// `rust_log` with rmcp held at `warn`, unless it names rmcp itself. rmcp logs every new MCP
+/// session's id at `info` (`session::local`, "create new session"), and that id is a bearer:
+/// it carries the session's remembered token, which for an admin credential never expires.
+/// rmcp logs through `tracing`, whose `log` feature forwards to this logger when no tracing
+/// subscriber is set (the CLI), and the launcher's tracing filter reads the same `RUST_LOG`.
+/// A global level (`RUST_LOG=info`) would otherwise log it. An operator who names rmcp
+/// itself (`rmcp=debug`) gets what they asked for; a directive for one rmcp module
+/// (`rmcp::service=debug`) keeps its level and the rest of rmcp stays at `warn`.
+pub fn without_mcp_session_ids(rust_log: &str) -> String {
+    let names_rmcp = rust_log
+        .split(',')
+        .any(|directive| directive.split('=').next().unwrap_or_default().trim() == "rmcp");
+    if names_rmcp {
+        rust_log.to_string()
+    } else if rust_log.trim().is_empty() {
+        "rmcp=warn".to_string()
+    } else {
+        format!("{rust_log},rmcp=warn")
+    }
+}
+
+/// Set `RUST_LOG`: the environment's if set, else the one `log_config` (or the defaults)
+/// builds; either way without MCP session ids ([`without_mcp_session_ids`]).
+fn set_rust_log(log_config: Option<&std::collections::HashMap<String, String>>) {
+    let rust_log = env::var("RUST_LOG").unwrap_or_else(|_| {
+        let default_config = get_default_log_config();
+        build_rust_log_from_config(log_config.unwrap_or(&default_config))
+    });
+    env::set_var("RUST_LOG", without_mcp_session_ids(&rust_log));
+}
+
 /// Initialize logging for CLI (stdout)
 pub fn init_cli_logging(log_config: Option<&std::collections::HashMap<String, String>>) {
-    // Only set RUST_LOG if it's not already set in environment
-    if env::var("RUST_LOG").is_err() {
-        let default_config = get_default_log_config();
-        let config = log_config.unwrap_or(&default_config);
-        let rust_log = build_rust_log_from_config(config);
-        env::set_var("RUST_LOG", &rust_log);
-    }
+    set_rust_log(log_config);
 
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if !*initialized {
@@ -157,13 +182,7 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
     target: Box<W>,
     log_config: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Only set RUST_LOG if it's not already set in environment
-    if env::var("RUST_LOG").is_err() {
-        let default_config = get_default_log_config();
-        let config = log_config.unwrap_or(&default_config);
-        let rust_log = build_rust_log_from_config(config);
-        env::set_var("RUST_LOG", &rust_log);
-    }
+    set_rust_log(log_config);
 
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if *initialized {
@@ -202,5 +221,61 @@ mod tests {
                 "wasmer_compiler_cranelift=warn"
             ]
         );
+    }
+
+    /// Whether a logger filtered by `rust_log` logs `target` at `level`.
+    fn logs(rust_log: &str, target: &str, level: log::Level) -> bool {
+        let filter = env_logger::filter::Builder::new().parse(rust_log).build();
+        filter.enabled(&log::Metadata::builder().target(target).level(level).build())
+    }
+
+    const RMCP_SESSIONS: &str = "rmcp::transport::streamable_http_server::session::local";
+
+    /// rmcp logs each new MCP session's id at info; the id is a bearer for the session's
+    /// remembered token. A global level must not log it, and the executor's own info stays.
+    #[test]
+    fn mcp_session_ids_are_not_logged_at_a_global_level() {
+        for rust_log in ["info", "debug", "warn,rust_executor=info", ""] {
+            let quiet = without_mcp_session_ids(rust_log);
+            assert!(
+                !logs(&quiet, RMCP_SESSIONS, log::Level::Info),
+                "{rust_log:?} -> {quiet:?} logs MCP session ids"
+            );
+            assert!(logs(&quiet, RMCP_SESSIONS, log::Level::Warn), "{quiet:?}");
+        }
+        let quiet = without_mcp_session_ids("info");
+        assert!(logs(&quiet, "rust_executor::mcp", log::Level::Info));
+        let defaults = without_mcp_session_ids(&build_rust_log_from_config(
+            &std::collections::HashMap::new(),
+        ));
+        assert!(!logs(&defaults, RMCP_SESSIONS, log::Level::Info));
+        assert!(logs(&defaults, "rust_executor", log::Level::Info));
+    }
+
+    /// A directive for one rmcp module does not name rmcp: the rest of rmcp, the session
+    /// ids included, stays at warn, and the named module gets its level.
+    #[test]
+    fn naming_an_rmcp_module_still_holds_rmcp_at_warn() {
+        let quiet = without_mcp_session_ids("info,rmcp::service=debug");
+        assert_eq!(quiet, "info,rmcp::service=debug,rmcp=warn");
+        assert!(!logs(&quiet, RMCP_SESSIONS, log::Level::Info), "{quiet:?}");
+        assert!(
+            logs(&quiet, "rmcp::service", log::Level::Debug),
+            "{quiet:?}"
+        );
+    }
+
+    /// An operator who names rmcp gets what they asked for.
+    #[test]
+    fn naming_rmcp_keeps_its_level() {
+        assert_eq!(
+            without_mcp_session_ids("info,rmcp=debug"),
+            "info,rmcp=debug"
+        );
+        assert!(logs(
+            &without_mcp_session_ids("rmcp::transport=info"),
+            RMCP_SESSIONS,
+            log::Level::Info
+        ));
     }
 }
