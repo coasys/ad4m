@@ -1525,6 +1525,17 @@ impl SparqlStore {
             .map_err(|e| anyhow!("SPARQL store flush failed: {}", e))
     }
 
+    /// Write a consistent point-in-time copy of this store to `target`, which
+    /// must not exist yet: a RocksDB checkpoint, with the data files
+    /// hard-linked when `target` is on the same filesystem. Copying the live
+    /// store directory instead can capture files that do not belong together,
+    /// because writes and compaction keep changing it.
+    pub fn backup(&self, target: &std::path::Path) -> Result<(), Error> {
+        self.store
+            .backup(target)
+            .map_err(|e| anyhow!("SPARQL store backup to {:?} failed: {}", target, e))
+    }
+
     /// Clear the store and bulk-insert all provided links.
     pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
         self.clear()?;
