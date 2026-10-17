@@ -466,16 +466,12 @@ pub fn migrate_apps_file(db: &Ad4mDb, apps_file: &Path) -> Result<usize, String>
     Ok(migrated)
 }
 
-/// The DID of the managed agent that `sub` names in `db`: a user's email, or the DID itself.
+/// The DID of the managed agent that `sub` names in `db`: the DID itself, if a user owns it.
 fn managed_did_named(db: &Ad4mDb, sub: &str) -> Option<String> {
-    match db.get_user(sub) {
-        Ok(user) if !user.did.is_empty() => Some(user.did),
-        _ => db
-            .get_username_by_did(sub)
-            .ok()
-            .flatten()
-            .map(|_| sub.to_string()),
-    }
+    db.get_username_by_did(sub)
+        .ok()
+        .flatten()
+        .map(|_| sub.to_string())
 }
 
 /// Fills the executor's grants at start, after the database opens and before the API serves:
@@ -853,18 +849,17 @@ mod tests {
 
         assert_eq!(
             migrate_apps_file(&db, &path).unwrap(),
-            2,
-            "the app of no user is skipped"
+            1,
+            "an app whose sub is an email or no user's DID is skipped (no D16 migration)"
         );
         Grants::global().load(&db).unwrap();
-        for token in [&by_email, &by_did] {
-            let session = Session::open(token, &None, ListenerReach::Network).unwrap();
-            assert_eq!(
-                session.principal,
-                Principal::Agent(AgentContext::managed(did.clone()))
-            );
-            assert!(session.may(&AGENT_READ_CAPABILITY));
-        }
+        let session = Session::open(&by_did, &None, ListenerReach::Network).unwrap();
+        assert_eq!(
+            session.principal,
+            Principal::Agent(AgentContext::managed(did.clone()))
+        );
+        assert!(session.may(&AGENT_READ_CAPABILITY));
+        assert!(Session::open(&by_email, &None, ListenerReach::Network).is_err());
         assert!(Session::open(&nobody, &None, ListenerReach::Network).is_err());
         assert!(Grants::global()
             .list(&AgentContext::main_agent())
