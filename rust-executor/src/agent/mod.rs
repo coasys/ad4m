@@ -86,12 +86,30 @@ impl AgentContext {
 
     /// Get the wallet key name for this context
     /// For users, this uses their email directly
-    pub fn wallet_key_name(&self) -> String {
+    pub fn wallet_key_name(&self) -> Result<String, AnyError> {
         match &self.user_email {
-            Some(email) => email.clone(),
-            None => crate::wallet::KEY_NAME_MAIN.to_string(),
+            Some(email) => Ok(user_key_name(email)?.to_string()),
+            None => Ok(crate::wallet::KEY_NAME_MAIN.to_string()),
         }
     }
+}
+
+/// A managed user's wallet key is named by their email, in the same wallet as
+/// the executor's own keys. An email that names one of those keys must never
+/// reach it, or that user would sign as the executor.
+fn user_key_name(user_email: &str) -> Result<&str, AnyError> {
+    let signing_key = crate::config::GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|config| config.signing_key_name());
+    if user_email == crate::wallet::KEY_NAME_MAIN
+        || user_email == crate::wallet::KEY_NAME_PLATFORM
+        || signing_key.as_deref() == Some(user_email)
+    {
+        return Err(anyhow!("'{}' names an executor key", user_email));
+    }
+    Ok(user_email)
 }
 
 /// Data for a specific agent (main or user)
@@ -230,7 +248,7 @@ fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
     if context.is_main_agent {
         let backend = wallet_backend();
-        let key_name = context.wallet_key_name();
+        let key_name = context.wallet_key_name()?;
         backend
             .get_did_document(&key_name)
             .ok_or(anyhow!("{} key not found", key_name))
@@ -268,7 +286,7 @@ pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
 
 pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
     let backend = wallet_backend();
-    let key_name = context.wallet_key_name();
+    let key_name = context.wallet_key_name()?;
     let signature = backend
         .sign(&key_name, payload)
         .ok_or(anyhow!("{} key not found", key_name))?;
@@ -591,6 +609,7 @@ impl AgentService {
     /// Ensure a user key exists in the wallet, generating it if necessary.
     /// Uses email as the wallet key name.
     pub fn ensure_user_key_exists(user_email: &str) -> Result<(), AnyError> {
+        let user_email = user_key_name(user_email)?;
         let backend = wallet_backend();
 
         let available_keys = backend.list_key_names();
@@ -620,6 +639,7 @@ impl AgentService {
 
     /// Get user agent data for a specific user email. Fails if the user does not exist.
     pub fn get_user_agent_data(user_email: &str) -> Result<AgentData, AnyError> {
+        let user_email = user_key_name(user_email)?;
         let backend = wallet_backend();
 
         let available_keys = backend.list_key_names();
@@ -650,8 +670,7 @@ impl AgentService {
 
     /// Check whether a user key exists in the wallet.
     pub fn user_exists(user_email: &str) -> bool {
-        let backend = wallet_backend();
-        backend.key_exists(user_email)
+        user_key_name(user_email).is_ok_and(|name| wallet_backend().key_exists(name))
     }
 
     /// List all user emails that have keys in the wallet (excluding the
@@ -1275,13 +1294,13 @@ mod tests {
         let main_context = AgentContext::main_agent();
         assert!(main_context.is_main_agent);
         assert_eq!(main_context.user_email, None);
-        assert_eq!(main_context.wallet_key_name(), "main");
+        assert_eq!(main_context.wallet_key_name().unwrap(), "main");
 
         let user_email = "test@example.com".to_string();
         let user_context = AgentContext::for_user_email(user_email.clone());
         assert!(!user_context.is_main_agent);
         assert_eq!(user_context.user_email, Some(user_email.clone()));
-        assert_eq!(user_context.wallet_key_name(), user_email);
+        assert_eq!(user_context.wallet_key_name().unwrap(), user_email);
     }
 
     #[test]
@@ -1392,6 +1411,27 @@ mod tests {
     }
 
     // User key management tests
+
+    /// A managed user's key is named by the email, so an email that names one
+    /// of the executor's own keys must never reach that key.
+    #[test]
+    fn executor_key_names_are_not_user_keys() {
+        ensure_setup();
+        for name in [
+            crate::wallet::KEY_NAME_MAIN,
+            crate::wallet::KEY_NAME_PLATFORM,
+        ] {
+            let user = AgentContext::for_user_email(name.to_string());
+            assert!(
+                AgentService::ensure_user_key_exists(name).is_err(),
+                "{name}"
+            );
+            assert!(AgentService::get_user_did_by_email(name).is_err(), "{name}");
+            assert!(!AgentService::user_exists(name), "{name}");
+            assert!(sign_for_context(b"payload", &user).is_err(), "{name}");
+            assert!(did_document_for_context(&user).is_err(), "{name}");
+        }
+    }
 
     #[test]
     fn test_ensure_user_key_exists() {
@@ -1523,8 +1563,8 @@ mod tests {
         assert_eq!(bob_context.user_email, Some(bob_email.to_string()));
 
         // Verify wallet key names are emails
-        assert_eq!(alice_context.wallet_key_name(), alice_email);
-        assert_eq!(bob_context.wallet_key_name(), bob_email);
+        assert_eq!(alice_context.wallet_key_name().unwrap(), alice_email);
+        assert_eq!(bob_context.wallet_key_name().unwrap(), bob_email);
 
         // Generate DIDs
         let alice_did = did_for_context(&alice_context).expect("Alice DID generation failed");
