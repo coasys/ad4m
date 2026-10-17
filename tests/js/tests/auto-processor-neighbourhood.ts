@@ -114,18 +114,35 @@ export default function autoProcessorNeighbourhoodTests(
         // watchers start firing. Fresh neighbourhood, cold gossip peers —
         // without this, later cross-peer expectations time out on cold-start
         // sync rather than reporting the actual state.
-        const marker = `warmup://${uuidv4()}`;
-        await aliceP.add(
-          new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
-        );
-        await waitUntil(
-          async () => {
+        //
+        // One publish is not enough. On a cold neighbourhood the other
+        // executor's `latest_revision` stays null, so the first marker is
+        // never pulled. Publish a new marker every 30s, and exchange agent
+        // infos again before each publish, until one arrives or 180s is up.
+        const warmupMs = 180_000;
+        const deadline = Date.now() + warmupMs;
+        let synced = false;
+        while (!synced && Date.now() < deadline) {
+          await testContext.makeAllNodesKnown();
+          const marker = `warmup://${uuidv4()}`;
+          await aliceP.add(
+            new Link({ source: marker, predicate: "ns://ping", target: "literal:string:ok" }),
+          );
+          const sliceEnd = Math.min(Date.now() + 30_000, deadline);
+          while (Date.now() < sliceEnd) {
             const links = await bobP.get(new LinkQuery({ source: marker }));
-            return links.length > 0;
-          },
-          180_000,
-          "gossip warm-up: Alice's marker link to reach Bob",
-        );
+            if (links.length > 0) {
+              synced = true;
+              break;
+            }
+            await sleep(500);
+          }
+        }
+        if (!synced) {
+          throw new Error(
+            `waitUntil timed out after ${warmupMs}ms waiting for: gossip warm-up: Alice's marker link to reach Bob`,
+          );
+        }
 
         await ConversationSubgroup.register(aliceP);
         await ConversationSubgroup.register(bobP);
