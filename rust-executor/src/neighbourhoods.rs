@@ -4,7 +4,6 @@ use uuid::Uuid;
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::languages::LanguageController;
-use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::{
     add_perspective, all_perspectives, get_perspective, update_perspective, update_perspective_with,
 };
@@ -78,23 +77,6 @@ pub async fn _install_neighbourhood(url: String) -> Result<PerspectiveHandle, An
     install_neighbourhood_with_context(url, &crate::agent::AgentContext::main_agent()).await
 }
 
-/// Adds `did` as an owner of the neighbourhood perspective `p` and tells its
-/// link language the new owners.
-async fn add_owner(
-    p: &PerspectiveInstance,
-    url: &str,
-    did: &str,
-) -> Result<PerspectiveHandle, AnyError> {
-    crate::db::Ad4mDb::with_global_instance(|db| db.add_owner_to_neighbourhood(url, did))?;
-    let handle = update_perspective_with(&p.uuid, |h| h.add_owner(did))
-        .await
-        .map_err(|e| anyhow!(e))?;
-    if let Some(owners) = &handle.owners {
-        p.update_local_agents(owners.clone()).await;
-    }
-    Ok(handle)
-}
-
 pub async fn install_neighbourhood_with_context(
     url: String,
     context: &crate::agent::AgentContext,
@@ -105,18 +87,63 @@ pub async fn install_neighbourhood_with_context(
     for p in perspectives.iter() {
         let handle = p.persisted.lock().await.clone();
         if handle.shared_url == Some(url.clone()) {
-            // Neighbourhood exists: add the joining agent as an owner.
-            let did = match &context.user_email {
-                Some(user_email) => crate::agent::AgentService::get_user_did_by_email(user_email)?,
-                None => crate::agent::did_for_context(context)?,
-            };
-            let handle = add_owner(p, &url, &did).await?;
+            // Neighbourhood exists - add this user as owner if it's a user context
             log::info!(
-                "Added {} to existing neighbourhood {}. Link language has been updated with new owners.",
-                did,
+                "Adding user {:?} to existing neighbourhood {}",
+                context.user_email,
                 url
             );
-            return Ok(handle);
+            if let Some(user_email) = &context.user_email {
+                let user_did = crate::agent::AgentService::get_user_did_by_email(user_email)?;
+
+                // Update database
+                crate::db::Ad4mDb::with_global_instance(|db| {
+                    db.add_owner_to_neighbourhood(&url, &user_did)
+                })?;
+
+                // Add user to owners list, under the perspective's lock so
+                // concurrent joins cannot overwrite each other's owner
+                let handle = update_perspective_with(&p.uuid, |h| h.add_owner(&user_did))
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+
+                // Update link language with new owners list
+                if let Some(owners) = &handle.owners {
+                    p.update_local_agents(owners.clone()).await;
+                }
+
+                log::info!(
+                    "Added user {} to existing neighbourhood {}. Link language has been updated with new owners.",
+                    user_email,
+                    url
+                );
+                return Ok(handle.clone());
+            } else {
+                // Main agent trying to join existing neighbourhood
+                // Add main agent to owners list for access control
+                let main_agent_did = crate::agent::did_for_context(context)?;
+
+                // Update database
+                crate::db::Ad4mDb::with_global_instance(|db| {
+                    db.add_owner_to_neighbourhood(&url, &main_agent_did)
+                })?;
+
+                // Add main agent to owners list, under the perspective's lock
+                let handle = update_perspective_with(&p.uuid, |h| h.add_owner(&main_agent_did))
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+
+                // Update link language with new owners list
+                if let Some(owners) = &handle.owners {
+                    p.update_local_agents(owners.clone()).await;
+                }
+
+                log::info!(
+                    "Added main agent to existing neighbourhood {}. Link language has been updated with new owners.",
+                    url
+                );
+                return Ok(handle.clone());
+            }
         }
     }
 
@@ -186,6 +213,7 @@ pub async fn install_neighbourhood_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentService;
     use crate::db::Ad4mDb;
 
     /// Users joining one neighbourhood at the same moment each add an owner;
@@ -195,34 +223,47 @@ mod tests {
     async fn concurrent_joins_keep_every_owner() {
         crate::test_utils::setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
-        crate::agent::AgentService::init_global_test_instance();
-        let url = "neighbourhood://concurrent-joins";
+        AgentService::init_global_test_instance();
+        let url = "neighbourhood://concurrent-joins".to_string();
         let mut handle = PerspectiveHandle::new_from_name("joined by many".to_string());
-        handle.shared_url = Some(url.to_string());
+        handle.shared_url = Some(url.clone());
         add_perspective(handle.clone(), None).await.unwrap();
-        let p: PerspectiveInstance = get_perspective(&handle.uuid).unwrap();
 
-        let dids: Vec<String> = (0..100).map(|i| format!("did:key:z6Mkjoiner{i}")).collect();
-        let joins = dids.iter().cloned().map(|did| {
-            let p = p.clone();
-            tokio::spawn(async move { add_owner(&p, url, &did).await.unwrap() })
+        let emails: Vec<String> = (0..50).map(|i| format!("joiner{i}@test")).collect();
+        for email in &emails {
+            AgentService::ensure_user_key_exists(email).unwrap();
+        }
+        let joins = emails.iter().cloned().map(|email| {
+            let url = url.clone();
+            tokio::spawn(async move {
+                let context = AgentContext::for_user_email(email);
+                install_neighbourhood_with_context(url, &context)
+                    .await
+                    .unwrap();
+            })
         });
         futures::future::join_all(joins).await;
 
-        let in_memory = p.persisted.lock().await.clone();
+        let in_memory = get_perspective(&handle.uuid)
+            .unwrap()
+            .persisted
+            .lock()
+            .await
+            .clone();
         let stored = Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
             .unwrap()
             .into_iter()
             .find(|s| s.uuid == handle.uuid)
             .unwrap();
-        for did in &dids {
+        for email in &emails {
+            let did = AgentService::get_user_did_by_email(email).unwrap();
             assert!(
-                in_memory.owners.as_ref().unwrap().contains(did),
-                "lost {did} in memory"
+                in_memory.owners.as_ref().unwrap().contains(&did),
+                "lost {email} in memory"
             );
             assert!(
-                stored.owners.as_ref().unwrap().contains(did),
-                "lost {did} in the db"
+                stored.owners.as_ref().unwrap().contains(&did),
+                "lost {email} in the db"
             );
         }
         // Other tests expect the global perspective map to start empty.
