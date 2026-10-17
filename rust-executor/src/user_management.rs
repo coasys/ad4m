@@ -255,6 +255,29 @@ fn shared_user_record(email: &str) -> Result<Option<serde_json::Value>, String> 
         .map_err(|e| format!("Shared DB lookup failed: {}", e))
 }
 
+/// The DID of the user `email` in the shared database, read without adopting the user: for
+/// lookups on behalf of callers who may not write, such as an anonymous capability request.
+/// `None` without a shared database or a record there. The user is adopted later, on login
+/// ([`import_user_from_shared_db`]).
+pub fn shared_did_for_email(email: &str) -> Option<String> {
+    let record = shared_user_record(email).unwrap_or_else(|e| {
+        log::warn!("{e}");
+        None
+    });
+    shared_record_did(email, record.as_ref())
+}
+
+/// The DID that the shared `record` of `email` names, if adopting it would act as that DID:
+/// `None` without a record or a DID, or when a local user of another email owns the DID
+/// ([`adopt_shared_user`] refuses such a record). Reads only.
+fn shared_record_did(email: &str, record: Option<&serde_json::Value>) -> Option<String> {
+    let did = record?.get("did")?.as_str().filter(|did| !did.is_empty())?;
+    match AgentService::email_for_did(did) {
+        Ok(owner) if owner != email => None,
+        _ => Some(did.to_string()),
+    }
+}
+
 /// Copies the user `email` from the shared database into the local `users` table, on an
 /// executor with a shared database, and returns the DID of the user's agent. `None` when
 /// there is no shared database or no such user there. A user created on another executor
@@ -426,6 +449,52 @@ mod tests {
             adopt_shared_user("new@example.org", "did:key:z6MkSharedNew", "hash").unwrap(),
             "did:key:z6MkSharedNew"
         );
+    }
+
+    /// D15: a capability request may come from anyone, so resolving the email it names reads
+    /// the shared record without adopting it: the local `users` table gets no row.
+    #[test]
+    fn reading_a_shared_record_adds_no_local_user() {
+        setup();
+        let victim = "did:key:z6MkPeekVictim";
+        Ad4mDb::with_global_instance(|db| db.add_user("peek-victim@example.org", victim, "pw"))
+            .unwrap();
+        let users = || {
+            Ad4mDb::with_global_instance(|db| db.list_users())
+                .unwrap()
+                .len()
+        };
+        let before = users();
+
+        let record = serde_json::json!({ "did": "did:key:z6MkPeekNew", "password_hash": "h" });
+        assert_eq!(
+            shared_record_did("peek-new@example.org", Some(&record)).as_deref(),
+            Some("did:key:z6MkPeekNew")
+        );
+        assert!(Ad4mDb::with_global_instance(|db| db.get_user("peek-new@example.org")).is_err());
+        assert_eq!(users(), before, "reading a shared record wrote a user");
+
+        // A record naming a local user's DID under another email names no agent.
+        let stolen = serde_json::json!({ "did": victim });
+        assert_eq!(
+            shared_record_did("peek-other@example.org", Some(&stolen)),
+            None
+        );
+        assert_eq!(
+            shared_record_did("peek-victim@example.org", Some(&stolen)).as_deref(),
+            Some(victim)
+        );
+        assert_eq!(shared_record_did("peek-new@example.org", None), None);
+        assert_eq!(
+            shared_record_did(
+                "peek-new@example.org",
+                Some(&serde_json::json!({ "did": "" }))
+            ),
+            None
+        );
+        // Without a shared database there is no record to read.
+        assert_eq!(shared_did_for_email("peek-new@example.org"), None);
+        assert_eq!(users(), before);
     }
 
     /// Invariant: create_user on a locked executor must return Err before writing any DB row.

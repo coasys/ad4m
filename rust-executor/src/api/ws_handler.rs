@@ -48,6 +48,12 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
+    pub fn too_many_requests(msg: impl Into<String>) -> Self {
+        Self {
+            code: 429,
+            message: msg.into(),
+        }
+    }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
             code: 500,

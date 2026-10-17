@@ -3,4 +3,8 @@ import type { LocalModel } from "./LocalModel";
 import type { ModelApi } from "./ModelApi";
 import type { ModelType } from "./ModelType";
 
+/**
+ * A model as RPC results show it. Its provider key never leaves the executor:
+ * `api.hasApiKey` says whether one is set.
+ */
 export type Model = { id: string, name: string, api: ModelApi | null, local: LocalModel | null, modelType: ModelType, };

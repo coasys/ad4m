@@ -22,6 +22,7 @@
 //! group or others (mode 0600 or 0400).
 
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
+use crate::secret::Secret;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -244,7 +245,7 @@ const INLINE_SECRETS: &[(&str, &str)] = &[
 /// which ones are set.
 #[derive(Clone, Default)]
 pub struct ExecutorSecrets {
-    pub admin_credential: Option<String>,
+    pub admin_credential: Option<Secret>,
     pub smtp_password: Option<String>,
     pub unlock_passphrase: Option<String>,
 }
@@ -253,7 +254,10 @@ impl fmt::Debug for ExecutorSecrets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let shown = |s: &Option<String>| s.as_ref().map(|_| REDACTED);
         f.debug_struct("ExecutorSecrets")
-            .field("admin_credential", &shown(&self.admin_credential))
+            .field(
+                "admin_credential",
+                &self.admin_credential.as_ref().map(|_| REDACTED),
+            )
             .field("smtp_password", &shown(&self.smtp_password))
             .field("unlock_passphrase", &shown(&self.unlock_passphrase))
             .finish()
@@ -289,7 +293,8 @@ impl ExecutorSecrets {
                 Some("AD4M_ADMIN_CREDENTIAL"),
                 "AD4M_ADMIN_CREDENTIAL_FILE",
                 None,
-            )?,
+            )?
+            .map(Secret::from),
             smtp_password: secret_from_env(
                 &env,
                 Some("AD4M_SMTP_PASSWORD"),
@@ -887,7 +892,7 @@ mod tests {
 
         let secrets = ExecutorSecrets::from_env(env_of(vec![]), &file).unwrap();
         assert_eq!(secrets.smtp_password.as_deref(), Some("config-pw"));
-        assert_eq!(secrets.admin_credential, None);
+        assert!(secrets.admin_credential.is_none());
         assert_eq!(secrets.unlock_passphrase, None);
 
         let path = |p: &PathBuf| p.to_string_lossy().into_owned();
@@ -902,7 +907,10 @@ mod tests {
         .unwrap();
         assert_eq!(secrets.smtp_password.as_deref(), Some("env-file-pw"));
         assert_eq!(secrets.unlock_passphrase.as_deref(), Some("passphrase"));
-        assert_eq!(secrets.admin_credential.as_deref(), Some("passphrase"));
+        assert!(secrets
+            .admin_credential
+            .as_ref()
+            .is_some_and(|c| c.expose_for_compare("passphrase")));
 
         let secrets = ExecutorSecrets::from_env(
             env_of(vec![("AD4M_SMTP_PASSWORD", "env-pw".to_string())]),

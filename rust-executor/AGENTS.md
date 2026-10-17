@@ -95,6 +95,25 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **Capabilities**: every WS handler checks `ctx.require(&X_CAPABILITY)` itself
   (`agent/capabilities/defs.rs`); `Session::may` answers the same question as a `bool`. MCP tools
   check via `Ad4mMcpHandler::get_*_perspective`.
+- **Capability requests** (#1399, executor side): `agent.requestCapability(authInfo, agent?)`
+  names a target agent (a managed user's email; absent = the main agent) and records a
+  `PendingRequest` in memory only (`agent/capabilities/pending.rs`: never on disk, anonymous
+  callers create them; 1024 at most, unapproved evicted first). The approval request event goes to
+  the target agent's DID with `AGENT_PERMIT`. `agent.permitCapability` (the operator, or a
+  session acting as the target managed agent) approves it, possibly with fewer capabilities, and
+  gets a six-digit code (a `Secret`). `agent.generateJwt` redeems the code once, in one locked
+  step: the grant is minted on the target agent with the approved capabilities capped at that
+  agent's own (`grant_caps_for`); a failed mint leaves the request approved and redeemable. Five
+  wrong codes delete a request; it lives 10 minutes (main agent) or 24 hours (managed agent),
+  restarted at approval. No request is approved at the request: the app name and domain are
+  whatever the (anonymous) caller declares, so they never grant anything. Only a six-digit code
+  approves or redeems (`pending::is_code`); the empty code is refused before any comparison.
+  The request flow is in `api/AGENTS.md`.
+- **Secrets** (`secret.rs`): credentials are `Secret`s (no `Serialize`): the admin credential,
+  AI provider keys (results carry `hasApiKey`), webhook credentials (`hasWebhookAuth`) and
+  capability codes. `api/tests/secret_leak_tests.rs` calls every read method as each principal
+  and fails if a seeded secret reaches a reply or an event; a new read method needing parameters
+  gets them in its `params` table.
 - **Notifications** post perspective data to any webhook URL. Their grant, update and delivery
   rules live in `runtime_service/notification_access.rs`: a notification fires only when granted
   and its owner may read the perspective. The owner is a DID (`owner_did`: a managed user's, or the

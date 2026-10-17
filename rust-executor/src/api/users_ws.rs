@@ -337,10 +337,17 @@ async fn logout(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpc
 
 /// user.revokeAllSessions — revokes every grant on a user's agent: logins and apps. A user
 /// revokes their own (the current one too); the operator revokes any user's, named by
-/// `email`. Logins after it work.
+/// `email`. Logins after it work. A session on the user's agent needs AGENT_UPDATE, as
+/// `agent.revokeToken` and `agent.removeApp` do: an app the user approved acts as the
+/// user's agent with only what it was granted (#1399), and a read-only one must not end
+/// every login. A login holds AGENT_UPDATE.
 async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UsersRevokeAllSessionsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if ctx.user_did().is_some() {
+        ctx.require(&AGENT_UPDATE_CAPABILITY)
+            .map_err(WsRpcError::forbidden)?;
+    }
     // The email names the user's agent: it resolves to the DID here, once. `None` when no
     // user with an agent has it.
     let did_of = |email: &str| {
@@ -391,9 +398,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<UsersLoginParams, String>("user.login", login_user);
     // The session JWT.
     map.method::<UsersVerifyEmailParams, String>("user.verifyEmail", verify_email);
-    // No capability check in these two: a user acts on their own sessions whatever their
-    // capabilities, and only the operator may name another user. The handlers check the
-    // session's principal.
+    // The handlers check the session's principal: `user.logout` revokes only the caller's
+    // own grant, whatever its capabilities; `user.revokeAllSessions` needs AGENT_UPDATE on
+    // the user's agent, and only the operator may name another user.
     // Revokes the caller's user token; 400 for any other session. Answers `true`.
     map.method::<NoParams, bool>("user.logout", logout);
     // Revokes every token of a user issued up to now. Answers `true`.
@@ -548,12 +555,12 @@ mod session_revocation_tests {
     }
 
     fn open(token: &str) -> Result<Session, AuthError> {
-        Session::open(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+        Session::open(token, &Some(ADMIN.into()), ListenerReach::Network)
     }
 
     /// The context of a socket that presents `token`.
     fn ctx(token: &str) -> Arc<RequestContext> {
-        let ctx = RequestContext::open(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+        let ctx = RequestContext::open(token, &Some(ADMIN.into()), ListenerReach::Network)
             .unwrap_or_else(|e| panic!("the token opens a session: {e}"));
         Arc::new(ctx)
     }
@@ -657,13 +664,13 @@ mod session_revocation_tests {
             );
             assert_eq!(open(token).unwrap_err(), AuthError::Revoked);
             // MCP resolves tokens without a session; it refuses them as well.
-            assert!(capabilities_from_token(token.clone(), None).is_err());
+            assert!(capabilities_from_token(token.clone(), &None).is_err());
         }
 
         // A login right after works: no cutoff, no same-second workaround.
         let later = generate_user_jwt(&email, "test").unwrap();
         assert!(open(&later).unwrap().check().is_ok());
-        assert!(capabilities_from_token(later, None).is_ok());
+        assert!(capabilities_from_token(later, &None).is_ok());
         assert!(open(&others).is_ok(), "another user's token works");
     }
 

@@ -407,7 +407,9 @@ mod app_approval_event_tests {
             capabilities: Some(vec![AGENT_READ_CAPABILITY.clone()]),
             user_email: None,
         };
-        let request_id = request_capability(auth.clone()).await;
+        let request_id = request_capability(auth.clone(), AgentContext::main_agent())
+            .await
+            .unwrap();
         let code = permit_capability(AuthInfoExtended {
             request_id: request_id.clone(),
             auth,
@@ -616,7 +618,8 @@ mod audience_matrix_tests {
     }
 
     /// The sessions of the matrix, by name. Users hold what a user token holds; "app" holds
-    /// the same set, so the audience alone decides what it gets. The AI app and the P reader
+    /// the same set but AGENT_PERMIT (which a user holds for their own agent only, #1399), so
+    /// the audience alone decides what it gets. The AI app and the P reader
     /// act as the main agent too, but their capabilities narrow what they receive (#1284).
     fn sessions() -> Vec<(&'static str, Arc<Session>)> {
         let ai = vec![
@@ -627,7 +630,16 @@ mod audience_matrix_tests {
         let p_reader = vec![perspective_query_capability(vec![P.to_string()])];
         [
             ("operator", Session::for_test(Principal::Operator)),
-            ("app", app("app", get_user_default_capabilities())),
+            (
+                "app",
+                app(
+                    "app",
+                    get_user_default_capabilities()
+                        .into_iter()
+                        .filter(|cap| cap != &*AGENT_PERMIT_CAPABILITY)
+                        .collect(),
+                ),
+            ),
             // An app whose token may approve apps (`AGENT_PERMIT`, here through `ALL`).
             (
                 "permit app",
@@ -750,11 +762,12 @@ mod audience_matrix_tests {
                 Event::apps_changed(&Default::default(), &AgentContext::main_agent()),
                 approvers.to_vec(),
             ),
-            // One for user A: A's sessions holding AGENT_PERMIT, which a user token lacks yet.
+            // One for user A: A's sessions holding AGENT_PERMIT, which a user token holds on
+            // its own agent (#1399).
             (
                 "apps-changed-of-a".into(),
                 event(Topic::AppsChanged, Audience::Dids(vec![A.into()])),
-                vec![],
+                vec!["user A"],
             ),
             (
                 "user-a".into(),
@@ -952,6 +965,17 @@ mod audience_matrix_tests {
                 };
                 cases.push((name, Event::exception(&info), to));
             }
+            // A capability request for user A's agent (#1399): A's sessions, which hold
+            // AGENT_PERMIT on it, and no one else.
+            let request_for_a = Event {
+                capability: AGENT_PERMIT_CAPABILITY.clone(),
+                ..event(Topic::ExceptionOccurred, Audience::Dids(vec![A.into()]))
+            };
+            cases.push((
+                "exception-CapabilityRequested-of-a".into(),
+                request_for_a,
+                vec!["user A"],
+            ));
         }
         // Perspective topics name the perspective's owners, or the main agent for an
         // unowned perspective: the rule the string filters applied before (`owner` equal to
@@ -1499,9 +1523,10 @@ mod audience_matrix_tests {
                     trigger: String::new(),
                     perspective_ids: vec![Q.into()],
                     webhook_url: String::new(),
-                    webhook_auth: String::new(),
+                    webhook_auth: crate::secret::Secret::new(""),
                     owner_did: main.clone(),
-                },
+                }
+                .view(),
                 perspective_id: Q.into(),
                 trigger_match: "[{\"secret\":\"q\"}]".into(),
             },
@@ -2278,7 +2303,7 @@ mod event_spec_tests {
                     notification: serde_json::from_value(serde_json::json!({
                         "id": "n", "granted": true, "description": "", "appName": "",
                         "appUrl": "", "appIconPath": "", "trigger": "", "perspectiveIds": [],
-                        "webhookUrl": "", "webhookAuth": "", "ownerDid": "did:x",
+                        "webhookUrl": "", "hasWebhookAuth": false, "ownerDid": "did:x",
                     }))
                     .unwrap(),
                     perspective_id: p(),

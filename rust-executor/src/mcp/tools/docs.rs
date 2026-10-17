@@ -384,7 +384,7 @@ mod tests {
         use tokio::sync::RwLock;
 
         let handler = Ad4mMcpHandler::new(McpContext {
-            admin_credential: Some("secret".to_string()),
+            admin_credential: Some("secret".into()),
             auth_token: Arc::new(RwLock::new(None)),
             dynamic_class_tools: false,
         });
