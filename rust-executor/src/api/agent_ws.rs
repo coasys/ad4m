@@ -8,7 +8,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::agent::grants::{GrantError, Grants, LiveGrant};
+use crate::agent::grants::{GrantError, Grants};
 use crate::agent::{
     did_document_for_context, AgentContext, AgentService, AgentSignature as InternalAgentSignature,
 };
@@ -22,7 +22,7 @@ use crate::pubsub::get_global_pubsub;
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::refuse_user_session;
+use super::guards::{Guard, IdParam, Owner};
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -71,9 +71,6 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
 
 /// agent.get — current agent info + status + lock state
 async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     // Multi-user mode: extract user DID from JWT token if present
     if let Some(did) = ctx.user_did().map(str::to_string) {
         AgentService::wallet_key_for_did(&did)
@@ -112,9 +109,6 @@ async fn get_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 /// agent.apps — the grants of the agent the caller acts as: a user lists the apps (and
 /// logins) on their own agent, the operator and main-agent apps those on the main agent.
 async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     apps_of(&ctx)
 }
 
@@ -128,22 +122,8 @@ fn apps_of(ctx: &RequestContext) -> Result<Value, WsRpcError> {
     Ok(serde_json::to_value(apps)?)
 }
 
-/// The grants that `token_or_request_id` names and the caller may manage: those on the agent
-/// it acts as, or any for the operator (D14). Another agent's grant reads as missing.
-fn manageable_grants(ctx: &RequestContext, token_or_request_id: &str) -> Vec<Arc<LiveGrant>> {
-    let own = ctx.acts_as();
-    Grants::global()
-        .find(token_or_request_id)
-        .into_iter()
-        .filter(|grant| ctx.is_operator() || grant.agent == own)
-        .collect()
-}
-
 /// agent.byDid — get agent by DID
-async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_agent_by_did(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let did = params.require_str("did")?;
     agent_by_did(&did).await
 }
@@ -159,10 +139,7 @@ pub(crate) const AGENTS_BY_DIDS_CONCURRENCY: usize = 16;
 /// A lookup that fails fails the whole call (500 naming the DID), as it
 /// fails `agent.byDid`. Each distinct DID is looked up once. More than
 /// [`MAX_AGENTS_BY_DIDS`] DIDs → 400.
-async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_agents_by_dids(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: AgentsByDidsRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     if body.dids.len() > MAX_AGENTS_BY_DIDS {
@@ -280,9 +257,6 @@ async fn agent_by_did(did: &str) -> Result<Value, WsRpcError> {
 
 /// agent.updateProfile — update DM language and/or public perspective
 async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: UpdateProfileRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -405,11 +379,7 @@ fn spawn_main_agent_publish() {
 }
 
 /// agent.generate — generate agent identity
-async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.generate")?;
-
+async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GenerateAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -469,11 +439,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 /// agent.lock — lock agent
-async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.lock")?;
-
+async fn lock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: LockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -490,11 +456,7 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 /// agent.unlock — unlock agent
-async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_SIGN_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.unlock")?;
-
+async fn unlock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UnlockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -587,9 +549,6 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
 /// agent.sign — sign a message
 async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_SIGN_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: SignMessageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -601,23 +560,20 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(out)?)
 }
 
-/// agent.removeApp — deletes an app's grant: its token stops working at once (a missing grant
-/// refuses as a revoked one does, #396) and leaves the app list.
-async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+/// The grant `agent.removeApp` removes: its `id` param, a token or a request id.
+const REMOVED_GRANT: IdParam = IdParam::Field(&["id"]);
 
-    let request_id = params.require_str("id")?;
-    match Grants::global().remove(&manageable_grants(&ctx, &request_id)) {
-        Ok(()) => {}
-        Err(GrantError::NotFound) => {
-            return Err(WsRpcError::internal(format!(
-                "App with request_key '{}' not found.",
-                request_id
-            )))
-        }
-        Err(e @ GrantError::Store(_)) => return Err(WsRpcError::internal(e.to_string())),
-    }
+/// The grant `agent.revokeToken` revokes: its `token` param, a token or a request id.
+const REVOKED_GRANT: IdParam = IdParam::Field(&["token"]);
+
+/// agent.removeApp — deletes an app's grant: its token stops working at once (a missing grant
+/// refuses as a revoked one does, #396) and leaves the app list. The guard (`Owns { Grant }`)
+/// checked that the caller's agent owns it, or that the caller is the operator.
+async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let request_id = REMOVED_GRANT.require(&params)?;
+    Grants::global()
+        .remove(&Grants::global().find(&request_id))
+        .map_err(grant_error)?;
     apps_of(&ctx)
 }
 
@@ -625,10 +581,7 @@ async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
 /// agent.requestCapability — an app asks to act as an agent: the main agent, or the managed
 /// agent that `agent` names (#1399). Returns the request id that `agent.generateJwt` redeems.
-async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_AUTH_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn request_capability(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: RequestCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -688,31 +641,27 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
 
 /// agent.permitCapability — the owner of the agent a request names approves it, with the
 /// capabilities in `auth` (which may be fewer than the app asked for), and gets the code
-/// the app redeems. The owner is the operator, or a session acting as that agent with
-/// AGENT_PERMIT ([`may_approve`], D12); a request for another agent reads as missing.
-// PR 5 moves the owner check into the method's guard.
+/// the app redeems. The guard (`Owns { Request }`, D12) checked that the caller is the
+/// operator or acts as that agent with AGENT_PERMIT; a request for another agent is 404.
+/// An approver grants no more than it holds itself (`permit_capability_within`).
 async fn permit_capability_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_PERMIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+    // The request the guard checked.
+    let request_id = PERMITTED_REQUEST_ID.require(&params)?;
     let body: PermitCapabilityRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let auth: AuthInfoExtended = serde_json::from_str(&body.auth)
+    let mut auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
+    auth.request_id = request_id;
     let missing = || {
         WsRpcError::not_found(
             "No pending request has this id; it may have expired. The app must request access \
              again",
         )
     };
-    let target = request_target(&auth.request_id).ok_or_else(missing)?;
-    if !may_approve(&ctx.session, &target) {
-        return Err(missing());
-    }
     // An approver grants no more than it holds itself.
     let held = ctx.session.capabilities();
     if let Some(approved) = &auth.auth.capabilities {
@@ -727,11 +676,15 @@ async fn permit_capability_handler(
     Ok(Value::String(random_number_challenge))
 }
 
-/// agent.generateJwt — generate JWT
-async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_AUTH_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+/// The request `agent.permitCapability` approves: `requestId` in its `auth` param, a JSON
+/// string. Missing (400) when `auth` is not a JSON object with a string `requestId`.
+const PERMITTED_REQUEST_ID: IdParam = IdParam::InJson {
+    param: "auth",
+    field: "requestId",
+};
 
+/// agent.generateJwt — generate JWT
+async fn generate_jwt(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GenerateJwtRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -741,31 +694,32 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(Value::String(cap_token.expose_once()))
 }
 
-/// agent.revokeToken — revokes a grant: its token stops working and its sockets close.
+/// agent.revokeToken — revokes a grant: its token stops working and its sockets close. The
+/// guard (`Owns { Grant }`) checked that the caller's agent owns it, or that the caller is the
+/// operator: a value that names no grant the caller may manage is 404, not a silent success
+/// (#1060).
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
-    // for an app's grant and a login's. A value that names no grant the caller may manage
-    // answers 404 instead of a silent success (#1060).
-    let token = params.require_str("token")?;
+    // for an app's grant and a login's.
+    let token = REVOKED_GRANT.require(&params)?;
     Grants::global()
-        .revoke(&manageable_grants(&ctx, &token))
-        .map_err(|e| match e {
-            GrantError::NotFound => WsRpcError::not_found(e.to_string()),
-            GrantError::Store(_) => WsRpcError::internal(e.to_string()),
-        })?;
+        .revoke(&Grants::global().find(&token))
+        .map_err(grant_error)?;
     apps_of(&ctx)
+}
+
+/// A grant that went away between the guard and the handler is 404, as a missing one is.
+fn grant_error(e: GrantError) -> WsRpcError {
+    match e {
+        GrantError::NotFound => WsRpcError::not_found(e.to_string()),
+        GrantError::Store(_) => WsRpcError::internal(e.to_string()),
+    }
 }
 
 // ── Status ──
 
 /// agent.status — agent status
 async fn get_agent_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     // Multi-user mode
     if let Some(did) = ctx.user_did().map(str::to_string) {
         let agent_context = AgentContext::managed(did.clone());
@@ -807,10 +761,10 @@ async fn is_locked(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
 // ── Trust ──
 
 /// agent.getTrustedAgents — list trusted agents
-async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_trusted_agents(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let agents = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
     });
@@ -818,12 +772,7 @@ async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 /// agent.addTrustedAgents — add trusted agents
-async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The executor's trust list decides whose languages this executor installs and runs.
-    refuse_user_session(&ctx, "agent.addTrustedAgents")?;
-
+async fn add_trusted_agents(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -840,12 +789,8 @@ async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<V
 /// agent.deleteTrustedAgents — remove trusted agents
 async fn delete_trusted_agents(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.deleteTrustedAgents")?;
-
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -862,12 +807,7 @@ async fn delete_trusted_agents(
 // ── Entanglement ──
 
 /// agent.getEntanglementProofs — list
-async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The proofs belong to the main agent.
-    refuse_user_session(&ctx, "agent.getEntanglementProofs")?;
-
+async fn get_entanglement(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let proofs = get_entanglement_proofs();
     Ok(serde_json::to_value(
         proofs
@@ -878,11 +818,7 @@ async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 /// agent.addEntanglementProofs — add
-async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.addEntanglementProofs")?;
-
+async fn add_entanglement(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: AgentAddEntanglementProofsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -928,11 +864,10 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 /// agent.deleteEntanglementProofs — delete
-async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_UPDATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.deleteEntanglementProofs")?;
-
+async fn delete_entanglement(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let body: EntanglementProofsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -963,10 +898,7 @@ async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 /// agent.import — import agent from keystore
-async fn import_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn import_agent(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     Err(WsRpcError::not_implemented(
         "Agent import not yet implemented",
     ))
@@ -975,12 +907,8 @@ async fn import_agent(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 /// agent.entanglementProofPreflight — pre-flight check
 async fn entanglement_proof_preflight(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "agent.entanglementProofPreflight")?;
-
     let body: EntanglementProofPreflightRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -994,56 +922,110 @@ async fn entanglement_proof_preflight(
 ///
 /// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.method::<NoParams, Agent>("agent.get", get_agent).read();
+    // The caller's own agent: a user's, else the main agent.
+    map.method::<NoParams, Agent>("agent.get", get_agent)
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // The grants on the caller's own agent (without tokens).
     map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
-        .read();
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
-        .read();
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<AgentsByDidsRequest, Vec<Option<Agent>>>("agent.byDIDs", get_agents_by_dids)
-        .read();
-    map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile)
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
-        .long();
-    // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
-    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent);
-    map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent);
+        .long()
+        .guard(Guard::Executor(AGENT_CREATE_CAPABILITY.clone()));
+    // Always fails (not implemented); the result type is the SDK's `AgentStatus`. Users get
+    // the 501 too.
+    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent)
+        .guard(Guard::Cap(AGENT_CREATE_CAPABILITY.clone()));
+    map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent)
+        .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
-        .long();
-    map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message);
-    map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app);
-    map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability);
+        .long()
+        .guard(Guard::Executor(AGENT_SIGN_CAPABILITY.clone()));
+    map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message)
+        .guard(Guard::Cap(AGENT_SIGN_CAPABILITY.clone()));
+    // A grant belongs to its agent's owner: a user removes the grants on their own agent, the
+    // operator any (D14); another agent's grant is 404.
+    map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app)
+        .guard(Guard::Owns {
+            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            id: REMOVED_GRANT,
+            owner: Owner::Grant,
+        });
+    // An app without a token asks for one.
+    map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability)
+        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
+    // The owner of the request's target agent approves it (D12): the operator, or a session
+    // acting as that agent with AGENT_PERMIT. Another agent's request is 404.
     map.method::<PermitCapabilityRequest, String>(
         "agent.permitCapability",
         permit_capability_handler,
-    );
-    map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt);
-    map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token);
+    )
+    .guard(Guard::Owns {
+        cap: |_| AGENT_PERMIT_CAPABILITY.clone(),
+        id: PERMITTED_REQUEST_ID,
+        owner: Owner::Request,
+    });
+    map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt)
+        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
+    // As agent.removeApp: the grants on the caller's own agent, or any for the operator.
+    map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token)
+        .guard(Guard::Owns {
+            cap: |_| AGENT_UPDATE_CAPABILITY.clone(),
+            id: REVOKED_GRANT,
+            owner: Owner::Grant,
+        });
     map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
-        .read();
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // Every caller may ask, with or without capabilities.
     map.method::<NoParams, bool>("agent.isLocked", is_locked)
-        .read();
+        .read()
+        .guard(Guard::Open);
+    // The executor's trust list, which users read too.
     map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
-        .read();
-    map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents);
+        .read()
+        .guard(Guard::Cap(RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY.clone()));
+    // The executor's trust list decides whose languages this executor installs and runs.
+    map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents)
+        .guard(Guard::Executor(
+            RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY.clone(),
+        ));
     map.method::<TrustedAgentsWrapper, Vec<String>>(
         "agent.deleteTrustedAgents",
         delete_trusted_agents,
-    );
+    )
+    .guard(Guard::Executor(
+        RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY.clone(),
+    ));
+    // The proofs belong to the executor's main agent.
     map.method::<NoParams, Vec<EntanglementProof>>("agent.getEntanglementProofs", get_entanglement)
-        .read();
+        .read()
+        .guard(Guard::Executor(AGENT_READ_CAPABILITY.clone()));
     map.method::<AgentAddEntanglementProofsParams, Vec<EntanglementProof>>(
         "agent.addEntanglementProofs",
         add_entanglement,
-    );
+    )
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<EntanglementProofsWrapper, Vec<EntanglementProof>>(
         "agent.deleteEntanglementProofs",
         delete_entanglement,
-    );
+    )
+    .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<EntanglementProofPreflightRequest, EntanglementProof>(
         "agent.entanglementProofPreflight",
         entanglement_proof_preflight,
     )
-    .read();
+    .read()
+    .guard(Guard::Executor(AGENT_READ_CAPABILITY.clone()));
 }
 
 // ── Contracts ───────────────────────────────────────────────────────────────
@@ -1396,7 +1378,8 @@ mod revoke_token_tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err.0, 500, "{}", err.1);
+        // 404 as for revokeToken (the handler answered 500 before the guard checked the grant).
+        assert_eq!(err.0, 404, "{}", err.1);
         assert!(err.1.contains("not found"), "{}", err.1);
     }
 
@@ -1698,6 +1681,40 @@ mod capability_request_tests {
         text
     }
 
+    // An `auth` that names `requestId` twice is 400 and approves nothing, in either order: the
+    // guard would read the last id (a `Value` keeps it) while the handler's struct refuses a
+    // repeated field, so the guard could check another request than the one approved.
+    #[tokio::test]
+    async fn a_repeated_request_id_is_400_and_approves_nothing() {
+        setup();
+        let (alice_email, alice) = user("repeated-id-alice");
+        let (bob_email, _bob) = user("repeated-id-bob");
+        let caps = [AGENT_READ_CAPABILITY.clone()];
+        let mine = request(Some(&alice_email), &caps).await;
+        let victim = request(Some(&bob_email), &caps).await;
+        let auth = serde_json::to_string(&AuthInfo {
+            app_name: "Consent test app".into(),
+            capabilities: Some(caps.to_vec()),
+            ..AuthInfo::default()
+        })
+        .unwrap();
+        for (first, last) in [(&mine, &victim), (&victim, &mine)] {
+            let repeated =
+                format!(r#"{{"requestId":"{first}","requestId":"{last}","auth":{auth}}}"#);
+            let err = call(
+                "agent.permitCapability",
+                json!({ "auth": repeated }),
+                alice.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.0, 400, "{first} then {last}: {}", err.1);
+        }
+        let pending = crate::agent::capabilities::pending::PendingRequests::global();
+        assert!(!pending.is_approved(&mine));
+        assert!(!pending.is_approved(&victim));
+    }
+
     // The end-to-end flow of #1399 on the executor: the user (a session acting as the managed
     // agent) receives the request, approves part of it, and the app's token acts as that
     // user with only that part.
@@ -1809,6 +1826,83 @@ mod capability_request_tests {
         .await
         .is_ok());
         assert!(permit(operator(), &for_main, &caps).await.is_ok());
+    }
+
+    // D12, at the guard of `agent.permitCapability` (`Owns { Request }`): the operator
+    // approves any request; a session approves only a request for the agent it acts as, and
+    // only while it holds AGENT_PERMIT; nobody but the operator approves a request for an
+    // email without an agent. An anonymous caller approves nothing, whatever it holds: it acts
+    // as the main agent only in name.
+    #[tokio::test]
+    async fn only_the_operator_or_the_agent_with_permit_passes_the_approval_guard() {
+        use crate::agent::session::{Principal, Session};
+        use crate::agent::AgentContext;
+        setup();
+        let main = AgentContext::main_agent();
+        let alice = AgentContext::managed("did:key:z6MkGuardAlice".into());
+        let bob = AgentContext::managed("did:key:z6MkGuardBob".into());
+        let permit_caps = vec![
+            AGENT_PERMIT_CAPABILITY.clone(),
+            AGENT_READ_CAPABILITY.clone(),
+        ];
+        let no_permit = vec![AGENT_READ_CAPABILITY.clone()];
+        let ctx = |principal: Principal, caps: &Vec<Capability>| {
+            RequestContext::for_session(Session::for_test(principal).with_caps(caps.clone()))
+        };
+
+        let mut targets = Vec::new();
+        for target in [
+            RequestTarget::from(main.clone()),
+            alice.clone().into(),
+            bob.clone().into(),
+            RequestTarget::NoAgent,
+        ] {
+            let auth = AuthInfo {
+                app_name: "guard test".into(),
+                capabilities: Some(no_permit.clone()),
+                ..AuthInfo::default()
+            };
+            let id = crate::agent::capabilities::request_capability(auth, target)
+                .await
+                .unwrap();
+            targets.push(id);
+        }
+        let map = build_handler_map();
+        let admits = |ctx: RequestContext, request_id: String| {
+            let map = &map;
+            async move {
+                let auth = AuthInfoExtended {
+                    request_id,
+                    auth: AuthInfo::default(),
+                };
+                let params = json!({ "auth": serde_json::to_string(&auth).unwrap() });
+                map.admit("agent.permitCapability", &params, &ctx).await
+            }
+        };
+
+        for id in &targets {
+            let operator = RequestContext::operator_for_test();
+            assert!(admits(operator, id.clone()).await.is_ok(), "operator, {id}");
+            let anonymous = ctx(Principal::Anonymous, &permit_caps);
+            let refused = admits(anonymous, id.clone()).await.unwrap_err();
+            assert_eq!(
+                refused.code, 404,
+                "anonymous with PERMIT: {}",
+                refused.message
+            );
+        }
+
+        for (agent, own) in [(&main, &targets[0]), (&alice, &targets[1])] {
+            let with = || ctx(Principal::Agent(agent.clone()), &permit_caps);
+            assert!(admits(with(), own.clone()).await.is_ok(), "{agent:?}");
+            let without = ctx(Principal::Agent(agent.clone()), &no_permit);
+            let refused = admits(without, own.clone()).await.unwrap_err();
+            assert_eq!(refused.code, 403, "{agent:?} without PERMIT");
+            for other in targets.iter().filter(|t| *t != own) {
+                let refused = admits(with(), other.clone()).await.unwrap_err();
+                assert_eq!(refused.code, 404, "{agent:?} on another agent's request");
+            }
+        }
     }
 
     // D13: an approval wider than the user's own capabilities (here, every capability) yields

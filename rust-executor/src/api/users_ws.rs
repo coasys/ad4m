@@ -9,16 +9,14 @@ use crate::agent::capabilities::*;
 use crate::db::Ad4mDb;
 use crate::types::{RequestContext, UserCreationResult, UserStatistics, VerificationRequestResult};
 
+use super::guards::Guard;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 async fn get_multi_user_enabled(
     _params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let enabled = Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled())
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(enabled))
@@ -26,12 +24,8 @@ async fn get_multi_user_enabled(
 
 async fn set_multi_user_enabled(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-
     let body: SetMultiUserRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -40,10 +34,7 @@ async fn set_multi_user_enabled(
     Ok(Value::Bool(true))
 }
 
-async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn list_users(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     if !crate::user_management::is_multi_user_enabled() {
         return Ok(serde_json::json!([]));
     }
@@ -54,10 +45,7 @@ async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::to_value(users).unwrap_or_default())
 }
 
-async fn get_user_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_user_wallet(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let email = params.require_str("email")?;
 
     let wallet = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
@@ -69,12 +57,8 @@ async fn get_user_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
 async fn set_user_free_access(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_operator() {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-
     let body: SetUserFreeAccessRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -93,11 +77,8 @@ async fn set_user_free_access(
     Ok(Value::Bool(true))
 }
 
-async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn create_user(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     use crate::user_management as um;
-
-    ctx.require(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: CreateUserRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -162,10 +143,7 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::json!({ "did": did, "success": true }))
 }
 
-async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn login_user(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UsersLoginParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -177,10 +155,7 @@ async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     Ok(Value::String(jwt))
 }
 
-async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn verify_email(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UsersVerifyEmailParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -194,10 +169,7 @@ async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(Value::String(jwt))
 }
 
-async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&ALL_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn email_test(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UsersEmailTestParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -247,12 +219,9 @@ async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
 async fn request_verification(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     use crate::user_management as um;
-
-    ctx.require(&RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersRequestVerificationParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -337,17 +306,13 @@ async fn logout(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpc
 
 /// user.revokeAllSessions — revokes every grant on a user's agent: logins and apps. A user
 /// revokes their own (the current one too); the operator revokes any user's, named by
-/// `email`. Logins after it work. A session on the user's agent needs AGENT_UPDATE, as
-/// `agent.revokeToken` and `agent.removeApp` do: an app the user approved acts as the
+/// `email`. Logins after it work. The guard (`Cap(AGENT_UPDATE)`) checked the capability, as
+/// `agent.revokeToken` and `agent.removeApp` need it: an app the user approved acts as the
 /// user's agent with only what it was granted (#1399), and a read-only one must not end
 /// every login. A login holds AGENT_UPDATE.
 async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: UsersRevokeAllSessionsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    if ctx.user_did().is_some() {
-        ctx.require(&AGENT_UPDATE_CAPABILITY)
-            .map_err(WsRpcError::forbidden)?;
-    }
     // The email names the user's agent: it resolves to the DID here, once. `None` when no
     // user with an agent has it.
     let did_of = |email: &str| {
@@ -393,34 +358,66 @@ async fn users_credits(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.method::<CreateUserRequest, UserCreationResult>("user.create", create_user);
+    // Signing up, logging in and verifying an email: callers without a token hold these
+    // capabilities while multi-user mode is on.
+    map.method::<CreateUserRequest, UserCreationResult>("user.create", create_user)
+        .guard(Guard::Cap(
+            RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
+        ));
     // The session JWT.
-    map.method::<UsersLoginParams, String>("user.login", login_user);
+    map.method::<UsersLoginParams, String>("user.login", login_user)
+        .guard(Guard::Cap(RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone()));
     // The session JWT.
-    map.method::<UsersVerifyEmailParams, String>("user.verifyEmail", verify_email);
-    // The handlers check the session's principal: `user.logout` revokes only the caller's
-    // own grant, whatever its capabilities; `user.revokeAllSessions` needs AGENT_UPDATE on
-    // the user's agent, and only the operator may name another user.
-    // Revokes the caller's user token; 400 for any other session. Answers `true`.
-    map.method::<NoParams, bool>("user.logout", logout);
-    // Revokes every token of a user issued up to now. Answers `true`.
-    map.method::<UsersRevokeAllSessionsParams, bool>("user.revokeAllSessions", revoke_all_sessions);
+    map.method::<UsersVerifyEmailParams, String>("user.verifyEmail", verify_email)
+        .guard(Guard::Cap(
+            RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
+        ));
+    // Open: a login ends itself whatever its capabilities. The handler checks the session's
+    // principal. Revokes the caller's user token; 400 for any other session. Answers `true`.
+    map.method::<NoParams, bool>("user.logout", logout)
+        .guard(Guard::Open);
+    // Revokes every token of a user issued up to now, logins and apps. AGENT_UPDATE, as
+    // `agent.removeApp`: since #1399 an app a user approved acts as the user's agent too.
+    // Only the operator may name another user; the handler checks the session's principal.
+    // Answers `true`.
+    map.method::<UsersRevokeAllSessionsParams, bool>("user.revokeAllSessions", revoke_all_sessions)
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // Every user's record: the default user capabilities leave this capability out.
     map.method::<NoParams, Vec<UserStatistics>>("user.list", list_users)
-        .read();
+        .read()
+        .guard(Guard::Executor(
+            RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone(),
+        ));
     map.method::<NoParams, bool>("user.multiUserEnabled", get_multi_user_enabled)
-        .read();
-    map.method::<SetMultiUserRequest, bool>("user.setMultiUserEnabled", set_multi_user_enabled);
-    map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access);
-    // Always answers 501; the contract is the SDK's call.
-    map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits);
-    // The user's hot-wallet address (404 when none).
+        .read()
+        .guard(Guard::Cap(
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ));
+    map.method::<SetMultiUserRequest, bool>("user.setMultiUserEnabled", set_multi_user_enabled)
+        .guard(Guard::Operator);
+    map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access)
+        .guard(Guard::Operator);
+    // Always errors: setting credits has no implementation yet. The operator gets the 501,
+    // every other caller the guard's 403. The contract is the SDK's call.
+    // Operator until implemented: set the real guard with the handler.
+    map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits)
+        .guard(Guard::Operator);
+    // Any user's hot-wallet address, named by email (404 when none).
     map.method::<UsersEmailParams, String>("user.wallet", get_user_wallet)
-        .read();
-    map.method::<UsersEmailTestParams, UsersEmailTestResult>("user.emailTest", email_test);
+        .read()
+        .guard(Guard::Executor(
+            RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone(),
+        ));
+    // Test hooks of the email service, for the executor's own test runs.
+    map.method::<UsersEmailTestParams, UsersEmailTestResult>("user.emailTest", email_test)
+        .guard(Guard::Executor(ALL_CAPABILITY.clone()));
     map.method::<UsersRequestVerificationParams, VerificationRequestResult>(
         "user.requestVerification",
         request_verification,
-    );
+    )
+    .guard(Guard::Cap(
+        RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
+    ));
 }
 
 // ── Contracts ──
@@ -533,6 +530,64 @@ pub enum UsersEmailTestResult {
 }
 
 #[cfg(test)]
+mod operator_tests {
+    use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
+    use crate::api::ws_handler::HandlerMap;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    // Only the admin credential: an app that holds every capability is refused too, before
+    // the handler reads the params or the DB.
+    #[tokio::test]
+    async fn executor_wide_user_settings_refuse_an_app_holding_every_capability_and_users() {
+        let mut map = HandlerMap::new();
+        super::register_ws_handlers(&mut map);
+        let callers = [
+            RequestContext::app_for_test(vec![ALL_CAPABILITY.clone()]),
+            RequestContext::user_for_test("did:key:settings", get_user_default_capabilities()),
+        ];
+        for (method, params) in [
+            ("user.setMultiUserEnabled", json!({ "enabled": true })),
+            (
+                "user.freeAccess",
+                json!({ "email": "a@example.org", "enabled": true }),
+            ),
+            (
+                "user.credits",
+                json!({ "email": "a@example.org", "amount": 1.0 }),
+            ),
+        ] {
+            for ctx in &callers {
+                let err = map
+                    .dispatch(method, params.clone(), Arc::new(ctx.clone()))
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.code, 403, "{method}: {}", err.message);
+                assert_eq!(err.message, "Admin credential required", "{method}");
+            }
+        }
+    }
+
+    // `user.credits` has no implementation yet: the operator reaches the handler and gets
+    // its 501.
+    #[tokio::test]
+    async fn user_credits_answers_the_operator_not_implemented() {
+        let mut map = HandlerMap::new();
+        super::register_ws_handlers(&mut map);
+        let err = map
+            .dispatch(
+                "user.credits",
+                json!({ "email": "a@example.org", "amount": 1.0 }),
+                Arc::new(RequestContext::operator_for_test()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, 501, "{}", err.message);
+    }
+}
+
+#[cfg(test)]
 mod session_revocation_tests {
     //! #1370: user tokens could not be revoked: no logout, no "log out everywhere".
     use crate::agent::capabilities::{capabilities_from_token, AuthInfo, ListenerReach};
@@ -603,6 +658,27 @@ mod session_revocation_tests {
             grant.did,
             crate::agent::AgentService::did_for_email(&email).unwrap()
         );
+    }
+
+    // Since #1399 an app the user approved acts as the user's agent too, with the subset the
+    // user approved. Revoking every grant on the agent is AGENT_UPDATE, as `agent.removeApp`.
+    #[tokio::test]
+    async fn an_app_on_a_users_agent_without_agent_update_cannot_revoke_the_users_sessions() {
+        setup();
+        let email = managed_user("narrow-app");
+        let login = generate_user_jwt(&email, "test").unwrap();
+        let narrow = granted_token(AuthInfo {
+            app_name: "narrow".into(),
+            user_email: Some(email.clone()),
+            capabilities: Some(vec![
+                crate::agent::capabilities::perspective_query_capability(vec!["*".into()]),
+            ]),
+            ..AuthInfo::default()
+        });
+        let refused = call("user.revokeAllSessions", json!({}), ctx(&narrow)).await;
+        assert!(matches!(refused, Err((403, _))), "{refused:?}");
+        assert!(open(&login).is_ok(), "the user's login survives");
+        assert!(open(&narrow).is_ok(), "the app's own grant survives");
     }
 
     #[tokio::test]

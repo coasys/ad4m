@@ -15,7 +15,7 @@ use crate::types::{
 };
 use base64::Engine;
 
-use super::guards::refuse_user_session;
+use super::guards::{Guard, IdParam, Owner};
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -43,10 +43,7 @@ fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
 
 // ── Models ──
 
-async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let _service = AIService::global_instance()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -77,15 +74,10 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// credentials, so this widens reach and not authority; and the body is the
 /// reason the endpoint is worth having, because a status alone does not
 /// separate a bad key from a bad model name from a host that is not an LLM.
-/// The default user capabilities include AI_CREATE, so the call also refuses
-/// user sessions: the reach is a cleaner read primitive than `addModel` plus a
-/// prompt, needing no model and no completion.
-async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // The executor sends a request to a URL the caller chooses.
-    refuse_user_session(&ctx, "ai.discoverModels")?;
-
+/// The default user capabilities include AI_CREATE, so the guard also refuses
+/// user sessions: the executor sends a request to a URL the caller chooses, a cleaner
+/// read primitive than `addModel` plus a prompt, needing no model and no completion.
+async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let base_url = params.require_str("baseUrl")?;
     let base_url = url::Url::parse(&base_url)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid baseUrl: {e}")))?;
@@ -146,12 +138,7 @@ pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRp
     }
 }
 
-async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    // Node-wide settings: every user's prompts go to the models and keys set here.
-    refuse_user_session(&ctx, "ai.addModel")?;
-
+async fn add_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
@@ -169,11 +156,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::String(id))
 }
 
-async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "ai.updateModel")?;
-
+async fn update_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
@@ -195,11 +178,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(Value::Bool(true))
 }
 
-async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "ai.removeModel")?;
-
+async fn remove_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
 
     let service = AIService::global_instance()
@@ -214,11 +193,7 @@ async fn remove_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(Value::Bool(true))
 }
 
-async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    refuse_user_session(&ctx, "ai.setDefaultModel")?;
-
+async fn set_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let id = params.require_str("id")?;
     let body: SetDefaultModelRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -241,10 +216,7 @@ async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     Ok(Value::Bool(true))
 }
 
-async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
+async fn get_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let model_type_str = params.require_str("modelType")?;
 
     let model_type: ModelType = serde_json::from_str(&format!("\"{}\"", model_type_str))
@@ -265,11 +237,8 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 
 async fn get_model_loading_status(
     params: Value,
-    ctx: Arc<RequestContext>,
+    _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let model = params
         .opt_str("model")
         .or_else(|| params.opt_str("modelId"))
@@ -284,18 +253,32 @@ async fn get_model_loading_status(
 
 // ── Tasks ──
 
-async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+/// The id of the task `ai.prompt` runs: its `taskId` param.
+const PROMPT_TASK_ID: IdParam = IdParam::Field(&["taskId"]);
 
-    let tasks = AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?;
+/// The id of the task `ai.removeTask` deletes: its `id` param.
+const REMOVED_TASK_ID: IdParam = IdParam::Field(&["id"]);
+
+/// The id of the task `ai.updateTask` rewrites: `task.taskId`, the row the update writes.
+const UPDATED_TASK_ID: IdParam = IdParam::Field(&["task", "taskId"]);
+
+/// The operator lists every task; any other session the tasks of the agent it acts as (a
+/// grant on the main agent the main agent's, which belong to no user), as the task guard
+/// (`Owns { Task }`) lets it reach them.
+async fn list_tasks(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let tasks = if ctx.is_operator() {
+        AIService::get_tasks().map_err(|e| WsRpcError::internal(e.to_string()))?
+    } else {
+        let agent = ctx.acts_as();
+        Ad4mDb::with_global_instance(|db| db.get_tasks_owned_by(agent.managed_did()))
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
+    };
     Ok(serde_json::to_value(tasks)?)
 }
 
+/// The new task belongs to the caller's agent, by DID: a user session's to its managed agent,
+/// the operator's and main-agent apps' to the main agent (`NULL`).
 async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let task: AITaskInput =
         serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
@@ -305,19 +288,19 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .add_task(task)
+        .add_task(task, ctx.user_did())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(result)?)
 }
 
-async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let task: AITask = serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
-        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+async fn update_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let mut task: AITask =
+        serde_json::from_value(params.get("task").cloned().unwrap_or(Value::Null))
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    // The task the guard checked.
+    task.task_id = UPDATED_TASK_ID.require(&params)?;
 
     let service = AIService::global_instance()
         .await
@@ -331,11 +314,8 @@ async fn update_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(serde_json::to_value(result)?)
 }
 
-async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let id = params.require_str("id")?;
+async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let id = REMOVED_TASK_ID.require(&params)?;
 
     let service = AIService::global_instance()
         .await
@@ -352,10 +332,10 @@ async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 // ── Prompt & Embed ──
 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_PROMPT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_did())?;
 
+    // The task the guard checked.
+    let task_id = PROMPT_TASK_ID.require(&params)?;
     let body: PromptRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -364,11 +344,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .prompt(
-            body.task_id,
-            body.prompt,
-            ctx.user_did().map(str::to_string),
-        )
+        .prompt(task_id, body.prompt, ctx.user_did().map(str::to_string))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -376,8 +352,6 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_PROMPT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_did())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
@@ -406,8 +380,6 @@ async fn open_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_TRANSCRIBE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(ctx.user_did())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
@@ -429,9 +401,6 @@ async fn close_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    ctx.require(&AI_TRANSCRIBE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
     let body: AiTranscriptionCloseParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -448,48 +417,83 @@ async fn close_transcription_stream(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
+    // The executor's models (without keys), which users read too.
     map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
-        .read();
+        .read()
+        .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     // The provider's own model ids.
     map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
-        .read();
+        .read()
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // Executor-wide settings: every user's prompts go to the models and keys set here.
     // The new model's id.
     map.method::<AiAddModelParams, String>("ai.addModel", add_model)
-        .long();
-    map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model);
-    map.method::<AiIdParams, bool>("ai.removeModel", remove_model);
-    map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model);
+        .long()
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model)
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiIdParams, bool>("ai.removeModel", remove_model)
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model)
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiGetDefaultModelParams, Option<ModelView>>(
         "ai.getDefaultModel",
         get_default_model,
     )
-    .read();
+    .read()
+    .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
         "ai.modelLoadingStatus",
         get_model_loading_status,
     )
-    .read();
+    .read()
+    .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
+    // Tasks belong to the agent whose session created them (`tasks.agent_did`, `NULL` for the
+    // main agent); the operator reaches every task, any other session its agent's. The list
+    // and the new task follow the caller's agent.
     map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
-        .read();
-    map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task);
-    map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task);
-    map.method::<AiIdParams, bool>("ai.removeTask", remove_task);
+        .read()
+        .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
+    map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task)
+        .guard(Guard::Cap(AI_CREATE_CAPABILITY.clone()));
+    map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task)
+        .guard(Guard::Owns {
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
+            id: UPDATED_TASK_ID,
+            owner: Owner::Task,
+        });
+    map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
+        .guard(Guard::Owns {
+            cap: |_| AI_CREATE_CAPABILITY.clone(),
+            id: REMOVED_TASK_ID,
+            owner: Owner::Task,
+        });
+    // Prompts, embeddings and transcription bill the caller's user; the handlers check its
+    // compute credits after the guard.
     // The completion text.
     map.method::<PromptRequest, String>("ai.prompt", ai_prompt)
-        .long();
+        .long()
+        .guard(Guard::Owns {
+            cap: |_| AI_PROMPT_CAPABILITY.clone(),
+            id: PROMPT_TASK_ID,
+            owner: Owner::Task,
+        });
     // The embedding vector as JSON, zlib-deflated, base64-encoded.
     map.method::<EmbedRequest, String>("ai.embed", ai_embed)
-        .long();
+        .long()
+        .guard(Guard::Cap(AI_PROMPT_CAPABILITY.clone()));
     // The new stream's id.
     map.method::<AiTranscriptionOpenParams, String>(
         "ai.transcriptionOpen",
         open_transcription_stream,
-    );
+    )
+    .guard(Guard::Cap(AI_TRANSCRIBE_CAPABILITY.clone()));
     // Always the string `"true"`.
     map.method::<AiTranscriptionCloseParams, String>(
         "ai.transcriptionClose",
         close_transcription_stream,
-    );
+    )
+    .guard(Guard::Cap(AI_TRANSCRIBE_CAPABILITY.clone()));
 }
 
 // ── HTTP-only: binary transcription feed ────────────────────────────────────

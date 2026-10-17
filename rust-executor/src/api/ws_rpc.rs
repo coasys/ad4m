@@ -619,7 +619,7 @@ mod event_gate_tests {
             .is_authenticated()
     }
 
-    // On a node with an admin credential, a socket with no token gets only the anonymous
+    // On an executor with an admin credential, a socket with no token gets only the anonymous
     // capabilities. It used to receive the main agent's event stream all the same.
     #[test]
     fn an_unauthenticated_socket_receives_no_events() {
@@ -648,7 +648,7 @@ mod event_gate_tests {
         let user = RequestContext::user_for_test("did:key:u", vec![]);
         assert!(user.session.is_authenticated());
         assert!(gets_events(ADMIN, Some(ADMIN), ListenerReach::Network));
-        // No token on a loopback listener of a node without an admin credential (#1059).
+        // No token on a loopback listener of an executor without an admin credential (#1059).
         assert!(gets_events("", None, ListenerReach::Loopback));
     }
 }

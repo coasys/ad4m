@@ -476,7 +476,9 @@ describe("Multi-User Simple integration tests", () => {
                 expect.fail("User 2 should not be able to add links to User 1's perspective");
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                expect(errorMessage).to.include("Access denied");
+                // Not yours answers as missing does (404), so a user cannot learn which
+                // perspectives exist.
+                expect(errorMessage).to.include(`Perspective ${perspective1.uuid} not found`);
                 console.log("✅ Cross-user perspective access properly denied");
             }
         });
@@ -3122,7 +3124,9 @@ describe("Multi-User Simple integration tests", () => {
                 await managedClient.runtime.grantNotification(notificationId);
                 expect.fail("Managed user should not be able to call grantNotification");
             } catch (error: any) {
-                expect(error.message).to.include("Permission denied");
+                // runtime.grantNotification is Guard::Operator: only the admin credential.
+                expect(error.message).to.include("403");
+                expect(error.message).to.include("Admin credential required");
                 console.log("✅ Managed user correctly blocked from calling grantNotification");
             }
         });

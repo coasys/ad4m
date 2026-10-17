@@ -11,6 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use super::guards::Guard;
 use crate::types::RequestContext;
 
 // ── Error type ──────────────────────────────────────────────────────────────
@@ -255,20 +256,73 @@ struct Entry {
     params: Check,
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     result: Check,
+    guard: Option<Guard>,
+    /// [`MethodFlags::or_null`]: answer `null` where the method would answer 404.
+    or_null: bool,
 }
 
-/// Returned by [`HandlerMap::method`] to mark a method `read` or `long`.
-pub struct MethodFlags<'a>(&'a mut MethodSpec);
+/// Returned by [`HandlerMap::method`] to mark a method `read` or `long` and to set its
+/// guard.
+pub struct MethodFlags<'a> {
+    spec: &'a mut MethodSpec,
+    /// `None` for a method the socket reader handles itself ([`HandlerMap::inline`]).
+    entry: Option<&'a mut Entry>,
+}
 
 impl MethodFlags<'_> {
     pub fn read(self) -> Self {
-        self.0.read = true;
+        self.spec.read = true;
         self
     }
     pub fn long(self) -> Self {
-        self.0.long = true;
+        self.spec.long = true;
         self
     }
+    /// The method answers `null` where it would answer 404: a resource that is missing or not
+    /// the caller's (the guard's answer, D6), or one that went away before the handler read
+    /// it. For reads whose SDK result is optional (`perspective.get`, `perspective.snapshot`).
+    pub fn or_null(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no or_null"));
+        entry.or_null = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
+    }
+    /// Who may call the method. The dispatcher runs the guard after the params deserialize
+    /// and before the handler.
+    pub fn guard(self, guard: Guard) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no guard"));
+        if entry.guard.is_some() {
+            panic!("'{name}' has two guards");
+        }
+        entry.guard = Some(guard);
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
+    }
+}
+
+fn push_spec<'a, P, R>(specs: &'a mut Vec<MethodSpec>, name: &str) -> &'a mut MethodSpec
+where
+    P: ts_rs::TS + 'static,
+    R: ts_rs::TS + 'static,
+{
+    specs.push(MethodSpec {
+        name: name.to_string(),
+        params: TsType::of::<P>(),
+        result: TsType::of::<R>(),
+        read: false,
+        long: false,
+    });
+    specs.last_mut().expect("just pushed")
 }
 
 // ── Handler map ─────────────────────────────────────────────────────────────
@@ -302,15 +356,17 @@ impl HandlerMap {
         if self.handlers.contains_key(name) {
             panic!("Duplicate WS handler registration for '{}'", name);
         }
-        self.handlers.insert(
-            name.to_string(),
-            Entry {
-                handler: Box::new(move |params, ctx| handler.call(params, ctx)),
-                params: check::<P>,
-                result: check::<R>,
-            },
-        );
-        self.inline::<P, R>(name)
+        let entry = self.handlers.entry(name.to_string()).or_insert(Entry {
+            handler: Box::new(move |params, ctx| handler.call(params, ctx)),
+            params: check::<P>,
+            result: check::<R>,
+            guard: None,
+            or_null: false,
+        });
+        MethodFlags {
+            spec: push_spec::<P, R>(&mut self.specs, name),
+            entry: Some(entry),
+        }
     }
 
     /// Record the contract of a method the socket reader handles itself
@@ -321,14 +377,34 @@ impl HandlerMap {
         P: ts_rs::TS + 'static,
         R: ts_rs::TS + 'static,
     {
-        self.specs.push(MethodSpec {
-            name: name.to_string(),
-            params: TsType::of::<P>(),
-            result: TsType::of::<R>(),
-            read: false,
-            long: false,
-        });
-        MethodFlags(self.specs.last_mut().expect("just pushed"))
+        MethodFlags {
+            spec: push_spec::<P, R>(&mut self.specs, name),
+            entry: None,
+        }
+    }
+
+    /// Every dispatched method's guard (`None`: the method has none, which
+    /// [`HandlerMap::require_guards`] refuses), sorted by name.
+    pub fn guards(&self) -> Vec<(&str, Option<&Guard>)> {
+        let mut guards: Vec<(&str, Option<&Guard>)> = self
+            .handlers
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry.guard.as_ref()))
+            .collect();
+        guards.sort_by_key(|(name, _)| *name);
+        guards
+    }
+
+    /// The methods flagged [`MethodFlags::or_null`], sorted by name.
+    pub fn or_null_methods(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .handlers
+            .iter()
+            .filter(|(_, entry)| entry.or_null)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort();
+        names
     }
 
     /// Every method contract, sorted by name.
@@ -338,21 +414,24 @@ impl HandlerMap {
         specs
     }
 
-    /// Dispatch an RPC message to the appropriate handler.
+    /// Dispatch an RPC message: find the method (404), check the params against its
+    /// contract (400), run its guard (403, or 404 for a resource that is missing or not the
+    /// caller's), then run the handler. A method flagged `.or_null()` answers `null` for 404.
     pub async fn dispatch(
         &self,
         msg_type: &str,
         params: Value,
         ctx: Arc<RequestContext>,
     ) -> Result<Value, WsRpcError> {
-        let entry = self
-            .handlers
-            .get(msg_type)
-            .ok_or_else(|| WsRpcError::not_found(format!("Unknown type: {}", msg_type)))?;
-        (entry.params)(&params).map_err(|e| {
-            WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
-        })?;
-        let result = (entry.handler)(params, ctx).await?;
+        let entry = self.entry(msg_type)?;
+        let answer = match Self::admit_entry(entry, msg_type, &params, &ctx).await {
+            Ok(()) => (entry.handler)(params, ctx).await,
+            Err(e) => Err(e),
+        };
+        let result = match answer {
+            Err(e) if e.code == 404 && entry.or_null => return Ok(Value::Null),
+            answer => answer?,
+        };
         #[cfg(debug_assertions)]
         if let Err(e) = (entry.result)(&result) {
             log::error!("{} returned a result outside its contract: {}", msg_type, e);
@@ -360,9 +439,65 @@ impl HandlerMap {
         Ok(result)
     }
 
+    /// The dispatcher's steps before the handler, without running it: whether `ctx` may call
+    /// `msg_type` with `params`. The guard's answer as it is: a 404 stays a 404 for a method
+    /// flagged `.or_null()`, which `dispatch` turns into `null`.
+    pub async fn admit(
+        &self,
+        msg_type: &str,
+        params: &Value,
+        ctx: &RequestContext,
+    ) -> Result<(), WsRpcError> {
+        Self::admit_entry(self.entry(msg_type)?, msg_type, params, ctx).await
+    }
+
+    fn entry(&self, msg_type: &str) -> Result<&Entry, WsRpcError> {
+        self.handlers
+            .get(msg_type)
+            .ok_or_else(|| WsRpcError::not_found(format!("Unknown type: {}", msg_type)))
+    }
+
+    async fn admit_entry(
+        entry: &Entry,
+        msg_type: &str,
+        params: &Value,
+        ctx: &RequestContext,
+    ) -> Result<(), WsRpcError> {
+        (entry.params)(params).map_err(|e| {
+            WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
+        })?;
+        match &entry.guard {
+            Some(guard) => guard.admit(msg_type, params, ctx).await,
+            // `require_guards` stops a map with such a method at start-up; a map built
+            // without it still refuses the call.
+            None => Err(WsRpcError::internal(format!(
+                "{msg_type} has no guard, so no caller may call it"
+            ))),
+        }
+    }
+
     /// Number of registered handlers (useful for logging at startup).
     pub fn len(&self) -> usize {
         self.handlers.len()
+    }
+
+    /// Panics, naming them, if any dispatched method has no guard. The API thread builds the
+    /// map before it serves a request, so a method without a guard ends that thread at start
+    /// and the executor binary exits (`exit_when_api_fails`).
+    pub fn require_guards(self) -> Self {
+        let unguarded: Vec<&str> = self
+            .guards()
+            .into_iter()
+            .filter_map(|(name, guard)| guard.is_none().then_some(name))
+            .collect();
+        if !unguarded.is_empty() {
+            panic!(
+                "WS RPC methods without a guard: {}. Every method declares who may call it \
+                 (`.guard(..)`, see api/guards.rs).",
+                unguarded.join(", ")
+            );
+        }
+        self
     }
 }
 
@@ -387,7 +522,7 @@ pub fn build_handler_map() -> HandlerMap {
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);
     log::info!("WS RPC: registered {} handlers", map.len());
-    map
+    map.require_guards()
 }
 
 // ── Param extraction helpers ────────────────────────────────────────────────

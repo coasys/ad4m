@@ -77,6 +77,93 @@ async fn host_rate_and_membrane_proof_setters_refuse_invalid_params() {
     }
 }
 
+// Only the admin credential: an app that holds every capability is refused too, and a user
+// with the default capabilities. No call here gets past the check, so none touches the host
+// or the DB. The guard refuses, with its message.
+#[tokio::test]
+async fn operator_only_methods_refuse_an_app_holding_every_capability_and_users() {
+    use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
+    let mut map = HandlerMap::new();
+    register_ws_handlers(&mut map);
+    let app = RequestContext::app_for_test(vec![ALL_CAPABILITY.clone()]);
+    let user =
+        RequestContext::user_for_test("did:key:operator-only", get_user_default_capabilities());
+    for (method, params) in [
+        ("runtime.openLink", json!({ "url": "https://example.org" })),
+        ("runtime.restartHolochain", json!({})),
+        ("runtime.setHostRates", json!({ "rates": [] })),
+        (
+            "runtime.setUnytMembraneProof",
+            json!({ "proof": "cHJvb2Y=" }),
+        ),
+        (
+            "runtime.grantNotification",
+            json!({ "id": "n1", "granted": true }),
+        ),
+        (
+            "runtime.importData",
+            json!({ "type": "db", "filePath": "/nonexistent/dump.json" }),
+        ),
+        ("runtime.unytAgentKey", json!({})),
+        (
+            "runtime.unytSendHot",
+            json!({ "recipient": "r", "amount": "1" }),
+        ),
+    ] {
+        for ctx in [&app, &user] {
+            let err = map
+                .dispatch(method, params.clone(), Arc::new(ctx.clone()))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (err.code, err.message.as_str()),
+                (403, crate::api::guards::OPERATOR_ONLY),
+                "{method}"
+            );
+        }
+    }
+}
+
+// The unyt stubs have no implementation: the operator, the only caller the guard admits,
+// gets the 501.
+#[tokio::test]
+async fn unyt_stubs_answer_the_operator_not_implemented() {
+    for (method, params) in [
+        ("runtime.unytAgentKey", json!({})),
+        (
+            "runtime.unytSendHot",
+            json!({ "recipient": "r", "amount": "1" }),
+        ),
+        ("runtime.unytWalletBalance", json!({})),
+        ("runtime.unytWalletHistory", json!({})),
+        ("runtime.unytHotAgentPubkey", json!({})),
+        ("runtime.unytReinstallDna", json!({})),
+    ] {
+        assert_eq!(error_code(method, params, true).await, 501, "{method}");
+    }
+}
+
+// Free hosting is a billing decision for the whole executor: an app approved for "quit" may not
+// switch it (#1328). The refusal comes before the handler, so the shared DB stays untouched.
+#[tokio::test]
+async fn set_free_hosting_enabled_needs_the_admin_credential() {
+    use crate::agent::capabilities::RUNTIME_QUIT_CAPABILITY;
+    let mut map = HandlerMap::new();
+    register_ws_handlers(&mut map);
+    let quit_app = Arc::new(RequestContext::app_for_test(vec![
+        RUNTIME_QUIT_CAPABILITY.clone()
+    ]));
+    let err = map
+        .dispatch(
+            "runtime.setFreeHostingEnabled",
+            json!({ "enabled": true }),
+            quit_app,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, 403, "{}", err.message);
+}
+
 // Nothing delivers a friend message and the outbox has no owner, so storing one would let
 // every user read it through `runtime.outbox`.
 #[tokio::test]

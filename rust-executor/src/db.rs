@@ -27,6 +27,7 @@ use url::Url;
 use uuid::Uuid;
 
 mod grants;
+mod tasks;
 pub use grants::GrantRow;
 
 #[derive(Serialize, Deserialize)]
@@ -316,7 +317,8 @@ impl Ad4mDb {
                 prompt_examples TEXT NOT NULL,
                 metadata TEXT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                agent_did TEXT
              )",
             [],
         )?;
@@ -624,6 +626,7 @@ impl Ad4mDb {
         }
     }
 
+    /// `agent_did` is the owning managed agent; `None` makes a task of the main agent.
     pub fn add_task(
         &self,
         name: String,
@@ -631,13 +634,14 @@ impl Ad4mDb {
         system_prompt: String,
         prompt_examples: Vec<AIPromptExamples>,
         metadata: Option<String>,
+        agent_did: Option<&str>,
     ) -> Result<String, rusqlite::Error> {
         let created_at = chrono::Utc::now().to_string();
         let updated_at = created_at.clone();
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at],
+            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at, agent_did],
         )?;
         Ok(id)
     }
@@ -2505,7 +2509,7 @@ impl Ad4mDb {
 
         // Export tasks
         let tasks: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at FROM tasks"
+            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did FROM tasks"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2515,7 +2519,8 @@ impl Ad4mDb {
                 "prompt_examples": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
                 "metadata": row.get::<_, Option<String>>(5)?,
                 "created_at": row.get::<_, String>(6)?,
-                "updated_at": row.get::<_, String>(7)?
+                "updated_at": row.get::<_, String>(7)?,
+                "agent_did": row.get::<_, Option<String>>(8)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
@@ -3035,8 +3040,8 @@ impl Ad4mDb {
                             .and_then(|n| n.as_str())
                             .unwrap_or("<unknown>");
                         match self.conn.execute(
-                            "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
-                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at, agent_did)
+                                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                             params![
                                 task["id"].as_str().unwrap_or(""),
                                 task["name"].as_str().unwrap_or(""),
@@ -3045,7 +3050,8 @@ impl Ad4mDb {
                                 task["prompt_examples"].to_string(),
                                 task["metadata"].as_str(),
                                 task["created_at"].as_str().unwrap_or(""),
-                                task["updated_at"].as_str().unwrap_or("")
+                                task["updated_at"].as_str().unwrap_or(""),
+                                task["agent_did"].as_str()
                             ],
                         ) {
                             Ok(_) => result.tasks.imported += 1,
@@ -4587,6 +4593,7 @@ mod tests {
                 "test system prompt".to_string(),
                 vec![task],
                 Some("test metadata".to_string()),
+                Some("did:key:task-owner"),
             )
             .unwrap();
 
@@ -4646,6 +4653,11 @@ mod tests {
         let imported_task = tasks.first().unwrap();
         assert_eq!(imported_task.task_id, task_id);
         assert_eq!(imported_task.name, "Test Task");
+        // Without the owner, a restore would hand the user's task to the operator.
+        assert_eq!(
+            import_db.get_task_owner(&task_id).unwrap(),
+            Some(Some("did:key:task-owner".to_string()))
+        );
 
         // Verify models
         let models = import_db.get_models().unwrap();
@@ -5255,6 +5267,7 @@ mod tests {
                 model_id.clone(),
                 system_prompt.clone(),
                 prompt_examples.clone(),
+                None,
                 None,
             )
             .unwrap();

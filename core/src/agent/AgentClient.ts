@@ -297,7 +297,7 @@ export class AgentClient {
   /**
    * Revokes every token of a user issued up to now, this client's own included, and closes
    * their sockets. A user leaves out `email` (or names themselves); the operator names the
-   * user. Tokens from a later login work.
+   * user. Needs AGENT_UPDATE, which a login holds. Tokens from a later login work.
    */
   async revokeAllSessions(email?: string): Promise<boolean> {
     return this.#apiClient.call('user.revokeAllSessions', email === undefined ? {} : { email });

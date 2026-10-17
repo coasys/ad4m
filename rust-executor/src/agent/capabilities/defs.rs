@@ -512,7 +512,8 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         AGENT_SIGN_CAPABILITY.clone(),
         AGENT_SUBSCRIBE_CAPABILITY.clone(),
         // Approving apps' requests for this user's own agent (#1399, D12):
-        // `capabilities::may_approve` limits it to requests that name this agent.
+        // `agent.permitCapability`'s guard (`Owns { Request }`) limits it to requests that
+        // name this agent.
         AGENT_PERMIT_CAPABILITY.clone(),
         // Note: Excluding LOCK, UNLOCK as these are admin operations
 

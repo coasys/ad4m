@@ -13,7 +13,7 @@ pub enum ApiError {
     NotFound(String),
     NotImplemented(String),
     Internal(String),
-    /// The node cannot answer yet (its wallet is locked); the caller should retry.
+    /// The executor cannot answer yet (its wallet is locked); the caller should retry.
     Unavailable(String),
 }
 
