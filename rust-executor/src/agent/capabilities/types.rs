@@ -79,8 +79,7 @@ impl From<crate::types::ResourceInput> for Resource {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct Claims {
     iss: String,
-    /// The managed agent a user token acts as: its DID. Tokens minted before agents were keyed
-    /// by DID carry the user's email here; `Session::open` resolves either.
+    /// The managed agent a user token acts as: its DID.
     pub sub: Option<String>,
     aud: String,
     exp: u64,

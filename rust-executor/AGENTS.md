@@ -69,21 +69,18 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   else carries an email. `users.did` is unique (partial index, empty DIDs excluded).
   `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
   credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
-  (a grant: a token without `sub` acts as the main agent; a user token's `sub` is the agent's DID,
-  or the user's email in tokens minted before D16, and `Session::open` resolves either), or
+  (a grant: a token without `sub` acts as the main agent; a user token's `sub` is the agent's
+  DID), or
   `Principal::Anonymous`. Capabilities, token id, expiry and the agent's DID are `Session` fields.
   Read identity with `acts_as()` / `acts_as_did()` / `managed_did()` / `is_operator()`; never
   decode the token again. Any signing/DID/billing path takes the `AgentContext` explicitly.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
-  `AgentService::wallet_key_for_did` finds it (cached; it accepts a key under the user's email only
-  if that key derives the DID: a shared wallet cannot rename keys). On every unlock
-  `migrate_managed_key_names` renames keys an older executor named by email: copy under the DID,
-  check the copy derives it, save, remove the old name, save. A key that derives another DID keeps
-  its name and its user's sessions fail with `NoIdentity`.
+  `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there
+  the key sits under the user's email and counts only if it derives the DID. No migration from
+  email-named keys exists: data from before D16 is not supported.
 - **Billing** is per agent: `billing::bill_compute(agent_did, ..)`, `compute_log.agent_did`,
-  `payment_requests.agent_did` (moved from `user_email` at start by
-  `Ad4mDb::migrate_user_email_to_agent_did`). Credits stay on the user's `users` row, reached by
+  `payment_requests.agent_did`. Credits stay on the user's `users` row, reached by
   DID (`get_agent_credits`, `deduct_credits_and_log`).
 - **Capabilities**: every WS handler checks `ctx.require(&X_CAPABILITY)` itself
   (`agent/capabilities/defs.rs`); `Session::may` answers the same question as a `bool`. MCP tools
