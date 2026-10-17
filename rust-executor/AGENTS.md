@@ -77,24 +77,20 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   tokens: a token (id = its `nonce`) opens a session only while its grant exists, is active and
   has not expired, and the session's capabilities are the grant's (tokens carry `iss, aud, iat,
   exp, nonce, sub` only). A grant names its agent by `agent_did` (`NULL` = the main agent); a
-  token's `sub` must name the same agent: none for the main agent, the DID, or the owner's email
-  in user tokens minted before D16. Both mint paths go through `grants::mint`: the app
-  capability flow (a grant on the main agent) and a user login (an auto-approved grant on that
-  user's agent). The admin credential is no token. Revoking or removing a grant cancels its
-  `ended` token, which every socket of the session watches through `Session::ended()`.
-  Start-up moves the old app registry (`apps_data.json`, renamed `.migrated`) into grant rows,
-  moves `grants.agent_email` (PR 2 before D16) to `agent_did`, and drops expired rows. Tests
-  mint with `test_utils::granted_token(auth)`; a token signed without a grant is refused.
+  token's `sub` must name the same agent: none for the main agent, the DID for a managed agent.
+  Both mint paths go through `grants::mint`: the app capability flow (a grant on the main agent)
+  and a user login (an auto-approved grant on that user's agent). The admin credential is no
+  token. Revoking or removing a grant cancels its `ended` token, which every socket of the
+  session watches through `Session::ended()`. Start-up moves the old app registry
+  (`apps_data.json`, renamed `.migrated`) into grant rows and drops expired rows. Tests mint with
+  `test_utils::granted_token(auth)`; a token signed without a grant is refused.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
-  `AgentService::wallet_key_for_did` finds it (cached; it accepts a key under the user's email only
-  if that key derives the DID: a shared wallet cannot rename keys). On every unlock
-  `migrate_managed_key_names` renames keys an older executor named by email: copy under the DID,
-  check the copy derives it, save, remove the old name, save. A key that derives another DID keeps
-  its name and its user's sessions fail with `NoIdentity`.
+  `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there
+  the key sits under the user's email and counts only if it derives the DID. No migration from
+  email-named keys exists: data from before D16 is not supported.
 - **Billing** is per agent: `billing::bill_compute(agent_did, ..)`, `compute_log.agent_did`,
-  `payment_requests.agent_did` (moved from `user_email` at start by
-  `Ad4mDb::migrate_user_email_to_agent_did`). Credits stay on the user's `users` row, reached by
+  `payment_requests.agent_did`. Credits stay on the user's `users` row, reached by
   DID (`get_agent_credits`, `deduct_credits_and_log`).
 - **Capabilities**: every WS handler checks `ctx.require(&X_CAPABILITY)` itself
   (`agent/capabilities/defs.rs`); `Session::may` answers the same question as a `bool`. MCP tools

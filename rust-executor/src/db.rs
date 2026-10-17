@@ -532,14 +532,12 @@ impl Ad4mDb {
             )",
         )?;
 
-        // An agent is its DID (D16): rows that named their user by email name the user's
-        // agent instead.
-        Self::migrate_user_email_to_agent_did(&conn, "payment_requests")?;
-        Self::migrate_user_email_to_agent_did(&conn, "compute_log")?;
+        // `users.did` is the key of a managed agent: one user per DID. Users without an agent
+        // (an empty DID) stay out of the index.
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_compute_log_agent_time ON compute_log(agent_did, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_compute_log_agent_time ON compute_log(agent_did, timestamp);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_did ON users(did) WHERE did != '';",
         )?;
-        Self::index_users_by_did(&conn)?;
 
         // The flow engine's per-replica bookkeeping (#1424): what each agent's
         // consensus pass last derived for an instance, and which proposals it
@@ -578,88 +576,6 @@ impl Ad4mDb {
         )?;
 
         Ok(Self { conn })
-    }
-
-    /// Replaces `table.user_email` with `table.agent_did`, the DID of that user's agent from
-    /// `users`. A row whose email names no user with an agent keeps the email as its
-    /// `agent_did`: no session acts as an email, so it stays unreachable, but the operator's
-    /// audit view (`get_compute_log_all`) still lists it. The count is logged. One
-    /// transaction: after a crash the table
-    /// has either its old or its new shape. Does nothing on a table without `user_email`.
-    fn migrate_user_email_to_agent_did(conn: &Connection, table: &str) -> Ad4mDbResult<()> {
-        let has_column = |column: &str| -> Ad4mDbResult<bool> {
-            Ok(conn.query_row(
-                &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = ?1"),
-                [column],
-                |row| row.get(0),
-            )?)
-        };
-        if !has_column("user_email")? {
-            return Ok(());
-        }
-        let tx = conn.unchecked_transaction()?;
-        if !has_column("agent_did")? {
-            tx.execute(
-                &format!("ALTER TABLE {table} ADD COLUMN agent_did TEXT"),
-                [],
-            )?;
-        }
-        tx.execute(
-            &format!(
-                "UPDATE {table} SET agent_did = (SELECT NULLIF(did, '') FROM users WHERE username = {table}.user_email)
-                 WHERE agent_did IS NULL"
-            ),
-            [],
-        )?;
-        // `compute_log` is the operator's audit trail and a dropped row cannot come back.
-        // A row the `users` join cannot map keeps its email in `agent_did`: an email is
-        // not a DID, so no session reaches it, and the operator's view still shows it.
-        // A pending payment for no agent can never be credited: it leaves `pending`, so the
-        // payment poller does not retry it on every pass.
-        if table == "payment_requests" {
-            tx.execute(
-                "UPDATE payment_requests SET status = 'unmapped' WHERE agent_did IS NULL AND status = 'pending'",
-                [],
-            )?;
-        }
-        let kept = tx.execute(
-            &format!("UPDATE {table} SET agent_did = user_email WHERE agent_did IS NULL"),
-            [],
-        )?;
-        if kept > 0 {
-            log::warn!(
-                "Kept {} {} row(s) whose user has no agent, named by their email: no session can reach them",
-                kept,
-                table
-            );
-        }
-        // SQLite refuses to drop a column an index uses.
-        tx.execute("DROP INDEX IF EXISTS idx_compute_log_user_time", [])?;
-        tx.execute(&format!("ALTER TABLE {table} DROP COLUMN user_email"), [])?;
-        tx.commit()?;
-        log::info!("{}: rows now name their agent by DID", table);
-        Ok(())
-    }
-
-    /// `users.did` is the key of a managed agent: one user per DID. Users without an agent
-    /// (an empty DID) stay out of the index. If two users already share a DID, the index is
-    /// left out and the clash logged: the operator has to resolve it.
-    fn index_users_by_did(conn: &Connection) -> Ad4mDbResult<()> {
-        let clashes: Vec<String> = conn
-            .prepare("SELECT did FROM users WHERE did != '' GROUP BY did HAVING COUNT(*) > 1")?
-            .query_map([], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
-        if !clashes.is_empty() {
-            log::error!(
-                "Users share an agent DID, so users.did is not indexed as unique: {}",
-                clashes.join(", ")
-            );
-            return Ok(());
-        }
-        conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_did ON users(did) WHERE did != ''",
-        )?;
-        Ok(())
     }
 
     pub fn create_or_update_model_status(
@@ -5100,157 +5016,6 @@ mod tests {
         db.migrate_notification_owners("did:key:other").unwrap();
         assert_eq!(owners(&db).len(), 2);
         assert_eq!(owners(&db)[1].1, "did:key:main");
-    }
-
-    /// A database file of an executor from before agents were keyed by DID: payment
-    /// requests and the compute log name their user by email.
-    fn legacy_billing_db(path: &std::path::Path, extra: &str) {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(&format!(
-            "CREATE TABLE users (
-                username TEXT PRIMARY KEY, did TEXT NOT NULL, password_hash TEXT NOT NULL,
-                last_seen INTEGER);
-             CREATE TABLE payment_requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL,
-                amount_hot TEXT NOT NULL, proposal_action_hash TEXT UNIQUE,
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT);
-             CREATE TABLE compute_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL,
-                timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                operation TEXT NOT NULL, summary TEXT, cost REAL NOT NULL,
-                credits_after REAL NOT NULL);
-             CREATE INDEX idx_compute_log_user_time ON compute_log(user_email, timestamp);
-             INSERT INTO users (username, did, password_hash) VALUES ('alice@test', 'did:key:alice', 'x');
-             INSERT INTO users (username, did, password_hash) VALUES ('nodid@test', '', 'x');
-             INSERT INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES ('alice@test', '10', 'hash-alice');
-             INSERT INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES ('gone@test', '20', 'hash-gone');
-             INSERT INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES ('nodid@test', '30', 'hash-nodid');
-             INSERT INTO compute_log (user_email, operation, cost, credits_after) VALUES ('alice@test', 'prompt', 1.0, 9.0);
-             INSERT INTO compute_log (user_email, operation, cost, credits_after) VALUES ('gone@test', 'prompt', 2.0, 8.0);
-             {extra}"
-        ))
-        .unwrap();
-    }
-
-    fn columns(db: &Ad4mDb, table: &str) -> Vec<String> {
-        db.conn
-            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
-
-    fn has_index(db: &Ad4mDb, name: &str) -> bool {
-        db.conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'index' AND name = ?1",
-                [name],
-                |row| row.get(0),
-            )
-            .unwrap()
-    }
-
-    /// D16: payment requests and the compute log name their agent by DID. Rows whose
-    /// email names no user with an agent keep the email as `agent_did`: the operator's audit
-    /// view shows them, no managed session reaches them. A second start changes nothing.
-    #[test]
-    fn start_moves_billing_rows_from_the_users_email_to_the_agents_did() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ad4m.db");
-        legacy_billing_db(&path, "");
-
-        for start in ["first", "second"] {
-            let db = Ad4mDb::new(path.to_str().unwrap()).unwrap();
-            for table in ["payment_requests", "compute_log"] {
-                let columns = columns(&db, table);
-                assert!(
-                    columns.contains(&"agent_did".to_string()),
-                    "{start}: {columns:?}"
-                );
-                assert!(
-                    !columns.contains(&"user_email".to_string()),
-                    "{start}: {columns:?}"
-                );
-            }
-            assert!(!has_index(&db, "idx_compute_log_user_time"), "{start}");
-            assert!(has_index(&db, "idx_compute_log_agent_time"), "{start}");
-            assert!(has_index(&db, "idx_users_did"), "{start}");
-
-            let request = db
-                .get_payment_request_by_hash("hash-alice")
-                .unwrap()
-                .unwrap();
-            assert_eq!(request.agent_did, "did:key:alice", "{start}");
-            // Rows of a deleted user or of one without an agent are kept, named by email.
-            // A kept payment can never be credited, so it leaves `pending`: the payment poller
-            // does not retry it on every pass.
-            for (hash, email) in [("hash-gone", "gone@test"), ("hash-nodid", "nodid@test")] {
-                let kept = db.get_payment_request_by_hash(hash).unwrap().unwrap();
-                assert_eq!(kept.agent_did, email, "{start}");
-                assert_eq!(kept.status, "unmapped", "{start}");
-            }
-            let pending = db.get_pending_payment_requests().unwrap();
-            assert_eq!(pending.len(), 1, "{start}: {pending:?}");
-            assert_eq!(pending[0].agent_did, "did:key:alice", "{start}");
-
-            let log = db.get_compute_log_all(None, 10).unwrap();
-            assert_eq!(log.len(), 2, "{start}: {log:?}");
-            assert!(
-                log.iter().any(|entry| entry.user_email == "gone@test"),
-                "{start}: the operator's audit view still shows the kept row: {log:?}"
-            );
-            let alice = db.get_compute_log("did:key:alice", None, 10).unwrap();
-            assert_eq!(alice.len(), 1, "{start}");
-            assert_eq!(
-                alice[0].user_email, "alice@test",
-                "{start}: the log still names the account by email"
-            );
-
-            // A managed session acts as a user's DID; none of them reaches a kept row.
-            let managed_dids: Vec<String> = db
-                .list_users()
-                .unwrap()
-                .into_iter()
-                .map(|user| user.did)
-                .filter(|did| !did.is_empty())
-                .collect();
-            assert_eq!(managed_dids, vec!["did:key:alice".to_string()], "{start}");
-            for did in &managed_dids {
-                let reached = db.get_compute_log(did, None, 10).unwrap();
-                assert!(
-                    reached.iter().all(|entry| entry.user_email != "gone@test"),
-                    "{start}: {did} reaches a kept row: {reached:?}"
-                );
-            }
-            for email in ["gone@test", "nodid@test"] {
-                assert!(
-                    db.get_username_by_did(email).unwrap().is_none(),
-                    "{start}: {email} must not resolve to a managed agent"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn users_sharing_a_did_leave_the_did_unindexed_and_the_executor_starts() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ad4m.db");
-        legacy_billing_db(
-            &path,
-            "INSERT INTO users (username, did, password_hash) VALUES ('twin@test', 'did:key:alice', 'x');",
-        );
-        let db = Ad4mDb::new(path.to_str().unwrap()).unwrap();
-        assert!(!has_index(&db, "idx_users_did"));
-        assert_eq!(
-            db.get_payment_request_by_hash("hash-alice")
-                .unwrap()
-                .unwrap()
-                .agent_did,
-            "did:key:alice"
-        );
     }
 
     #[test]
