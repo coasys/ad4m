@@ -388,6 +388,8 @@ mod tests {
             max_count: None,
             target_class_name: target.into(),
             target_class_uri: String::new(),
+            required: false,
+            disjoint: Vec::new(),
         };
         let mut top = shape("Top", vec![relation("mids", "we://mids")]);
         top.include_relations = vec![rel("mids", "we://mids", "Mid")];

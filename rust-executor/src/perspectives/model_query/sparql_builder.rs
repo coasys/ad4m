@@ -2644,6 +2644,8 @@ mod relation_quantifier_tests {
             max_count: None,
             target_class_name: "Comment".to_string(),
             target_class_uri: String::new(),
+            required: false,
+            disjoint: Vec::new(),
         });
         s
     }
@@ -3003,6 +3005,8 @@ mod relation_quantifier_tests {
             max_count: Some(1),
             target_class_name: "Agent".to_string(),
             target_class_uri: String::new(),
+            required: false,
+            disjoint: Vec::new(),
         });
 
         let clause = wc(vec![("author", ops_with(None, Some(vec![])))]);
