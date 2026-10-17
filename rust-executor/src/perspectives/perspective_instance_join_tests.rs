@@ -4,7 +4,7 @@
 //! runtime is doing.
 
 use super::*;
-use crate::agent::AgentService;
+use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
 use crate::languages::capability::{register_capabilities, remove_capabilities, Capability};
 use crate::languages::language_runtime::LanguageOperation;
@@ -13,13 +13,11 @@ use crate::languages::LanguageController;
 use crate::test_utils::setup_wallet;
 use std::collections::HashSet;
 
-#[tokio::test(start_paused = true)]
-async fn joining_an_existing_neighbourhood_does_not_wait_for_the_link_language() {
-    setup_wallet();
-    Ad4mDb::init_global_instance(":memory:").unwrap();
-    AgentService::init_global_test_instance();
+/// Join a neighbourhood this executor already has, as `context`, against a
+/// link language that never answers: the join returns, `joiner` is an owner,
+/// and the registration still reaches the language afterwards.
+async fn join_returns_before_the_link_language(context: AgentContext, joiner: String) {
     let creator = "did:key:creator".to_string();
-    let joiner = crate::agent::did();
 
     // A link language served by this test, which never answers.
     let address = format!("QmSilentPeers{}", Uuid::new_v4().simple());
@@ -54,10 +52,7 @@ async fn joining_an_existing_neighbourhood_does_not_wait_for_the_link_language()
 
     let joined = tokio::time::timeout(
         Duration::from_secs(5),
-        crate::neighbourhoods::install_neighbourhood_with_context(
-            url,
-            &crate::agent::AgentContext::main_agent(),
-        ),
+        crate::neighbourhoods::install_neighbourhood_with_context(url, &context),
     )
     .await
     .expect("the join waited on the link language")
@@ -85,4 +80,30 @@ async fn joining_an_existing_neighbourhood_does_not_wait_for_the_link_language()
         .set_runtime_for_test(&address, None)
         .await;
     remove_capabilities(&address);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_main_agent_joining_does_not_wait_for_the_link_language() {
+    setup_wallet();
+    Ad4mDb::init_global_instance(":memory:").unwrap();
+    AgentService::init_global_test_instance();
+    join_returns_before_the_link_language(AgentContext::main_agent(), crate::agent::did()).await;
+}
+
+/// The branch a managed user's join takes, which is what staging hit.
+#[tokio::test(start_paused = true)]
+async fn a_user_joining_does_not_wait_for_the_link_language() {
+    setup_wallet();
+    crate::test_utils::setup_agent();
+    Ad4mDb::init_global_instance(":memory:").unwrap();
+    let email = format!("joiner.{}@example.org", Uuid::new_v4());
+    AgentService::ensure_user_key_exists(&email).unwrap();
+    let did = AgentService::get_user_did_by_email(&email).unwrap();
+
+    join_returns_before_the_link_language(AgentContext::for_user_email(email.clone()), did).await;
+
+    let profile = AgentService::with_global_instance(|a| a.user_profile_path(&email)).unwrap();
+    if let Some(user_dir) = profile.parent() {
+        let _ = std::fs::remove_dir_all(user_dir);
+    }
 }

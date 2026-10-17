@@ -180,7 +180,9 @@ async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .expression_create(&language_language_address, content, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
-    remember_published_meta(&controller, &meta, &agent_context);
+    // No meta is recorded here, unlike applyTemplate: this bundle's hash may
+    // already be published by someone else (the language language answers
+    // "Key already exists" with the hash), and that publisher is its author.
 
     let bundle_on_disk = crate::utils::languages_directory()
         .join(&hash)
