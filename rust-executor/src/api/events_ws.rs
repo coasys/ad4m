@@ -51,13 +51,14 @@ use axum::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::IntoResponse,
+    response::Response,
 };
 use futures::stream::StreamExt;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::agent::capabilities::*;
+use crate::agent::session::Session;
 use crate::agent::{did_for_context, AgentContext};
 
 /// Cached DID for a single WebSocket subscription, with lazy re-resolution.
@@ -111,8 +112,9 @@ use crate::pubsub::{
     SFU_ROOM_ROSTER_TOPIC,
 };
 
-use super::auth::{AppState, AuthContext};
+use super::auth::AppState;
 use super::errors::ApiError;
+use crate::types::RequestContext;
 use crate::types::{
     AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
     NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveExpression,
@@ -266,59 +268,63 @@ pub fn event_specs() -> Vec<EventSpec> {
 ///
 /// Authentication is via `token` query parameter or `Authorization` header.
 /// All event types are multiplexed over a single WebSocket connection.
+///
+/// A token that opens no session gets the upgrade, then a close with 1008 at once: a browser
+/// cannot read the HTTP status of a refused upgrade.
 pub async fn events_ws(
     ws: WebSocketUpgrade,
     State(_state): State<AppState>,
-    auth: AuthContext,
-) -> Result<impl IntoResponse, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
+    context: Result<RequestContext, ApiError>,
+) -> Result<Response, ApiError> {
+    let context = match context {
+        Ok(context) => context,
+        Err(ApiError::Unauthorized(reason)) => {
+            return Ok(ws.on_upgrade(move |socket| {
+                super::ws_rpc::close_refused(socket, super::ws_rpc::CLOSE_TOKEN_ENDED, reason)
+            }))
+        }
+        Err(ApiError::Unavailable(reason)) => {
+            return Ok(ws.on_upgrade(move |socket| {
+                super::ws_rpc::close_refused(socket, super::ws_rpc::CLOSE_TRY_AGAIN_LATER, reason)
+            }))
+        }
+        Err(e) => return Err(e),
+    };
+    context
+        .require(&AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let user_email = context.user_email.clone();
     // Captured before the upgrade so the stream builder knows whether the
     // caller is an admin credential. Admin is the ONLY escape hatch for
     // per-DID filters — an ordinary session whose DID hasn't resolved yet
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
-    let is_admin = context.is_admin_credential;
-    let can_approve_apps =
-        check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
+    let is_admin = context.is_operator();
+    let can_approve_apps = context.session.may(&AGENT_PERMIT_CAPABILITY);
     let sfu_events = sfu_events_allowed(&context);
-    let token_check = TokenCheck::new(&context.auth_token, is_admin);
+    let session = context.session.clone();
 
     Ok(ws.on_upgrade(move |socket| {
-        handle_events_ws(
-            socket,
-            token_check,
-            user_email,
-            is_admin,
-            can_approve_apps,
-            sfu_events,
-        )
+        handle_events_ws(socket, session, is_admin, can_approve_apps, sfu_events)
     }))
 }
 
 /// The SFU streams describe calls in neighbourhoods, so they need what the
 /// `sfu.*` reads need: `NEIGHBOURHOOD_READ`, not just the `AGENT_READ` that
 /// opens the event socket.
-pub(crate) fn sfu_events_allowed(ctx: &crate::types::RequestContext) -> bool {
-    check_capability(
-        &ctx.capabilities,
-        &crate::agent::capabilities::NEIGHBOURHOOD_READ_CAPABILITY,
-    )
-    .is_ok()
+pub(crate) fn sfu_events_allowed(ctx: &RequestContext) -> bool {
+    ctx.session
+        .may(&crate::agent::capabilities::NEIGHBOURHOOD_READ_CAPABILITY)
 }
 
-/// Build the merged event stream for a given user.
+/// Build the merged event stream for the agent a session acts as.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user. The stream ends at the first event after `token_check` fails.
+/// per agent. The stream ends at the first event after `session.check()` fails.
 /// `connection_id` is the RPC connection whose live query updates the stream
 /// carries (`None`: no query updates).
 pub(crate) async fn build_event_stream(
-    token_check: TokenCheck,
-    user_email: Option<String>,
+    session: Arc<Session>,
     is_admin: bool,
     can_approve_apps: bool,
     sfu_events: bool,
@@ -329,11 +335,10 @@ pub(crate) async fn build_event_stream(
     // repeated DB / AgentService lookups on every single event. If the client connected
     // before `agent.generate()` completed this returns `None`; the per-DID filters below
     // fail closed on `None` until re-resolution succeeds.
-    let resolved_did = did_for_context(&AgentContext::for_session(user_email.clone())).ok();
+    let resolved_did = session.acts_as_did().map(str::to_string);
     build_event_stream_for(
-        token_check,
+        session,
         resolved_did,
-        user_email,
         is_admin,
         can_approve_apps,
         sfu_events,
@@ -345,9 +350,8 @@ pub(crate) async fn build_event_stream(
 /// [`build_event_stream`] with the session DID already resolved (tests
 /// inject one directly).
 pub(crate) async fn build_event_stream_for(
-    token_check: TokenCheck,
+    session: Arc<Session>,
     resolved_did: Option<String>,
-    user_email: Option<String>,
     is_admin: bool,
     can_approve_apps: bool,
     sfu_events: bool,
@@ -356,7 +360,16 @@ pub(crate) async fn build_event_stream_for(
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
 
-    let session_context = AgentContext::for_session(user_email.clone());
+    let session_context = session.acts_as();
+    // Hosting info names its user by the account's email: resolve the managed agent's once.
+    // An agent whose account does not resolve matches no user's info (fail closed).
+    // For a managed agent this is `Some("")`, never `None`: `matches_hosting_user(None)`
+    // means "see every user's info" (the operator, the main agent), so turning a failed
+    // lookup into `None` would hand every user's credits and wallet to a session whose DID
+    // names no account. No account has the empty email, so `Some("")` matches nothing.
+    let user_email = session_context
+        .managed_did()
+        .map(|did| crate::agent::AgentService::email_for_did(did).unwrap_or_default());
 
     // Clone the pre-resolved DID for each filter closure
     let d_persp_added = resolved_did.clone();
@@ -484,7 +497,7 @@ pub(crate) async fn build_event_stream_for(
         d_agent_updated,
         matches_agent_did
     );
-    // Apps belong to the node owner: only sessions that can approve apps see their changes.
+    // Apps belong to the operator: only sessions that can approve apps see their changes.
     let s_apps = BroadcastStream::new(pubsub.subscribe(&APPS_CHANGED).await)
         .filter_map(|r| async { handle_broadcast_result(r) })
         .filter_map(move |result| async move {
@@ -876,13 +889,12 @@ pub(crate) async fn build_event_stream_for(
     );
 
     // Events end with the token: expiry and revokeToken() stop them as they stop requests.
-    Box::pin(top.take_while(move |_| futures::future::ready(token_check.check().is_ok())))
+    Box::pin(top.take_while(move |_| futures::future::ready(session.check().is_ok())))
 }
 
 async fn handle_events_ws(
     mut socket: WebSocket,
-    token_check: TokenCheck,
-    user_email: Option<String>,
+    session: Arc<Session>,
     is_admin: bool,
     can_approve_apps: bool,
     sfu_events: bool,
@@ -890,15 +902,9 @@ async fn handle_events_ws(
     log::info!("Events WebSocket connected");
 
     let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream = build_event_stream(
-        token_check,
-        user_email,
-        is_admin,
-        can_approve_apps,
-        sfu_events,
-        None,
-    )
-    .await;
+    // No RPC connection, so no live query updates.
+    let event_stream =
+        build_event_stream(session, is_admin, can_approve_apps, sfu_events, None).await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
         event_stream,
         interest.clone(),
@@ -917,7 +923,7 @@ async fn handle_events_ws(
                     // The stream ends when the token stops working.
                     None => {
                         let close = CloseFrame {
-                            code: 1008,
+                            code: super::ws_rpc::CLOSE_TOKEN_ENDED,
                             reason: "token expired or revoked".into(),
                         };
                         let _ = socket.send(Message::Close(Some(close))).await;
@@ -1084,8 +1090,8 @@ pub(crate) fn exception_visible(msg: &str, can_approve_apps: bool) -> bool {
 }
 
 /// A sync-state event carries the whole perspective record (owners, neighbourhood), so it
-/// reaches only sessions that may access the perspective: its owners, and the node's main
-/// agent for an unowned one. The same rule as `helpers::can_access_perspective`.
+/// reaches only sessions that may access the perspective: its owners, and the main agent for
+/// an unowned one. The same rule as `helpers::can_access_perspective`.
 pub(crate) fn matches_sync_state_owner(msg: &str, current_did: Option<&str>) -> bool {
     let Some(did) = current_did else {
         return false;
@@ -1215,7 +1221,7 @@ fn query_update_for(msg: &str, connection_id: Option<&str>) -> Option<String> {
 /// fails closed.
 ///
 /// `is_admin` is the ONLY escape hatch: an admin credential (checked at WS
-/// setup, `AuthContext.is_admin_credential`) sees every event. An ordinary
+/// setup, `RequestContext::is_operator`) sees every event. An ordinary
 /// session whose DID has not yet resolved (`did_for_context` failed —
 /// happens when the client connects before `agent.generate()` completes)
 /// is treated as fail-closed, NOT as admin, per CodeRabbit's second-round
@@ -1351,7 +1357,7 @@ mod flow_state_filter_tests {
     }
 
     #[test]
-    fn another_agent_on_the_same_node_does_not() {
+    fn another_agent_on_the_same_executor_does_not() {
         assert!(!matches_flow_state_agent(&event(ALICE), Some(BOB)));
     }
 
@@ -1395,7 +1401,7 @@ mod auto_processor_filter_tests {
     //! `matches_auto_processor_pass_owner` — CodeRabbit #881 review + Nico's
     //! Aug-19 call: an event is delivered ONLY to the DID whose pass produced
     //! it, so a hosting agent's session never sees events for a managed
-    //! user's pass. `is_admin` (from `AuthContext.is_admin_credential`) is
+    //! user's pass. `is_admin` (from `RequestContext::is_operator`) is
     //! the only escape hatch — an unresolved DID is NOT silently promoted.
     //!
     //! `perspective_is_owned_by` now fails closed when the perspective is not
@@ -1844,8 +1850,15 @@ mod notification_owner_filter_tests {
 #[cfg(test)]
 mod app_approval_event_tests {
     use super::*;
+    use crate::agent::session::Principal;
     use crate::types::{ExceptionInfo, ExceptionType};
     use std::time::Duration;
+
+    /// A session whose check never fails: the operator has no token to revoke or expire. It
+    /// acts as the main agent; `is_admin` stays a separate argument.
+    fn unending() -> Arc<Session> {
+        Arc::new(Session::for_test(Principal::Operator))
+    }
 
     fn exception(kind: ExceptionType) -> String {
         serde_json::to_string(&ExceptionInfo {
@@ -1921,10 +1934,8 @@ mod app_approval_event_tests {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let pubsub = get_global_pubsub().await;
-        let mut other =
-            build_event_stream(TokenCheck::new("", false), None, false, false, false, None).await;
-        let mut approver =
-            build_event_stream(TokenCheck::new("", false), None, false, true, false, None).await;
+        let mut other = build_event_stream(unending(), false, false, false, None).await;
+        let mut approver = build_event_stream(unending(), false, true, false, None).await;
 
         pubsub
             .publish(&APPS_CHANGED, &"{\"requestId\":\"request-1\"}".to_string())
@@ -1963,6 +1974,69 @@ mod app_approval_event_tests {
         );
     }
 
+    // A managed agent whose DID names no account must see no user's hosting info: its
+    // filter is `Some("")`, and `None` would let every user's info through.
+    #[tokio::test]
+    async fn a_managed_agent_without_an_account_sees_no_users_hosting_info() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let real = "hosting.real@example.org";
+        crate::test_utils::create_test_user(real);
+        let ghost_did = "did:key:ghost";
+        assert!(crate::agent::AgentService::email_for_did(ghost_did).is_err());
+
+        let ghost = Arc::new(
+            Session::for_test(Principal::Agent(AgentContext::managed(ghost_did.into())))
+                .with_did(ghost_did),
+        );
+        let mut ghost_stream = build_event_stream(ghost, false, false, false, None).await;
+        // The operator sees every user's info: it proves the event went out.
+        let mut operator_stream = build_event_stream(unending(), false, false, false, None).await;
+
+        let info = serde_json::to_string(&crate::types::HostingUserInfo {
+            email: real.to_string(),
+            remaining_credits: "5".to_string(),
+            hot_wallet_address: None,
+            free_access: false,
+        })
+        .unwrap();
+        get_global_pubsub()
+            .await
+            .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &info)
+            .await;
+
+        let seen = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = operator_stream.next().await.expect("the stream stays open");
+                if event.contains(events::HOSTING_USER_INFO_CHANGED) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("the operator receives the hosting event");
+        assert!(seen.contains(real), "{}", seen);
+
+        let leaked = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match ghost_stream.next().await {
+                    Some(event) if event.contains(events::HOSTING_USER_INFO_CHANGED) => {
+                        break Some(event)
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            leaked.is_err(),
+            "a session whose DID names no account received hosting info, or its stream \
+             ended: {:?}",
+            leaked
+        );
+    }
+
     // A type this build does not know may carry anything, so it goes to approvers only.
     #[test]
     fn exceptions_of_an_unknown_type_reach_only_sessions_that_can_approve_apps() {
@@ -1981,8 +2055,7 @@ mod app_approval_event_tests {
         let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
             .expect("the test agent has a DID");
         crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
-        let mut stream =
-            build_event_stream(TokenCheck::new("", false), None, false, false, false, None).await;
+        let mut stream = build_event_stream(unending(), false, false, false, None).await;
         crate::agent::AgentService::with_mutable_global_instance(|a| {
             a.did = Some(main_did.clone())
         });
@@ -2025,22 +2098,15 @@ mod app_approval_event_tests {
 #[cfg(test)]
 mod token_expiry_tests {
     use super::*;
+    use crate::agent::session::Principal;
     use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
     use std::time::Duration;
 
+    const USER: &str = "events.user@example.org";
+
     /// Builds a user's event stream, publishes one event and returns what the stream yields.
-    async fn next_event(token_check: TokenCheck) -> Option<String> {
-        // The stream resolves the session's DID through the wallet.
-        setup_wallet();
-        let mut stream = build_event_stream(
-            token_check,
-            Some("events.user@example.org".to_string()),
-            false,
-            false,
-            false,
-            None,
-        )
-        .await;
+    async fn next_event(session: Session) -> Option<String> {
+        let mut stream = build_event_stream(Arc::new(session), false, false, false, None).await;
         get_global_pubsub()
             .await
             .publish(
@@ -2061,7 +2127,10 @@ mod token_expiry_tests {
             .unwrap()
             .as_secs()
             - 3600;
-        let expired = TokenCheck::with_expiry("user-jwt", an_hour_ago);
+        let user = Principal::Agent(AgentContext::managed("did:key:events-user".into()));
+        let expired = Session::for_test(user)
+            .with_did("did:key:events-user")
+            .expiring_at(an_hour_ago);
         assert!(next_event(expired).await.is_none());
     }
 
@@ -2070,9 +2139,10 @@ mod token_expiry_tests {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let token =
-            crate::user_management::generate_user_jwt("events.user@example.org", "test").unwrap();
-        assert!(next_event(TokenCheck::new(&token, false)).await.is_some());
+        crate::test_utils::create_test_user(USER);
+        let token = crate::user_management::generate_user_jwt(USER, "test").unwrap();
+        let session = Session::open(&token, &None, ListenerReach::Network).unwrap();
+        assert!(next_event(session).await.is_some());
     }
 }
 
