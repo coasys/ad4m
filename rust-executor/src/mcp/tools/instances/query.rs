@@ -61,7 +61,8 @@ impl Ad4mMcpHandler {
         };
 
         let mut query = json!({
-            "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT)
+            "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT),
+            "count": true
         });
         if let Some(offset) = p.offset {
             query["offset"] = json!(offset);

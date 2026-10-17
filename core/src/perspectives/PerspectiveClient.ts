@@ -17,6 +17,7 @@ import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -38,6 +39,7 @@ export class PerspectiveClient {
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
+    #sparqlInFlight = new Map<string, Promise<string>>()
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -101,9 +103,21 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
+    /**
+     * Concurrent identical calls (same perspective and query, no `options`)
+     * share one RPC. Each caller parses its own copy of the reply, and a call
+     * made after the shared one settled makes a new RPC.
+     */
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
-        const result = await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
-        return JSON.parse(result) as T
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)) as T
+        const key = `${uuid}\n${query}`
+        let reply = this.#sparqlInFlight.get(key)
+        if (!reply) {
+            reply = this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query })
+                .finally(() => this.#sparqlInFlight.delete(key))
+            this.#sparqlInFlight.set(key, reply)
+        }
+        return JSON.parse(await reply) as T
     }
 
     /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
@@ -395,11 +409,11 @@ export class PerspectiveClient {
         )
     }
 
-    /** The proposals of `instance` the calling agent's replica recorded as
-     *  fired, sorted. */
-    async flowFired(uuid: string, instance: string): Promise<string[]> {
+    /** For each of `instances`, in order, the proposals the calling agent's
+     *  replica recorded as fired, sorted. One call for all of them. */
+    async flowFired(uuid: string, instances: string[]): Promise<FlowFiredEntry[]> {
         return this.#apiClient.call(
-            'perspective.flowFired', { uuid, instance },
+            'perspective.flowFired', { uuid, instances },
         )
     }
 
@@ -518,13 +532,12 @@ export class PerspectiveClient {
     }
 
     /**
-     * Retrieve all SHACL shapes in one call.  Returns an array of
-     * `{name, shapeUri, links}` — one entry per shape (one RPC call).
+     * Retrieve SHACL shapes in one call: every shape, or only those in
+     * `names` (unknown names are left out). Returns `{name, shapeUri, links}`
+     * per shape.
      */
-    async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
-        return this.#apiClient.call(
-            'perspective.getAllShacl', { uuid }
-        )
+    async getAllShacl(uuid: string, names?: string[]): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
+        return this.#apiClient.call('perspective.getAllShacl', { uuid, names })
     }
 
     // ExpressionClient functions, needed for Subjects:

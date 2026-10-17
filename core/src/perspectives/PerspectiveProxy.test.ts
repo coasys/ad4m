@@ -3,7 +3,6 @@ import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
 import { SHACLFlow } from '../shacl/SHACLFlow';
-import { clearQueryCache } from '../model/query-cache';
 
 function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
@@ -439,10 +438,10 @@ describe('PerspectiveProxy.addFlow replace', () => {
   });
 });
 
-// A read right after an awaited write must not be served from the query
-// cache: `updateSubject` and `removeSubject` through an abstract class (#1435)
-// write in the executor, so they invalidate it like the other writes.
-describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
+// A read right after an awaited write sees the write: `updateSubject` and
+// `removeSubject` through an abstract class (#1435) write in the executor,
+// and querySparql keeps no result once its call settles.
+describe('PerspectiveProxy reads after write RPCs are fresh', () => {
   const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
 
   function client() {
@@ -457,8 +456,6 @@ describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
       queryLinks: jest.fn().mockResolvedValue([marker]),
     } as any;
   }
-
-  beforeEach(() => clearQueryCache());
 
   it('after updateSubject', async () => {
     const proxy = createProxy(client());
@@ -477,8 +474,6 @@ describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
   });
 
   it('after delete of a built-in TextContent row', async () => {
-    const now = Date.now();
-    jest.spyOn(Date, 'now').mockReturnValue(now);
     const c = client();
     const proxy = createProxy(c);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
@@ -486,6 +481,5 @@ describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
     await proxy.removeSubject(row, 'ad4m://m/1');
     expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
-    jest.spyOn(Date, 'now').mockRestore();
   });
 });

@@ -273,13 +273,14 @@ impl Fixture {
     /// The proposals of this instance this agent has marked fired.
     pub(super) async fn marked(&self) -> std::collections::HashSet<String> {
         let did = crate::agent::did_for_context(&self.ctx).expect("did_for_context");
-        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instances(
             &self.perspective.uuid,
             &did,
-            &self.instance_uri,
+            std::slice::from_ref(&self.instance_uri),
         )
         .expect("read the fired marks")
         .into_iter()
+        .flat_map(|entry| entry.fired)
         .collect()
     }
 

@@ -48,6 +48,16 @@ pub struct FlowStateEntry {
     pub derived_at: Option<String>,
 }
 
+/// The proposals of one instance this agent has marked fired, as
+/// `perspective.flowFired` returns them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct FlowFiredEntry {
+    pub instance: String,
+    /// Sorted; empty when this agent has marked none.
+    pub fired: Vec<String>,
+}
+
 /// An instance's derived state moved, or an edge settled, on one agent's
 /// replica. Published once per change by that agent's pass, and delivered
 /// only to that agent's sockets.
@@ -295,16 +305,23 @@ impl FlowReplicaState {
         Self::record_pass(perspective, agent_did, instance, None, proposals, &live).map(|_| ())
     }
 
-    /// Every proposal of `instance` this agent has marked fired, sorted.
-    pub fn fired_for_instance(
+    /// The proposals of each of `instances` this agent has marked fired: one
+    /// entry per instance, in the order given, read under one lock.
+    pub fn fired_for_instances(
         perspective: &str,
         agent_did: &str,
-        instance: &str,
-    ) -> anyhow::Result<Vec<String>> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_fired_for_instance(perspective, agent_did, instance)
+        instances: &[String],
+    ) -> anyhow::Result<Vec<FlowFiredEntry>> {
+        let lists = Ad4mDb::with_global_instance(|db| {
+            db.get_flow_fired_for_instances(perspective, agent_did, instances)
         })
-        .map_err(|e| anyhow::anyhow!("reading fired marks of {instance}: {e}"))
+        .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))?;
+        Ok(instances
+            .iter()
+            .cloned()
+            .zip(lists)
+            .map(|(instance, fired)| FlowFiredEntry { instance, fired })
+            .collect())
     }
 
     /// Drop every row of the perspective, for every agent. Production removal
@@ -358,6 +375,57 @@ mod tests {
         uuid::Uuid::new_v4().to_string()
     }
 
+    fn fired_for(p: &str, agent: &str, instance: &str) -> Vec<String> {
+        let mut entries =
+            FlowReplicaState::fired_for_instances(p, agent, &[instance.to_string()]).unwrap();
+        assert_eq!(entries.len(), 1);
+        entries.remove(0).fired
+    }
+
+    /// One read answers several instances, each with its own marks, in the
+    /// order asked; an instance with none answers `[]`; another agent's marks
+    /// never appear.
+    #[test]
+    fn fired_for_instances_answers_each_instance_for_this_agent_only() {
+        let p = fresh();
+        FlowReplicaState::mark_fired(&p, ALICE, "a", &["pa2".into(), "pa1".into()]).unwrap();
+        FlowReplicaState::mark_fired(&p, ALICE, "c", &["pc".into()]).unwrap();
+        FlowReplicaState::mark_fired(&p, BOB, "b", &["bob-pb".into()]).unwrap();
+        FlowReplicaState::mark_fired(&p, BOB, "a", &["bob-pa".into()]).unwrap();
+
+        let asked: Vec<String> = ["c", "b", "a"].map(String::from).to_vec();
+        assert_eq!(
+            FlowReplicaState::fired_for_instances(&p, ALICE, &asked).unwrap(),
+            vec![
+                FlowFiredEntry {
+                    instance: "c".into(),
+                    fired: vec!["pc".into()]
+                },
+                FlowFiredEntry {
+                    instance: "b".into(),
+                    fired: vec![]
+                },
+                FlowFiredEntry {
+                    instance: "a".into(),
+                    fired: vec!["pa1".into(), "pa2".into()]
+                },
+            ]
+        );
+        assert!(FlowReplicaState::fired_for_instances(&p, ALICE, &[])
+            .unwrap()
+            .is_empty());
+        // Bob's own read sees his marks, on the wire as `{ instance, fired }`.
+        assert_eq!(
+            serde_json::to_value(FlowReplicaState::fired_for_instances(&p, BOB, &asked).unwrap())
+                .unwrap(),
+            serde_json::json!([
+                { "instance": "c", "fired": [] },
+                { "instance": "b", "fired": ["bob-pb"] },
+                { "instance": "a", "fired": ["bob-pa"] },
+            ])
+        );
+    }
+
     #[test]
     fn an_unknown_instance_has_no_row_and_no_state() {
         let p = fresh();
@@ -402,9 +470,7 @@ mod tests {
         assert!(!FlowReplicaState::has_derived(&p, BOB, "i").unwrap());
         assert!(!FlowReplicaState::is_fired(&p, BOB, "p1").unwrap());
         assert!(FlowReplicaState::states(&p, BOB, None).unwrap().is_empty());
-        assert!(FlowReplicaState::fired_for_instance(&p, BOB, "i")
-            .unwrap()
-            .is_empty());
+        assert!(fired_for(&p, BOB, "i").is_empty());
     }
 
     #[test]
@@ -516,7 +582,7 @@ mod tests {
         assert_eq!(second.prior, PriorRow::Derived("scoped".into()));
         assert_eq!(second.newly_marked, vec!["p3".to_string()]);
         assert_eq!(
-            FlowReplicaState::fired_for_instance(&p, ALICE, "i").unwrap(),
+            fired_for(&p, ALICE, "i"),
             vec!["p1".to_string(), "p2".into(), "p3".into()]
         );
         assert_eq!(
@@ -548,10 +614,7 @@ mod tests {
                 .as_deref(),
             Some("open")
         );
-        assert_eq!(
-            FlowReplicaState::fired_for_instance(&p, ALICE, "i").unwrap(),
-            vec!["p1".to_string()]
-        );
+        assert_eq!(fired_for(&p, ALICE, "i"), vec!["p1".to_string()]);
     }
 
     #[test]

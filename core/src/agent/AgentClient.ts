@@ -1,4 +1,4 @@
-import {ApiClient, CallOptions } from '../apiClient';
+import {ApiClient, CallOptions, RpcError } from '../apiClient';
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
   Agent,
@@ -12,7 +12,8 @@ import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runti
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
-import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
+import { createPersistentCache } from "../cache/PersistentCache";
+import { KeyedCache, StoredEntry } from "../cache/KeyedCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
 
@@ -27,26 +28,28 @@ function toAgent(data: AgentData | null): Agent | null {
   return data ? Agent.fromWire(data) : null;
 }
 
+/** Most DIDs the executor takes in one `agent.byDIDs` call. */
+const MAX_DIDS_PER_CALL = 200;
+
 export class AgentClient {
   #apiClient: ApiClient;
 
-  // ── byDID cache ────────────────────────────────────────────────────
-  // L1: in-memory promise cache with timestamps for TTL
-  #memCache = new Map<string, { promise: Promise<Agent>; ts: number }>();
-  // L2: persistent cache (IndexedDB in browser, NullCache in Node)
-  // Entries are wrapped with a timestamp so the TTL can be enforced across restarts.
-  #persistent: PersistentCache<{ agent: Agent; ts: number }>;
-  // Self-DID for event-driven invalidation (no TTL for own profile)
+  // byDID cache: concurrent misses go out in one `agent.byDIDs` call.
+  #agents: KeyedCache<Agent>;
+  // The own profile is kept fresh by `agent-updated` events, so it has no TTL.
   #selfDid: string | null = null;
-  /** TTL for remote (non-self) agent profiles in L1 cache (ms). */
+  /** TTL of other agents' profiles, in memory and in the persistent cache (ms). */
   static REMOTE_AGENT_TTL_MS = 5 * 60_000; // 5 minutes
-  /** TTL for remote agent profiles in the L2 (IndexedDB) cache (ms).
-   *  After this window any restart triggers a fresh network fetch. */
-  static REMOTE_AGENT_TTL_L2_MS = 5 * 60_000; // 5 minutes
 
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
-    this.#persistent = createPersistentCache<{ agent: Agent; ts: number }>('ad4m-agent-cache', 'agents');
+    this.#agents = new KeyedCache<Agent>({
+      loadMany: (dids) => this.#loadAgents(dids),
+      maxBatch: MAX_DIDS_PER_CALL,
+      persistent: createPersistentCache<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
+      maxAgeMs: (did) => did === this.#selfDid ? Infinity : AgentClient.REMOTE_AGENT_TTL_MS,
+      persistentMaxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
+    });
   }
 
   async me(): Promise<Agent> {
@@ -86,52 +89,35 @@ export class AgentClient {
     return new AgentStatus(result);
   }
 
+  /**
+   * The agent with this DID, or `null` when it is unknown. Concurrent calls
+   * for any DIDs share one `agent.byDIDs` request.
+   */
   async byDID(did: string): Promise<Agent> {
     // agent-updated events keep cached entries fresh (the self-DID entry has no TTL).
     this.#listen();
-    const now = Date.now();
-    const cached = this.#memCache.get(did);
+    return this.#agents.get(did);
+  }
 
-    if (cached) {
-      const isSelf = did === this.#selfDid;
-      // Self-DID: L1 always valid (event-driven invalidation)
-      // Remote DID: L1 valid within TTL
-      if (isSelf || (now - cached.ts) < AgentClient.REMOTE_AGENT_TTL_MS) {
-        return cached.promise;
-      }
+  /**
+   * One `agent.byDIDs` call for the misses of one tick. The executor fails
+   * that call when one DID's lookup fails (500), so the DIDs of a failed
+   * batch are then read alone: each caller gets what a lone `byDID` gives.
+   */
+  async #loadAgents(dids: string[]): Promise<Array<Agent | null | Error>> {
+    try {
+      return (await this.#apiClient.call('agent.byDIDs', { dids })).map(toAgent);
+    } catch (error) {
+      if (dids.length === 1 || !(error instanceof RpcError) || error.status !== 500) throw error;
+      return Promise.all(dids.map(did =>
+        this.#apiClient.call('agent.byDid', { did }).then(toAgent, (failure) =>
+          failure instanceof Error ? failure : new Error(String(failure)))));
     }
-
-    // Deduplicate: store the promise immediately so concurrent calls share one RPC
-    const promise = (async () => {
-      // L2: check persistent cache before network
-      const entry = await this.#persistent.get(did);
-      // entry.agent may be undefined for pre-TTL cache entries (migration) — treat as expired
-      if (entry?.agent && (now - (entry.ts ?? 0)) < AgentClient.REMOTE_AGENT_TTL_L2_MS) {
-        return entry.agent;
-      }
-
-      // L3: network fetch
-      const result = toAgent(await this.#apiClient.call('agent.byDid', { did }));
-      this.#persistent.put(did, { agent: result, ts: Date.now() }); // fire-and-forget write to L2
-      return result;
-    })();
-
-    this.#memCache.set(did, { promise, ts: now });
-
-    // Clean up on failure so next call retries
-    promise.catch(() => {
-      if (this.#memCache.get(did)?.promise === promise) {
-        this.#memCache.delete(did);
-      }
-    });
-
-    return promise;
   }
 
   #cacheAgent(agent: Agent): void {
     if (!agent.did) return;
-    this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
-    this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
+    this.#agents.set(agent.did, agent);
     this.#listen();
   }
 
@@ -147,8 +133,7 @@ export class AgentClient {
    * Invalidate a specific DID's cache entry in both L1 and L2.
    */
   invalidateByDid(did: string): void {
-    this.#memCache.delete(did);
-    this.#persistent.delete(did); // fire-and-forget
+    this.#agents.delete(did);
   }
 
   /**
@@ -156,7 +141,7 @@ export class AgentClient {
    * L2 (IndexedDB) is preserved — agent data remains valid across sessions.
    */
   clearByDidCache(): void {
-    this.#memCache.clear();
+    this.#agents.clear();
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {

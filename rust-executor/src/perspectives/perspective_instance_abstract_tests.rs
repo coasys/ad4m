@@ -432,9 +432,15 @@ async fn an_abstract_class_is_read_on_its_own() {
     let err = p.model_query_classes(&union, ALL).await.unwrap_err();
     assert!(err.to_string().contains("abstract class"), "{err}");
 
+    // The empty result counts only when asked, like any other query.
     let empty = p.model_query_classes(&one("TextContent"), ALL).await;
     let empty: Value = serde_json::from_str(&empty.unwrap()).unwrap();
-    assert_eq!(empty["totalCount"], 0, "{empty}");
+    assert_eq!(empty["instances"], serde_json::json!([]), "{empty}");
+    assert!(empty.get("totalCount").is_none(), "{empty}");
+    let counted = r#"{"includeUnverified":true,"count":true}"#;
+    let counted = p.model_query_classes(&one("TextContent"), counted).await;
+    let counted: Value = serde_json::from_str(&counted.unwrap()).unwrap();
+    assert_eq!(counted["totalCount"], 0, "{counted}");
 
     let scoped =
         r#"{"parent":{"ids":["ad4m://p"],"predicate":"ad4m://has_child","limitPerAnchor":2}}"#;
@@ -542,7 +548,7 @@ async fn a_subscription_follows_the_installed_shapes() {
         .await
         .unwrap();
     let (mut sub, initial) = Sub::open(&p).await;
-    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+    assert!(initial.contains("\"instances\":[]"), "{initial}");
 
     // Message's SHACL, alone: its predicates are no record's.
     install(&mut p, &ctx, "Message", MESSAGE_SDNA).await;
@@ -591,7 +597,7 @@ async fn a_failed_resolution_is_tried_again_on_the_next_pass() {
 
     fail_next_index(&p.uuid);
     let (mut sub, initial) = Sub::open(&p).await;
-    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+    assert!(initial.contains("\"instances\":[]"), "{initial}");
     let chat = json!({"text": "first"});
     create(&mut p, &ctx, "Chat", "ad4m://chat/1", chat)
         .await
@@ -688,7 +694,7 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(app["totalCount"], 0, "{app}");
+    assert_eq!(app["instances"], serde_json::json!([]), "{app}");
 
     let refused = create(
         &mut perspective,
