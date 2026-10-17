@@ -554,17 +554,7 @@ struct TestLanguageLanguage {
 impl TestLanguageLanguage {
     async fn install() -> Self {
         crate::test_utils::init_v8_platform();
-        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        let dir = DIR.get_or_init(|| {
-            let dir = tempfile::tempdir().unwrap();
-            crate::utils::set_languages_directory(dir.path().to_str().unwrap());
-            dir
-        });
-        assert!(
-            crate::utils::languages_directory().starts_with(dir.path()),
-            "the languages directory was set before this test, to {:?}",
-            crate::utils::languages_directory()
-        );
+        crate::test_utils::test_languages_directory();
 
         let controller = LanguageController::global_instance();
         let (template_address, _) = controller
@@ -673,6 +663,73 @@ async fn apply_template_publishes_as_the_calling_session() {
             operators_copy["address"].as_str().unwrap(),
         ])
         .await;
+}
+
+/// WE reads the meta of every link-language template on each space creation, and a meta
+/// under an address never changes: `language.applyTemplate` records the meta it
+/// published in the language's meta.json, and `language.meta` answers from it without
+/// the language language.
+#[tokio::test]
+async fn apply_template_records_the_meta_it_published() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let user = TestUser::new("template.meta.user");
+    let languages = TestLanguageLanguage::install().await;
+
+    let copy = call(
+        "language.applyTemplate",
+        json!({
+            "sourceLanguageHash": languages.template_address,
+            "templateData": json!({ "uid": "recorded meta" }).to_string(),
+        }),
+        user_session(&user.email),
+    )
+    .await
+    .expect("a user may template a link language");
+    let address = copy["address"].as_str().unwrap().to_string();
+
+    let meta_file = crate::utils::languages_directory()
+        .join(&address)
+        .join("meta.json");
+    let on_disk: Value = serde_json::from_str(
+        &std::fs::read_to_string(&meta_file).expect("applyTemplate wrote meta.json"),
+    )
+    .unwrap();
+    assert_eq!(on_disk["author"], json!(user.did()));
+    assert_eq!(
+        on_disk["templateSourceLanguageAddress"],
+        json!(languages.template_address)
+    );
+
+    // Without a language language, language.meta still answers.
+    let language_language = languages
+        .controller
+        .system_addresses
+        .lock()
+        .await
+        .language_language
+        .take();
+    let meta = call(
+        "language.meta",
+        json!({ "address": address }),
+        user_session(&user.email),
+    )
+    .await;
+    languages
+        .controller
+        .system_addresses
+        .lock()
+        .await
+        .language_language = language_language;
+    let meta = meta.expect("language.meta answers from what applyTemplate recorded");
+    assert_eq!(meta["author"], json!(user.did()));
+    assert_eq!(meta["address"], json!(address));
+    assert_eq!(
+        meta["templateSourceLanguageAddress"],
+        json!(languages.template_address)
+    );
+
+    languages.uninstall(&[&address]).await;
 }
 
 /// The MCP neighbourhood tool clones its link language itself; a user's clone must carry

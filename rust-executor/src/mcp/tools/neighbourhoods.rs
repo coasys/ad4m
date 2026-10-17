@@ -311,6 +311,16 @@ pub(crate) async fn clone_link_language(
         )
     })?;
 
+    // Record the meta just published, so reading it never asks the language language.
+    match crate::agent::did_for_context(agent_context) {
+        Ok(author) => controller.remember_published_meta(&input.meta, &author),
+        Err(e) => log::warn!(
+            "Not recording the meta of {}: no DID for its publisher: {}",
+            input.meta.address,
+            e
+        ),
+    }
+
     // Load into runtime - use the saved bundle path
     // Verify the saved hash matches the published address
     if saved_hash != address {

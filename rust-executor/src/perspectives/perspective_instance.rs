@@ -81,6 +81,10 @@ mod subscription_tests;
 #[path = "perspective_instance_abstract_tests.rs"]
 mod abstract_tests;
 
+#[cfg(test)]
+#[path = "perspective_instance_join_tests.rs"]
+mod join_tests;
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;

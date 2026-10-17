@@ -75,6 +75,23 @@ pub async fn _install_neighbourhood(url: String) -> Result<PerspectiveHandle, An
     install_neighbourhood_with_context(url, &crate::agent::AgentContext::main_agent()).await
 }
 
+/// Tell `perspective`'s link language its new owners without waiting for it.
+/// In p-diff-sync that is a Holochain zome call queued behind everything else
+/// the language's runtime is doing, which on a busy executor holds a join RPC
+/// past the client's timeout. The join is already recorded (database and
+/// owners list); `update_local_agents` logs a failure, and the next
+/// registration (another join, or the link language's own attach) sends the
+/// full owners list again.
+fn register_owners_in_background(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    owners: Vec<String>,
+) {
+    let perspective = perspective.clone();
+    tokio::spawn(async move {
+        perspective.update_local_agents(owners).await;
+    });
+}
+
 pub async fn install_neighbourhood_with_context(
     url: String,
     context: &crate::agent::AgentContext,
@@ -107,11 +124,11 @@ pub async fn install_neighbourhood_with_context(
 
                 // Update link language with new owners list
                 if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
+                    register_owners_in_background(p, owners.clone());
                 }
 
                 log::info!(
-                    "Added user {} to existing neighbourhood {}. Link language has been updated with new owners.",
+                    "Added user {} to existing neighbourhood {}. Registering the new owners with the link language in the background.",
                     user_email,
                     url
                 );
@@ -133,11 +150,11 @@ pub async fn install_neighbourhood_with_context(
 
                 // Update link language with new owners list
                 if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
+                    register_owners_in_background(p, owners.clone());
                 }
 
                 log::info!(
-                    "Added main agent to existing neighbourhood {}. Link language has been updated with new owners.",
+                    "Added main agent to existing neighbourhood {}. Registering the new owners with the link language in the background.",
                     url
                 );
                 return Ok(handle.clone());

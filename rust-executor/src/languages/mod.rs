@@ -4,6 +4,7 @@ mod conductor_languages;
 pub mod error;
 pub mod language;
 pub mod language_context;
+mod language_meta;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
@@ -68,6 +69,19 @@ fn sorted_json_string(val: &JsonValue) -> String {
     }
 }
 
+/// Removes a directory tree when dropped: a temp dir that must go on every exit path.
+struct RemoveDirOnDrop(PathBuf);
+
+impl Drop for RemoveDirOnDrop {
+    fn drop(&mut self) {
+        if let Err(e) = fs::remove_dir_all(&self.0) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Could not remove temp dir {}: {}", self.0.display(), e);
+            }
+        }
+    }
+}
+
 /// Tracks addresses of system languages (language language, agent, neighbourhood, perspective)
 #[derive(Debug, Clone, Default)]
 pub struct SystemLanguageAddresses {
@@ -96,6 +110,9 @@ pub struct LanguageController {
 
     // Cached language names (address -> name)
     language_names: Arc<TokioMutex<HashMap<String, String>>>,
+
+    // Language metas known without asking the language language (see language_meta.rs)
+    language_metas: Arc<Mutex<HashMap<String, LanguageMeta>>>,
 }
 
 impl LanguageController {
@@ -121,6 +138,7 @@ impl LanguageController {
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
+            language_metas: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -287,6 +305,22 @@ impl LanguageController {
 
         info!("Successfully loaded language: {}", label);
         Ok(language_address)
+    }
+
+    /// Test-only: serve `address` from `handle` (see
+    /// `LanguageRuntimeHandle::from_channel`), or stop serving it with `None`.
+    /// No load, no teardown.
+    #[cfg(test)]
+    pub(crate) async fn set_runtime_for_test(
+        &self,
+        address: &str,
+        handle: Option<LanguageRuntimeHandle>,
+    ) {
+        let mut runtimes = self.runtimes.lock().await;
+        match handle {
+            Some(handle) => runtimes.insert(address.to_string(), handle),
+            None => runtimes.remove(address),
+        };
     }
 
     /// Unload a language and clean up
@@ -830,93 +864,36 @@ impl LanguageController {
             sys.language_language.clone()
         };
 
-        // Get meta: from disk or from language language with retry
-        let meta: Option<JsonValue> = if meta_path.exists() {
-            let content = fs::read_to_string(&meta_path)?;
-            Some(serde_json::from_str(&content)?)
-        } else if let Some(ref ll_addr) = language_language_address {
-            // Fetch from language language with retry logic (up to 10 retries)
-            let language_lit =
-                serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
-            let meta_script = format!(
-                r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
-                language_lit
-            );
-
-            let mut meta_result = None;
-            for retry in 0..10 {
-                match controller.execute_on_language(ll_addr, &meta_script).await {
-                    Ok(result) => {
-                        if let Ok(val) = serde_json::from_str::<JsonValue>(&result) {
-                            if !val.is_null() {
-                                meta_result = Some(val);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Error getting language meta from language language: {}\nRetrying...",
-                            e
-                        );
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
-            }
-
-            meta_result.and_then(|expr| expr.get("data").cloned())
-        } else {
-            None
-        };
-
-        // Get bundle source: from disk or from language language
-        let source = if bundle_path.exists() {
+        // Get bundle source: from disk or from the language language. A
+        // language another node has just published may take a while to reach
+        // the language language's store, so retry, but within a deadline.
+        let source_from_language_language = !bundle_path.exists();
+        let source = if !source_from_language_language {
             Some(fs::read_to_string(&bundle_path)?)
         } else if let Some(ref ll_addr) = language_language_address {
-            // Match the meta fetch retry policy: up to 10 attempts with
-            // linear backoff. Previously the source fetch was one-shot,
-            // which meant that if the language language was still warming
-            // up the meta call could succeed on retry N while the source
-            // call failed instantly on the first attempt, aborting the
-            // whole install with a confusing "no source available" error
-            // even though a retry would have succeeded.
             let language_lit =
                 serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
             let source_script = format!(
                 r#"await globalThis.__ad4m_language_instance__.languageGetSource({})"#,
                 language_lit
             );
-
-            let mut source_result: Option<String> = None;
-            for retry in 0..10 {
-                match controller
-                    .execute_on_language(ll_addr, &source_script)
-                    .await
-                {
-                    Ok(s) => {
-                        // A language-language that returns null/undefined
-                        // for an unknown address stringifies to the literal
-                        // "null" / "undefined" here. Treat those as
-                        // "source not available" — but still retry in case
-                        // the LL is mid-warmup and hasn't yet materialized
-                        // the expression.
-                        let trimmed = s.trim();
-                        if !(trimmed.is_empty() || trimmed == "null" || trimmed == "undefined") {
-                            source_result = Some(s);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Error getting language source from language language: {}\nRetrying...",
-                            e
-                        );
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5000 * (retry + 1))).await;
-            }
-
-            source_result
+            let (controller, ll_addr, source_script) = (&controller, ll_addr, &source_script);
+            language_meta::fetch_with_backoff(
+                &format!("the source of language {}", language),
+                language_meta::SOURCE_FETCH_DEADLINE,
+                move || async move {
+                    let source = controller
+                        .execute_on_language(ll_addr, source_script)
+                        .await?;
+                    // A language-language that returns null/undefined for an
+                    // unknown address stringifies to the literal "null" /
+                    // "undefined" here: not available (yet).
+                    let trimmed = source.trim();
+                    let missing = trimmed.is_empty() || trimmed == "null" || trimmed == "undefined";
+                    Ok::<_, LanguageError>((!missing).then_some(source))
+                },
+            )
+            .await
         } else {
             None
         };
@@ -948,6 +925,55 @@ impl LanguageController {
                     hash
                 ));
             }
+
+            // Meta is optional: it is only stored beside the bundle. Asked of
+            // the language language only for a bundle that came from it, and
+            // only when this node does not know it already.
+            let meta: Option<JsonValue> = if meta_path.exists() {
+                let content = fs::read_to_string(&meta_path)?;
+                Some(serde_json::from_str(&content)?)
+            } else if let Some(known) = controller.known_language_meta(&language) {
+                Some(serde_json::to_value(known)?)
+            } else if let (true, Some(ll_addr)) = (
+                source_from_language_language,
+                language_language_address.as_ref(),
+            ) {
+                let language_lit =
+                    serde_json::to_string(&language).unwrap_or_else(|_| "\"\"".to_string());
+                let meta_script = format!(
+                    r#"JSON.stringify((await globalThis.__ad4m_language_instance__.expressionGet({})) ?? null)"#,
+                    language_lit
+                );
+                let (controller, ll_addr, meta_script) = (&controller, ll_addr, &meta_script);
+                let expression = language_meta::fetch_with_backoff(
+                    &format!("the meta of language {}", language),
+                    language_meta::META_FETCH_DEADLINE,
+                    move || async move {
+                        let result = controller.execute_on_language(ll_addr, meta_script).await?;
+                        let expression = serde_json::from_str::<JsonValue>(&result)
+                            .ok()
+                            .filter(|expression| !expression.is_null());
+                        Ok::<_, LanguageError>(expression)
+                    },
+                )
+                .await;
+                expression.and_then(|expression| {
+                    let author = expression
+                        .get("author")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let data = expression.get("data").cloned()?;
+                    controller.cache_language_meta(&language_meta::language_meta_from_data(
+                        &language,
+                        data.clone(),
+                        author.clone(),
+                    ));
+                    Some(language_meta::meta_file_content(data, &author))
+                })
+            } else {
+                None
+            };
 
             // Save language bundle to disk
             let (_saved_hash, saved_bundle_path) =
@@ -1217,16 +1243,13 @@ impl LanguageController {
         // `integration-tests-js` job.
         //
         // A per-call UUID suffix keeps each invocation on its own dir, so
-        // concurrent templates can't race on the same path. The cleanup at
-        // the end of the function still removes the per-call dir, and an
-        // earlier-failing call leaves a uniquely-named orphan rather than
-        // poisoning the next one.
+        // concurrent templates can't race on the same path. The guard removes
+        // the per-call dir on every way out of this function, failures
+        // included.
         let temp_templating_path =
             std::env::temp_dir().join(format!("{}-{}", source_language_hash, uuid::Uuid::new_v4()));
-        if temp_templating_path.exists() {
-            let _ = fs::remove_dir_all(&temp_templating_path);
-        }
         fs::create_dir_all(&temp_templating_path)?;
+        let _remove_temp_dir = RemoveDirOnDrop(temp_templating_path.clone());
 
         let temp_happ_path = temp_templating_path.join("happ.happ");
 
@@ -1398,9 +1421,6 @@ impl LanguageController {
         // Read packed happ as base64
         let happ_bytes = fs::read(&pack_happ_path)?;
         let base64_string = BASE64_STANDARD.encode(&happ_bytes);
-
-        // Cleanup temp directory
-        let _ = fs::remove_dir_all(&temp_templating_path);
 
         Ok(Some(base64_string))
     }
@@ -2047,11 +2067,16 @@ impl LanguageController {
         result
     }
 
-    /// Get language expression (meta) from the language language.
+    /// Get language expression (meta): what this node already knows (see
+    /// `language_meta.rs`), else from the language language, then cached.
     pub async fn get_language_expression(
         &self,
         address: &str,
     ) -> Result<LanguageMeta, LanguageError> {
+        if let Some(meta) = self.known_language_meta(address) {
+            return Ok(meta);
+        }
+
         let language_language_address = {
             let sys = self.system_addresses.lock().await;
             sys.language_language
@@ -2077,40 +2102,27 @@ impl LanguageController {
                 message: format!("Failed to parse language expression: {}", e),
             })?;
 
+        // Not published (or not propagated) yet: not cached, so the next read
+        // asks again.
         if meta_expression.is_null() {
             return Err(LanguageError::NotFound {
                 address: address.to_string(),
             });
         }
 
-        // Extract author from the expression envelope (not from data)
+        // The author comes from the expression envelope, not from data
         let author = meta_expression
             .get("author")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-
         let data = meta_expression
             .get("data")
             .cloned()
             .unwrap_or(JsonValue::Object(serde_json::Map::new()));
 
-        // If data is a string, parse it as JSON first
-        let data = if let JsonValue::String(s) = &data {
-            serde_json::from_str::<JsonValue>(s).unwrap_or(data)
-        } else {
-            data
-        };
-
-        let mut meta: LanguageMeta = serde_json::from_value(data).unwrap_or_default();
-        // Override author from the expression envelope
-        meta.author = author;
-        // Set the address from the query parameter
-        meta.address = address.to_string();
-        // Default templated to false if not present in the data
-        if meta.templated.is_none() {
-            meta.templated = Some(false);
-        }
+        let meta = language_meta::language_meta_from_data(address, data, author);
+        self.cache_language_meta(&meta);
         Ok(meta)
     }
 
@@ -2842,6 +2854,36 @@ impl LanguageController {
 mod template_tests {
     use super::*;
     use serde_json::json;
+
+    /// The temp dir a DNA templating call works in goes on every exit, not only on
+    /// success: here the happ does not decode, before the conductor is needed.
+    #[tokio::test]
+    async fn a_failed_dna_template_leaves_no_temp_dir() {
+        let source_hash = format!("QmTemplateCleanup{}", uuid::Uuid::new_v4().simple());
+        let lines = make_source(&[r#"var happ = "not base64!";"#]);
+
+        let result = LanguageController::new()
+            .read_and_template_holochain_dna(&lines, &serde_json::Map::new(), &source_hash)
+            .await;
+
+        assert!(
+            matches!(result, Err(LanguageError::InvalidBundle { .. })),
+            "{:?}",
+            result
+        );
+        let left: Vec<_> = fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&source_hash)
+            })
+            .map(|entry| entry.path())
+            .collect();
+        assert!(left.is_empty(), "left behind: {:?}", left);
+    }
 
     fn make_source(lines: &[&str]) -> Vec<String> {
         lines.iter().map(|s| s.to_string()).collect()

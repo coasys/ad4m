@@ -180,6 +180,7 @@ async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .expression_create(&language_language_address, content, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
+    remember_published_meta(&controller, &meta, &agent_context);
 
     let bundle_on_disk = crate::utils::languages_directory()
         .join(&hash)
@@ -248,14 +249,12 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     // Users template link languages to create neighbourhoods, so this call stays open to
     // them. A user session publishes as the user, never as the node's main agent.
+    let publisher = session_agent_context(&ctx);
     controller
-        .expression_create(
-            &language_language_address,
-            content,
-            &session_agent_context(&ctx),
-        )
+        .expression_create(&language_language_address, content, &publisher)
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
+    remember_published_meta(&controller, &input.meta, &publisher);
 
     let bundle_on_disk = crate::utils::languages_directory()
         .join(&hash)
@@ -272,6 +271,23 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         address: hash,
         name: input_name,
     })?)
+}
+
+/// Record the meta just published, signed by `publisher`, so `language.meta` never asks
+/// the language language for it (`LanguageController::remember_published_meta`).
+fn remember_published_meta(
+    controller: &LanguageController,
+    meta: &LanguageMeta,
+    publisher: &crate::agent::AgentContext,
+) {
+    match crate::agent::did_for_context(publisher) {
+        Ok(author) => controller.remember_published_meta(meta, &author),
+        Err(e) => log::warn!(
+            "Not recording the meta of {}: no DID for its publisher: {}",
+            meta.address,
+            e
+        ),
+    }
 }
 
 async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
