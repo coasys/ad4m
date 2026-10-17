@@ -110,8 +110,21 @@ export async function verifyChallenge(
 // Perspective sync / commit
 // ---------------------------------------------------------------------------
 
-export async function commitDiff(config: RoomConfig, token: string, diff: WirePerspectiveDiff): Promise<void> {
-    await request<unknown>(roomUrl(config, "/commit"), "POST", jsonHeaders(token), JSON.stringify(diff));
+/** Where the server put an accepted commit in the room's diff log. Fields
+ *  are absent when the server's answer carries none (older servers). */
+export interface CommitResult {
+    sequence?: number;
+    revision?: string;
+}
+
+export async function commitDiff(config: RoomConfig, token: string, diff: WirePerspectiveDiff): Promise<CommitResult> {
+    const res = await request<unknown>(roomUrl(config, "/commit"), "POST", jsonHeaders(token), JSON.stringify(diff));
+    if (!res || typeof res !== "object") return {};
+    const { sequence, revision } = res as { sequence?: unknown; revision?: unknown };
+    return {
+        sequence: typeof sequence === "number" ? sequence : undefined,
+        revision: typeof revision === "string" ? revision : undefined,
+    };
 }
 
 export async function fetchSync(config: RoomConfig, token: string, since: number): Promise<SyncResponse> {

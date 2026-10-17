@@ -156,6 +156,7 @@ function wireClient(
   syncModule.initSync({
     config: { serverUrl, roomId },
     getToken: () => auth.getValidToken(),
+    invalidateToken: () => auth.invalidateSession(),
     emitDiff: (diff) => emittedDiffs.push(diff),
     emitSyncState: (state) => syncStates.push(state),
     getKeyRing: () => null,
@@ -231,6 +232,36 @@ describe("integration: commit + HTTP sync", () => {
     const rendered = JSON.parse(renderRes.body) as { links: LinkExpression[] };
     assert.equal(rendered.links.length, 1);
     assert.equal((rendered.links[0].data as { source: string }).source, "test://int-source");
+  });
+});
+
+describe("integration: a rejected session is replaced", () => {
+  // The server drops sessions (ACL change, expiry sweep, data reset). The
+  // cached JWT then 401s on every call; the language must re-authenticate
+  // instead of retrying the dead token until the executor restarts.
+  it("commit and catchUp re-authenticate after the server revokes the session", async () => {
+    const server = await bootServer();
+    const agent = RealAgent.create();
+    wireClient(server.url, "revoked-session-room", agent);
+
+    const link = (source: string): LinkExpression => ({
+      author: agent.did(),
+      timestamp: new Date().toISOString(),
+      data: { source, predicate: "test://p", target: "test://t" },
+      proof: { signature: "test-sig", key: `${agent.did()}#primary` },
+    });
+
+    await syncModule.commit({ additions: [link("test://before")], removals: [] });
+    server.built.db.deleteSessionsForDid("revoked-session-room", agent.did());
+    await syncModule.commit({ additions: [link("test://after")], removals: [] });
+
+    server.built.db.deleteSessionsForDid("revoked-session-room", agent.did());
+    await syncModule.catchUp();
+
+    server.built.db.deleteSessionsForDid("revoked-session-room", agent.did());
+    await syncModule.bootstrap();
+    const sources = store.allLinks().links.map((l) => (l.data as { source: string }).source).sort();
+    assert.deepEqual(sources, ["test://after", "test://before"], "both commits must be on the server");
   });
 });
 
