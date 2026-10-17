@@ -348,34 +348,38 @@ pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 }
 
 pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {
-    {
-        if PERSPECTIVES.read().unwrap().get(&handle.uuid).is_none() {
-            return Err(format!("Perspective with uuid {} not found", &handle.uuid));
-        }
+    let new = handle.clone();
+    update_perspective_with(&handle.uuid, move |persisted| *persisted = new)
+        .await
+        .map(|_| ())
+}
 
-        let instance = PERSPECTIVES
-            .read()
-            .unwrap()
-            .get(&handle.uuid)
-            .unwrap()
-            .read()
-            .unwrap()
-            .clone();
-
-        instance.update_from_handle(handle.clone()).await;
-
+/// Applies `change` to a perspective's handle under the instance's lock, then
+/// persists and announces the result. A read-modify-write done through this
+/// cannot overwrite a concurrent one (two users joining one neighbourhood at
+/// once each read the owners, added themselves and wrote back, so one was lost).
+pub async fn update_perspective_with(
+    uuid: &str,
+    change: impl FnOnce(&mut PerspectiveHandle),
+) -> Result<PerspectiveHandle, String> {
+    let instance =
+        get_perspective(uuid).ok_or_else(|| format!("Perspective with uuid {} not found", uuid))?;
+    let handle = {
+        let mut persisted = instance.persisted.lock().await;
+        change(&mut persisted);
         Ad4mDb::with_global_instance(|db| {
-            db.update_perspective(handle).map_err(|e| e.to_string())
+            db.update_perspective(&persisted).map_err(|e| e.to_string())
         })?;
+        persisted.clone()
+    };
 
-        // Update the signal routing cache if this perspective has a link language.
-        // Without this, the cached PerspectiveHandle retains a stale owners list,
-        // causing signals (especially broadcasts) to not be delivered to owners
-        // added after the cache was first populated (e.g. managed users joining
-        // an existing neighbourhood).
-        if let Some(nh) = &handle.neighbourhood {
-            register_link_language_perspective(nh.data.link_language.clone(), handle.clone());
-        }
+    // Update the signal routing cache if this perspective has a link language.
+    // Without this, the cached PerspectiveHandle retains a stale owners list,
+    // causing signals (especially broadcasts) to not be delivered to owners
+    // added after the cache was first populated (e.g. managed users joining
+    // an existing neighbourhood).
+    if let Some(nh) = &handle.neighbourhood {
+        register_link_language_perspective(nh.data.link_language.clone(), handle.clone());
     }
 
     // Publish one event per owner so each user gets their own notification
@@ -411,7 +415,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
             )
             .await;
     }
-    Ok(())
+    Ok(handle)
 }
 
 pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {

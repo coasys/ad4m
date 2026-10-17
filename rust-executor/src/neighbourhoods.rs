@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::languages::LanguageController;
-use crate::perspectives::{add_perspective, all_perspectives, get_perspective, update_perspective};
+use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::{
+    add_perspective, all_perspectives, get_perspective, update_perspective, update_perspective_with,
+};
 use crate::types::*;
 use crate::types::{Neighbourhood, Perspective, PerspectiveHandle, PerspectiveState};
 
@@ -75,6 +78,23 @@ pub async fn _install_neighbourhood(url: String) -> Result<PerspectiveHandle, An
     install_neighbourhood_with_context(url, &crate::agent::AgentContext::main_agent()).await
 }
 
+/// Adds `did` as an owner of the neighbourhood perspective `p` and tells its
+/// link language the new owners.
+async fn add_owner(
+    p: &PerspectiveInstance,
+    url: &str,
+    did: &str,
+) -> Result<PerspectiveHandle, AnyError> {
+    crate::db::Ad4mDb::with_global_instance(|db| db.add_owner_to_neighbourhood(url, did))?;
+    let handle = update_perspective_with(&p.uuid, |h| h.add_owner(did))
+        .await
+        .map_err(|e| anyhow!(e))?;
+    if let Some(owners) = &handle.owners {
+        p.update_local_agents(owners.clone()).await;
+    }
+    Ok(handle)
+}
+
 pub async fn install_neighbourhood_with_context(
     url: String,
     context: &crate::agent::AgentContext,
@@ -83,65 +103,20 @@ pub async fn install_neighbourhood_with_context(
 
     // Check if neighbourhood already exists
     for p in perspectives.iter() {
-        let mut handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.lock().await.clone();
         if handle.shared_url == Some(url.clone()) {
-            // Neighbourhood exists - add this user as owner if it's a user context
+            // Neighbourhood exists: add the joining agent as an owner.
+            let did = match &context.user_email {
+                Some(user_email) => crate::agent::AgentService::get_user_did_by_email(user_email)?,
+                None => crate::agent::did_for_context(context)?,
+            };
+            let handle = add_owner(p, &url, &did).await?;
             log::info!(
-                "Adding user {:?} to existing neighbourhood {}",
-                context.user_email,
+                "Added {} to existing neighbourhood {}. Link language has been updated with new owners.",
+                did,
                 url
             );
-            if let Some(user_email) = &context.user_email {
-                let user_did = crate::agent::AgentService::get_user_did_by_email(user_email)?;
-
-                // Update database
-                crate::db::Ad4mDb::with_global_instance(|db| {
-                    db.add_owner_to_neighbourhood(&url, &user_did)
-                })?;
-
-                // Add user to owners list
-                // Update in-memory handle
-                handle.add_owner(&user_did);
-
-                update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
-
-                // Update link language with new owners list
-                if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
-                }
-
-                log::info!(
-                    "Added user {} to existing neighbourhood {}. Link language has been updated with new owners.",
-                    user_email,
-                    url
-                );
-                return Ok(handle.clone());
-            } else {
-                // Main agent trying to join existing neighbourhood
-                // Add main agent to owners list for access control
-                let main_agent_did = crate::agent::did_for_context(context)?;
-
-                // Update database
-                crate::db::Ad4mDb::with_global_instance(|db| {
-                    db.add_owner_to_neighbourhood(&url, &main_agent_did)
-                })?;
-
-                // Add main agent to owners list in memory
-                handle.add_owner(&main_agent_did);
-
-                update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
-
-                // Update link language with new owners list
-                if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
-                }
-
-                log::info!(
-                    "Added main agent to existing neighbourhood {}. Link language has been updated with new owners.",
-                    url
-                );
-                return Ok(handle.clone());
-            }
+            return Ok(handle);
         }
     }
 
@@ -206,4 +181,49 @@ pub async fn install_neighbourhood_with_context(
     );
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Ad4mDb;
+
+    /// Users joining one neighbourhood at the same moment each add an owner;
+    /// none may be lost, in memory or in the database (staging, 16 Oct: one
+    /// of three joiners got 403 on its own perspective).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_joins_keep_every_owner() {
+        crate::test_utils::setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::agent::AgentService::init_global_test_instance();
+        let url = "neighbourhood://concurrent-joins";
+        let mut handle = PerspectiveHandle::new_from_name("joined by many".to_string());
+        handle.shared_url = Some(url.to_string());
+        add_perspective(handle.clone(), None).await.unwrap();
+        let p: PerspectiveInstance = get_perspective(&handle.uuid).unwrap();
+
+        let dids: Vec<String> = (0..100).map(|i| format!("did:key:z6Mkjoiner{i}")).collect();
+        let joins = dids.iter().cloned().map(|did| {
+            let p = p.clone();
+            tokio::spawn(async move { add_owner(&p, url, &did).await.unwrap() })
+        });
+        futures::future::join_all(joins).await;
+
+        let in_memory = p.persisted.lock().await.clone();
+        let stored = Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.uuid == handle.uuid)
+            .unwrap();
+        for did in &dids {
+            assert!(
+                in_memory.owners.as_ref().unwrap().contains(did),
+                "lost {did} in memory"
+            );
+            assert!(
+                stored.owners.as_ref().unwrap().contains(did),
+                "lost {did} in the db"
+            );
+        }
+    }
 }
