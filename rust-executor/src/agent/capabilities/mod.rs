@@ -1,4 +1,3 @@
-pub mod apps_map;
 pub mod defs;
 pub mod requests_map;
 pub mod token;
@@ -137,11 +136,12 @@ pub fn capability_matches(capabilities: &[Capability], expected: &Capability) ->
     })
 }
 
-pub fn check_token_revoked(token: &str) -> Result<(), String> {
-    if apps_map::is_revoked(token) {
-        return Err("Unauthorized access".to_string());
-    }
-    Ok(())
+/// The grant of a decoded token while it lets the token act; `Err` when the token has no
+/// grant, its grant was revoked, removed or expired, its `sub` names another agent, or its
+/// agent has no identity. For MCP, which resolves its tokens without a `Session`; it applies
+/// the checks `Session::open` applies ([`crate::agent::session::grant_for`]).
+pub fn granted(claims: &Claims) -> Result<std::sync::Arc<crate::agent::grants::LiveGrant>, String> {
+    crate::agent::session::grant_for(claims).map_err(|e| e.to_string())
 }
 
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
@@ -334,15 +334,8 @@ pub fn capabilities_on(
         return Ok(anonymous_capabilities());
     }
 
-    check_token_revoked(&token)?;
-
     let claims = decode_jwt(token).map_err(|e| e.to_string())?;
-
-    if claims.capabilities.capabilities.is_none() {
-        Ok(vec![AGENT_AUTH_CAPABILITY.clone()])
-    } else {
-        Ok(claims.capabilities.capabilities.unwrap())
-    }
+    Ok(granted(&claims)?.caps.clone())
 }
 
 pub async fn request_capability(auth_info: AuthInfo) -> String {
@@ -413,33 +406,23 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
         }
     };
 
-    let cap_token = token::generate_jwt(
-        auth.app_name.clone(),
+    // A capability request is a grant on the main agent (a request for a managed agent
+    // comes with #1399).
+    let auth = AuthInfo {
+        user_email: None,
+        ..auth
+    };
+    let (cap_token, grant) = crate::agent::grants::mint(
+        crate::agent::AgentContext::main_agent(),
+        auth,
+        Some(request_id.clone()),
         DEFAULT_TOKEN_VALID_PERIOD,
-        auth.clone(),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
     remove_request(&auth_key)?;
 
-    let auth_for_publish = auth.clone();
-
-    apps_map::insert_app(
-        request_id.clone(),
-        AuthInfoExtended {
-            request_id: request_id.clone(),
-            auth,
-        },
-        cap_token.clone(),
-    )?;
-
     // The event reaches every session that can approve apps; the token goes only to the caller.
-    let apps_changed = Apps {
-        auth: auth_for_publish,
-        request_id: request_id.clone(),
-        revoked: Some(false),
-        token: String::new(),
-    };
+    let apps_changed = grant.as_app();
     get_global_pubsub()
         .await
         .publish(
@@ -772,7 +755,7 @@ mod app_token_tests {
     async fn wrong_codes_for_a_prefix_of_an_id_leave_that_request_alone() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+        crate::test_utils::ensure_test_db();
         let (request_id, code) = permitted_request().await;
         let prefix = request_id.split('-').next().unwrap().to_string();
         assert_ne!(prefix, request_id);
@@ -786,7 +769,7 @@ mod app_token_tests {
     async fn a_correct_code_after_a_few_wrong_ones_still_works() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+        crate::test_utils::ensure_test_db();
         let (request_id, code) = permitted_request().await;
         let wrong = if code == "100000" { "100001" } else { "100000" };
         for _ in 0..MAX_CODE_ATTEMPTS - 1 {
@@ -805,7 +788,7 @@ mod app_token_tests {
     async fn app_events_and_the_client_app_list_carry_no_token() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        crate::test_utils::use_test_apps_file();
+        crate::test_utils::ensure_test_db();
         let mut events = get_global_pubsub().await.subscribe(&APPS_CHANGED).await;
 
         let (request_id, code) = permitted_request().await;
@@ -827,8 +810,10 @@ mod app_token_tests {
         };
         assert!(event.token.is_empty(), "the event carried the app token");
 
-        let listed = apps_map::client_view()
-            .into_iter()
+        let listed = crate::agent::grants::Grants::global()
+            .list(&crate::agent::AgentContext::main_agent())
+            .iter()
+            .map(|grant| grant.as_app())
             .find(|app| app.request_id == request_id)
             .expect("the app appears in the list");
         assert!(
@@ -836,8 +821,32 @@ mod app_token_tests {
             "the app list carried the app token"
         );
 
-        assert!(check_token_revoked(&token).is_ok());
-        apps_map::revoke_app(&request_id).unwrap();
-        assert!(check_token_revoked(&token).is_err());
+        assert!(capabilities_from_token(token.clone(), None).is_ok());
+        let grants = crate::agent::grants::Grants::global();
+        grants.revoke(&grants.find(&request_id)).unwrap();
+        assert!(capabilities_from_token(token, None).is_err());
+    }
+
+    // MCP resolves tokens without a `Session`, by the same grants: a removed app's token
+    // has no grant and is refused (#396), and so is a token that never had one.
+    #[test]
+    fn mcp_refuses_a_token_without_an_active_grant() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::ensure_test_db();
+        let token = crate::test_utils::granted_token(test_auth_info());
+        assert!(capabilities_from_token(token.clone(), None).is_ok());
+        assert!(crate::agent::AgentContext::from_auth_token(token.clone(), false).is_ok());
+
+        let grants = crate::agent::grants::Grants::global();
+        let found = grants.find(&token);
+        grants.revoke(&found).unwrap();
+        grants.remove(&found).unwrap();
+        assert!(capabilities_from_token(token.clone(), None).is_err());
+        assert!(crate::agent::AgentContext::from_auth_token(token, false).is_err());
+
+        let (ungranted, _) = token::sign_token("no grant".to_string(), 3600, None).unwrap();
+        assert!(capabilities_from_token(ungranted.clone(), None).is_err());
+        assert!(crate::agent::AgentContext::from_auth_token(ungranted, false).is_err());
     }
 }

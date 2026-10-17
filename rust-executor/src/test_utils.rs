@@ -85,6 +85,8 @@ pub fn setup_agent() {
         .as_mut()
         .expect("Must be some because was initalized above")
         .create_new_keys();
+    // Minting a token stores its grant.
+    ensure_test_db();
 }
 
 /// Turns multi-user mode on, on a fresh in-memory database, and off again when dropped,
@@ -103,6 +105,14 @@ impl Drop for MultiUserMode {
     fn drop(&mut self) {
         let _ = crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false));
     }
+}
+
+/// A new managed user with a unique email (see [`create_test_user`]). Returns the email.
+/// Needs `setup_wallet()` and `setup_agent()` first.
+pub fn managed_user(name: &str) -> String {
+    let email = format!("{name}-{}@example.org", uuid::Uuid::new_v4().simple());
+    create_test_user(&email);
+    email
 }
 
 /// A user `email` with a managed agent, as `user.create` leaves one: a key in the global
@@ -151,7 +161,7 @@ pub fn keyless_user_token(email: &str) -> String {
     crate::user_management::generate_user_jwt(email, "test").unwrap()
 }
 
-/// A user token the node signed, with its expiry one hour in the past.
+/// A user token the executor signed, with its expiry one hour in the past.
 /// Needs `setup_wallet()` and `setup_agent()` first.
 /// Creates the user if it does not exist.
 pub fn expired_user_token(email: &str) -> String {
@@ -190,14 +200,26 @@ pub fn resigned_token(token: &str, edit: impl FnOnce(&mut serde_json::Value)) ->
     .unwrap()
 }
 
-/// Points the app registry at one temp file for the whole test process. Tests that insert
-/// apps call this and use their own unique keys: a temp dir per test would race when tests
-/// run in parallel, because the registry's file path is global.
-pub fn use_test_apps_file() {
-    static APPS_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    let dir =
-        APPS_DIR.get_or_init(|| tempfile::tempdir().expect("a temp dir for the app registry"));
-    crate::agent::capabilities::apps_map::set_data_file_path(
-        dir.path().join("apps.json").to_string_lossy().into(),
-    );
+/// Opens an in-memory database for the grants when no test has opened one. Tests that mint
+/// tokens call this: a token works only while the database holds its grant.
+pub fn ensure_test_db() {
+    let db = crate::db::Ad4mDb::global_instance();
+    let mut db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if db.is_none() {
+        *db = Some(crate::db::Ad4mDb::new(":memory:").expect("an in-memory database"));
+    }
+}
+
+/// A token for the app `auth`, with its grant: on the managed agent of `auth.user_email`, or
+/// on the main agent. Valid for an hour. Needs `setup_wallet()` and `setup_agent()` first.
+pub fn granted_token(auth: crate::agent::capabilities::AuthInfo) -> String {
+    ensure_test_db();
+    let agent = match &auth.user_email {
+        Some(email) => crate::agent::AgentContext::managed(create_test_user(email)),
+        None => crate::agent::AgentContext::main_agent(),
+    };
+    let request_id = format!("test-{}", uuid::Uuid::new_v4());
+    crate::agent::grants::mint(agent, auth, Some(request_id), 3600)
+        .expect("the test wallet signs and the test database stores the grant")
+        .0
 }

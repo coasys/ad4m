@@ -85,16 +85,19 @@ pub struct Claims {
     exp: u64,
     iat: u64,
     nonce: String,
-    pub capabilities: AuthInfo,
+    // Tokens issued before grants also carry `capabilities` (the app's `AuthInfo`). Serde
+    // skips the unknown field, so they still decode; their grant (migrated from the old app
+    // registry) holds the capabilities now, and nothing reads them from a token.
 }
 
 impl Claims {
+    /// Claims for a token that the main agent's key `issuer` signs, naming the managed agent
+    /// `sub` (`None`: the main agent).
     pub fn new(
         issuer: String,
         audience: String,
         expiration_time: u64,
         sub: Option<String>,
-        capabilities: AuthInfo,
     ) -> Self {
         let now = SystemTime::now();
         let unix_timestamp = now
@@ -111,8 +114,12 @@ impl Claims {
             exp: unix_timestamp + expiration_time,
             iat: unix_timestamp,
             nonce,
-            capabilities,
         }
+    }
+
+    /// The DID of the key that signed the token.
+    pub fn issuer(&self) -> &str {
+        &self.iss
     }
 
     /// The token's id: a fresh v4 UUID per token.
@@ -123,5 +130,10 @@ impl Claims {
     /// Unix time (seconds) after which the token no longer validates.
     pub fn expires_at(&self) -> u64 {
         self.exp
+    }
+
+    /// Unix time (seconds) at which the token was issued.
+    pub fn issued_at(&self) -> u64 {
+        self.iat
     }
 }

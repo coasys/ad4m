@@ -323,6 +323,60 @@ async fn request_verification(
     }
 }
 
+/// user.logout — revokes the caller's own grant: its token stops working and its open
+/// sockets close. The user's other logins keep working.
+async fn logout(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let grant = ctx.session.user_grant().ok_or_else(|| {
+        WsRpcError::bad_request("user.logout ends a user session; this session is not one")
+    })?;
+    crate::agent::grants::Grants::global()
+        .revoke(std::slice::from_ref(grant))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+/// user.revokeAllSessions — revokes every grant on a user's agent: logins and apps. A user
+/// revokes their own (the current one too); the operator revokes any user's, named by
+/// `email`. Logins after it work.
+async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: UsersRevokeAllSessionsParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    // The email names the user's agent: it resolves to the DID here, once. `None` when no
+    // user with an agent has it.
+    let did_of = |email: &str| {
+        crate::db::Ad4mDb::with_global_instance(|db| db.get_user(email).ok())
+            .map(|user| user.did)
+            .filter(|did| !did.is_empty())
+    };
+    let named = body.email.map(|email| email.trim().to_lowercase());
+    let did = match (ctx.user_did(), named) {
+        (Some(own), None) => own.to_string(),
+        (Some(own), Some(named)) if did_of(&named).as_deref() == Some(own) => own.to_string(),
+        (Some(_), Some(_)) => {
+            return Err(WsRpcError::forbidden(
+                "A user may revoke only their own sessions",
+            ))
+        }
+        (None, Some(named)) if ctx.is_operator() => {
+            did_of(&named).ok_or_else(|| WsRpcError::not_found("No user has this email"))?
+        }
+        (None, None) if ctx.is_operator() => {
+            return Err(WsRpcError::bad_request(
+                "'email' required: name the user whose sessions to revoke",
+            ))
+        }
+        (None, _) => {
+            return Err(WsRpcError::forbidden(
+                "Only a user or the operator may revoke a user's sessions",
+            ))
+        }
+    };
+    crate::agent::grants::Grants::global()
+        .revoke_agent(&crate::agent::AgentContext::managed(did))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
 async fn users_credits(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     // Stub — not yet implemented
     let _ = params;
@@ -337,6 +391,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<UsersLoginParams, String>("user.login", login_user);
     // The session JWT.
     map.method::<UsersVerifyEmailParams, String>("user.verifyEmail", verify_email);
+    // No capability check in these two: a user acts on their own sessions whatever their
+    // capabilities, and only the operator may name another user. The handlers check the
+    // session's principal.
+    // Revokes the caller's user token; 400 for any other session. Answers `true`.
+    map.method::<NoParams, bool>("user.logout", logout);
+    // Revokes every token of a user issued up to now. Answers `true`.
+    map.method::<UsersRevokeAllSessionsParams, bool>("user.revokeAllSessions", revoke_all_sessions);
     map.method::<NoParams, Vec<UserStatistics>>("user.list", list_users)
         .read();
     map.method::<NoParams, bool>("user.multiUserEnabled", get_multi_user_enabled)
@@ -397,6 +458,16 @@ pub struct UsersVerifyEmailParams {
     pub app_name: Option<String>,
 }
 
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersRevokeAllSessionsParams {
+    /// The user whose sessions to revoke. A user may leave it out or name themselves; the
+    /// operator must name the user.
+    #[ts(optional)]
+    pub email: Option<String>,
+}
+
 /// The part of the caller's app info that login-code requests read.
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -452,4 +523,283 @@ pub struct UsersEmailTestParams {
 pub enum UsersEmailTestResult {
     Done(bool),
     Code(Option<String>),
+}
+
+#[cfg(test)]
+mod session_revocation_tests {
+    //! #1370: user tokens could not be revoked: no logout, no "log out everywhere".
+    use crate::agent::capabilities::{capabilities_from_token, AuthInfo, ListenerReach};
+    use crate::agent::grants::Grants;
+    use crate::agent::session::{AuthError, Session};
+    use crate::agent::AgentContext;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::db::Ad4mDb;
+    use crate::test_utils::{granted_token, managed_user, setup_agent, setup_wallet};
+    use crate::types::RequestContext;
+    use crate::user_management::generate_user_jwt;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    const ADMIN: &str = "the-admin-credential";
+
+    fn setup() {
+        setup_wallet();
+        setup_agent();
+    }
+
+    fn open(token: &str) -> Result<Session, AuthError> {
+        Session::open(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+    }
+
+    /// The context of a socket that presents `token`.
+    fn ctx(token: &str) -> Arc<RequestContext> {
+        let ctx = RequestContext::open(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+            .unwrap_or_else(|e| panic!("the token opens a session: {e}"));
+        Arc::new(ctx)
+    }
+
+    async fn call(
+        op: &str,
+        params: Value,
+        ctx: Arc<RequestContext>,
+    ) -> Result<Value, (u16, String)> {
+        build_handler_map()
+            .dispatch(op, params, ctx)
+            .await
+            .map_err(|e| (e.code, e.message))
+    }
+
+    fn app_token(name: &str) -> String {
+        granted_token(AuthInfo {
+            app_name: name.to_string(),
+            capabilities: Some(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]),
+            ..Default::default()
+        })
+    }
+
+    // D3: a login is an auto-approved grant on the user's agent, named after the app that
+    // logged in.
+    #[tokio::test]
+    async fn a_login_is_a_grant_on_the_users_agent() {
+        setup();
+        let email = managed_user("login-grant");
+        let token = generate_user_jwt(&email, "Flux").unwrap();
+        let session = open(&token).unwrap();
+        let grant = session.grant().expect("a login has a grant");
+        assert_eq!(
+            grant.agent,
+            AgentContext::managed(crate::agent::AgentService::did_for_email(&email).unwrap())
+        );
+        assert_eq!(grant.app_name(), "Flux");
+        assert_eq!(grant.request_id, grant.id.0, "a login answers no request");
+        assert_eq!(
+            grant.did,
+            crate::agent::AgentService::did_for_email(&email).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_the_callers_token_only() {
+        setup();
+        let email = managed_user("logout");
+        let (laptop, phone) = (
+            generate_user_jwt(&email, "test").unwrap(),
+            generate_user_jwt(&email, "test").unwrap(),
+        );
+        let (laptop_session, phone_session) = (open(&laptop).unwrap(), open(&phone).unwrap());
+        let laptop_socket = laptop_session.ended();
+
+        let reply = call("user.logout", json!({}), ctx(&laptop)).await.unwrap();
+        assert_eq!(reply, json!(true));
+        assert_eq!(laptop_session.check(), Err(AuthError::Revoked));
+        assert!(laptop_socket.is_cancelled(), "the laptop's sockets close");
+        assert_eq!(open(&laptop).unwrap_err(), AuthError::Revoked);
+        assert!(
+            phone_session.check().is_ok(),
+            "the user's other token works"
+        );
+        assert!(open(&phone).is_ok());
+    }
+
+    #[tokio::test]
+    async fn logout_is_a_bad_request_for_a_session_without_a_user_token() {
+        setup();
+        let app = app_token("logout app");
+        for caller in [ctx(ADMIN), ctx(&app)] {
+            let (code, message) = call("user.logout", json!({}), caller).await.unwrap_err();
+            assert_eq!(code, 400, "{message}");
+            assert!(message.contains("user session"), "{message}");
+        }
+        assert!(open(&app).is_ok(), "the app's grant stays");
+    }
+
+    #[tokio::test]
+    async fn revoke_all_refuses_every_earlier_token_and_allows_a_later_one() {
+        setup();
+        let email = managed_user("revoke-all");
+        let other_user = managed_user("revoke-all-other");
+        let earlier = [
+            generate_user_jwt(&email, "test").unwrap(),
+            generate_user_jwt(&email, "test").unwrap(),
+        ];
+        let sessions: Vec<Session> = earlier.iter().map(|t| open(t).unwrap()).collect();
+        let others = generate_user_jwt(&other_user, "test").unwrap();
+
+        let reply = call("user.revokeAllSessions", json!({}), ctx(&earlier[0]))
+            .await
+            .unwrap();
+        assert_eq!(reply, json!(true));
+        for (token, session) in earlier.iter().zip(&sessions) {
+            assert_eq!(
+                session.check(),
+                Err(AuthError::Revoked),
+                "the current one too"
+            );
+            assert_eq!(open(token).unwrap_err(), AuthError::Revoked);
+            // MCP resolves tokens without a session; it refuses them as well.
+            assert!(capabilities_from_token(token.clone(), None).is_err());
+        }
+
+        // A login right after works: no cutoff, no same-second workaround.
+        let later = generate_user_jwt(&email, "test").unwrap();
+        assert!(open(&later).unwrap().check().is_ok());
+        assert!(capabilities_from_token(later, None).is_ok());
+        assert!(open(&others).is_ok(), "another user's token works");
+    }
+
+    // Two revoke-alls with a login between them: the second ends that login.
+    #[tokio::test]
+    async fn a_second_revoke_all_ends_a_login_made_after_the_first() {
+        setup();
+        let email = managed_user("revoke-all-twice");
+        let agent =
+            AgentContext::managed(crate::agent::AgentService::did_for_email(&email).unwrap());
+        let first = generate_user_jwt(&email, "test").unwrap();
+        Grants::global().revoke_agent(&agent).unwrap();
+        let between = generate_user_jwt(&email, "test").unwrap();
+        assert!(open(&between).is_ok(), "a login after the first works");
+
+        Grants::global().revoke_agent(&agent).unwrap();
+        assert_eq!(open(&between).unwrap_err(), AuthError::Revoked);
+        assert_eq!(open(&first).unwrap_err(), AuthError::Revoked);
+        let after = generate_user_jwt(&email, "test").unwrap();
+        assert!(open(&after).is_ok(), "a login after the second works");
+    }
+
+    #[tokio::test]
+    async fn the_operator_revokes_any_users_sessions_and_a_user_only_their_own() {
+        setup();
+        let email = managed_user("revoke-all-target");
+        let caller = managed_user("revoke-all-caller");
+        let target = generate_user_jwt(&email, "test").unwrap();
+        let callers = generate_user_jwt(&caller, "test").unwrap();
+
+        let err = call(
+            "user.revokeAllSessions",
+            json!({ "email": email }),
+            ctx(&callers),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, 403, "{}", err.1);
+        assert!(open(&target).is_ok(), "the refused call revoked nothing");
+
+        // A user may name themselves.
+        call(
+            "user.revokeAllSessions",
+            json!({ "email": caller }),
+            ctx(&callers),
+        )
+        .await
+        .unwrap();
+        assert_eq!(open(&callers).unwrap_err(), AuthError::Revoked);
+
+        call(
+            "user.revokeAllSessions",
+            json!({ "email": email }),
+            ctx(ADMIN),
+        )
+        .await
+        .unwrap();
+        assert_eq!(open(&target).unwrap_err(), AuthError::Revoked);
+    }
+
+    #[tokio::test]
+    async fn revoke_all_refuses_callers_and_targets_it_cannot_serve() {
+        setup();
+        let app = app_token("revoke-all app");
+        let email = managed_user("revoke-all-app-target");
+        let target = generate_user_jwt(&email, "test").unwrap();
+        let cases = [
+            (ctx(&app), json!({ "email": email }), 403),
+            (ctx(ADMIN), json!({}), 400),
+            (ctx(ADMIN), json!({ "email": "nobody@example.org" }), 404),
+        ];
+        for (caller, params, expected) in cases {
+            let (code, message) = call("user.revokeAllSessions", params.clone(), caller)
+                .await
+                .unwrap_err();
+            assert_eq!(code, expected, "{params}: {message}");
+        }
+        assert!(open(&target).is_ok(), "the refused calls revoked nothing");
+    }
+
+    // A restart reads the revoked grants back from the database.
+    #[tokio::test]
+    async fn revoked_logins_stay_revoked_after_a_reload() {
+        setup();
+        let email = managed_user("revoke-all-db");
+        let token = generate_user_jwt(&email, "test").unwrap();
+        let id = open(&token).unwrap().grant().unwrap().id.clone();
+        call(
+            "user.revokeAllSessions",
+            json!({ "email": email }),
+            ctx(ADMIN),
+        )
+        .await
+        .unwrap();
+
+        let reloaded = Grants::default();
+        Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        assert!(reloaded.get(&id).is_none());
+        let listed = reloaded.list(&AgentContext::managed(
+            crate::agent::AgentService::did_for_email(&email).unwrap(),
+        ));
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_ended());
+    }
+
+    // `agent.revokeToken` answered 404 for a user's JWT: only app tokens could be revoked.
+    #[tokio::test]
+    async fn the_operator_revokes_a_user_token_by_its_jwt() {
+        setup();
+        let email = managed_user("revoke-token");
+        let (revoked, kept) = (
+            generate_user_jwt(&email, "test").unwrap(),
+            generate_user_jwt(&email, "test").unwrap(),
+        );
+        call("agent.revokeToken", json!({ "token": revoked }), ctx(ADMIN))
+            .await
+            .unwrap();
+        assert_eq!(open(&revoked).unwrap_err(), AuthError::Revoked);
+        assert!(open(&kept).is_ok());
+    }
+
+    // D4: a user token issued before grants has no grant and is refused once; the user logs
+    // in again.
+    #[tokio::test]
+    async fn a_user_token_from_before_grants_is_refused_and_a_new_login_works() {
+        setup();
+        let email = managed_user("pre-grants");
+        let (old, _) = crate::agent::capabilities::token::sign_token(
+            "test".to_string(),
+            3600,
+            Some(email.clone()),
+        )
+        .unwrap();
+        let err = open(&old).unwrap_err();
+        assert_eq!(err, AuthError::Revoked);
+        assert_eq!(err.close_code(), 1008);
+        assert!(open(&generate_user_jwt(&email, "test").unwrap()).is_ok());
+    }
 }

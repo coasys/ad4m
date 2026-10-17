@@ -69,11 +69,21 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   else carries an email. `users.did` is unique (partial index, empty DIDs excluded).
   `agent/session.rs` opens one `Session` per connection: `Principal::Operator` (the admin
   credential: the executor's administrator role, not an agent), `Principal::Agent(AgentContext)`
-  (a grant: a token without `sub` acts as the main agent; a user token's `sub` is the agent's
-  DID), or
-  `Principal::Anonymous`. Capabilities, token id, expiry and the agent's DID are `Session` fields.
-  Read identity with `acts_as()` / `acts_as_did()` / `managed_did()` / `is_operator()`; never
-  decode the token again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+  (a grant on the main agent or on a managed agent, by DID), or `Principal::Anonymous`.
+  Capabilities, the grant and the agent's DID are `Session` fields. Read identity with
+  `acts_as()` / `acts_as_did()` / `managed_did()` / `is_operator()`; never decode the token
+  again. Any signing/DID/billing path takes the `AgentContext` explicitly.
+- **Grants** (`agent/grants.rs`, table `grants` in `db/grants.rs`) are the one allowlist of
+  tokens: a token (id = its `nonce`) opens a session only while its grant exists, is active and
+  has not expired, and the session's capabilities are the grant's (tokens carry `iss, aud, iat,
+  exp, nonce, sub` only). A grant names its agent by `agent_did` (`NULL` = the main agent); a
+  token's `sub` must name the same agent: none for the main agent, the DID for a managed agent.
+  Both mint paths go through `grants::mint`: the app capability flow (a grant on the main agent)
+  and a user login (an auto-approved grant on that user's agent). The admin credential is no
+  token. Revoking or removing a grant cancels its `ended` token, which every socket of the
+  session watches through `Session::ended()`. Start-up moves the old app registry
+  (`apps_data.json`, renamed `.migrated`) into grant rows and drops expired rows. Tests mint with
+  `test_utils::granted_token(auth)`; a token signed without a grant is refused.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
   `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there
