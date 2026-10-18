@@ -31,7 +31,7 @@ lazy_static! {
 }
 
 // Cache for last_seen timestamps to avoid repeated database lookups
-// Maps user_email -> (last_checked_timestamp, last_seen_value)
+// Maps agent DID -> (last_checked_timestamp, last_seen_value)
 #[derive(Clone)]
 struct LastSeenCacheEntry {
     last_checked: i64,    // When we last checked the database
@@ -63,7 +63,7 @@ pub enum ListenerReach {
     /// proxy or tunnel running here. The API reads a request that carries a `Forwarded`,
     /// `X-Forwarded-For` or `X-Real-IP` header as `Network` (`api::auth::listener_reach`). A
     /// proxy that sets none of them (a raw TCP forward, `ssh -R`) still reads as `Loopback`,
-    /// so its remote clients are the operator: a node behind a proxy needs an admin credential.
+    /// so its remote clients are the operator: an executor behind a proxy needs an admin credential.
     Loopback,
     /// Bound to any other address: whoever can route to it connects.
     Network,
@@ -104,42 +104,37 @@ pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
     expected: &Capability,
 ) -> Result<(), String> {
-    let capabilities = capabilities.clone()?;
-    let custom_cap_match = |cap: &Capability, expected: &Capability| -> bool {
-        if cap.with.domain != WILD_CARD && cap.with.domain != expected.with.domain {
-            return false;
-        }
+    require_capability(capabilities.as_ref().map_err(|e| e.clone())?, expected)
+}
 
-        if !cap.with.pointers.contains(&WILD_CARD.to_string())
-            && expected
-                .with
-                .pointers
-                .iter()
-                .any(|p| !cap.with.pointers.contains(p))
-        {
-            return false;
-        }
-
-        if !cap.can.contains(&WILD_CARD.to_string())
-            && expected.can.iter().any(|c| !cap.can.contains(c))
-        {
-            return false;
-        }
-
-        true
-    };
-
-    if !capabilities
-        .iter()
-        .any(|cap| custom_cap_match(cap, expected))
-    {
+/// `Ok` if any of `capabilities` covers `expected`; otherwise the error a refused call reports.
+pub fn require_capability(
+    capabilities: &[Capability],
+    expected: &Capability,
+) -> Result<(), String> {
+    if !capability_matches(capabilities, expected) {
         return Err(format!(
             "Capability is not matched, you have capabilities: {:?}, expected: {:?}",
             capabilities, expected
         ));
     }
-
     Ok(())
+}
+
+/// Whether any of `capabilities` covers `expected`: the same domain, every pointer and every
+/// action, each of which `*` matches.
+pub fn capability_matches(capabilities: &[Capability], expected: &Capability) -> bool {
+    capabilities.iter().any(|cap| {
+        (cap.with.domain == WILD_CARD || cap.with.domain == expected.with.domain)
+            && (cap.with.pointers.contains(&WILD_CARD.to_string())
+                || expected
+                    .with
+                    .pointers
+                    .iter()
+                    .all(|p| cap.with.pointers.contains(p)))
+            && (cap.can.contains(&WILD_CARD.to_string())
+                || expected.can.iter().all(|c| cap.can.contains(c)))
+    })
 }
 
 pub fn check_token_revoked(token: &str) -> Result<(), String> {
@@ -150,203 +145,138 @@ pub fn check_token_revoked(token: &str) -> Result<(), String> {
 }
 
 /// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
-const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
+pub(crate) const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
 
-/// Checks a connection's token again on every request and event, without the wallet.
-///
-/// The token's signature gets checked once, when the connection opens: its capabilities come
-/// from that check. After that, revocation and the expiry read at connect decide, so a token
-/// that expires or gets revoked during a connection stops working at once, and a locked
-/// wallet does not look like a bad token.
-#[derive(Clone)]
-pub struct TokenCheck {
-    token: String,
-    expires_at: Option<u64>,
-}
-
-impl TokenCheck {
-    /// `expires_at` stays `None` in two different cases. The admin credential and the empty
-    /// token never expire. A token that does not decode got no capabilities when the
-    /// connection opened, so every capability check refuses it; `None` there does not mean
-    /// "never expires", and a caller that skips the capability check must not read it so.
-    /// (Failing it here instead would turn a wallet that was locked at connect time into a
-    /// 401 on every request, even on calls that check no capability.)
-    pub fn new(token: &str, is_admin_credential: bool) -> Self {
-        let expires_at = if is_admin_credential || token.is_empty() {
-            None
-        } else {
-            decode_jwt(token.to_string())
-                .ok()
-                .map(|claims| claims.expires_at())
-        };
-        Self {
-            token: token.to_string(),
-            expires_at,
-        }
-    }
-
-    pub fn check(&self) -> Result<(), String> {
-        check_token_revoked(&self.token)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(u64::MAX);
-        match self.expires_at {
-            Some(expires_at) if now > expires_at + TOKEN_EXPIRY_LEEWAY_SECONDS => {
-                Err("Unauthorized access: the token has expired".to_string())
-            }
-            _ => Ok(()),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_expiry(token: &str, expires_at: u64) -> Self {
-        Self {
-            token: token.to_string(),
-            expires_at: Some(expires_at),
-        }
-    }
-}
-
-/// The user a token names, if any. Only the login flows set `sub`, and a token keeps naming
-/// that user whatever the multi-user setting says, so a user token never acts as the node.
-pub fn user_email_from_token(token: String) -> Option<String> {
-    if token.is_empty() {
-        return None;
-    }
-    decode_jwt(token).ok().and_then(|claims| claims.sub)
-}
-
-/// Update last_seen timestamp for the user from the auth token
+/// Update the last_seen timestamp of the account that owns the managed agent `agent_did`, the
+/// agent the caller's session acts as.
 /// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
-pub async fn track_last_seen_from_token(token: String) {
+pub async fn track_last_seen(agent_did: &str) {
     use crate::db::Ad4mDb;
 
-    if let Some(user_email) = user_email_from_token(token) {
-        let now = chrono::Utc::now().timestamp();
+    let agent_did = agent_did.to_string();
+    let now = chrono::Utc::now().timestamp();
 
-        // Check cache first (non-blocking read)
-        {
-            let cache = LAST_SEEN_CACHE.read().await;
-            if let Some(entry) = cache.get(&user_email) {
-                let cache_age = now - entry.last_checked;
-                if cache_age < CACHE_TTL_SECONDS {
-                    // Cache is fresh, check if update is needed based on cached value
-                    let time_since_last_seen = now - entry.last_seen_value;
-                    if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
-                        // Still inside the throttle period, no need to update
-                        log::trace!(
-                            "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
-                            user_email, entry.last_seen_value, time_since_last_seen
-                        );
-                        return;
-                    }
+    // Check cache first (non-blocking read)
+    {
+        let cache = LAST_SEEN_CACHE.read().await;
+        if let Some(entry) = cache.get(&agent_did) {
+            let cache_age = now - entry.last_checked;
+            if cache_age < CACHE_TTL_SECONDS {
+                // Cache is fresh, check if update is needed based on cached value
+                let time_since_last_seen = now - entry.last_seen_value;
+                if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
+                    // Still inside the throttle period, no need to update
+                    log::trace!(
+                        "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
+                        agent_did, entry.last_seen_value, time_since_last_seen
+                    );
+                    return;
                 }
             }
         }
+    }
 
-        // Cache miss or stale - need to check database
-        // Use spawn_blocking to avoid blocking the async runtime
-        let user_email_clone = user_email.clone();
-        let should_update = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| {
-                if let Ok(user) = db.get_user(&user_email_clone) {
-                    if let Some(last_seen) = user.last_seen {
-                        let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
+    // Cache miss or stale - need to check database
+    // Use spawn_blocking to avoid blocking the async runtime
+    let agent_did_clone = agent_did.clone();
+    let should_update = tokio::task::spawn_blocking(move || {
+        Ad4mDb::with_global_instance(|db| {
+            if let Ok(Some(user)) = db.get_user_by_did(&agent_did_clone) {
+                if let Some(last_seen) = user.last_seen {
+                    let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
 
-                        // Handle unrealistic future timestamps by treating them as stale
-                        // (allow some clock skew tolerance of 1 minute)
-                        let should_update = if last_seen > now + 60 {
-                            log::warn!(
-                                "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                                user_email_clone, last_seen
-                            );
-                            true
-                        } else {
-                            last_seen < throttle_cutoff
-                        };
-
-                        log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                            user_email_clone, last_seen, throttle_cutoff, should_update);
-                        (should_update, Some(last_seen))
-                    } else {
-                        log::debug!(
-                            "last_seen tracking for {}: never seen before, updating now",
-                            user_email_clone
+                    // Handle unrealistic future timestamps by treating them as stale
+                    // (allow some clock skew tolerance of 1 minute)
+                    let should_update = if last_seen > now + 60 {
+                        log::warn!(
+                            "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
+                            agent_did_clone, last_seen
                         );
-                        (true, None) // Never updated, do it now
-                    }
+                        true
+                    } else {
+                        last_seen < throttle_cutoff
+                    };
+
+                    log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
+                        agent_did_clone, last_seen, throttle_cutoff, should_update);
+                    (should_update, Some(last_seen))
                 } else {
-                    log::warn!(
-                        "last_seen tracking: user {} not found in database",
-                        user_email_clone
+                    log::debug!(
+                        "last_seen tracking for {}: never seen before, updating now",
+                        agent_did_clone
                     );
-                    (false, None) // User not found
+                    (true, None) // Never updated, do it now
                 }
-            })
+            } else {
+                log::warn!(
+                    "last_seen tracking: no user owns the agent {}",
+                    agent_did_clone
+                );
+                (false, None) // User not found
+            }
+        })
+    })
+    .await;
+
+    let (should_update, last_seen_value) = match should_update {
+        Ok((update, value)) => (update, value),
+        Err(e) => {
+            log::error!(
+                "Failed to check last_seen status (spawn_blocking join error): {:?}",
+                e
+            );
+            return;
+        }
+    };
+
+    // Update cache with the value we got from DB
+    if let Some(last_seen_val) = last_seen_value {
+        let mut cache = LAST_SEEN_CACHE.write().await;
+        cache.insert(
+            agent_did.clone(),
+            LastSeenCacheEntry {
+                last_checked: now,
+                last_seen_value: last_seen_val,
+            },
+        );
+    }
+
+    if should_update {
+        log::debug!("Updating last_seen for agent: {}", agent_did);
+
+        // Perform the update in spawn_blocking
+        let agent_did_for_update = agent_did.clone();
+        let update_result = tokio::task::spawn_blocking(move || {
+            Ad4mDb::with_global_instance(|db| db.update_agent_last_seen(&agent_did_for_update))
         })
         .await;
 
-        let (should_update, last_seen_value) = match should_update {
-            Ok((update, value)) => (update, value),
-            Err(e) => {
+        match update_result {
+            Ok(Ok(())) => {
+                // Update succeeded, refresh cache with new timestamp
+                let mut cache = LAST_SEEN_CACHE.write().await;
+                cache.insert(
+                    agent_did,
+                    LastSeenCacheEntry {
+                        last_checked: now,
+                        last_seen_value: now,
+                    },
+                );
+            }
+            Ok(Err(e)) => {
                 log::error!(
-                    "Failed to check last_seen status (spawn_blocking join error): {:?}",
+                    "Failed to update last_seen for agent {}: {:?}",
+                    agent_did,
                     e
                 );
-                return;
             }
-        };
-
-        // Update cache with the value we got from DB
-        if let Some(last_seen_val) = last_seen_value {
-            let mut cache = LAST_SEEN_CACHE.write().await;
-            cache.insert(
-                user_email.clone(),
-                LastSeenCacheEntry {
-                    last_checked: now,
-                    last_seen_value: last_seen_val,
-                },
-            );
-        }
-
-        if should_update {
-            log::debug!("Updating last_seen for user: {}", user_email);
-
-            // Perform the update in spawn_blocking
-            let user_email_for_update = user_email.clone();
-            let update_result = tokio::task::spawn_blocking(move || {
-                Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
-            })
-            .await;
-
-            match update_result {
-                Ok(Ok(())) => {
-                    // Update succeeded, refresh cache with new timestamp
-                    let mut cache = LAST_SEEN_CACHE.write().await;
-                    cache.insert(
-                        user_email,
-                        LastSeenCacheEntry {
-                            last_checked: now,
-                            last_seen_value: now,
-                        },
-                    );
-                }
-                Ok(Err(e)) => {
-                    log::error!(
-                        "Failed to update last_seen for user {}: {:?}",
-                        user_email,
-                        e
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "Failed to update last_seen for user {} (spawn_blocking join error): {:?}",
-                        user_email,
-                        e
-                    );
-                }
+            Err(e) => {
+                log::error!(
+                    "Failed to update last_seen for agent {} (spawn_blocking join error): {:?}",
+                    agent_did,
+                    e
+                );
             }
         }
     }
@@ -364,6 +294,29 @@ pub fn capabilities_from_token(
     capabilities_on(token, admin_credential, ListenerReach::Loopback)
 }
 
+/// What a caller without a token may do: request a capability and read whether multi-user
+/// mode is on, plus sign up, log in and verify an email when it is. Reading users is left out,
+/// so anonymous callers cannot list them.
+pub fn anonymous_capabilities() -> Vec<Capability> {
+    use crate::db::Ad4mDb;
+    let multi_user_enabled =
+        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    if multi_user_enabled {
+        vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]
+    } else {
+        vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]
+    }
+}
+
 /// The capabilities of a caller that presents `token` on a listener with this reach.
 pub fn capabilities_on(
     token: String,
@@ -376,28 +329,9 @@ pub fn capabilities_on(
     }
 
     if token.is_empty() {
-        // An anonymous caller: the node has an admin credential, or the listener is on the
-        // network. For empty tokens, check if multi-user mode is enabled
-        // If so, allow user creation (registration), login, and checking enabled status
-        // READ capability is intentionally excluded to prevent unauthenticated user enumeration
-        use crate::db::Ad4mDb;
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-        if multi_user_enabled {
-            return Ok(vec![
-                AGENT_AUTH_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-            ]);
-        }
-
-        return Ok(vec![
-            AGENT_AUTH_CAPABILITY.clone(),
-            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-        ]);
+        // An anonymous caller: the executor has an admin credential, or the listener is on the
+        // network.
+        return Ok(anonymous_capabilities());
     }
 
     check_token_revoked(&token)?;
@@ -674,7 +608,7 @@ mod tests {
     }
 
     // #1059: without an admin credential, an empty token is the operator only on loopback.
-    // On the network it gets what an anonymous caller gets on a node with a credential:
+    // On the network it gets what an anonymous caller gets on an executor with a credential:
     // enough to request a capability, nothing to read with.
     #[test]
     fn without_a_credential_an_empty_token_is_the_operator_only_on_loopback() {
@@ -905,73 +839,5 @@ mod app_token_tests {
         assert!(check_token_revoked(&token).is_ok());
         apps_map::revoke_app(&request_id).unwrap();
         assert!(check_token_revoked(&token).is_err());
-    }
-}
-
-#[cfg(test)]
-mod token_validity_tests {
-    use super::*;
-    use crate::test_utils::{setup_agent, setup_wallet};
-
-    fn unix_now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    }
-
-    // A connection used to check its token only when it opened, so a token that expired
-    // during a connection kept its capabilities.
-    #[test]
-    fn a_token_past_its_expiry_stops_working() {
-        let expired = TokenCheck::with_expiry("some-token", unix_now() - 3600);
-        let err = expired.check().unwrap_err();
-        assert!(err.contains("expired"), "{err}");
-    }
-
-    #[test]
-    fn expiry_allows_the_same_leeway_as_jwt_validation() {
-        let just_expired = TokenCheck::with_expiry("some-token", unix_now() - 10);
-        assert!(just_expired.check().is_ok());
-    }
-
-    #[test]
-    fn a_valid_token_keeps_working_and_carries_its_expiry() {
-        setup_wallet();
-        setup_agent();
-        let token = crate::user_management::generate_user_jwt("valid@example.org", "test").unwrap();
-        let check = TokenCheck::new(&token, false);
-        assert!(check.expires_at.is_some());
-        assert!(check.check().is_ok());
-    }
-
-    #[test]
-    fn the_admin_credential_the_empty_token_and_garbage_carry_no_expiry() {
-        setup_wallet();
-        setup_agent();
-        assert!(TokenCheck::new("the-admin-credential", true)
-            .check()
-            .is_ok());
-        assert!(TokenCheck::new("", false).check().is_ok());
-        // Garbage gets no capabilities at connect; the check adds nothing on top.
-        assert!(TokenCheck::new("not-a-jwt", false).expires_at.is_none());
-    }
-
-    // revokeToken() must end existing connections, not only new ones.
-    #[test]
-    fn a_revoked_app_token_stops_working() {
-        crate::test_utils::use_test_apps_file();
-        let token = format!("revoked-app-token-{}", uuid::Uuid::new_v4());
-        let request_key = format!("key-{}", uuid::Uuid::new_v4());
-        let app = AuthInfoExtended {
-            request_id: request_key.clone(),
-            auth: AuthInfo::default(),
-        };
-        apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
-        let check = TokenCheck::with_expiry(&token, unix_now() + 3600);
-        assert!(check.check().is_ok());
-        apps_map::revoke_app(&request_key).unwrap();
-        assert!(check.check().is_err());
-        apps_map::remove_app(&request_key).unwrap();
     }
 }
