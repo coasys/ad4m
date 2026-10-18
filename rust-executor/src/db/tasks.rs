@@ -2,7 +2,8 @@
 //!
 //! `tasks.agent_did` names the managed agent whose session created a task (D16: an agent is
 //! its DID). `NULL` marks a task of the main agent: one created by the admin credential, by
-//! an app token on the main agent, or by the executor itself (the interpretation tasks).
+//! an app token on the main agent, by the executor itself (the interpretation tasks), or
+//! before the column existed.
 
 use rusqlite::{params, OptionalExtension};
 
@@ -59,6 +60,7 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
 
     fn add(db: &Ad4mDb, name: &str, owner: Option<&str>) -> String {
         db.add_task(
@@ -117,5 +119,71 @@ mod tests {
             db.get_task_owner(&alice).unwrap(),
             Some(Some("did:key:alice".to_string()))
         );
+    }
+
+    /// A database written before tasks had owners gains the column on open, and every task
+    /// already in it becomes an operator task: invisible to user sessions, still there for
+    /// operators and the executor.
+    #[test]
+    fn opening_a_pre_owner_database_adds_the_column_and_keeps_old_tasks_for_operators() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("ad4m.db");
+        let path = path.to_str().unwrap();
+
+        {
+            let legacy = Connection::open(path).unwrap();
+            legacy
+                .execute(
+                    "CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        system_prompt TEXT NOT NULL,
+                        prompt_examples TEXT NOT NULL,
+                        metadata TEXT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                     )",
+                    [],
+                )
+                .unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO tasks VALUES ('legacy-task', 'legacy', 'model', 'old prompt', '[]', NULL, 'then', 'then')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let db = Ad4mDb::new(path).unwrap();
+        let columns: Vec<String> = db
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('tasks')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(columns.last().map(String::as_str), Some("agent_did"));
+
+        assert_eq!(db.get_task_owner("legacy-task").unwrap(), Some(None));
+        assert_eq!(names(db.get_tasks_owned_by(None).unwrap()), vec!["legacy"]);
+        assert!(db
+            .get_tasks_owned_by(Some("did:key:alice"))
+            .unwrap()
+            .is_empty());
+        let legacy = db.get_task("legacy-task".to_string()).unwrap().unwrap();
+        assert_eq!(legacy.system_prompt, "old prompt");
+
+        let owned = add(&db, "alice's", Some("did:key:alice"));
+        assert_eq!(
+            db.get_task_owner(&owned).unwrap(),
+            Some(Some("did:key:alice".to_string()))
+        );
+        drop(db);
+
+        // The column add runs on every start; the second run must be a no-op.
+        let reopened = Ad4mDb::new(path).unwrap();
+        assert_eq!(reopened.get_tasks().unwrap().len(), 2);
     }
 }
