@@ -17,7 +17,7 @@
  * Needs `sudo -n tc`; skipped without it. Shares E6's host lease.
  */
 
-import { leaseNet, netAvailable, socketPorts, type NetLease } from "../../net.js";
+import { leaseNet, netAvailable, socketPorts, type NetLease, type SocketPort } from "../../net.js";
 import type { Call } from "../call.js";
 import { CAMERA } from "../media.js";
 import { e2eScenario } from "../scenario.js";
@@ -34,19 +34,21 @@ const debug = (line: string) => {
  */
 async function dropOut(net: NetLease, call: Call, name: string, ms: number): Promise<void> {
   const pid = call.who(name).pid;
-  const cut = new Set(socketPorts(pid));
-  net.impair([...cut], { lossPct: 100 });
-  debug(`${name} cut off: ports ${[...cut].join(" ")}`);
+  const key = ({ port, protocol }: SocketPort) => `${protocol}/${port}`;
+  const first = socketPorts(pid);
+  const cut = new Set(first.map(key));
+  net.impair(first, { lossPct: 100 });
+  debug(`${name} cut off: ${[...cut].join(" ")}`);
   try {
     // Nobody sees `name` any more: the cut reached them.
     await call.eventually(call.noVideoFrom(name), 5_000, `${name}'s dropout takes effect`);
     const end = Date.now() + ms;
     while (Date.now() < end) {
-      const fresh = socketPorts(pid).filter((port) => !cut.has(port));
+      const fresh = socketPorts(pid).filter((socket) => !cut.has(key(socket)));
       if (fresh.length > 0) {
         net.extend(fresh);
-        for (const port of fresh) cut.add(port);
-        debug(`${name}'s new ports cut off too: ${fresh.join(" ")}`);
+        for (const socket of fresh) cut.add(key(socket));
+        debug(`${name}'s new sockets cut off too: ${fresh.map(key).join(" ")}`);
       }
       await sleep(100);
     }

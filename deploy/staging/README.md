@@ -415,7 +415,9 @@ public one, and audio, video and all three simulcast layers flow through the
 router's forward. A caller's `chrome://webrtc-internals` shows the same: the
 selected pair's remote candidate is `srflx <public IP>:40000`. If it shows
 `127.0.0.1` or the LAN address only, the `sfu_*` keys are missing from the
-config, or the executor runs a build from before coasys/ad4m#1448.
+config, or the executor runs a build from before coasys/ad4m#1448. If the keys
+are set and step 6's line says `advertised none`, the STUN probe failed or
+returned a private address: set `sfu_public_addr`.
 
 The public address is read at startup only. The box's public IP is dynamic:
 when it changes, restart `ad4m-staging.service` so the SFU offers the new
