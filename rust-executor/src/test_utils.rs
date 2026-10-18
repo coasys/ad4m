@@ -105,23 +105,80 @@ impl Drop for MultiUserMode {
     }
 }
 
+/// A user `email` with a managed agent, as `user.create` leaves one: a key in the global
+/// wallet named by the agent's DID, and a `users` row naming that DID. Returns the DID. Opens
+/// an in-memory database if none is open. Needs `setup_wallet()` first.
+pub fn create_test_user(email: &str) -> String {
+    if crate::db::Ad4mDb::global_instance()
+        .lock()
+        .expect("db lock")
+        .is_none()
+    {
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("in-memory db");
+    }
+    if let Ok(user) = crate::db::Ad4mDb::with_global_instance(|db| db.get_user(email)) {
+        let key = crate::wallet::wallet_backend().get_did_document(&user.did);
+        if key.is_some_and(|doc| doc.id == user.did) {
+            return user.did;
+        }
+    }
+    let did = AgentService::create_managed_agent_key(email).expect("managed agent key");
+    crate::db::Ad4mDb::with_global_instance(|db| {
+        // `add_user_prehashed` keeps a row whose email exists: point it at the new agent.
+        db.add_user_prehashed(email, &did, "test-hash")?;
+        db.set_user_did(email, &did)
+    })
+    .expect("users row");
+    did
+}
+
+/// A user token for `email`, whose `users` row names an agent no wallet key derives: the token
+/// is valid, and no session can act as its agent. Needs `setup_wallet()` and `setup_agent()`.
+pub fn keyless_user_token(email: &str) -> String {
+    if crate::db::Ad4mDb::global_instance()
+        .lock()
+        .expect("db lock")
+        .is_none()
+    {
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("in-memory db");
+    }
+    let keyless_did = format!("did:key:z6MkKeyless{}", email.replace(['@', '.'], ""));
+    crate::db::Ad4mDb::with_global_instance(|db| {
+        db.add_user_prehashed(email, &keyless_did, "test-hash")?;
+        db.set_user_did(email, &keyless_did)
+    })
+    .expect("users row");
+    crate::user_management::generate_user_jwt(email, "test").unwrap()
+}
+
 /// A user token the node signed, with its expiry one hour in the past.
 /// Needs `setup_wallet()` and `setup_agent()` first.
+/// Creates the user if it does not exist.
 pub fn expired_user_token(email: &str) -> String {
-    use base64::Engine;
+    create_test_user(email);
     let valid = crate::user_management::generate_user_jwt(email, "test").unwrap();
-    let payload = valid.split('.').nth(1).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    resigned_token(&valid, |claims| {
+        claims["exp"] = serde_json::json!(now - 3600)
+    })
+}
+
+/// `token`, a JWT the executor signed, with its claims changed by `edit` and signed again
+/// with the executor's key: a token of a shape the executor no longer mints, such as one
+/// from before agents were keyed by DID. Needs `setup_wallet()` and `setup_agent()` first.
+pub fn resigned_token(token: &str, edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    use base64::Engine;
+    let payload = token.split('.').nth(1).unwrap();
     let mut claims: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
             .unwrap(),
     )
     .unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    claims["exp"] = serde_json::json!(now - 3600);
+    edit(&mut claims);
     let secret = crate::wallet::wallet_backend()
         .get_secret_key(&crate::agent::capabilities::signing_key_name())
         .expect("the test wallet holds the signing key");
