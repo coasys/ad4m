@@ -18,7 +18,7 @@
 //! agent's sockets.
 //!
 //! Before #1424 both were `Local` links (#987), which made them part of the
-//! graph every other agent on the node shares. Out of the graph they are
+//! graph every other agent on the executor shares. Out of the graph they are
 //! exactly what they say — what *this* agent's replica derived — and no
 //! query, sync or co-owner can see or forge them.
 //!
@@ -37,7 +37,7 @@
 //!   one. Replicas receive links in whatever order sync delivers them, so
 //!   each derives state from a view that may still be missing links others
 //!   already hold — which is why the code says "new to *this replica*",
-//!   never just "new". On a multi-user node each owner agent keeps its own
+//!   never just "new". On a multi-user executor each owner agent keeps its own
 //!   rows, so "replica" here means replica-agent.
 //!
 //! ## Catch-up
@@ -92,7 +92,7 @@ pub struct FireOutcome {
 /// before the agent writes a vote of its own (`accept`, `propose`).
 ///
 /// Without it, an agent whose first contact with an instance is its own vote
-/// — a co-owner on the same node pressing a button on someone else's run —
+/// — a co-owner on the same executor pressing a button on someone else's run —
 /// would have that vote's settle swallowed: the pass after the vote is its
 /// first, so it is a catch-up, and the agent would be told nothing fired.
 /// Catching up first records the history quietly, and the pass after the
@@ -130,14 +130,14 @@ pub(crate) async fn catch_up_before_own_vote(
 }
 
 /// After `writer`'s own pass: the same pass for every other agent this
-/// node keeps bookkeeping for on the perspective — its owners here, as a
+/// executor keeps bookkeeping for on the perspective — its owners here, as a
 /// sync-triggered pass sweeps them (`flow_pass_contexts`).
 ///
-/// A write made on this node never syncs back to it, so nothing else would
+/// A write made on this executor never syncs back to it, so nothing else would
 /// run their pass: a co-owner's rows would lag a vote cast here until
 /// something else touched the instance, and that co-owner's next vote would
 /// report this one's settle as its own. Before #1424 this did not arise,
-/// because every agent on the node shared the one `Local` cache.
+/// because every agent on the executor shared the one `Local` cache.
 ///
 /// Their outcomes reach them as their own `flow-state-changed` events; the
 /// caller still returns the writer's.
@@ -148,7 +148,7 @@ pub(crate) async fn run_flow_pass_for_co_owners(
     instance_filter: Option<&[String]>,
 ) {
     for context in perspective.flow_pass_contexts().await {
-        if same_agent(&context, writer) {
+        if context == *writer {
             continue;
         }
         let outcomes =
@@ -156,21 +156,13 @@ pub(crate) async fn run_flow_pass_for_co_owners(
                 .await;
         for outcome in &outcomes {
             log::debug!(
-                "flow settled for co-owner {:?}: {} {} → {}",
-                context.user_email,
+                "flow settled for co-owner {}: {} {} → {}",
+                context.managed_did().unwrap_or("main agent"),
                 outcome.instance_uri,
                 outcome.from_state,
                 outcome.to_state
             );
         }
-    }
-}
-
-fn same_agent(a: &AgentContext, b: &AgentContext) -> bool {
-    if a.is_main_agent || b.is_main_agent {
-        a.is_main_agent == b.is_main_agent
-    } else {
-        a.user_email == b.user_email
     }
 }
 
