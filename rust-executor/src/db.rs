@@ -454,6 +454,12 @@ impl Ad4mDb {
         // `migrate_notification_owners` moves them to `owner_did` once the agent's DID is known.
         alter_add_column("ALTER TABLE notifications ADD COLUMN owner_did TEXT")?;
 
+        // Owner of each AI task: the DID of the managed agent whose session created it. NULL
+        // marks a task of the main agent, which includes every row created before this
+        // column (a v0.12.0 data folder). Appended last so its `SELECT *` position matches a
+        // fresh table.
+        alter_add_column("ALTER TABLE tasks ADD COLUMN agent_did TEXT")?;
+
         // Add hosting columns to users table
         alter_add_column("ALTER TABLE users ADD COLUMN remaining_credits REAL DEFAULT 0")?;
         alter_add_column("ALTER TABLE users ADD COLUMN hot_wallet_address TEXT")?;
