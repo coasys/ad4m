@@ -9,12 +9,12 @@ use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
 use crate::types::*;
 
-use super::guards::{refuse_user_session, session_agent_context};
+use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 async fn list_languages(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
+    ctx.require(&LANGUAGE_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let filter = params.opt_str("filter");
@@ -43,7 +43,7 @@ async fn list_languages(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn get_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
+    ctx.require(&LANGUAGE_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let address = params.require_str("address")?;
@@ -95,7 +95,7 @@ async fn get_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn get_language_meta(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
+    ctx.require(&LANGUAGE_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let address = params.require_str("address")?;
@@ -114,7 +114,7 @@ async fn get_language_meta(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn get_language_source(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_READ_CAPABILITY)
+    ctx.require(&LANGUAGE_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let address = params.require_str("address")?;
@@ -133,10 +133,10 @@ async fn get_language_source(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
+    ctx.require(&LANGUAGE_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     // Reads `languagePath` from any path on the host and publishes the file signed by the
-    // node's main agent.
+    // main agent.
     refuse_user_session(&ctx, "language.publish")?;
 
     let body: PublishLanguageRequest = serde_json::from_value(params)
@@ -200,7 +200,7 @@ async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_CREATE_CAPABILITY)
+    ctx.require(&LANGUAGE_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: ApplyTemplateRequest = serde_json::from_value(params)
@@ -247,13 +247,9 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::internal(format!("Failed to serialize language input: {}", e)))?;
 
     // Users template link languages to create neighbourhoods, so this call stays open to
-    // them. A user session publishes as the user, never as the node's main agent.
+    // them. A user session publishes as the user, never as the main agent.
     controller
-        .expression_create(
-            &language_language_address,
-            content,
-            &session_agent_context(&ctx),
-        )
+        .expression_create(&language_language_address, content, &ctx.acts_as())
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
 
@@ -275,9 +271,9 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_DELETE_CAPABILITY)
+    ctx.require(&LANGUAGE_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // Installed languages and their settings are shared by every user of the node.
+    // Installed languages and their settings are shared by every user of the executor.
     refuse_user_session(&ctx, "language.remove")?;
 
     let address = params.require_str("address")?;
@@ -291,7 +287,7 @@ async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 async fn write_settings(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &LANGUAGE_UPDATE_CAPABILITY)
+    ctx.require(&LANGUAGE_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "language.writeSettings")?;
 
