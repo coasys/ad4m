@@ -123,6 +123,62 @@ pub(crate) fn is_executor_key_name(name: &str) -> bool {
             .is_some_and(|config| config.signing_key_name() == name)
 }
 
+/// The name of the key of the managed agent `did` in `wallet`: the DID itself (D16). A shared
+/// wallet cannot name keys, so there the key sits under the user's email, never under one of
+/// the executor's own key names, and is used only if it derives `did`. Fails if no key
+/// derives `did`: the agent has no identity on this executor.
+fn managed_key_name(
+    wallet: &dyn crate::wallet::WalletBackend,
+    did: &str,
+) -> Result<String, AnyError> {
+    let name = if wallet.can_rename_keys() {
+        did.to_string()
+    } else {
+        let email = AgentService::email_for_did(did)?;
+        if is_executor_key_name(&email) {
+            return Err(anyhow!(
+                "The user {} is named like one of the executor's own keys",
+                email
+            ));
+        }
+        email
+    };
+    if derived_did(wallet, &name).as_deref() != Some(did) {
+        return Err(anyhow!("No key in the wallet derives the agent {}", did));
+    }
+    Ok(name)
+}
+
+/// Logs the users whose agent has no key in the wallet. Their logins still mint tokens, but
+/// every session they open fails with `NoIdentity`; a user from a data folder written before
+/// D16 is the usual cause. Runs at unlock, the first time the keys are in memory.
+fn warn_users_without_an_agent_key() {
+    // Unlock can run before the database is up: then there are no users to check.
+    let db = Ad4mDb::global_instance();
+    let users = match db.lock() {
+        Ok(guard) => guard.as_ref().map(|db| db.list_users()),
+        Err(_) => None,
+    };
+    let Some(Ok(users)) = users else {
+        return;
+    };
+    let wallet = wallet_backend();
+    let without: Vec<String> = users
+        .into_iter()
+        .filter(|user| !user.did.is_empty())
+        .filter(|user| managed_key_name(wallet.as_ref(), &user.did).is_err())
+        .map(|user| user.username)
+        .collect();
+    if !without.is_empty() {
+        log::warn!(
+            "🔑 {} user(s) have no key in the wallet for their agent, so their sessions fail \
+             with NoIdentity (data from before agents were keyed by DID is not supported): {}",
+            without.len(),
+            without.join(", ")
+        );
+    }
+}
+
 /// The DID of the key named `name` in `wallet`, if it holds one.
 fn derived_did(wallet: &dyn crate::wallet::WalletBackend, name: &str) -> Option<String> {
     wallet.get_did_document(name).map(|doc| doc.id)
@@ -679,10 +735,8 @@ impl AgentService {
         Ok(AgentContext::managed(sub.to_string()))
     }
 
-    /// The name of the wallet key of the managed agent `did`: the DID itself (D16). A shared
-    /// wallet cannot name keys, so there the key sits under the user's email and is used only
-    /// if it derives `did`. Fails if no key derives `did`: the agent has no identity on this
-    /// executor.
+    /// The name of the wallet key of the managed agent `did` (cached); see
+    /// [`managed_key_name`].
     pub fn wallet_key_for_did(did: &str) -> Result<String, AnyError> {
         if let Some(name) = MANAGED_KEY_NAMES
             .read()
@@ -691,22 +745,7 @@ impl AgentService {
         {
             return Ok(name);
         }
-        let backend = wallet_backend();
-        let name = if backend.can_rename_keys() {
-            did.to_string()
-        } else {
-            let email = Self::email_for_did(did)?;
-            if is_executor_key_name(&email) {
-                return Err(anyhow!(
-                    "The user {} is named like one of the executor's own keys",
-                    email
-                ));
-            }
-            email
-        };
-        if derived_did(backend.as_ref(), &name).as_deref() != Some(did) {
-            return Err(anyhow!("No key in the wallet derives the agent {}", did));
-        }
+        let name = managed_key_name(wallet_backend().as_ref(), did)?;
         if let Ok(mut names) = MANAGED_KEY_NAMES.write() {
             names.insert(did.to_string(), name.clone());
         }
@@ -983,6 +1022,7 @@ impl AgentService {
             }
             // The unlocked keystore replaces the keys in memory: resolve names afresh.
             forget_managed_key_names();
+            warn_users_without_an_agent_key();
             self.passphrase = Some(password);
             let key_count = backend.list_key_names().len();
             log::debug!("🔑 Wallet unlocked. {} key(s) present.", key_count);
@@ -1756,6 +1796,58 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A wallet that cannot name keys, as a shared wallet: keys sit under the user's email.
+    struct EmailNamedWallet(crate::wallet::LocalWallet);
+    impl crate::wallet::WalletBackend for EmailNamedWallet {
+        fn generate_keypair(&self, name: &str) -> Result<(), AnyError> {
+            crate::wallet::WalletBackend::generate_keypair(&self.0, name)
+        }
+        fn get_secret_key(&self, name: &str) -> Option<Vec<u8>> {
+            crate::wallet::WalletBackend::get_secret_key(&self.0, name)
+        }
+        fn get_public_key(&self, name: &str) -> Option<Vec<u8>> {
+            crate::wallet::WalletBackend::get_public_key(&self.0, name)
+        }
+        fn get_did_document(&self, name: &str) -> Option<did_key::Document> {
+            crate::wallet::WalletBackend::get_did_document(&self.0, name)
+        }
+        fn sign(&self, name: &str, message: &[u8]) -> Option<Vec<u8>> {
+            crate::wallet::WalletBackend::sign(&self.0, name, message)
+        }
+        fn list_key_names(&self) -> Vec<String> {
+            crate::wallet::WalletBackend::list_key_names(&self.0)
+        }
+        fn key_exists(&self, name: &str) -> bool {
+            crate::wallet::WalletBackend::key_exists(&self.0, name)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// On a wallet that cannot name keys, a managed agent's key is the one under its user's
+    /// email, but never one of the executor's own keys: a user row named `main` whose DID is
+    /// the main agent's must not resolve to the main key.
+    #[test]
+    fn on_a_shared_wallet_a_user_named_like_an_executor_key_gets_no_key() {
+        use crate::wallet::WalletBackend;
+        ensure_setup();
+        let _db = crate::test_utils::MultiUserMode::on();
+        let wallet = EmailNamedWallet(crate::wallet::LocalWallet::new());
+        for name in [crate::wallet::KEY_NAME_MAIN, "shared.user@example.org"] {
+            wallet.generate_keypair(name).unwrap();
+            let did = wallet.get_did_document(name).unwrap().id;
+            Ad4mDb::with_global_instance(|db| db.add_user(name, &did, "pw")).unwrap();
+        }
+        let did_of = |name: &str| wallet.get_did_document(name).unwrap().id;
+
+        assert_eq!(
+            managed_key_name(&wallet, &did_of("shared.user@example.org")).unwrap(),
+            "shared.user@example.org"
+        );
+        assert!(managed_key_name(&wallet, &did_of(crate::wallet::KEY_NAME_MAIN)).is_err());
     }
 
     /// An agent file that an older executor wrote holds a legacy keystore. The first
