@@ -4,8 +4,7 @@ use crate::languages::language_runtime::get_runtime_agent_context;
 use crate::{
     agent::{
         create_signed_expression, did, did_document, did_for_context, room_key_seed_for_context,
-        sign_for_context, sign_string_hex_for_context, signing_key_id_for_context, AgentContext,
-        AgentService,
+        sign_for_context, sign_string_hex_for_context, signing_key_id_for_context, AgentService,
     },
     types::Agent,
 };
@@ -67,13 +66,15 @@ fn agent_create_signed_expression_for_user(
 
 /// Signs `data` as `user_email`, but only while the language runs for that user. Language
 /// code comes from third parties: without this check, any language on a multi-user node
-/// signs anything as any managed user.
+/// signs anything as any managed user. The host contract names users by email; the email
+/// resolves to the user's agent here.
 fn create_signed_expression_for_user(
     user_email: &str,
     data: &serde_json::Value,
 ) -> Result<serde_json::Value, anyhow::Error> {
     let ctx = get_runtime_agent_context();
-    if ctx.user_email.as_deref() != Some(user_email) {
+    let named = AgentService::did_for_email(user_email).ok();
+    if named.is_none() || ctx.managed_did() != named.as_deref() {
         return Err(anyhow::anyhow!(
             "A language signs only as the user it runs for"
         ));
@@ -85,14 +86,21 @@ fn create_signed_expression_for_user(
 #[op2]
 #[string]
 fn agent_did_for_user(#[string] user_email: String) -> Result<String, AnyhowWrapperError> {
-    let context = AgentContext::for_user_email(user_email);
+    let context =
+        AgentService::managed_agent_for_email(&user_email).map_err(AnyhowWrapperError::from)?;
     did_for_context(&context).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
 #[serde]
 fn agent_list_user_emails() -> Result<Vec<String>, AnyhowWrapperError> {
-    AgentService::list_user_emails().map_err(AnyhowWrapperError::from)
+    let users = crate::db::Ad4mDb::with_global_instance(|db| db.list_users())
+        .map_err(AnyhowWrapperError::from)?;
+    Ok(users
+        .into_iter()
+        .filter(|user| !user.did.is_empty())
+        .map(|user| user.username)
+        .collect())
 }
 
 #[op2]
@@ -103,13 +111,8 @@ fn agent_get_all_local_user_dids() -> Result<Vec<String>, AnyhowWrapperError> {
     // Add main agent DID
     dids.push(did());
 
-    // Add all managed user DIDs
-    let user_emails = AgentService::list_user_emails().map_err(AnyhowWrapperError::from)?;
-    for email in user_emails {
-        let context = AgentContext::for_user_email(email);
-        let user_did = did_for_context(&context).map_err(AnyhowWrapperError::from)?;
-        dids.push(user_did);
-    }
+    // Add all managed agents' DIDs
+    dids.extend(AgentService::managed_agent_dids().map_err(AnyhowWrapperError::from)?);
 
     Ok(dids)
 }
@@ -119,11 +122,10 @@ fn agent_get_all_local_user_dids() -> Result<Vec<String>, AnyhowWrapperError> {
 fn agent_agent_for_user(
     #[string] user_email: String,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
-    let agent = AgentService::with_global_instance(|agent_service| {
-        agent_service.load_user_agent_profile(&user_email)
-    })
-    .map_err(|_| anyhow::anyhow!("User agent profile not found"))
-    .map_err(AnyhowWrapperError::from)?;
+    let agent = AgentService::did_for_email(&user_email)
+        .and_then(|did| AgentService::load_managed_agent_profile(&did))
+        .map_err(|_| anyhow::anyhow!("User agent profile not found"))
+        .map_err(AnyhowWrapperError::from)?;
 
     match agent {
         Some(agent) => serde_json::to_value(agent).map_err(AnyhowWrapperError::from),
@@ -196,7 +198,7 @@ deno_core::extension!(
 #[cfg(test)]
 mod tests {
     use super::create_signed_expression_for_user;
-    use crate::agent::{AgentContext, AgentService};
+    use crate::agent::AgentContext;
     use crate::languages::language_runtime::set_runtime_agent_context;
     use serde_json::json;
 
@@ -206,22 +208,21 @@ mod tests {
         crate::test_utils::setup_agent();
         let alice = format!("alice.{}@example.org", uuid::Uuid::new_v4());
         let bob = format!("bob.{}@example.org", uuid::Uuid::new_v4());
-        AgentService::ensure_user_key_exists(&alice).unwrap();
-        AgentService::ensure_user_key_exists(&bob).unwrap();
+        let alice_did = crate::test_utils::create_test_user(&alice);
+        crate::test_utils::create_test_user(&bob);
         let data = json!({ "claim": "x" });
 
-        set_runtime_agent_context(&AgentContext::for_user_email(alice.clone()));
+        set_runtime_agent_context(&AgentContext::managed(alice_did.clone()));
         let own = create_signed_expression_for_user(&alice, &data);
         let other = create_signed_expression_for_user(&bob, &data);
+        let nobody = create_signed_expression_for_user("nobody@example.org", &data);
         set_runtime_agent_context(&AgentContext::main_agent());
         let from_the_node = create_signed_expression_for_user(&alice, &data);
 
         let own = own.expect("a language signs as the user it runs for");
-        assert_eq!(
-            own["author"],
-            json!(AgentService::get_user_did_by_email(&alice).unwrap())
-        );
+        assert_eq!(own["author"], json!(alice_did));
         assert!(other.is_err(), "a language signed as another user");
+        assert!(nobody.is_err(), "a language signed as an email no user has");
         assert!(
             from_the_node.is_err(),
             "a language that runs for the node signed as a user"

@@ -56,8 +56,9 @@ describe("Local integration tests (no Holochain)", function () {
         }
         if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
           fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-        if(!fs.existsSync(appDataPath))
-            fs.mkdirSync(appDataPath)
+        // rmSync with force also clears a dangling symlink, which existsSync reports as missing.
+        fs.rmSync(appDataPath, { recursive: true, force: true });
+        fs.mkdirSync(appDataPath, { recursive: true });
 
         // No HC local services — executor runs with --run-holochain false.
         executorProcess = await startLocalExecutor(appDataPath, apiPort, hcAdminPort, hcAppPort);
