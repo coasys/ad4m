@@ -744,7 +744,7 @@ mod tests {
     /// which drops an event with no `agentDid` or someone else's.
     #[tokio::test]
     async fn batch_ready_names_a_managed_user_running_the_tick() {
-        use crate::agent::{did_for_context, AgentContext, AgentService};
+        use crate::agent::{did_for_context, AgentContext};
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::events::{
             next_event_matching, subscribe, AutoProcessorStep,
@@ -755,8 +755,7 @@ mod tests {
 
         let (mut p, _shapes, main_ctx) = setup_perspective_no_llm(&[]).await;
         let email = "batch-ready-user@test";
-        AgentService::ensure_user_key_exists(email).expect("user key");
-        let user_ctx = AgentContext::for_user_email(email.to_string());
+        let user_ctx = AgentContext::managed(crate::test_utils::create_test_user(email));
         let user_did = did_for_context(&user_ctx).expect("user did");
         assert_ne!(
             Some(user_did.as_str()),

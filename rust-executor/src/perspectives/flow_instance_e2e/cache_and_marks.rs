@@ -76,7 +76,7 @@ async fn the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do() {
 
 /// Nothing the pass records is a link: the mint's initial state, the healed
 /// state and the fired marks all land in the executor's tables. Before #1424
-/// they were `Local` links, readable by every agent on the node through any
+/// they were `Local` links, readable by every agent on the executor through any
 /// link query; this is the test that fails on that executor.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pass_writes_no_links() {
@@ -105,7 +105,7 @@ async fn the_pass_writes_no_links() {
     );
 }
 
-/// A second agent on the same node — a co-owner — has no view of the first
+/// A second agent on the same executor — a co-owner — has no view of the first
 /// agent's bookkeeping: not through the graph (there is nothing there, see
 /// `the_pass_writes_no_links`), and not through the table, which is keyed by
 /// agent. Its own pass keeps its own rows.
@@ -681,7 +681,7 @@ async fn a_synced_instance_is_not_seeded() {
     );
     assert!(
         !FlowReplicaState::has_derived(&f.perspective.uuid, &bob.did, theirs).expect("has_derived"),
-        "nor for the peer, whose bookkeeping is on its own node"
+        "nor for the peer, whose bookkeeping is on its own executor"
     );
 }
 
