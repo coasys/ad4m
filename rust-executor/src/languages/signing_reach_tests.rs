@@ -105,8 +105,8 @@ async fn a_language_cannot_sign_the_room_key_seed_message() {
     init_v8_platform();
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
-    let alice = format!("alice.{}@example.org", uuid::Uuid::new_v4());
-    AgentService::ensure_user_key_exists(&alice).unwrap();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
 
     let dir = tempfile::tempdir().unwrap();
     let handle =
@@ -130,7 +130,7 @@ async fn a_language_cannot_sign_the_room_key_seed_message() {
 
     for context in [
         AgentContext::main_agent(),
-        AgentContext::for_user_email(alice.clone()),
+        AgentContext::managed(alice.clone()),
     ] {
         let raw = handle
             .execute_with_context(script.to_string(), context.clone())

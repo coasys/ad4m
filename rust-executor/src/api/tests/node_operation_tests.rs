@@ -231,12 +231,11 @@ async fn no_rpc_signs_the_room_key_seed_message() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let seed_message = "adam-server-link-language:x25519-seed:v1";
-    let email = "room.key.seed.rpc@example.org";
-    AgentService::ensure_user_key_exists(email).unwrap();
+    let did = crate::test_utils::create_test_user("room.key.seed.rpc@example.org");
 
     for (who, session) in [
         ("operator", operator_session()),
-        ("user", user_session(email)),
+        ("user", user_session(&did)),
     ] {
         let signed = call("agent.sign", json!({ "message": seed_message }), session).await;
         assert!(

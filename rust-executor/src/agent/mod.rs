@@ -1588,9 +1588,8 @@ mod tests {
             "a holochain entanglement proof signed the room-key seed message"
         );
 
-        let email = "room.key.seed.refusal@example.org";
-        AgentService::ensure_user_key_exists(email).expect("user key");
-        assert_refuses_the_seed_message(&AgentContext::for_user_email(email.to_string()));
+        let did = crate::test_utils::create_test_user("room.key.seed.refusal@example.org");
+        assert_refuses_the_seed_message(&AgentContext::managed(did));
     }
 
     /// `room_key_seed_for_context` is what the server link language computed before
@@ -1601,18 +1600,14 @@ mod tests {
         use sha2::{Digest, Sha256};
         ensure_setup();
         assert_eq!(ROOM_KEY_SEED_MESSAGE, SEED_MESSAGE);
-        let email = "room.key.seed.value@example.org";
-        AgentService::ensure_user_key_exists(email).expect("user key");
+        let did = crate::test_utils::create_test_user("room.key.seed.value@example.org");
 
         let mut seeds = Vec::new();
-        for context in [
-            AgentContext::main_agent(),
-            AgentContext::for_user_email(email.to_string()),
-        ] {
+        for context in [AgentContext::main_agent(), AgentContext::managed(did)] {
             // The old derivation, straight from the wallet: no refusal on this path.
             let old_signature = wallet_backend()
                 .sign(
-                    &context.wallet_key_name(),
+                    &context.wallet_key_name().unwrap(),
                     &signatures::hash_message(&SEED_MESSAGE.to_string()),
                 )
                 .expect("the wallet signs");
