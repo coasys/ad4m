@@ -347,17 +347,11 @@ pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         })
 }
 
-pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String> {
-    let new = handle.clone();
-    update_perspective_with(&handle.uuid, move |persisted| *persisted = new)
-        .await
-        .map(|_| ())
-}
-
 /// Applies `change` to a perspective's handle under the instance's lock, then
-/// persists and announces the result. A read-modify-write done through this
-/// cannot overwrite a concurrent one (two users joining one neighbourhood at
-/// once each read the owners, added themselves and wrote back, so one was lost).
+/// persists and announces the result. It is the only way to change a handle: a
+/// change that wrote back a whole copy overwrote a concurrent one (users joining
+/// one neighbourhood at once lost owners; a join wrote back over the state the
+/// link language's install had just set).
 pub async fn update_perspective_with(
     uuid: &str,
     change: impl FnOnce(&mut PerspectiveHandle),
@@ -851,11 +845,11 @@ mod tests {
             Some("Test Perspective 1".to_string())
         );
 
-        let mut handle_updated = handle1.clone();
-        handle_updated.name = Some("Test Perspective 1 Updated".to_string());
-        update_perspective(&handle_updated)
-            .await
-            .expect("Failed to update perspective");
+        update_perspective_with(&handle1.uuid, |h| {
+            h.name = Some("Test Perspective 1 Updated".to_string())
+        })
+        .await
+        .expect("Failed to update perspective");
 
         let p1_updated = get_perspective(&handle1.uuid).unwrap();
         assert_eq!(

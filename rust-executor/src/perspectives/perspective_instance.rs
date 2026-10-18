@@ -4,7 +4,7 @@ use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
-use super::update_perspective;
+use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::{AgentContext, AgentService};
@@ -1523,10 +1523,9 @@ impl PerspectiveInstance {
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
         if self.persisted.lock().await.state != state {
-            let mut handle = self.persisted.lock().await.clone();
-            handle.state = state.clone();
-
-            update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
+            let handle = update_perspective_with(&self.uuid, |h| h.state = state.clone())
+                .await
+                .map_err(|e| anyhow!(e))?;
 
             get_global_pubsub()
                 .await

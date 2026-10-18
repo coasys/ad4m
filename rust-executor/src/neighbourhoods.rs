@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::agent::{did_for_context, AgentContext};
 use crate::languages::LanguageController;
 use crate::perspectives::{
-    add_perspective, all_perspectives, get_perspective, update_perspective, update_perspective_with,
+    add_perspective, all_perspectives, get_perspective, update_perspective_with,
 };
 use crate::types::*;
 use crate::types::{Neighbourhood, Perspective, PerspectiveHandle, PerspectiveState};
@@ -48,23 +48,21 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
         .await?
         .ok_or(anyhow!("Could not retrieve NeigbourhoodExpression which was just created. Problem with Neighbourhood language"))?;
 
-    let mut perspective_handle = perspective.persisted.lock().await.clone();
-    // Add shared perspective to original perspective and then update controller
-    perspective_handle.shared_url = Some(neighbourhood_url.clone());
-    perspective_handle.neighbourhood = Some(neighbourhood_exp);
-    perspective_handle.state = PerspectiveState::NeighbourhoodCreationInitiated;
-
+    // Add shared perspective to original perspective and then update controller.
     // Initialize owners list with the creator's DID if not already set
     let creator_did = did_for_context(context)?;
-    if perspective_handle.owners.is_none() {
-        perspective_handle.owners = Some(vec![creator_did.clone()]);
-    } else if !perspective_handle.is_owned_by(&creator_did) {
-        perspective_handle.add_owner(&creator_did);
-    }
-
-    update_perspective(&perspective_handle)
-        .await
-        .map_err(|e| anyhow!(e))?;
+    let perspective_handle = update_perspective_with(&perspective.uuid, |h| {
+        h.shared_url = Some(neighbourhood_url.clone());
+        h.neighbourhood = Some(neighbourhood_exp);
+        h.state = PerspectiveState::NeighbourhoodCreationInitiated;
+        if h.owners.is_none() {
+            h.owners = Some(vec![creator_did.clone()]);
+        } else if !h.is_owned_by(&creator_did) {
+            h.add_owner(&creator_did);
+        }
+    })
+    .await
+    .map_err(|e| anyhow!(e))?;
 
     // Ensure any existing shared links are committed to the link language
     // This is critical for early links created before neighbourhood sharing
@@ -267,6 +265,66 @@ mod tests {
             );
         }
         // Other tests expect the global perspective map to start empty.
+        crate::perspectives::remove_perspective(&handle.uuid).await;
+    }
+
+    /// The link language's install sets the perspective's state while users join (CI,
+    /// 18 Oct: #1439's e10 waited 60 s for a state a join had written back over). Neither
+    /// change may overwrite the other.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_state_change_during_joins_keeps_the_state_and_every_owner() {
+        crate::test_utils::setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+        let url = "neighbourhood://state-during-joins".to_string();
+        let mut handle = PerspectiveHandle::new_from_name("installs while joined".to_string());
+        handle.shared_url = Some(url.clone());
+        handle.state = PerspectiveState::NeighbourhoodJoinInitiated;
+        add_perspective(handle.clone(), None).await.unwrap();
+        let p = get_perspective(&handle.uuid).unwrap();
+
+        let emails: Vec<String> = (0..50).map(|i| format!("stater{i}@test")).collect();
+        for email in &emails {
+            AgentService::ensure_user_key_exists(email).unwrap();
+        }
+        let mut tasks: Vec<_> = emails
+            .iter()
+            .cloned()
+            .map(|email| {
+                let url = url.clone();
+                tokio::spawn(async move {
+                    let context = AgentContext::for_user_email(email);
+                    install_neighbourhood_with_context(url, &context)
+                        .await
+                        .unwrap();
+                })
+            })
+            .collect();
+        let installer = p.clone();
+        tasks.insert(
+            25,
+            tokio::spawn(async move {
+                installer
+                    .update_perspective_state(PerspectiveState::LinkLanguageInstalledButNotSynced)
+                    .await
+                    .unwrap();
+            }),
+        );
+        futures::future::join_all(tasks).await;
+
+        let persisted = p.persisted.lock().await.clone();
+        assert_eq!(
+            persisted.state,
+            PerspectiveState::LinkLanguageInstalledButNotSynced,
+            "a join wrote back a stale state"
+        );
+        for email in &emails {
+            let did = AgentService::get_user_did_by_email(email).unwrap();
+            assert!(
+                persisted.owners.as_ref().unwrap().contains(&did),
+                "lost {email}"
+            );
+        }
         crate::perspectives::remove_perspective(&handle.uuid).await;
     }
 }
