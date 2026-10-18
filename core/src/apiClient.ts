@@ -85,7 +85,14 @@ interface PendingCall {
     reject: (reason: unknown) => void
 }
 
-const closedError = () => new RpcError(503, 'WebSocket connection closed')
+const closedError = (reason?: string) => new RpcError(503, reason || 'WebSocket connection closed')
+
+/** Close code for "try again later": the executor's wallet is locked, so it cannot check the
+ *  token yet. The token may be good: reconnect as for any close, and pass the reason on. */
+const CLOSE_TRY_AGAIN_LATER = 1013
+
+/** Close code the executor uses when the socket's token opens no session, expired or was revoked. */
+const CLOSE_AUTH_FAILED = 1008
 
 export class ApiClient {
     private baseUrl: string
@@ -117,6 +124,10 @@ export class ApiClient {
     /** `on()` handlers by event type; a type with none has no entry. */
     private _handlers = new Map<string, Set<Registration>>()
     private _reconnectCallbacks = new Set<() => void>()
+    private _authFailedCallbacks = new Set<(reason: string) => void>()
+    /** Set once the executor refused the token: the reason. The client then
+     *  never connects again; a new token needs a new client. */
+    private _authFailed: string | null = null
     private _hasConnectedOnce = false
     private _pendingCalls = new Map<string, PendingCall>()
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -142,6 +153,7 @@ export class ApiClient {
 
     private _ensureWs(): void {
         if (this._ws) return
+        if (this._authFailed !== null) throw new RpcError(401, this._authFailed)
         const WsImpl = this._webSocketImpl ?? globalThis.WebSocket
         const ws = new WsImpl(this._getWsUrl())
         this._ws = ws
@@ -150,9 +162,16 @@ export class ApiClient {
                 resolve()
                 this._onOpen(ws)
             }
-            ws.onclose = () => {
-                reject(closedError())
-                this._onClose(ws)
+            ws.onclose = (event?: CloseEvent) => {
+                // Classify the close for watchApplied() as for every other waiting call.
+                reject(event?.code === CLOSE_AUTH_FAILED
+                    ? new RpcError(401, event.reason || 'token expired or revoked')
+                    : closedError(event?.code === CLOSE_TRY_AGAIN_LATER ? event.reason : undefined))
+                if (event?.code === CLOSE_AUTH_FAILED && this._ws === ws) {
+                    this._failAuth(event.reason || 'token expired or revoked')
+                } else {
+                    this._onClose(ws, event?.code === CLOSE_TRY_AGAIN_LATER ? event.reason : undefined)
+                }
             }
         })
         // Only watchApplied() awaits this; a close before open is not an error otherwise.
@@ -169,8 +188,14 @@ export class ApiClient {
                 const pending = this._pendingCalls.get(parsed.id as string)
                 if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
                 const error = parsed.error as { code?: number; message?: string } | undefined
-                if (error) pending.reject(new RpcError(error.code ?? 500, error.message ?? 'Unknown error'))
-                else pending.resolve(parsed.result)
+                if (!error) {
+                    pending.resolve(parsed.result)
+                    return
+                }
+                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error')
+                pending.reject(rpcError)
+                // The executor answers 401 only when the token stopped working, then closes the socket.
+                if (rpcError.status === 401) this._failAuth(rpcError.body)
                 return
             }
             if (parsed.type === 'pong') return
@@ -215,7 +240,8 @@ export class ApiClient {
         this._hasConnectedOnce = true
     }
 
-    private _onClose(ws: WebSocket): void {
+    /** `reason` is set when the executor asked to try again later; calls that fail carry it. */
+    private _onClose(ws: WebSocket, reason?: string): void {
         // A socket closed by _closeWs() can report after a new one exists.
         if (this._ws !== ws) return
         this._stopPing()
@@ -227,10 +253,21 @@ export class ApiClient {
                 pending.sent = false
                 pending.retry = false
             } else {
-                pending.reject(closedError())
+                pending.reject(closedError(reason))
             }
         }
         if (this._handlers.size > 0 || this._pendingCalls.size > 0) this._scheduleReconnect()
+    }
+
+    /** The executor refused the token: fail every call with 401, stop
+     *  reconnecting and tell the `onAuthFailed` callbacks, once. */
+    private _failAuth(reason: string): void {
+        if (this._authFailed !== null) return
+        this._authFailed = reason
+        const error = new RpcError(401, reason)
+        for (const pending of this._pendingCalls.values()) pending.reject(error)
+        this._closeWs()
+        for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }
 
     private _startPing(): void {
@@ -250,7 +287,7 @@ export class ApiClient {
     }
 
     private _scheduleReconnect(): void {
-        if (this._wsReconnectTimer) return
+        if (this._wsReconnectTimer || this._authFailed !== null) return
         const delay = this._wsReconnectDelay
         this._wsReconnectDelay = Math.min(this._wsReconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
         this._wsReconnectTimer = setTimeout(() => {
@@ -352,7 +389,8 @@ export class ApiClient {
             regs.add(reg)
             this._scheduleWatch()
         }
-        this._ensureWs()
+        // A client whose token was refused keeps the handler but opens no socket.
+        if (this._authFailed === null) this._ensureWs()
 
         return () => {
             const regs = this._handlers.get(type)
@@ -415,9 +453,11 @@ export class ApiClient {
         const key = JSON.stringify(events)
         if (key === this._watching) return
         this._watching = key
-        this._watchSent = this._request('events.watch', events).then(() => { this._watchRetries = 0 }, (e) => {
+        const sent = this._request('events.watch', events).then(() => { this._watchRetries = 0 }, (e) => {
             if (this._watching !== key) return
             this._watching = null
+            // A refused token (401) gets no next socket: watchApplied() must not resolve.
+            if (e instanceof RpcError && e.status === 401) throw e
             // A closed socket (503) gets the watch again when the next one opens.
             if (e instanceof RpcError && e.status === 503) return
             console.error('events.watch failed:', e)
@@ -428,6 +468,9 @@ export class ApiClient {
                 }, WATCH_RETRY_DELAY_MS)
             }
         })
+        // Only watchApplied() awaits this; a refused watch is not an unhandled rejection otherwise.
+        sent.catch(() => {})
+        this._watchSent = sent
     }
 
     private _closeWs(): void {
@@ -454,6 +497,15 @@ export class ApiClient {
         return () => { this._reconnectCallbacks.delete(callback) }
     }
 
+    /** Register a callback that fires once when the executor refuses this
+     *  client's token: a 401 reply, or a socket closed with code 1008. Every
+     *  call then fails with a 401 `RpcError` and the client does not reconnect;
+     *  build a new client to use another token. Returns an unsubscribe function. */
+    onAuthFailed(callback: (reason: string) => void): () => void {
+        this._authFailedCallbacks.add(callback)
+        return () => { this._authFailedCallbacks.delete(callback) }
+    }
+
     /** Close the WebSocket and reject pending calls. */
     closeAll(): void {
         for (const pending of this._pendingCalls.values()) {
@@ -462,6 +514,7 @@ export class ApiClient {
         this._closeWs()
         this._handlers.clear()
         this._reconnectCallbacks.clear()
+        this._authFailedCallbacks.clear()
         // A reused client must not fire onReconnect on its next first open.
         this._hasConnectedOnce = false
     }
