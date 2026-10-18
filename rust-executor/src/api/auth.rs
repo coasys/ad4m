@@ -1,79 +1,19 @@
 use axum::{extract::FromRequestParts, http::request::Parts};
 
 use super::errors::ApiError;
-use crate::agent::capabilities::{
-    capabilities_on, is_admin_credential_token_on, user_email_from_token, Capability, ListenerReach,
-};
-use crate::agent::AgentService;
+use crate::agent::capabilities::ListenerReach;
+use crate::agent::session::AuthError;
 use crate::types::RequestContext;
-
-/// Auth context extracted from the Authorization header.
-/// Constructs the RequestContext from auth headers.
-#[derive(Clone)]
-pub struct AuthContext {
-    pub capabilities: Result<Vec<Capability>, String>,
-    pub auto_permit_cap_requests: bool,
-    pub auth_token: String,
-    pub is_admin_credential: bool,
-}
-
-/// Resolves the user behind a token, and keeps the session from acting as anyone else.
-///
-/// Returns the capabilities to use, the user's email and the user's DID. A token that names
-/// a user whose DID cannot load (a wallet or shared-backend error) gets no capabilities:
-/// perspective checks treat a missing DID as the node's main agent, so the session must not
-/// run with one.
-pub(crate) fn resolve_user_session(
-    auth_token: &str,
-    capabilities: Result<Vec<Capability>, String>,
-) -> (
-    Result<Vec<Capability>, String>,
-    Option<String>,
-    Option<String>,
-) {
-    let user_email = user_email_from_token(auth_token.to_string());
-    match &user_email {
-        None => (capabilities, None, None),
-        Some(email) => match AgentService::get_user_did_by_email(email) {
-            Ok(did) => (capabilities, user_email, Some(did)),
-            Err(e) => (
-                Err(format!(
-                    "Could not load the identity of this user session; reconnect: {}",
-                    e
-                )),
-                user_email,
-                None,
-            ),
-        },
-    }
-}
-
-impl AuthContext {
-    /// Convert to the existing RequestContext used by internal functions.
-    pub fn to_request_context(&self) -> RequestContext {
-        let (capabilities, user_email, user_did) =
-            resolve_user_session(&self.auth_token, self.capabilities.clone());
-        RequestContext {
-            capabilities,
-            auto_permit_cap_requests: self.auto_permit_cap_requests,
-            auth_token: self.auth_token.clone(),
-            is_admin_credential: self.is_admin_credential,
-            user_email,
-            user_did,
-            cancel_token: None,
-            connection_id: None,
-        }
-    }
-}
 
 /// AppState shared across all API handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub admin_credential: Option<String>,
-    pub auto_permit_cap_requests: bool,
 }
 
-impl<S: Send + Sync> FromRequestParts<S> for AuthContext
+/// REST and the OpenAI-compatible API open a session per request from the `Authorization`
+/// header or the `token` query parameter.
+impl<S: Send + Sync> FromRequestParts<S> for RequestContext
 where
     AppState: FromRef<S>,
 {
@@ -100,24 +40,24 @@ where
                     .unwrap_or_default()
             });
 
+        // A token that opens no session gets 401: the client logs in again. A locked wallet
+        // gets 503: the token may be good, and the client retries after the unlock.
+        let ctx = RequestContext::open(
+            &auth_header,
+            &app_state.admin_credential,
+            listener_reach(parts),
+        )
+        .map_err(|e| match e {
+            AuthError::Locked => ApiError::Unavailable(e.to_string()),
+            e => ApiError::Unauthorized(e.to_string()),
+        })?;
+
         // Track last_seen for multi-user mode
-        crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;
+        if let Some(did) = ctx.user_did() {
+            crate::agent::capabilities::track_last_seen(did).await;
+        }
 
-        let reach = listener_reach(parts);
-        let capabilities = capabilities_on(
-            auth_header.clone(),
-            app_state.admin_credential.clone(),
-            reach,
-        );
-        let is_admin_credential =
-            is_admin_credential_token_on(&auth_header, &app_state.admin_credential, reach);
-
-        Ok(AuthContext {
-            capabilities,
-            auto_permit_cap_requests: app_state.auto_permit_cap_requests,
-            auth_token: auth_header,
-            is_admin_credential,
-        })
+        Ok(ctx)
     }
 }
 
@@ -173,51 +113,137 @@ impl FromRef<AppState> for AppState {
 #[cfg(test)]
 mod session_tests {
     use super::*;
-    use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
-    use crate::test_utils::MultiUserMode;
+    use crate::agent::AgentService;
 
-    // A user token whose DID could not load used to run with that user's capabilities and
-    // no DID, and perspective checks treat a missing DID as the node's main agent.
-    #[test]
-    fn a_user_session_without_a_loadable_identity_gets_no_capabilities() {
+    // #1175: REST and the OpenAI-compatible API used to decode the token again for every
+    // user lookup. The extractor now opens a session and the request context carries it.
+    #[tokio::test]
+    async fn a_rest_request_with_a_user_token_carries_the_users_session() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
-        let _multi_user = MultiUserMode::on();
-        let token = crate::user_management::generate_user_jwt("no.key@example.org", "test")
-            .expect("the wallet is unlocked in tests");
-
-        let (capabilities, user_email, user_did) =
-            resolve_user_session(&token, Ok(get_user_default_capabilities()));
-        assert!(capabilities.is_err(), "the session must not act at all");
-        assert_eq!(user_email.as_deref(), Some("no.key@example.org"));
-        assert!(user_did.is_none());
-    }
-
-    #[test]
-    fn a_user_session_with_an_identity_keeps_its_capabilities() {
-        crate::test_utils::setup_wallet();
-        crate::test_utils::setup_agent();
-        let _multi_user = MultiUserMode::on();
-        let email = "has.key@example.org";
-        AgentService::ensure_user_key_exists(email).unwrap();
+        let email = "rest.session@example.org";
+        let did = crate::test_utils::create_test_user(email);
         let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
 
-        let (capabilities, user_email, user_did) =
-            resolve_user_session(&token, Ok(get_user_default_capabilities()));
-        assert!(capabilities.is_ok());
-        assert_eq!(user_email.as_deref(), Some(email));
+        let request = axum::http::Request::builder()
+            .uri("/v1/models")
+            .header("Authorization", format!("Bearer {token}"))
+            .extension(ListenerReach::Network)
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let state = AppState {
+            admin_credential: Some("the-admin-credential".to_string()),
+        };
+        let ctx = RequestContext::from_request_parts(&mut parts, &state)
+            .await
+            .unwrap_or_else(|_| panic!("the extractor accepts a user token"));
+
+        assert_eq!(ctx.session.managed_did(), Some(did.as_str()));
+        assert!(!ctx.is_operator());
+        assert_eq!(ctx.auth_token, token);
+        assert_eq!(ctx.user_did(), Some(did.as_str()));
         assert_eq!(
-            user_did,
-            Some(AgentService::get_user_did_by_email(email).unwrap())
+            ctx.acts_as(),
+            crate::agent::AgentContext::managed(did.clone())
+        );
+        assert_eq!(
+            AgentService::email_for_did(&did).unwrap(),
+            email,
+            "the agent's account is still the user's"
         );
     }
 
+    /// What the HTTP extractor makes of a request that carries `token`.
+    async fn extract(token: &str) -> Result<RequestContext, ApiError> {
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/models")
+            .extension(ListenerReach::Network);
+        if !token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let (mut parts, _) = request.body(()).unwrap().into_parts();
+        let state = AppState {
+            admin_credential: Some("the-admin-credential".to_string()),
+        };
+        RequestContext::from_request_parts(&mut parts, &state).await
+    }
+
+    // A user whose DID does not load used to get a request context with `Err` capabilities.
     #[test]
-    fn an_operator_session_is_unchanged() {
-        let (capabilities, user_email, user_did) =
-            resolve_user_session("", Ok(vec![ALL_CAPABILITY.clone()]));
-        assert!(capabilities.is_ok());
-        assert!(user_email.is_none());
-        assert!(user_did.is_none());
+    fn a_user_without_a_loadable_identity_opens_no_request_context() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        // A user whose agent no wallet key derives: the token names it, the session cannot
+        // sign as it.
+        let token = crate::test_utils::keyless_user_token("rest.nokey@example.org");
+        let refused = RequestContext::open(
+            &token,
+            &Some("the-admin-credential".to_string()),
+            ListenerReach::Network,
+        );
+        assert!(
+            matches!(refused, Err(AuthError::NoIdentity(_))),
+            "{:?}",
+            refused.err()
+        );
+    }
+
+    // A dead token used to reach the handler with `Err` capabilities, and failed there with
+    // whatever that route answered. Now the client gets 401 and logs in again.
+    #[tokio::test]
+    async fn the_http_extractor_answers_401_for_a_token_that_opens_no_session() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let revoked = crate::agent::capabilities::token::generate_jwt(
+            "a revoked app".to_string(),
+            3600,
+            crate::agent::capabilities::AuthInfo::default(),
+        )
+        .unwrap();
+        let request_id = format!("extractor-{}", uuid::Uuid::new_v4());
+        let app = crate::agent::capabilities::AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: crate::agent::capabilities::AuthInfo::default(),
+        };
+        crate::agent::capabilities::apps_map::insert_app(request_id.clone(), app, revoked.clone())
+            .unwrap();
+        crate::agent::capabilities::apps_map::revoke_app(&request_id).unwrap();
+
+        let expired = crate::test_utils::expired_user_token("rest.expired@example.org");
+        for token in [revoked.as_str(), expired.as_str(), "not-a-jwt"] {
+            match extract(token).await {
+                Err(ApiError::Unauthorized(reason)) => assert!(!reason.is_empty()),
+                Err(other) => panic!("token {token:.20}…: expected 401, got {other:?}"),
+                Ok(_) => panic!("token {token:.20}…: the extractor accepted a dead token"),
+            }
+        }
+        let response =
+            axum::response::IntoResponse::into_response(extract("not-a-jwt").await.err().unwrap());
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_http_extractor_accepts_an_empty_token() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        // The anonymous set reads the multi-user setting. Initialise the database only when
+        // no test has, so this does not wipe one another test is using.
+        if crate::db::Ad4mDb::global_instance()
+            .lock()
+            .unwrap()
+            .is_none()
+        {
+            crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        let ctx = extract("")
+            .await
+            .unwrap_or_else(|e| panic!("refused: {e:?}"));
+        assert!(!ctx.is_operator());
+        assert_eq!(
+            ctx.session.principal,
+            crate::agent::session::Principal::Anonymous
+        );
     }
 }
