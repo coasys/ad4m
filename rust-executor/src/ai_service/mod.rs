@@ -3,6 +3,7 @@ use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::ModelInput;
+use crate::types::RequestContext;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
@@ -103,8 +104,9 @@ struct TranscriptionSession {
     // stored here for potential close-stream reconciliation)
     #[allow(dead_code)]
     model_id: String,
-    #[allow(dead_code)]
-    user_email: Option<String>,
+    /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
+    /// stream. `None`: the main agent.
+    agent_did: Option<String>,
 }
 
 #[derive(Clone)]
@@ -413,16 +415,18 @@ pub struct VoiceActivityParams {
     pub time_before_speech: Option<u64>,
 }
 
-/// The owner of a new transcription stream: the caller's email (billing, ownership) and DID
-/// (event filtering). A caller whose token no longer works, or whose DID does not resolve,
-/// owns nothing and opens no stream: text without an owner DID would reach every session.
+/// The owner of a new transcription stream: the managed agent's DID (billing, ownership;
+/// `None` for the main agent) and the DID of the agent the caller acts as (event filtering).
+/// A caller whose agent does not resolve owns nothing and opens no stream: text without an
+/// owner DID would reach every session.
 fn transcription_stream_owner(
-    auth_token: String,
-    is_admin_credential: bool,
+    context: crate::agent::AgentContext,
 ) -> Result<(Option<String>, String)> {
-    let context = crate::agent::AgentContext::from_auth_token(auth_token, is_admin_credential)?;
+    if let Some(managed) = context.managed_did() {
+        crate::agent::AgentService::wallet_key_for_did(managed)?;
+    }
     let did = crate::agent::did_for_context(&context)?;
-    Ok((context.user_email, did))
+    Ok((context.managed_did().map(str::to_string), did))
 }
 
 impl AIService {
@@ -1393,7 +1397,7 @@ impl AIService {
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
         constraint: Option<ArcParser<()>>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
@@ -1460,7 +1464,7 @@ impl AIService {
         // a no-op. InsufficientCredits is returned to the caller so /v1
         // can propagate 429; other errors are logged and swallowed.
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            bill_to.as_deref(),
             &resolved,
             prompt_tokens,
             completion_tokens,
@@ -1511,7 +1515,7 @@ impl AIService {
         model_id: String,
         turns: Vec<ChatTurn>,
         tools: Vec<ToolSpec>,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
     ) -> Result<ChatReply> {
         let resolved = Self::replace_model_variables(&model_id)?;
 
@@ -1554,7 +1558,7 @@ impl AIService {
         );
 
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            bill_to.as_deref(),
             &resolved,
             prompt_tokens,
             completion_tokens,
@@ -1575,7 +1579,7 @@ impl AIService {
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
         constraint: Option<ArcParser<()>>,
     ) -> Result<(
         mpsc::UnboundedReceiver<String>,
@@ -1626,8 +1630,7 @@ impl AIService {
                 Ok(inner) => inner,
                 Err(_) => Err(anyhow!("LLM stream ended without a final result")),
             };
-            Self::bill_and_forward_stream_result(auth_token, &billing_model_id, result, done_tx)
-                .await;
+            Self::bill_and_forward_stream_result(bill_to, &billing_model_id, result, done_tx).await;
         });
 
         // Schedule a Remove for after the prompt completes — best-effort
@@ -1661,7 +1664,7 @@ impl AIService {
         &self,
         task_id: String,
         prompt: String,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
     ) -> Result<PromptResult> {
         let (result_sender, rx) = oneshot::channel();
 
@@ -1746,7 +1749,7 @@ impl AIService {
 
         // Bill via the shared host_rates helper. See prompt_messages.
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            bill_to.as_deref(),
             &model_id,
             prompt_tokens,
             completion_tokens,
@@ -1768,14 +1771,14 @@ impl AIService {
     /// so the streaming billing behaviour is unit-testable without a live
     /// LLM channel.
     pub(crate) async fn bill_and_forward_stream_result(
-        auth_token: Option<String>,
+        bill_to: Option<String>,
         model_id: &str,
         result: Result<PromptResult>,
         done_tx: oneshot::Sender<Result<PromptResult>>,
     ) {
         if let Ok(pr) = &result {
             Self::bill_prompt_if_authed(
-                auth_token.as_deref(),
+                bill_to.as_deref(),
                 model_id,
                 pr.prompt_tokens,
                 pr.completion_tokens,
@@ -1790,17 +1793,16 @@ impl AIService {
     /// length estimate that estimate_token_count() computes (chars/4).
     /// This mirrors what the transcription worker does with word_count,
     /// so every AI billing path routes through the same shape.
+    ///
+    /// `bill_to` is the managed agent the request acts as, by DID; the main agent pays
+    /// nothing.
     fn bill_prompt_if_authed(
-        auth_token: Option<&str>,
+        bill_to: Option<&str>,
         model_id: &str,
         prompt_tokens: usize,
         completion_tokens: usize,
     ) {
-        let Some(token) = auth_token else {
-            return;
-        };
-        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
-        else {
+        let Some(agent_did) = bill_to else {
             return;
         };
         let total_tokens = prompt_tokens.saturating_add(completion_tokens);
@@ -1808,7 +1810,7 @@ impl AIService {
         // inside bill_ai_operation. Prompt has already run so we don't
         // want to fail the caller on a bookkeeping-only issue.
         let _ = crate::billing::bill_ai_operation(
-            &email,
+            agent_did,
             model_id,
             "ai_prompt",
             total_tokens,
@@ -1817,16 +1819,12 @@ impl AIService {
     }
 
     /// Shared post-compute billing hook for embed paths.
-    fn bill_embed_if_authed(auth_token: Option<&str>, model_id: &str, token_count: usize) {
-        let Some(token) = auth_token else {
-            return;
-        };
-        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
-        else {
+    fn bill_embed_if_authed(bill_to: Option<&str>, model_id: &str, token_count: usize) {
+        let Some(agent_did) = bill_to else {
             return;
         };
         let _ = crate::billing::bill_ai_operation(
-            &email,
+            agent_did,
             model_id,
             "ai_embedding",
             token_count,
@@ -1892,7 +1890,7 @@ impl AIService {
         &self,
         model_id: String,
         text: String,
-        auth_token: Option<String>,
+        bill_to: Option<String>,
     ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
         let text_chars = text.chars().count();
@@ -1932,7 +1930,7 @@ impl AIService {
         );
 
         // Bill via the shared host_rates helper.
-        Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
+        Self::bill_embed_if_authed(bill_to.as_deref(), &model_id, token_count);
 
         Ok(EmbedResult {
             embeddings,
@@ -2006,11 +2004,10 @@ impl AIService {
         &self,
         model_id: String,
         _params: Option<VoiceActivityParams>,
-        auth_token: String,
-        is_admin_credential: bool,
+        caller: &RequestContext,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
-        let (user_email, user_did) = transcription_stream_owner(auth_token, is_admin_credential)?;
+        let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -2058,7 +2055,7 @@ impl AIService {
         let text_broadcast_tx_clone = text_broadcast_tx.clone();
 
         // Clone billing context for the async task
-        let billing_email = user_email.clone();
+        let billing_agent = agent_did.clone();
         let billing_model_id = model_id.clone();
 
         let user_did = Some(user_did);
@@ -2168,7 +2165,7 @@ impl AIService {
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
-                                if let Some(ref email) = billing_email {
+                                if let Some(ref billed_did) = billing_agent {
                                     let rate_key =
                                         crate::db::Ad4mDb::with_global_instance(|db| {
                                             db.get_model(billing_model_id.clone())
@@ -2187,7 +2184,7 @@ impl AIService {
                                         .unwrap_or(0.0);
                                     let cost = word_count as f64 * rate;
                                     match crate::billing::bill_compute(
-                                        email,
+                                        billed_did,
                                         cost,
                                         "ai_transcription",
                                         Some(&format!(
@@ -2198,7 +2195,7 @@ impl AIService {
                                         Err(
                                             crate::billing::BillingError::InsufficientCredits,
                                         ) => {
-                                            log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
+                                            log::warn!("Transcription: insufficient credits for agent {} — delivering already-computed text, future feeds will be rejected", billed_did);
                                         }
                                         Err(e) => {
                                             log::warn!(
@@ -2268,7 +2265,7 @@ impl AIService {
                 last_activity,
                 text_broadcast_tx,
                 model_id: model_id.clone(),
-                user_email,
+                agent_did,
             },
         );
 
@@ -2279,13 +2276,13 @@ impl AIService {
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
-        auth_token: &str,
+        caller: &RequestContext,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         if let Some(stream) = map_lock.get_mut(stream_id) {
             // Verify the caller owns this stream
-            Self::verify_stream_ownership(stream, auth_token)?;
+            Self::verify_stream_ownership(stream, caller)?;
             // Update last activity time
             *stream.last_activity.lock().await = std::time::Instant::now();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
@@ -2303,12 +2300,12 @@ impl AIService {
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
-        auth_token: &str,
+        caller: &RequestContext,
     ) -> Result<tokio::sync::broadcast::Receiver<String>> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         if let Some(stream) = map_lock.get_mut(stream_id) {
-            Self::verify_stream_ownership(stream, auth_token)?;
+            Self::verify_stream_ownership(stream, caller)?;
             *stream.last_activity.lock().await = std::time::Instant::now();
             let rx = stream.text_broadcast_tx.subscribe();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
@@ -2331,18 +2328,17 @@ impl AIService {
         &self,
         model_id: String,
         samples: Vec<f32>,
-        auth_token: String,
-        is_admin_credential: bool,
+        caller: &RequestContext,
     ) -> Result<String> {
         let stream_id = self
-            .open_transcription_stream(model_id, None, auth_token.clone(), is_admin_credential)
+            .open_transcription_stream(model_id, None, caller)
             .await?;
 
         // Subscribe to the broadcast BEFORE feeding so we don't drop any
         // partial events the whisper thread emits during the first
         // window.
         let mut rx = self
-            .feed_transcription_stream_with_broadcast(&stream_id, samples, &auth_token)
+            .feed_transcription_stream_with_broadcast(&stream_id, samples, caller)
             .await?;
 
         // Drain until the receiver lags or no message arrives within a
@@ -2364,22 +2360,20 @@ impl AIService {
             }
         }
 
-        let _ = self
-            .close_transcription_stream(&stream_id, &auth_token)
-            .await;
+        let _ = self.close_transcription_stream(&stream_id, caller).await;
         Ok(transcript)
     }
 
     pub async fn close_transcription_stream(
         &self,
         stream_id: &String,
-        auth_token: &str,
+        caller: &RequestContext,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
 
         // Verify ownership before removing
         if let Some(stream) = map_lock.get(stream_id) {
-            Self::verify_stream_ownership(stream, auth_token)?;
+            Self::verify_stream_ownership(stream, caller)?;
         }
 
         if let Some(stream) = map_lock.remove(stream_id) {
@@ -2394,10 +2388,13 @@ impl AIService {
         }
     }
 
-    /// Verify that the caller (identified by auth_token) owns the given transcription session.
-    /// In single-user mode, ownership is not enforced.
-    /// In multi-user mode, both the session and the caller must have valid emails that match.
-    fn verify_stream_ownership(session: &TranscriptionSession, auth_token: &str) -> Result<()> {
+    /// Verify that the caller (the agent its request acts as) owns the given transcription
+    /// session. In single-user mode, ownership is not enforced.
+    /// In multi-user mode, a managed agent reaches only the streams it opened.
+    fn verify_stream_ownership(
+        session: &TranscriptionSession,
+        caller: &RequestContext,
+    ) -> Result<()> {
         let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
             db.get_multi_user_enabled().unwrap_or(false)
         });
@@ -2407,52 +2404,26 @@ impl AIService {
             return Ok(());
         }
 
-        // Multi-user mode: require valid token
-        let caller_email =
-            crate::agent::capabilities::user_email_from_token(auth_token.to_string());
-
-        // If caller has no email, they must still have a valid token (admin/main user)
-        if caller_email.is_none() {
-            if crate::agent::capabilities::decode_jwt(auth_token.to_string()).is_err() {
-                return Err(anyhow!(
-                    "Authorization error: valid token required in multi-user mode"
-                ));
-            }
-            // Admin user (valid token, no email) — allow access to any stream
-            return Ok(());
-        }
-
-        let caller_email = caller_email.unwrap();
-
-        // Session must also have an owner email to enforce ownership
-        let owner_email = match session.user_email.as_ref() {
-            Some(email) => email,
-            // Session has no owner email (created by admin) — only admin can access,
-            // but we already handled the admin case above, so reject.
-            None => {
-                return Err(anyhow!(
+        // A caller without a user acts as the main agent. The session already resolved and
+        // checked it: the operator and a grant on the main agent may reach any stream, an
+        // anonymous caller none.
+        let Some(caller_did) = caller.user_did() else {
+            return match &caller.session.principal {
+                crate::agent::session::Principal::Operator => Ok(()),
+                crate::agent::session::Principal::Agent(agent) if agent.is_main_agent() => Ok(()),
+                _ => Err(anyhow!(
                     "Authorization error: caller does not own this transcription stream"
-                ))
-            }
+                )),
+            };
         };
 
-        if caller_email == *owner_email {
+        // A stream the main agent opened (owner `None`) is not a managed agent's.
+        if session.agent_did.as_deref() == Some(caller_did) {
             Ok(())
         } else {
             Err(anyhow!(
                 "Authorization error: caller does not own this transcription stream"
             ))
-        }
-    }
-
-    /// Verify that a caller (identified by auth_token) is allowed to subscribe to a given stream.
-    /// Returns Ok(()) if access is allowed, or an error if not.
-    pub async fn verify_stream_access(&self, stream_id: &str, auth_token: &str) -> Result<()> {
-        let map_lock = self.transcription_streams.lock().await;
-        if let Some(session) = map_lock.get(stream_id) {
-            Self::verify_stream_ownership(session, auth_token)
-        } else {
-            Err(anyhow!("Transcription stream not found: {}", stream_id))
         }
     }
 
@@ -3076,49 +3047,109 @@ mod tests {
 }
 
 #[cfg(test)]
+mod stream_ownership_tests {
+    use super::*;
+    use crate::agent::session::Principal;
+    use crate::test_utils::MultiUserMode;
+
+    fn stream_of(owner: Option<&str>) -> TranscriptionSession {
+        let (samples_tx, _) = futures_channel::mpsc::unbounded();
+        let (drop_tx, _) = oneshot::channel();
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
+        TranscriptionSession {
+            samples_tx,
+            drop_tx,
+            last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+            text_broadcast_tx,
+            model_id: "m".to_string(),
+            agent_did: owner.map(str::to_string),
+        }
+    }
+
+    // The operator's admin credential is not a JWT, so the old token decode refused it: in
+    // multi-user mode it could open a stream but not feed or close it.
+    #[test]
+    fn in_multi_user_mode_the_session_decides_who_reaches_a_stream() {
+        let _multi_user = MultiUserMode::on();
+        let alice = RequestContext::user_for_test("did:key:alice", vec![]);
+        let bob = RequestContext::user_for_test("did:key:bob", vec![]);
+        let operator = RequestContext::operator_for_test();
+        let app = RequestContext::app_for_test(vec![]);
+        let anonymous = RequestContext::for_test(Principal::Anonymous);
+
+        let alices = stream_of(Some("did:key:alice"));
+        let main_agents = stream_of(None);
+        let reaches = |stream, caller| AIService::verify_stream_ownership(stream, caller).is_ok();
+
+        assert!(reaches(&alices, &alice), "a user reaches their own stream");
+        assert!(!reaches(&alices, &bob), "not another user's");
+        assert!(!reaches(&main_agents, &bob), "nor the main agent's");
+        assert!(
+            reaches(&alices, &operator),
+            "the operator reaches any stream"
+        );
+        assert!(reaches(&main_agents, &operator));
+        assert!(
+            reaches(&alices, &app),
+            "a grant on the main agent reaches any stream, as before"
+        );
+        assert!(
+            !reaches(&main_agents, &anonymous),
+            "an anonymous caller reaches none"
+        );
+    }
+}
+
+#[cfg(test)]
 mod transcription_owner_tests {
     use super::transcription_stream_owner;
-    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+    use crate::agent::AgentContext;
+    use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
 
     // A stream whose owner did not resolve used to open with a null owner DID, and the event
     // filter delivers such text to every session.
-    #[test]
-    fn a_caller_whose_token_expired_opens_no_stream() {
-        setup_wallet();
-        setup_agent();
-        let _multi_user = MultiUserMode::on();
-        let token = expired_user_token("expired@example.org");
-        assert!(transcription_stream_owner(token, false).is_err());
-    }
-
     #[test]
     fn a_user_without_a_key_opens_no_stream() {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let token =
-            crate::user_management::generate_user_jwt("no.key.stream@example.org", "test").unwrap();
-        assert!(transcription_stream_owner(token, false).is_err());
+        let owner = AgentContext::managed("did:key:z6MkNoKeyStreamOwner".to_string());
+        assert!(transcription_stream_owner(owner).is_err());
     }
 
     #[test]
-    fn a_user_owns_their_stream_and_the_admin_credential_owns_as_the_node() {
+    fn a_user_owns_their_stream_and_the_operator_owns_as_the_main_agent() {
         setup_wallet();
         setup_agent();
         let _multi_user = MultiUserMode::on();
-        let email = "stream.owner@example.org";
-        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
-        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
-        let (user_email, did) = transcription_stream_owner(token, false).unwrap();
-        assert_eq!(user_email.as_deref(), Some(email));
-        assert_eq!(
-            did,
-            crate::agent::AgentService::get_user_did_by_email(email).unwrap()
-        );
+        let user_did = crate::test_utils::create_test_user("stream.owner@example.org");
+        let (agent_did, did) =
+            transcription_stream_owner(AgentContext::managed(user_did.clone())).unwrap();
+        assert_eq!(agent_did.as_deref(), Some(user_did.as_str()));
+        assert_eq!(did, user_did);
 
-        let (admin_email, admin_did) =
-            transcription_stream_owner("the-admin-credential".to_string(), true).unwrap();
-        assert!(admin_email.is_none());
+        let (admin_agent, admin_did) =
+            transcription_stream_owner(AgentContext::main_agent()).unwrap();
+        assert!(admin_agent.is_none());
         assert_eq!(admin_did, crate::agent::did());
+    }
+
+    // An expired token opens no session, so the caller is refused before a transcription
+    // handler runs and before a stream has an owner.
+    #[test]
+    fn a_caller_whose_token_expired_is_refused() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token = crate::test_utils::expired_user_token("expired@example.org");
+        let refused = crate::types::RequestContext::open(
+            &token,
+            &Some("the-admin-credential".to_string()),
+            crate::agent::capabilities::ListenerReach::Network,
+        );
+        assert_eq!(
+            refused.err(),
+            Some(crate::agent::session::AuthError::Expired)
+        );
     }
 }

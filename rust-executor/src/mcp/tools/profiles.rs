@@ -70,13 +70,13 @@ pub struct SetAgentPublicPerspectiveParams {
 fn get_current_agent(context: &AgentContext) -> Result<Agent, String> {
     match AgentService::get_agent_for_context(context) {
         Ok(agent) => Ok(agent),
-        Err(_) if context.user_email.is_some() => {
+        Err(_) if context.managed_did().is_some() => {
             // Multi-user fallback: user exists in wallet but has no profile yet
-            let user_email = context.user_email.as_ref().unwrap();
-            let agent_data = AgentService::get_user_agent_data(user_email)
+            let did = context.managed_did().unwrap_or_default().to_string();
+            AgentService::wallet_key_for_did(&did)
                 .map_err(|e| format!("User agent not available: {}", e))?;
             Ok(Agent {
-                did: agent_data.did,
+                did,
                 direct_message_language: None,
                 perspective: Some(Perspective { links: vec![] }),
             })
@@ -90,27 +90,23 @@ async fn update_agent_perspective(
     context: &AgentContext,
     links: Vec<DecoratedLinkExpression>,
 ) -> Result<Agent, String> {
-    if let Some(user_email) = context.user_email.clone() {
+    if let Some(did) = context.managed_did().map(str::to_string) {
         // Multi-user mode
-        let agent_data = AgentService::get_user_agent_data(&user_email)
+        AgentService::wallet_key_for_did(&did)
             .map_err(|e| format!("User agent not available: {}", e))?;
 
         // Keep the user's DM language: this call updates only the perspective.
-        let direct_message_language = AgentService::with_global_instance(|agent_service| {
-            agent_service.load_user_agent_profile(&user_email)
-        })
-        .map_err(|e| format!("Failed to load user profile: {}", e))?
-        .and_then(|profile| profile.direct_message_language);
+        let direct_message_language = AgentService::load_managed_agent_profile(&did)
+            .map_err(|e| format!("Failed to load user profile: {}", e))?
+            .and_then(|profile| profile.direct_message_language);
         let agent = Agent {
-            did: agent_data.did,
+            did: did.clone(),
             direct_message_language,
             perspective: Some(Perspective { links }),
         };
 
-        AgentService::with_global_instance(|agent_service| {
-            agent_service.store_user_agent_profile(&user_email, &agent)
-        })
-        .map_err(|e| format!("Failed to store user profile: {}", e))?;
+        AgentService::store_managed_agent_profile(&did, &agent)
+            .map_err(|e| format!("Failed to store user profile: {}", e))?;
 
         if let Err(e) = AgentService::publish_agent_to_language(context).await {
             log::warn!("Failed to publish user profile to agent language: {}", e);
