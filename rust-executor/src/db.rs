@@ -175,6 +175,7 @@ impl Ad4mDb {
 
     pub(crate) fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
+        Self::refuse_data_from_before_did_keys(&conn)?;
 
         // Create tables if they don't exist
 
@@ -576,6 +577,29 @@ impl Ad4mDb {
         )?;
 
         Ok(Self { conn })
+    }
+
+    /// Refuses a database that a `dev` build wrote before agents were keyed by DID (D16):
+    /// its billing tables name users by `user_email`. No migration exists, so it stops here
+    /// with a message instead of failing later on a missing `agent_did` column.
+    fn refuse_data_from_before_did_keys(conn: &Connection) -> Ad4mDbResult<()> {
+        for table in ["compute_log", "payment_requests"] {
+            let has_user_email: bool = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = 'user_email'"
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if has_user_email {
+                return Err(anyhow!(
+                    "This data folder was written by a dev build from before agents were keyed \
+                     by DID ({table}.user_email). It cannot be upgraded: start the executor with \
+                     a fresh data folder."
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn create_or_update_model_status(
@@ -5016,6 +5040,31 @@ mod tests {
         db.migrate_notification_owners("did:key:other").unwrap();
         assert_eq!(owners(&db).len(), 2);
         assert_eq!(owners(&db)[1].1, "did:key:main");
+    }
+
+    /// A data folder from a `dev` build before D16 names billing rows by `user_email`. No
+    /// migration exists: start-up stops with a message that says so, not with a missing
+    /// column error from a later statement.
+    #[test]
+    fn a_data_folder_from_before_did_keys_is_refused_with_a_message() {
+        for table in ["compute_log", "payment_requests"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ad4m.db");
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TABLE {table} (id INTEGER PRIMARY KEY, user_email TEXT NOT NULL)"
+                ))
+                .unwrap();
+            let err = Ad4mDb::new(path.to_str().unwrap())
+                .err()
+                .expect(table)
+                .to_string();
+            assert!(
+                err.contains("fresh data folder") && err.contains(table),
+                "{table}: {err}"
+            );
+        }
     }
 
     #[test]
