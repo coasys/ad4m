@@ -226,13 +226,14 @@ mod tests {
         add_perspective(handle.clone(), None).await.unwrap();
 
         let emails: Vec<String> = (0..50).map(|i| format!("joiner{i}@test")).collect();
-        for email in &emails {
-            AgentService::ensure_user_key_exists(email).unwrap();
-        }
-        let joins = emails.iter().cloned().map(|email| {
+        let dids: Vec<String> = emails
+            .iter()
+            .map(|email| crate::test_utils::create_test_user(email))
+            .collect();
+        let joins = dids.iter().cloned().map(|did| {
             let url = url.clone();
             tokio::spawn(async move {
-                let context = AgentContext::for_user_email(email);
+                let context = AgentContext::managed(did);
                 install_neighbourhood_with_context(url, &context)
                     .await
                     .unwrap();
@@ -251,8 +252,7 @@ mod tests {
             .into_iter()
             .find(|s| s.uuid == handle.uuid)
             .unwrap();
-        for email in &emails {
-            let did = AgentService::get_user_did_by_email(email).unwrap();
+        for (email, did) in emails.iter().zip(&dids) {
             assert!(
                 in_memory.owners.as_ref().unwrap().contains(&did),
                 "lost {email} in memory"
@@ -282,16 +282,17 @@ mod tests {
         let p = get_perspective(&handle.uuid).unwrap();
 
         let emails: Vec<String> = (0..50).map(|i| format!("stater{i}@test")).collect();
-        for email in &emails {
-            AgentService::ensure_user_key_exists(email).unwrap();
-        }
-        let mut tasks: Vec<_> = emails
+        let dids: Vec<String> = emails
+            .iter()
+            .map(|email| crate::test_utils::create_test_user(email))
+            .collect();
+        let mut tasks: Vec<_> = dids
             .iter()
             .cloned()
-            .map(|email| {
+            .map(|did| {
                 let url = url.clone();
                 tokio::spawn(async move {
-                    let context = AgentContext::for_user_email(email);
+                    let context = AgentContext::managed(did);
                     install_neighbourhood_with_context(url, &context)
                         .await
                         .unwrap();
@@ -316,8 +317,7 @@ mod tests {
             PerspectiveState::LinkLanguageInstalledButNotSynced,
             "a join wrote back a stale state"
         );
-        for email in &emails {
-            let did = AgentService::get_user_did_by_email(email).unwrap();
+        for (email, did) in emails.iter().zip(&dids) {
             assert!(
                 persisted.owners.as_ref().unwrap().contains(&did),
                 "lost {email}"
