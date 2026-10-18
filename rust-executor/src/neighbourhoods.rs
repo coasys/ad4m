@@ -110,13 +110,11 @@ pub async fn install_neighbourhood_with_context(
         if handle.shared_url == Some(url.clone()) {
             // Neighbourhood exists - add this user as owner if it's a user context
             log::info!(
-                "Adding user {:?} to existing neighbourhood {}",
-                context.user_email,
+                "Adding agent {:?} to existing neighbourhood {}",
+                context,
                 url
             );
-            if let Some(user_email) = &context.user_email {
-                let user_did = crate::agent::AgentService::get_user_did_by_email(user_email)?;
-
+            if let Some(user_did) = context.managed_did().map(str::to_string) {
                 // Update database
                 crate::db::Ad4mDb::with_global_instance(|db| {
                     db.add_owner_to_neighbourhood(&url, &user_did)
@@ -132,8 +130,8 @@ pub async fn install_neighbourhood_with_context(
                 register_owners_in_background(p);
 
                 log::info!(
-                    "Added user {} to existing neighbourhood {}. Registering the new owners with the link language in the background.",
-                    user_email,
+                    "Added agent {} to existing neighbourhood {}. Registering the new owners with the link language in the background.",
+                    user_did,
                     url
                 );
                 return Ok(handle.clone());
