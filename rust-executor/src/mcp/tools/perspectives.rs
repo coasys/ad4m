@@ -197,11 +197,7 @@ impl Ad4mMcpHandler {
         }
 
         // In multi-user mode, set the creating user as owner (reuses REST pattern)
-        let owner_did = if let Some(email) = &agent_context.user_email {
-            crate::agent::AgentService::get_user_did_by_email(email).ok()
-        } else {
-            None
-        };
+        let owner_did = agent_context.managed_did().map(str::to_string);
 
         let handle = if let Some(owner) = &owner_did {
             PerspectiveHandle::new_with_owner(p.name.clone(), owner.clone())
