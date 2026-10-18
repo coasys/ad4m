@@ -60,7 +60,8 @@ impl std::error::Error for InvalidDefaultModel {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentRequest {
     pub id: i64,
-    pub user_email: String,
+    /// The agent that asked to pay: the DID of a managed agent.
+    pub agent_did: String,
     pub amount_hot: String,
     pub proposal_action_hash: Option<String>,
     pub status: String,
@@ -143,6 +144,7 @@ impl Ad4mDb {
 
     fn new(db_path: &str) -> Ad4mDbResult<Self> {
         let conn = Connection::open(db_path)?;
+        Self::refuse_data_from_before_did_keys(&conn)?;
 
         // Create tables if they don't exist
 
@@ -446,7 +448,7 @@ impl Ad4mDb {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS payment_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_email TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
                 amount_hot TEXT NOT NULL,
                 proposal_action_hash TEXT UNIQUE,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -488,7 +490,7 @@ impl Ad4mDb {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS compute_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_email TEXT NOT NULL,
+                agent_did TEXT NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                 operation TEXT NOT NULL,
                 summary TEXT,
@@ -496,8 +498,12 @@ impl Ad4mDb {
                 credits_after REAL NOT NULL
             )",
         )?;
+
+        // `users.did` is the key of a managed agent: one user per DID. Users without an agent
+        // (an empty DID) stay out of the index.
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_compute_log_user_time ON compute_log(user_email, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_compute_log_agent_time ON compute_log(agent_did, timestamp);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_did ON users(did) WHERE did != '';",
         )?;
 
         // The flow engine's per-replica bookkeeping (#1424): what each agent's
@@ -537,6 +543,29 @@ impl Ad4mDb {
         )?;
 
         Ok(Self { conn })
+    }
+
+    /// Refuses a database that a `dev` build wrote before agents were keyed by DID (D16):
+    /// its billing tables name users by `user_email`. No migration exists, so it stops here
+    /// with a message instead of failing later on a missing `agent_did` column.
+    fn refuse_data_from_before_did_keys(conn: &Connection) -> Ad4mDbResult<()> {
+        for table in ["compute_log", "payment_requests"] {
+            let has_user_email: bool = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = 'user_email'"
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if has_user_email {
+                return Err(anyhow!(
+                    "This data folder was written by a dev build from before agents were keyed \
+                     by DID ({table}.user_email). It cannot be upgraded: start the executor with \
+                     a fresh data folder."
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn create_or_update_model_status(
@@ -1348,8 +1377,8 @@ impl Ad4mDb {
     /// **Caller must enforce authorization.** This method trusts
     /// that the caller already verified the DID matches the
     /// authenticated identity (or holds admin privileges).
-    /// The `sfu.ensureMembership` WS handler gates this behind
-    /// `is_admin_credential`.
+    /// The `sfu.ensureMembership` WS handler allows only the executor's
+    /// operator (`RequestContext::is_operator`).
     pub fn ensure_neighbourhood_member(
         &self,
         neighbourhood_url: &str,
@@ -2568,11 +2597,11 @@ impl Ad4mDb {
         // Export payment_requests
         let payment_requests: Vec<serde_json::Value> = self
             .conn
-            .prepare("SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
+            .prepare("SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests")?
             .query_map([], |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, i64>(0)?,
-                    "user_email": row.get::<_, String>(1)?,
+                    "agent_did": row.get::<_, String>(1)?,
                     "amount_hot": row.get::<_, String>(2)?,
                     "proposal_action_hash": row.get::<_, Option<String>>(3)?,
                     "status": row.get::<_, String>(4)?,
@@ -3260,14 +3289,22 @@ impl Ad4mDb {
                 log::debug!("Importing {} payment_requests", requests.len());
                 for req in requests {
                     if let Err(e) = self.conn.execute(
-                        "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash, status, created_at, completed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        // Exports from before agents were keyed by DID name the user by
+                        // email; `users` was imported above, so it resolves to the agent.
+                        "INSERT OR IGNORE INTO payment_requests (agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at)
+                         SELECT did, ?2, ?3, ?4, ?5, ?6 FROM (
+                             SELECT ?1 AS did WHERE ?1 IS NOT NULL
+                             UNION ALL
+                             SELECT NULLIF(did, '') FROM users WHERE ?1 IS NULL AND username = ?7
+                         ) WHERE did IS NOT NULL",
                         params![
-                            req["user_email"].as_str().unwrap_or(""),
+                            req["agent_did"].as_str(),
                             req["amount_hot"].as_str().unwrap_or("0"),
                             req["proposal_action_hash"].as_str(),
                             req["status"].as_str().unwrap_or("pending"),
                             req["created_at"].as_str().unwrap_or(""),
-                            req["completed_at"].as_str()
+                            req["completed_at"].as_str(),
+                            req["user_email"].as_str()
                         ],
                     ) {
                         log::warn!("Failed to import payment_request: {}", e);
@@ -3381,12 +3418,22 @@ impl Ad4mDb {
     pub fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username FROM users WHERE did = ?1")?;
+            .prepare("SELECT username FROM users WHERE did = ?1 AND did != ''")?;
         match stmt.query_row([did], |row| row.get::<_, String>(0)) {
             Ok(username) => Ok(Some(username)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Points the user `username` at the agent `did` (tests build stale or mismatched rows).
+    #[cfg(test)]
+    pub fn set_user_did(&self, username: &str, did: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "UPDATE users SET did = ?2 WHERE username = ?1",
+            params![username, did],
+        )?;
+        Ok(())
     }
 
     pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
@@ -3396,6 +3443,34 @@ impl Ad4mDb {
             params![timestamp, email],
         )?;
         Ok(())
+    }
+
+    /// Records that the managed agent `agent_did` was just active (its account's last_seen).
+    pub fn update_agent_last_seen(&self, agent_did: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE users SET last_seen = ?1 WHERE did = ?2 AND did != ''",
+            params![timestamp, agent_did],
+        )?;
+        Ok(())
+    }
+
+    /// The account that owns the managed agent `agent_did`.
+    pub fn get_user_by_did(&self, agent_did: &str) -> Ad4mDbResult<Option<UserInfo>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT username, did, last_seen FROM users WHERE did = ?1 AND did != ''",
+                [agent_did],
+                |row| {
+                    Ok(UserInfo {
+                        username: row.get(0)?,
+                        did: row.get(1)?,
+                        last_seen: row.get(2).ok(),
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn list_users(&self) -> Ad4mDbResult<Vec<UserInfo>> {
@@ -3518,6 +3593,21 @@ impl Ad4mDb {
         Self::require_user_row(rows, email)
     }
 
+    /// Adds credits to the account that owns the agent `agent_did`; returns the account's email.
+    pub fn add_agent_credits(&self, agent_did: &str, amount: f64) -> Ad4mDbResult<String> {
+        Self::validate_credit_amount(amount)?;
+        let rows = self.conn.execute(
+            "UPDATE users SET remaining_credits = COALESCE(remaining_credits, 0) + ?1 WHERE did = ?2 AND did != ''",
+            params![amount, agent_did],
+        )?;
+        Self::require_user_row(rows, agent_did)?;
+        Ok(self.conn.query_row(
+            "SELECT username FROM users WHERE did = ?1",
+            [agent_did],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn deduct_user_credits(&self, email: &str, amount: f64) -> Ad4mDbResult<()> {
         Self::validate_credit_amount(amount)?;
         let rows = self.conn.execute(
@@ -3551,106 +3641,138 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// Atomically deduct credits AND insert a compute log entry in a single transaction.
-    /// Returns the credits_after value on success.
+    /// [`Ad4mDb::deduct_user_credits_if_available`] for the account that owns the agent
+    /// `agent_did`; returns the account's email.
+    pub fn deduct_agent_credits_if_available(
+        &self,
+        agent_did: &str,
+        amount: f64,
+    ) -> Ad4mDbResult<String> {
+        let email = self
+            .get_username_by_did(agent_did)?
+            .filter(|_| !agent_did.is_empty())
+            .ok_or_else(|| anyhow!("User not found: {}", agent_did))?;
+        self.deduct_user_credits_if_available(&email, amount)?;
+        Ok(email)
+    }
+
+    /// Atomically deduct credits from the account that owns the agent `agent_did` AND insert a
+    /// compute log entry for the agent, in a single transaction.
+    /// Returns the log row id, the credits left, and the account's email (whose hosting info
+    /// changed).
     pub fn deduct_credits_and_log(
         &self,
-        email: &str,
+        agent_did: &str,
         amount: f64,
         operation: &str,
         summary: Option<&str>,
-    ) -> Ad4mDbResult<(i64, f64)> {
+    ) -> Ad4mDbResult<(i64, f64, String)> {
         Self::validate_credit_amount(amount)?;
         let tx = self.conn.unchecked_transaction()?;
 
         // Deduct credits, clamped to 0 (never negative).
         // Any user with credits > 0 is charged; the balance floors at 0.
         let rows = tx.execute(
-            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE username = ?2 AND COALESCE(remaining_credits, 0) > 0",
-            params![amount, email],
+            "UPDATE users SET remaining_credits = MAX(remaining_credits - ?1, 0) WHERE did = ?2 AND did != '' AND COALESCE(remaining_credits, 0) > 0",
+            params![amount, agent_did],
         )?;
         if rows == 0 {
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?1)",
-                [email],
+                "SELECT EXISTS(SELECT 1 FROM users WHERE did = ?1 AND did != '')",
+                [agent_did],
                 |row| row.get(0),
             )?;
             // tx is dropped here → auto-rollback
             if !exists {
-                return Err(anyhow!("User not found: {}", email));
+                return Err(anyhow!("User not found: {}", agent_did));
             }
             return Err(anyhow!("Insufficient compute credits"));
         }
 
         // Read the resulting balance within the same transaction
-        let credits_after: f64 = tx.query_row(
-            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE username = ?1",
-            [email],
-            |row| row.get(0),
+        let (credits_after, email): (f64, String) = tx.query_row(
+            "SELECT COALESCE(remaining_credits, 0), username FROM users WHERE did = ?1",
+            [agent_did],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
         // Insert the audit log entry
         tx.execute(
-            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![email, operation, summary, amount, credits_after],
+            "INSERT INTO compute_log (agent_did, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_did, operation, summary, amount, credits_after],
         )?;
         let row_id = tx.last_insert_rowid();
 
         tx.commit()?;
-        Ok((row_id, credits_after))
+        Ok((row_id, credits_after, email))
+    }
+
+    /// The credits of the account that owns the agent `agent_did`.
+    pub fn get_agent_credits(&self, agent_did: &str) -> Ad4mDbResult<f64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(remaining_credits, 0) FROM users WHERE did = ?1 AND did != ''",
+            [agent_did],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Whether the account that owns the agent `agent_did` computes for free.
+    pub fn get_agent_free_access(&self, agent_did: &str) -> Ad4mDbResult<bool> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(free_access, 0) FROM users WHERE did = ?1 AND did != ''",
+            [agent_did],
+            |row| row.get(0),
+        )?)
     }
 
     // ── Compute activity log ────────────────────────────────────────────
 
-    /// Insert a compute log entry after a billing event.
+    /// Insert a compute log entry after a billing event of the agent `agent_did`.
     pub fn insert_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         operation: &str,
         summary: Option<&str>,
         cost: f64,
         credits_after: f64,
     ) -> Ad4mDbResult<i64> {
         self.conn.execute(
-            "INSERT INTO compute_log (user_email, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![email, operation, summary, cost, credits_after],
+            "INSERT INTO compute_log (agent_did, operation, summary, cost, credits_after) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_did, operation, summary, cost, credits_after],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Query compute log entries for a user, ordered newest-first.
+    /// The columns of a `ComputeLogEntry`. `userEmail` names the account that owns the agent,
+    /// for display; the row itself names the agent by DID.
+    const COMPUTE_LOG_SELECT: &'static str = "SELECT c.id, COALESCE(u.username, c.agent_did), c.timestamp, c.operation, c.summary, c.cost, c.credits_after FROM compute_log c LEFT JOIN users u ON u.did = c.agent_did";
+
+    fn compute_log_entry(row: &rusqlite::Row) -> rusqlite::Result<ComputeLogEntry> {
+        Ok(ComputeLogEntry {
+            id: row.get(0)?,
+            user_email: row.get(1)?,
+            timestamp: row.get(2)?,
+            operation: row.get(3)?,
+            summary: row.get(4)?,
+            cost: row.get(5)?,
+            credits_after: row.get(6)?,
+        })
+    }
+
+    /// Query compute log entries of the agent `agent_did`, ordered newest-first.
     /// If `since` is provided (ISO 8601), only entries after that timestamp are returned.
     pub fn get_compute_log(
         &self,
-        email: &str,
+        agent_did: &str,
         since: Option<&str>,
         limit: i64,
     ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
-        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
-            Some(ts) => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 AND timestamp > ?2 ORDER BY id DESC LIMIT ?3",
-                vec![Box::new(email.to_string()), Box::new(ts.to_string()), Box::new(limit)],
-            ),
-            None => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE user_email = ?1 ORDER BY id DESC LIMIT ?2",
-                vec![Box::new(email.to_string()), Box::new(limit)],
-            ),
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&format!(
+            "{} WHERE c.agent_did = ?1 AND (?2 IS NULL OR c.timestamp > ?2) ORDER BY c.id DESC LIMIT ?3",
+            Self::COMPUTE_LOG_SELECT
+        ))?;
         let entries = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(ComputeLogEntry {
-                    id: row.get(0)?,
-                    user_email: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    operation: row.get(3)?,
-                    summary: row.get(4)?,
-                    cost: row.get(5)?,
-                    credits_after: row.get(6)?,
-                })
-            })?
+            .query_map(params![agent_did, since, limit], Self::compute_log_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries)
     }
@@ -3661,31 +3783,12 @@ impl Ad4mDb {
         since: Option<&str>,
         limit: i64,
     ) -> Ad4mDbResult<Vec<ComputeLogEntry>> {
-        let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match since {
-            Some(ts) => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log WHERE timestamp > ?1 ORDER BY id DESC LIMIT ?2",
-                vec![Box::new(ts.to_string()), Box::new(limit)],
-            ),
-            None => (
-                "SELECT id, user_email, timestamp, operation, summary, cost, credits_after FROM compute_log ORDER BY id DESC LIMIT ?1",
-                vec![Box::new(limit)],
-            ),
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&format!(
+            "{} WHERE (?1 IS NULL OR c.timestamp > ?1) ORDER BY c.id DESC LIMIT ?2",
+            Self::COMPUTE_LOG_SELECT
+        ))?;
         let entries = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                Ok(ComputeLogEntry {
-                    id: row.get(0)?,
-                    user_email: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    operation: row.get(3)?,
-                    summary: row.get(4)?,
-                    cost: row.get(5)?,
-                    credits_after: row.get(6)?,
-                })
-            })?
+            .query_map(params![since, limit], Self::compute_log_entry)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries)
     }
@@ -3785,13 +3888,13 @@ impl Ad4mDb {
 
     pub fn create_payment_request(
         &self,
-        email: &str,
+        agent_did: &str,
         amount_hot: &str,
         action_hash: &str,
     ) -> Ad4mDbResult<i64> {
         let rows = self.conn.execute(
-            "INSERT OR IGNORE INTO payment_requests (user_email, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
-            params![email, amount_hot, action_hash],
+            "INSERT OR IGNORE INTO payment_requests (agent_did, amount_hot, proposal_action_hash) VALUES (?1, ?2, ?3)",
+            params![agent_did, amount_hot, action_hash],
         )?;
         if rows > 0 {
             Ok(self.conn.last_insert_rowid())
@@ -3826,13 +3929,13 @@ impl Ad4mDb {
         action_hash: &str,
     ) -> Ad4mDbResult<Option<PaymentRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
+            "SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE proposal_action_hash = ?1",
         )?;
         let mut requests = stmt
             .query_map(params![action_hash], |row| {
                 Ok(PaymentRequest {
                     id: row.get(0)?,
-                    user_email: row.get(1)?,
+                    agent_did: row.get(1)?,
                     amount_hot: row.get(2)?,
                     proposal_action_hash: row.get(3)?,
                     status: row.get(4)?,
@@ -3846,13 +3949,13 @@ impl Ad4mDb {
 
     pub fn get_pending_payment_requests(&self) -> Ad4mDbResult<Vec<PaymentRequest>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, user_email, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
+            "SELECT id, agent_did, amount_hot, proposal_action_hash, status, created_at, completed_at FROM payment_requests WHERE status = 'pending'",
         )?;
         let requests = stmt
             .query_map([], |row| {
                 Ok(PaymentRequest {
                     id: row.get(0)?,
-                    user_email: row.get(1)?,
+                    agent_did: row.get(1)?,
                     amount_hot: row.get(2)?,
                     proposal_action_hash: row.get(3)?,
                     status: row.get(4)?,
@@ -3945,7 +4048,7 @@ impl Ad4mDb {
     /// Get all payment requests (for transaction history display)
     pub fn get_all_payment_requests(&self) -> Ad4mDbResult<Vec<(String, String, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT user_email, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
+            "SELECT agent_did, amount_hot, status, created_at FROM payment_requests ORDER BY created_at DESC",
         )?;
         let requests = stmt
             .query_map([], |row| {
@@ -3955,13 +4058,17 @@ impl Ad4mDb {
         Ok(requests)
     }
 
-    pub fn get_user_by_hot_wallet_address(&self, address: &str) -> Ad4mDbResult<Option<String>> {
+    /// The account whose mHOT wallet is `address`: its email and its agent's DID.
+    pub fn get_user_by_hot_wallet_address(
+        &self,
+        address: &str,
+    ) -> Ad4mDbResult<Option<(String, String)>> {
         let result = self
             .conn
             .query_row(
-                "SELECT username FROM users WHERE hot_wallet_address = ?1",
+                "SELECT username, did FROM users WHERE hot_wallet_address = ?1",
                 [address],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
         Ok(result)
@@ -4866,6 +4973,41 @@ mod tests {
         db.migrate_notification_owners("did:key:other").unwrap();
         assert_eq!(owners(&db).len(), 2);
         assert_eq!(owners(&db)[1].1, "did:key:main");
+    }
+
+    /// A data folder from a `dev` build before D16 names billing rows by `user_email`. No
+    /// migration exists: start-up stops with a message that says so, not with a missing
+    /// column error from a later statement.
+    #[test]
+    fn a_data_folder_from_before_did_keys_is_refused_with_a_message() {
+        for table in ["compute_log", "payment_requests"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ad4m.db");
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TABLE {table} (id INTEGER PRIMARY KEY, user_email TEXT NOT NULL)"
+                ))
+                .unwrap();
+            let err = Ad4mDb::new(path.to_str().unwrap())
+                .err()
+                .expect(table)
+                .to_string();
+            assert!(
+                err.contains("fresh data folder") && err.contains(table),
+                "{table}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_did_names_one_user() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.add_user("a@test", "did:key:same", "pw").unwrap();
+        assert!(db.add_user("b@test", "did:key:same", "pw").is_err());
+        // Users without an agent are not indexed.
+        db.add_user("c@test", "", "pw").unwrap();
+        db.add_user("d@test", "", "pw").unwrap();
     }
 
     #[test]
@@ -5976,14 +6118,14 @@ mod tests {
 
         // Create payment request
         let id = db
-            .create_payment_request("alice@example.com", "100.5", "uhCAkABC123")
+            .create_payment_request("did:test:alice", "100.5", "uhCAkABC123")
             .unwrap();
         assert!(id > 0);
 
         // Should appear in pending list
         let pending = db.get_pending_payment_requests().unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].user_email, "alice@example.com");
+        assert_eq!(pending[0].agent_did, "did:test:alice");
         assert_eq!(pending[0].amount_hot, "100.5");
         assert_eq!(
             pending[0].proposal_action_hash.as_deref(),
@@ -6024,7 +6166,13 @@ mod tests {
 
         // Should find alice
         let result = db.get_user_by_hot_wallet_address("uhCAkXYZ").unwrap();
-        assert_eq!(result, Some("alice@example.com".to_string()));
+        assert_eq!(
+            result,
+            Some((
+                "alice@example.com".to_string(),
+                "did:test:alice".to_string()
+            ))
+        );
 
         // Bob's wallet not set
         let result = db.get_user_by_hot_wallet_address("uhCAkOther").unwrap();
@@ -6041,11 +6189,11 @@ mod tests {
             .unwrap();
 
         // Create multiple requests
-        db.create_payment_request("alice@example.com", "50", "hash1")
+        db.create_payment_request("did:test:alice", "50", "hash1")
             .unwrap();
-        db.create_payment_request("alice@example.com", "75", "hash2")
+        db.create_payment_request("did:test:alice", "75", "hash2")
             .unwrap();
-        db.create_payment_request("alice@example.com", "100", "hash3")
+        db.create_payment_request("did:test:alice", "100", "hash3")
             .unwrap();
 
         let pending = db.get_pending_payment_requests().unwrap();
