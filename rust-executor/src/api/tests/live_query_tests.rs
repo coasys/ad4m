@@ -13,16 +13,7 @@ use crate::types::RequestContext;
 
 /// A context that holds no capability at all.
 fn no_cap_ctx() -> Arc<RequestContext> {
-    Arc::new(RequestContext {
-        capabilities: Ok(vec![]),
-        auto_permit_cap_requests: false,
-        auth_token: "not-a-token".into(),
-        is_admin_credential: false,
-        user_email: None,
-        user_did: None,
-        cancel_token: None,
-        connection_id: None,
-    })
+    Arc::new(RequestContext::app_for_test(vec![]))
 }
 
 async fn call(method: &str, params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

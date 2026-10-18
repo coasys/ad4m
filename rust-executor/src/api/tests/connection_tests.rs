@@ -9,17 +9,25 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::agent::capabilities::TokenCheck;
+use crate::agent::capabilities::ALL_CAPABILITY;
+use crate::agent::session::{Principal, Session};
+use crate::agent::AgentContext;
 use crate::api::events_ws::build_event_stream_for;
-use crate::api::tests::support::{admin_conn_ctx, admin_ctx, registered_perspective};
+use crate::api::tests::support::{admin_ctx, registered_perspective};
 use crate::api::ws_handler::{build_handler_map, HandlerMap};
 use crate::api::ws_rpc::{serve, Connection};
 use crate::pubsub::{
     get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
 };
+use crate::types::RequestContext;
 
 const DID: &str = "did:key:alice";
 const QUERY: &str = "SELECT ?s WHERE { ?s ?p ?o }";
+
+/// A session whose check never fails: the operator has no token to revoke or expire.
+fn unending() -> Arc<Session> {
+    Arc::new(Session::for_test(Principal::Operator))
+}
 
 struct Socket {
     connection_id: String,
@@ -34,41 +42,35 @@ impl Socket {
     }
 
     async fn open_as(did: &str) -> Self {
-        Self::open_with(did, TokenCheck::new("", false)).await
+        Self::open_with(did, admin_ctx()).await
     }
 
-    /// A socket whose requests check `request_check`; its event stream never ends.
-    async fn open_with(did: &str, request_check: TokenCheck) -> Self {
-        Self::open_full(build_handler_map(), did, request_check).await
+    /// A socket whose requests run in `ctx` (on a new connection) and check its session; its
+    /// event stream never ends.
+    async fn open_with(did: &str, ctx: Arc<RequestContext>) -> Self {
+        Self::open_full(build_handler_map(), did, ctx).await
     }
 
     async fn open_with_handlers(handlers: HandlerMap) -> Self {
-        Self::open_full(handlers, DID, TokenCheck::new("", false)).await
+        Self::open_full(handlers, DID, admin_ctx()).await
     }
 
-    async fn open_full(handlers: HandlerMap, did: &str, request_check: TokenCheck) -> Self {
+    async fn open_full(handlers: HandlerMap, did: &str, ctx: Arc<RequestContext>) -> Self {
         let connection_id = uuid::Uuid::new_v4().to_string();
+        let ctx = Arc::new((*ctx).clone().on_connection(&connection_id));
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        // `admin_ctx()` holds every capability, so this socket can approve apps
-        // and receive SFU events.
+        // The socket holds every capability, so it can approve apps and receive SFU events.
         let events = build_event_stream_for(
-            TokenCheck::new("", false),
+            unending(),
             Some(did.into()),
-            None,
             false,
             true,
             true,
             Some(connection_id.clone()),
         )
         .await;
-        let conn = Connection::new(
-            Arc::new(handlers),
-            admin_conn_ctx(&connection_id),
-            String::new(),
-            request_check,
-            tx,
-        );
+        let conn = Connection::new(Arc::new(handlers), ctx, tx);
         let served = tokio::spawn(serve(conn, UnboundedReceiverStream::new(incoming), events));
         Self {
             connection_id,
@@ -429,13 +431,7 @@ async fn an_event_stream_that_ends_ends_the_session() {
     // of staying open without events while the client keeps it.
     let (tx, _out) = mpsc::unbounded_channel();
     let (_input, incoming) = mpsc::unbounded_channel::<String>();
-    let conn = Connection::new(
-        Arc::new(build_handler_map()),
-        admin_ctx(),
-        String::new(),
-        TokenCheck::new("", false),
-        tx,
-    );
+    let conn = Connection::new(Arc::new(build_handler_map()), admin_ctx(), tx);
     tokio::time::timeout(
         Duration::from_secs(5),
         serve(
@@ -456,8 +452,12 @@ async fn a_token_that_expired_gets_401_and_ends_the_connection() {
         .unwrap()
         .as_secs()
         - 3600;
-    let expired = TokenCheck::with_expiry("expired-jwt", an_hour_ago);
-    let mut socket = Socket::open_with(DID, expired).await;
+    let expired = RequestContext::for_session(
+        Session::for_test(Principal::Agent(AgentContext::main_agent()))
+            .with_caps(vec![ALL_CAPABILITY.clone()])
+            .expiring_at(an_hour_ago),
+    );
+    let mut socket = Socket::open_with(DID, Arc::new(expired)).await;
     socket.send(json!({ "id": "1", "type": "agent.status" }));
     assert_eq!(socket.reply("1").await["error"]["code"], 401);
     tokio::time::timeout(Duration::from_secs(5), &mut socket.served)

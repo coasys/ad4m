@@ -256,7 +256,7 @@ impl Ad4mMcpHandler {
     }
 
     /// The agent a read tool answers for: the session's agent, or — with no
-    /// token on a node without an admin credential, the local-trust mode
+    /// token on an executor without an admin credential, the local-trust mode
     /// `get_readable_perspective` allows — the main agent.
     async fn reading_agent(&self) -> Result<AgentContext, String> {
         match self.get_agent_context().await {
