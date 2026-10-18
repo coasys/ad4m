@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, perspective_query_capability, Capability, TokenCheck,
+    get_user_default_capabilities, perspective_query_capability, Capability,
     AGENT_UPDATE_CAPABILITY, ALL_CAPABILITY,
 };
 use crate::agent::AgentService;
@@ -45,42 +45,27 @@ fn setup() {
     AgentService::init_global_test_instance();
 }
 
-/// Creates the wallet key a managed user gets at sign-up; returns the DID.
+/// Creates the user and its managed agent, as sign-up does; returns the agent's DID.
 fn user(email: &str) -> String {
-    AgentService::ensure_user_key_exists(email).expect("user key");
-    AgentService::get_user_did_by_email(email).expect("user did")
-}
-
-fn context(
-    capabilities: Vec<Capability>,
-    is_admin_credential: bool,
-    user_email: Option<&str>,
-) -> RequestContext {
-    RequestContext {
-        capabilities: Ok(capabilities),
-        auto_permit_cap_requests: false,
-        auth_token: String::new(),
-        is_admin_credential,
-        user_email: user_email.map(str::to_string),
-        user_did: user_email.map(|email| AgentService::get_user_did_by_email(email).unwrap()),
-        cancel_token: None,
-        connection_id: None,
-    }
+    crate::test_utils::create_test_user(email)
 }
 
 /// A managed user's session.
 fn user_ctx(email: &str) -> RequestContext {
-    context(get_user_default_capabilities(), false, Some(email))
+    RequestContext::user_for_test(
+        &AgentService::did_for_email(email).unwrap(),
+        get_user_default_capabilities(),
+    )
 }
 
 /// The launcher's admin credential.
 fn admin_ctx() -> RequestContext {
-    context(vec![ALL_CAPABILITY.clone()], true, None)
+    RequestContext::operator_for_test()
 }
 
 /// A main-agent app token that holds only `capabilities`.
 fn app_ctx(capabilities: Vec<Capability>) -> RequestContext {
-    context(capabilities, false, None)
+    RequestContext::app_for_test(capabilities)
 }
 
 /// Perspectives put in the global registry for one test. Drop takes them out
@@ -163,12 +148,14 @@ fn main_agent_did() -> String {
 /// main agent for `None`.
 fn owner(email: Option<&str>) -> String {
     email.map_or_else(main_agent_did, |email| {
-        AgentService::get_user_did_by_email(email).expect("user did")
+        AgentService::did_for_email(email).expect("user did")
     })
 }
 
 /// Writes a notification row directly, as any write path could have left it.
 fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> String {
+    // Resolved before taking the database: `owner` reads the database itself.
+    let owner_did = owner(user_email);
     Ad4mDb::with_global_instance(|db| {
         db.add_notification(
             NotificationInput {
@@ -181,7 +168,7 @@ fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> S
                 webhook_url: "https://webhook.test".to_string(),
                 webhook_auth: "secret".to_string(),
             },
-            &owner(user_email),
+            &owner_did,
             granted,
         )
     })
@@ -643,18 +630,6 @@ async fn each_caller_lists_only_its_own_notifications() {
     );
 }
 
-// A managed user's session without a DID must not fall back to the main agent's.
-#[tokio::test]
-async fn a_user_session_without_a_did_is_refused() {
-    setup();
-    let mut ctx = context(get_user_default_capabilities(), false, None);
-    ctx.user_email = Some("nobody@notifications.test".to_string());
-    let err = call("runtime.notifications", json!({}), ctx)
-        .await
-        .expect_err("no DID, no notifications");
-    assert_eq!(err.code, 403);
-}
-
 // `runtime.importData` stores a notification's `granted` and `owner_did` as they are in the
 // file. With AGENT_UPDATE alone, Alice could import a granted notification on Bob's
 // perspective and receive Bob's links at her webhook.
@@ -751,12 +726,10 @@ async fn triggered_event_reaches_only_the_owners_stream() {
     setup();
     let alice_did = user(ALICE);
     user(BOB);
-    let check = || TokenCheck::new("", true);
-    let mut alice =
-        build_event_stream(check(), Some(ALICE.to_string()), false, false, false, None).await;
-    let mut bob =
-        build_event_stream(check(), Some(BOB.to_string()), false, false, false, None).await;
-    let mut main = build_event_stream(check(), None, true, true, true, None).await;
+    // Only the stream's owner filter decides here: no session has a token that ends.
+    let mut alice = build_event_stream(user_ctx(ALICE).session, false, false, false, None).await;
+    let mut bob = build_event_stream(user_ctx(BOB).session, false, false, false, None).await;
+    let mut main = build_event_stream(admin_ctx().session, true, true, true, None).await;
     let pubsub = get_global_pubsub().await;
 
     pubsub

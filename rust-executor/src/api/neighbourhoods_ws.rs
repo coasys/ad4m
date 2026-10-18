@@ -16,13 +16,13 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 async fn join_neighbourhood(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: JoinNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let handle = install_neighbourhood_with_context(body.url, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -34,13 +34,13 @@ async fn publish_neighbourhood(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
         &body.perspective_uuid,
         body.link_language,
@@ -97,14 +97,14 @@ fn build_signed_perspective(
 }
 
 async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
     let body: BroadcastRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -120,14 +120,14 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
     let body: SignalRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -143,14 +143,14 @@ async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
     let body: SetOnlineStatusRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -169,11 +169,11 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 /// here, or `null`. Lets a client change part of its status without
 /// replacing the rest.
 async fn own_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let did = crate::agent::did_for_context(&agent_context)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     let perspective = get_perspective(&uuid)
@@ -185,7 +185,7 @@ async fn own_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
@@ -196,7 +196,7 @@ async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
@@ -212,11 +212,11 @@ async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 }
 
 async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
-    let agent_context = AgentContext::from_request(&ctx);
+    let agent_context = ctx.acts_as();
     let current_user_did = crate::agent::did_for_context(&agent_context)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
