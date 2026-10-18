@@ -686,7 +686,7 @@ async fn apply_template_records_the_meta_it_published() {
             "sourceLanguageHash": languages.template_address,
             "templateData": json!({ "uid": "recorded meta" }).to_string(),
         }),
-        user_session(&user.email),
+        user_session(&user.did),
     )
     .await
     .expect("a user may template a link language");
@@ -716,7 +716,7 @@ async fn apply_template_records_the_meta_it_published() {
     let meta = call(
         "language.meta",
         json!({ "address": address }),
-        user_session(&user.email),
+        user_session(&user.did),
     )
     .await;
     languages

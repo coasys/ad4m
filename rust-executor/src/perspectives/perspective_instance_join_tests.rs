@@ -97,10 +97,9 @@ async fn a_user_joining_does_not_wait_for_the_link_language() {
     crate::test_utils::setup_agent();
     Ad4mDb::init_global_instance(":memory:").unwrap();
     let email = format!("joiner.{}@example.org", Uuid::new_v4());
-    AgentService::ensure_user_key_exists(&email).unwrap();
-    let did = AgentService::get_user_did_by_email(&email).unwrap();
+    let did = crate::test_utils::create_test_user(&email);
 
-    join_returns_before_the_link_language(AgentContext::for_user_email(email.clone()), did).await;
+    join_returns_before_the_link_language(AgentContext::managed(did.clone()), did).await;
 
     let profile = AgentService::with_global_instance(|a| a.user_profile_path(&email)).unwrap();
     if let Some(user_dir) = profile.parent() {
