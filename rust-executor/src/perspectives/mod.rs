@@ -62,6 +62,18 @@ lazy_static! {
         RwLock::new(HashMap::new());
 }
 
+#[cfg(test)]
+type RoutingCacheWriteHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test seam: `register_link_language_perspective` runs this right before
+    /// it writes the routing cache, so a test can run a concurrent handle
+    /// change at exactly that point. Set per task, so only the task under test
+    /// runs it.
+    static BEFORE_ROUTING_CACHE_WRITE: RoutingCacheWriteHook;
+}
+
 /// Set the application data path for perspective storage
 ///
 /// This must be called before creating perspectives to enable file-based storage.
@@ -504,6 +516,10 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
 
 /// Register a mapping from link_language address to PerspectiveHandle for fast signal routing
 pub fn register_link_language_perspective(language_address: String, handle: PerspectiveHandle) {
+    #[cfg(test)]
+    if let Ok(hook) = BEFORE_ROUTING_CACHE_WRITE.try_with(|hook| hook.clone()) {
+        hook();
+    }
     LINK_LANG_TO_PERSPECTIVE_HANDLE
         .write()
         .unwrap()
@@ -1035,6 +1051,134 @@ mod tests {
             "ad4m://flow/proposal/1"
         )
         .expect("is_fired"));
+    }
+
+    /// A neighbourhood perspective on `link_language`, owned by `owners`.
+    /// Registered without background tasks: the link language's install would
+    /// write the routing cache too.
+    fn neighbourhood_perspective(
+        link_language: &str,
+        owners: Option<Vec<String>>,
+    ) -> PerspectiveInstance {
+        let mut handle = PerspectiveHandle::new_from_name(link_language.to_string());
+        handle.owners = owners;
+        handle.neighbourhood = Some(crate::types::DecoratedNeighbourhoodExpression {
+            data: crate::types::domain::Neighbourhood {
+                link_language: link_language.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
+        register_perspective(
+            handle.uuid.clone(),
+            PerspectiveInstance::new(handle.clone(), None),
+        );
+        get_perspective(&handle.uuid).unwrap()
+    }
+
+    /// A hook for the task under test, plus a second task that adds the owner
+    /// `did:test:b` through `update_perspective_with` once the hook starts it.
+    /// The hook runs where the task under test writes the routing cache. If
+    /// that task no longer holds the handle lock there, the hook waits until
+    /// the second change has finished, cache write included, so the first
+    /// task's cache write comes last. If it still holds the lock, the second
+    /// change waits for that lock and the hook returns at once.
+    fn add_b_at_the_cache_write(
+        instance: &PerspectiveInstance,
+    ) -> (RoutingCacheWriteHook, tokio::task::JoinHandle<()>) {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let start_b = Arc::new(Notify::new());
+        let b_done = Arc::new(Notify::new());
+        let b = tokio::spawn({
+            let (uuid, start_b, b_done) = (instance.uuid.clone(), start_b.clone(), b_done.clone());
+            async move {
+                start_b.notified().await;
+                update_perspective_with(&uuid, |h| h.add_owner("did:test:b"))
+                    .await
+                    .unwrap();
+                b_done.notify_one();
+            }
+        });
+        let instance = instance.clone();
+        let hook: RoutingCacheWriteHook = Arc::new(move || {
+            let lock_released = instance.persisted.try_lock().is_ok();
+            start_b.notify_one();
+            if lock_released {
+                let b_done = b_done.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(b_done.notified())
+                });
+            }
+        });
+        (hook, b)
+    }
+
+    /// The owners in the routing cache for `link_language`; removes the cache
+    /// entry and the perspective so later tests start clean.
+    fn cached_owners_and_clean_up(link_language: &str, uuid: &str) -> Vec<String> {
+        let cached = cached_perspective_handle(link_language);
+        LINK_LANG_TO_PERSPECTIVE_HANDLE
+            .write()
+            .unwrap()
+            .remove(link_language);
+        unregister_perspective(uuid);
+        cached.and_then(|h| h.owners).unwrap_or_default()
+    }
+
+    /// Two concurrent changes to a neighbourhood's handle: the routing cache
+    /// must end with both. A's cache write coming after B's would put back A's
+    /// older copy, and B would get no broadcast signals.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_handle_changes_keep_every_owner_in_the_routing_cache() {
+        setup();
+        let link_language = "routing-cache-concurrent-changes";
+        let instance = neighbourhood_perspective(link_language, None);
+        let (hook, b) = add_b_at_the_cache_write(&instance);
+
+        BEFORE_ROUTING_CACHE_WRITE
+            .scope(
+                hook,
+                update_perspective_with(&instance.uuid, |h| h.add_owner("did:test:a")),
+            )
+            .await
+            .unwrap();
+        b.await.unwrap();
+
+        let owners = cached_owners_and_clean_up(link_language, &instance.uuid);
+        assert!(owners.contains(&"did:test:a".to_string()), "{owners:?}");
+        assert!(
+            owners.contains(&"did:test:b".to_string()),
+            "the routing cache lost B: {owners:?}"
+        );
+    }
+
+    /// A signal lookup that fills the routing cache on a miss, while a handle
+    /// change adds an owner: the lookup's copy must not replace the newer one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_routing_cache_miss_does_not_overwrite_a_concurrent_owner() {
+        setup();
+        let link_language = "routing-cache-miss-during-change";
+        let instance =
+            neighbourhood_perspective(link_language, Some(vec!["did:test:a".to_string()]));
+        let (hook, b) = add_b_at_the_cache_write(&instance);
+
+        let found = BEFORE_ROUTING_CACHE_WRITE
+            .scope(
+                hook,
+                perspective_by_link_language(link_language.to_string()),
+            )
+            .await;
+        b.await.unwrap();
+
+        let owners = cached_owners_and_clean_up(link_language, &instance.uuid);
+        assert_eq!(found.map(|p| p.uuid), Some(instance.uuid.clone()));
+        assert!(
+            owners.contains(&"did:test:b".to_string()),
+            "the routing cache lost B: {owners:?}"
+        );
     }
 
     // Migration tests have been moved to src/perspectives/migration.rs
