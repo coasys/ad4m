@@ -298,6 +298,7 @@ impl Session {
     pub(crate) fn may_receive(&self, event: &Event) -> bool {
         let in_audience = match &event.audience {
             Audience::Everyone => true,
+            Audience::Operator => self.is_operator(),
             Audience::Dids(dids) => self
                 .acts_as_did()
                 .is_some_and(|did| dids.iter().any(|d| d == did)),

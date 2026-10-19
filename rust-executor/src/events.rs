@@ -187,6 +187,9 @@ pub enum Audience {
     /// The sessions that act as one of these DIDs (`Session::acts_as_did`). A grant acts as
     /// its agent; the operator acts as the main agent, which it owns. Empty: nobody.
     Dids(Vec<String>),
+    /// The operator's sessions only: for what only the operator may read, such as the main
+    /// agent's state on a perspective the main agent does not own.
+    Operator,
 }
 
 impl Audience {

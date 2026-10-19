@@ -895,10 +895,12 @@ mod audience_matrix_tests {
                 cases.push((name.to_string(), event(topic, audience), to));
             }
         }
-        // A flow state change goes to the agent whose bookkeeping moved, owner or not
-        // (`matches_flow_state_agent` before): never to a co-owner or another user of this
-        // executor. It needs the query capability on its perspective, as
-        // `perspective.flowStates` does: the P reader gets the main agent's on P only.
+        // A flow state change goes to the agent whose bookkeeping moved, when it reads the
+        // perspective: never to a co-owner or another user of this executor. It needs the
+        // query capability on its perspective, as `perspective.flowStates` does: the P
+        // reader gets the main agent's on P only. The main agent's state on a perspective it
+        // does not read (the operator voted there) goes to the operator alone, the only
+        // session `perspective.flowStates` lets read it. Another non-reader's goes nowhere.
         {
             use crate::perspectives::flow_instance::replica_state::{
                 state_changed_event, FlowStateChangedEvent,
@@ -912,18 +914,23 @@ mod audience_matrix_tests {
                 fired_proposals: vec![],
                 caught_up: false,
             };
-            for (name, agent, on, to) in [
-                ("of-a", A, Q, vec!["user A"]),
-                ("of-b", B, Q, vec!["user B"]),
+            let a_and_b = vec![A.to_string(), B.to_string()];
+            let main_only = vec![main.clone()];
+            for (name, agent, on, readers, to) in [
+                ("of-a", A, Q, &a_and_b, vec!["user A"]),
+                ("of-b", B, Q, &a_and_b, vec!["user B"]),
                 (
                     "of-main-on-p",
                     &main,
                     P,
+                    &main_only,
                     [main_agent.as_slice(), &["P reader"]].concat(),
                 ),
-                ("of-main-on-q", &main, Q, main_agent.to_vec()),
+                ("of-main-on-q", &main, Q, &main_only, main_agent.to_vec()),
+                ("of-main-not-reading", &main, Q, &a_and_b, vec!["operator"]),
+                ("of-a-not-reading", A, Q, &main_only, vec![]),
             ] {
-                let e = state_changed_event(&change(agent, on));
+                let e = state_changed_event(&change(agent, on), readers);
                 assert_eq!(e.topic, Topic::FlowStateChanged);
                 assert_eq!(e.perspective.as_deref(), Some(on));
                 cases.push((format!("flow-state-changed-{name}"), e, to));
