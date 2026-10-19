@@ -18,7 +18,7 @@ migration still live in `db.rs`.
 
 - `tasks.agent_did` is the DID of the managed agent whose session created the task (D16).
   `NULL` is a task of the main agent: admin credential, app token on the main agent, the
-  executor's own interpretation tasks.
+  executor's own interpretation tasks, and rows from before the column existed.
 - A session reaches only its agent's tasks (`Guard::Owns { owner: Task }` in
   `api/guards.rs`; `ai.tasks` lists them): a user its own, a grant on the main agent the
   operator tasks. The operator reaches every task. Another agent's task is 404.
