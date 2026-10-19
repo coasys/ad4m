@@ -12,6 +12,7 @@
  */
 
 import { execSync, spawn } from "node:child_process";
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const DEFAULT_IFACE = process.env.WT_NET_IFACE ?? "lo";
@@ -65,7 +66,9 @@ export interface NetLease {
    * priomap keeps everything else in the three plain bands, so other jobs on
    * the host are not touched. Replaces this lease's previous impairment.
    */
-  impair(ports: number[], opts: NetemOptions): void;
+  impair(ports: (number | SocketPort)[], opts: NetemOptions): void;
+  /** Add `ports` to the current impairment, without lifting it for the others meanwhile. */
+  extend(ports: (number | SocketPort)[]): void;
   /** Remove the impairment; the lease stays held. */
   clear(): void;
   /** Remove the impairment and let the next run have the interface. */
@@ -126,6 +129,16 @@ export async function leaseNet(
   const held = () => {
     if (ended) throw new Error(`the network lease on ${iface} has ended`);
   };
+  /** Send traffic to or from `ports` through the netem band; a `SocketPort` matches its protocol too. */
+  const filter = (ports: (number | SocketPort)[]) => {
+    for (const entry of ports) {
+      const { port, protocol } = typeof entry === "number" ? { port: entry, protocol: undefined } : entry;
+      const match = protocol ? `match ip protocol ${protocol === "tcp" ? 6 : 17} 0xff ` : "";
+      for (const field of ["sport", "dport"]) {
+        tc(`filter add dev ${iface} parent ${HANDLE} protocol ip prio 1 u32 ${match}match ip ${field} ${port} 0xffff flowid ${HANDLE}4`);
+      }
+    }
+  };
   const clear = () => {
     try {
       if (tc(`qdisc show dev ${iface}`).includes(`qdisc prio ${HANDLE} root`)) tc(`qdisc del dev ${iface} root`);
@@ -144,14 +157,19 @@ export async function leaseNet(
       try {
         tc(`qdisc add dev ${iface} root handle ${HANDLE} prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1`);
         tc(`qdisc add dev ${iface} parent ${HANDLE}4 handle 40: netem ${netem.join(" ")}`);
-        for (const port of ports) {
-          for (const field of ["sport", "dport"]) {
-            tc(`filter add dev ${iface} parent ${HANDLE} protocol ip prio 1 u32 match ip ${field} ${port} 0xffff flowid ${HANDLE}4`);
-          }
-        }
+        filter(ports);
       } catch (e) {
         clear();
         throw new Error(`could not impair ports ${ports.join(", ")} on ${iface}: ${(e as Error).message}`);
+      }
+    },
+    extend(ports) {
+      held();
+      try {
+        filter(ports);
+      } catch (e) {
+        clear();
+        throw new Error(`could not add ports ${ports.join(", ")} to the impairment on ${iface}: ${(e as Error).message}`);
       }
     },
     clear,
@@ -163,6 +181,52 @@ export async function leaseNet(
       await exited;
     },
   };
+}
+
+/**
+ * The local ports of every TCP and UDP socket process `pid` holds open: its
+ * connections to the executor and the sockets its WebRTC stack gathered on.
+ * Impairing these cuts that one process off, as its own network failing does,
+ * and leaves every other process on the loopback alone. Linux only (/proc).
+ */
+export function socketPorts(pid: number): SocketPort[] {
+  const inodes = new Set<string>();
+  for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+    try {
+      const target = readlinkSync(`/proc/${pid}/fd/${fd}`);
+      if (target.startsWith("socket:[")) inodes.add(target.slice(8, -1));
+    } catch {
+      /* closed meanwhile */
+    }
+  }
+  const ports = new Map<string, SocketPort>();
+  for (const table of ["tcp", "tcp6", "udp", "udp6"]) {
+    let lines: string[];
+    try {
+      lines = readFileSync(`/proc/${pid}/net/${table}`, "utf8").trim().split("\n").slice(1);
+    } catch {
+      continue;
+    }
+    const protocol = table.startsWith("tcp") ? "tcp" : "udp";
+    for (const line of lines) {
+      // sl local_address rem_address st tx:rx tr:when retrnsmt uid timeout inode
+      const fields = line.trim().split(/\s+/);
+      if (!inodes.has(fields[9])) continue;
+      const port = parseInt(fields[1].split(":").pop()!, 16);
+      if (port > 0) ports.set(`${protocol}/${port}`, { port, protocol });
+    }
+  }
+  return [...ports.values()].sort((a, b) => a.port - b.port);
+}
+
+/**
+ * One local socket's port and protocol. TCP and UDP number their ports
+ * separately, so an impairment given the protocol cuts this socket's traffic
+ * and not another process's socket that happens to have the same number.
+ */
+export interface SocketPort {
+  port: number;
+  protocol: "tcp" | "udp";
 }
 
 const PARTITION_CHAIN = "WT_PARTITION";

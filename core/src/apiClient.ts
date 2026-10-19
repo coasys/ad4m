@@ -59,6 +59,12 @@ const MAX_RECONNECT_DELAY_MS = 30_000
 const WATCH_RETRY_DELAY_MS = 1_000
 const MAX_WATCH_RETRIES = 5
 
+/** An open socket sends a ping this often, and must deliver some message
+ *  (the pong will do) before the next one goes out. After a network switch a
+ *  socket can stay OPEN for minutes with no close event, since no FIN or RST
+ *  ever arrives; this notices it within two intervals. */
+const PING_INTERVAL_MS = 10_000
+
 let _idCounter = 0
 function nextId(): string {
     return String(++_idCounter)
@@ -133,6 +139,8 @@ export class ApiClient {
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
+    /** True once the open socket delivered a message since the last ping. */
+    private _wsHeard = true
     // The executor sends a socket only the events it asked for (`events.watch`).
     // What the executor has for the open socket, as sent; a new socket has `{}`.
     private _watching: string | null = '{}'
@@ -178,6 +186,7 @@ export class ApiClient {
         this._wsOpen.catch(() => {})
 
         ws.onmessage = (event) => {
+            if (this._ws === ws) this._wsHeard = true
             let parsed: Record<string, unknown>
             try { parsed = JSON.parse(event.data) } catch (e) {
                 console.error('Error parsing WebSocket data:', e)
@@ -219,7 +228,7 @@ export class ApiClient {
         // A socket closed by _closeWs() must not take the calls queued for its successor.
         if (this._ws !== ws) return
         this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
-        this._startPing()
+        this._startPing(ws)
         // The watch goes out before the queued calls, so the events they cause reach listeners.
         this._watching = '{}'
         this._watchRetries = 0
@@ -270,13 +279,27 @@ export class ApiClient {
         for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }
 
-    private _startPing(): void {
+    private _startPing(ws: WebSocket): void {
         this._stopPing()
+        this._wsHeard = true
         this._wsPingTimer = setInterval(() => {
-            if (this._ws?.readyState === 1 /* OPEN */) {
-                this._ws.send(JSON.stringify({ type: 'ping' }))
+            if (this._ws !== ws) return
+            if (!this._wsHeard) {
+                this._dropSilentSocket(ws)
+                return
             }
-        }, 30_000)
+            this._wsHeard = false
+            ws.send(JSON.stringify({ type: 'ping' }))
+        }, PING_INTERVAL_MS)
+    }
+
+    /** The socket answered nothing for a whole ping interval: treat it as
+     *  closed now. Its close event can take minutes on a dead connection,
+     *  since the close frame gets no answer either; `_onClose` ignores it then. */
+    private _dropSilentSocket(ws: WebSocket): void {
+        console.warn(`WebSocket silent for ${PING_INTERVAL_MS} ms after a ping; reconnecting`)
+        this._onClose(ws)
+        ws.close()
     }
 
     private _stopPing(): void {
