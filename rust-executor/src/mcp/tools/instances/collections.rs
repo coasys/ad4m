@@ -307,8 +307,8 @@ pub(crate) async fn add_member(
     Ok(true)
 }
 
-/// Remove `item` from `collection` of the instance at `base_uri` through the
-/// class's remover (`update_subject`), in whichever spelling it is stored
+/// Remove `item` (trimmed) from `collection` of the instance at `base_uri`
+/// through the class's remover (`update_subject`), in whichever spelling it is stored
 /// (see [`target_matches`]). Returns how many membership links went, read
 /// back after the remover ran, and every member stored before, for the
 /// caller to explain a miss. The error is the message to return.
@@ -320,6 +320,7 @@ pub(crate) async fn remove_member(
     item: &str,
     agent_context: &AgentContext,
 ) -> Result<(usize, Vec<String>), String> {
+    let item = item.trim();
     let encoded = link_target(item);
     let holding = |perspective: &PerspectiveInstance| {
         let perspective = perspective.clone();
