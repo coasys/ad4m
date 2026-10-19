@@ -9182,9 +9182,8 @@ async fn a_revocation_tombstone_is_reachable_through_links() {
 }
 
 /// A `__links` row carries the link's status, spelled as `perspective.get`
-/// spells it. A consumer that must tell its own `Local` bookkeeping from a
-/// peer's `Shared` link reads it here: the flow engine's fired mark is one
-/// (#1103), and the raw `get_links` read it replaced carried the status.
+/// spells it, so a row is the whole `LinkExpression` (`LinkRow.status`) and
+/// not one missing a field (#1103).
 #[tokio::test]
 async fn a_links_row_carries_the_status_of_its_link() {
     let store = SparqlStore::new(None).unwrap();

@@ -182,10 +182,11 @@ pub(super) fn resolve_link_keys(
 /// "invalid": true}`: `LinkExpression::compute_proof_valid` returns `false`
 /// for it.
 ///
-/// Each row carries the link's `status` (`"SHARED"` / `"LOCAL"`), so a
-/// consumer that must tell its own `Local` bookkeeping from a peer's `Shared`
-/// link (the flow engine's fired mark) reads it here instead of from a second
-/// raw read.
+/// Each row carries the link's `status` (`"SHARED"` / `"LOCAL"`), so a row is
+/// the whole [`LinkExpression`](crate::types::LinkExpression) that
+/// `perspective.get` returns (`LinkRow.status` in the SDK), not one missing a
+/// field. It is not signed: it says where this executor holds the link, not who
+/// wrote it.
 ///
 /// `data.target` is the target the link was signed over (the store's
 /// `wireTarget` annotation when a literal was written in another encoding

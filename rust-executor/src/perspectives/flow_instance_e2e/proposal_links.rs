@@ -79,10 +79,9 @@ async fn contested_settled_proposal() -> (Fixture, String) {
 /// The fold reads a proposal's links as the store holds them, and the atom
 /// rules (`signed_by`) pick out the proposer's own verified words. This pins
 /// what that read must keep: every link whose signature verifies, from every
-/// author and on every predicate the proposal carries, with the status that
-/// tells this replica's `Local` fired mark apart. Checked against a raw
+/// author and on every predicate the proposal carries. Checked against a raw
 /// `get_links` read of the same proposal, and through what the fold derives
-/// from it: our proposal, our and Bob's votes, and the mark the pass wrote.
+/// from it: our proposal and our and Bob's votes.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_proposal_read_keeps_every_verified_link_the_atom_rules_read() {
     let (f, proposal) = contested_settled_proposal().await;
@@ -109,13 +108,6 @@ async fn the_proposal_read_keeps_every_verified_link_the_atom_rules_read() {
         sorted_keys(&verified_raw),
         "the read keeps every verified link, field for field"
     );
-    assert!(
-        verified_read.iter().any(
-            |l| l.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE)
-                && l.status == Some(LinkStatus::Local)
-        ),
-        "the pass's own mark is read with its Local status: {verified_read:?}"
-    );
 
     let atoms = read_set.atoms();
     assert_eq!(atoms.len(), 1, "{atoms:?}");
@@ -134,10 +126,6 @@ async fn the_proposal_read_keeps_every_verified_link_the_atom_rules_read() {
     let mut expected = vec![me.as_str(), bob_vote.data.target.as_str()];
     expected.sort();
     assert_eq!(voters, expected, "Carol's forged vote adds no voter");
-    assert!(
-        read_set.marked_proposals().contains(&proposal),
-        "the pass's own mark reads as this replica's mark"
-    );
     assert_eq!(f.derived().await.state, "scoped");
 }
 

@@ -445,9 +445,10 @@ fn earliest_proposer_timestamp(
 
 /// Every predicate a proposal's links are read on, once each: each
 /// `properties[].path` of the `FlowTransitionProposal` SDNA, plus the votes.
-/// The class declares those as well (`acceptedBy`); they are added only when it
-/// does not, since a predicate listed twice would read each of its links twice.
-/// A property the class gains is read.
+/// The class declares the votes as well (`acceptedBy`); they are added only
+/// when it does not, since a predicate listed twice would read each of its
+/// links twice. A property the class gains is read. The legacy fired mark
+/// ([`LEGACY_RESOLVED_AS_PREDICATE`]) is not: since #1424 a mark is no link.
 static PROPOSAL_LINK_PREDICATES: LazyLock<Vec<String>> =
     LazyLock::new(|| link_predicates_of(FLOW_TRANSITION_PROPOSAL_SDNA));
 
@@ -538,6 +539,10 @@ mod tests {
         let read = link_predicates_of(FLOW_TRANSITION_PROPOSAL_SDNA);
         assert_eq!(*PROPOSAL_LINK_PREDICATES, read);
         assert!(read.iter().any(|p| p == "ad4m://flow/rationale"));
+        assert!(
+            !read.iter().any(|p| p == LEGACY_RESOLVED_AS_PREDICATE),
+            "the legacy fired mark (#1424) is not read: {read:?}"
+        );
         let mut once = read.clone();
         once.sort();
         once.dedup();
