@@ -2540,6 +2540,102 @@ async fn a_delete_through_an_abstract_class_keeps_the_records_other_classes() {
     assert!(links_of(&uuid, None, None, Some(&only)).await.is_empty());
 }
 
+/// An add writes the item trimmed, as it checks membership: a padded URI
+/// is stored as the URI, and adding it again is a no-op.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_to_collection_writes_the_trimmed_item() {
+    let (handler, uuid, _guard) = abstract_setup().await;
+    let thread = create_in(&handler, &uuid, "Thread", None, &[("body", json!("hello"))]).await;
+    let add = |item: &str| InstanceAddToCollectionParams {
+        perspective_id: uuid.clone(),
+        class_name: "Thread".into(),
+        base_uri: thread.clone(),
+        collection: "replies".into(),
+        item_uri: item.into(),
+    };
+    let added = parse(&handler.instance_add_to_collection(Parameters(add(" ad4m://obj/r1 "))).await);
+    assert_eq!(added["success"], true, "{added}");
+    assert_eq!(
+        links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None).await,
+        vec![format!("{thread} flux://thread_reply ad4m://obj/r1")]
+    );
+    let again = parse(&handler.instance_add_to_collection(Parameters(add("ad4m://obj/r1"))).await);
+    assert_eq!(again["success"], true, "{again}");
+    assert_eq!(
+        links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None)
+            .await
+            .len(),
+        1
+    );
+}
+
+/// A record that keeps another class keeps every outbound link the deleted
+/// classes do not declare: its own children and links another app wrote
+/// stay with it. Only the deleted classes' links go.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_through_an_abstract_class_leaves_links_its_classes_do_not_declare() {
+    let (handler, uuid, _guard) = abstract_setup().await;
+    let both = create_in(&handler, &uuid, "Thread", None, &[("body", json!("hello"))]).await;
+    create_in(
+        &handler,
+        &uuid,
+        "Tagged",
+        Some(&both),
+        &[("label", json!("kept"))],
+    )
+    .await;
+    for (predicate, target) in [
+        ("flux://thread_reply", "ad4m://obj/reply"),
+        ("ad4m://has_child", "ad4m://obj/child"),
+        ("app://other#note", "literal://string:other%20app"),
+    ] {
+        let linked = parse(
+            &handler
+                .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                    perspective_id: uuid.clone(),
+                    source: both.clone(),
+                    predicate: predicate.into(),
+                    target: target.into(),
+                }))
+                .await,
+        );
+        assert_eq!(linked["success"], true, "{linked}");
+    }
+
+    let removed = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Readable".into(),
+                base_uri: both.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+
+    for predicate in ["flux://thread_body", "flux://thread_reply"] {
+        assert!(
+            links_of(&uuid, Some(&both), Some(predicate), None)
+                .await
+                .is_empty(),
+            "{predicate} is Thread's and goes"
+        );
+    }
+    for predicate in ["ad4m://has_child", "app://other#note"] {
+        assert_eq!(
+            links_of(&uuid, Some(&both), Some(predicate), None)
+                .await
+                .len(),
+            1,
+            "{predicate} is no deleted class's and stays"
+        );
+    }
+    assert_eq!(
+        get_in(&handler, &uuid, "Tagged", &both).await["label"],
+        "kept"
+    );
+}
+
 // ── Reading through TextContent (#1446) ─────────────────────────────────────
 
 /// A class that aliases a property of another name to TextContent's `text`,
@@ -2663,6 +2759,29 @@ async fn a_transcript_reads_through_text_content() {
         !all.contains("a note") && !all.contains("notes"),
         "the text, not the identity property:\n{all}"
     );
+}
+
+/// `member_links` through a built-in finds a class's links at the property
+/// it aliases to the built-in's name: aliases key a built-in by its name
+/// (`TextContent`), not by the URI it is written through.
+#[tokio::test(flavor = "multi_thread")]
+async fn member_links_through_a_builtin_follow_its_alias() {
+    let (handler, uuid, _guard) = setup_with(&[("Note", ALIASED_NOTE_SDNA)], false).await;
+    let note = create_in(
+        &handler,
+        &uuid,
+        "Note",
+        None,
+        &[("title", json!("a note")), ("content", json!("hello"))],
+    )
+    .await;
+    let links = crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .member_links("ad4m://TextContent", &note, "text")
+        .await
+        .unwrap();
+    let predicates: Vec<_> = links.iter().map(|l| l.data.predicate.clone()).collect();
+    assert_eq!(predicates, vec![Some("app://content".to_string())]);
 }
 
 /// The transcript is TextContent's answer and nothing else: a `Message` whose

@@ -422,6 +422,22 @@ async fn relation_writes_through_an_abstract_class_run_each_classs_actions() {
     assert!(targets_on(&p, "ad4m://fb", "ns://children").is_empty());
 }
 
+/// `setX` on the concrete class (`{"action": "setter", "value": [...]}`)
+/// sets the members, as through the abstract class: the setter gets the
+/// inner value, not the wrapper as one member.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrapped_setter_on_a_concrete_class_sets_the_members() {
+    let (mut p, ctx) = relation_setup().await;
+    let set = json!({"children": {"action": "setter", "value": ["ad4m://c3"]}});
+    update(&mut p, &ctx, "Folder", "ad4m://f1", set)
+        .await
+        .unwrap();
+    assert_eq!(
+        targets_on(&p, "ad4m://f1", "ns://folder_child"),
+        ["ad4m://c3"]
+    );
+}
+
 /// Read on its own: in a union of several classes, refused. No conforming
 /// class is an empty result; what a union refuses is refused even then.
 #[tokio::test(flavor = "multi_thread")]
