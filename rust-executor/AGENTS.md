@@ -81,8 +81,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   Both mint paths go through `grants::mint`: the app capability flow (a grant on the main agent)
   and a user login (an auto-approved grant on that user's agent). The admin credential is no
   token. Revoking or removing a grant cancels its `ended` token, which every socket of the
-  session watches through `Session::ended()`. Start-up moves the old app registry
-  (`apps_data.json`, renamed `.migrated`) into grant rows and drops expired rows. Tests mint with
+  session watches through `Session::ended()`. Start-up drops expired rows. The app registry of
+  executors before grants (`apps_data.json`) is not read: no migration exists. Tests mint with
   `test_utils::granted_token(auth)`; a token signed without a grant is refused.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,

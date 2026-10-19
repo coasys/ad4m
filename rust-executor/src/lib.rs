@@ -549,16 +549,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .into_owned(),
     );
 
-    // Grants are the allowlist of tokens: load them before the API serves. The app registry of
-    // executors before grants (`apps_data.json`) moves into them once.
-    let apps_file = std::path::Path::new(
-        config
-            .app_data_path
-            .as_ref()
-            .expect("App data path not set in Ad4mConfig"),
-    )
-    .join("apps_data.json");
-    if let Err(e) = agent::grants::load_at_start(&apps_file) {
+    // Grants are the allowlist of tokens: load them before the API serves.
+    if let Err(e) = agent::grants::load_at_start() {
         // Without its grants the API would refuse every token: it does not start.
         return failed_start(format!("Could not load the grants: {e}"));
     }
