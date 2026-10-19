@@ -44,25 +44,34 @@ pub(super) fn membership_names(shape: &ModelShape) -> HashSet<&str> {
         .collect()
 }
 
+/// What `update_subject` on a concrete class writes for one value.
+pub(super) enum MemberWrite<'v> {
+    /// The adder's or remover's commands, once per member.
+    Members(Vec<Command>),
+    /// A value for the setters.
+    Set(&'v Value),
+}
+
 impl PerspectiveInstance {
     /// `update_subject` on a concrete class: `{"action": "adder" | "remover",
     /// "value": [...]}` on a relation or collection runs its adder or remover
-    /// once per member, as through an abstract class. `None` for anything
-    /// else: the setters write it.
-    pub(super) async fn member_op(
+    /// once per member, as through an abstract class. `{"action": "setter",
+    /// "value": [...]}` there hands the setters the inner value, as through
+    /// an abstract class. Anything else goes to the setters as it is.
+    pub(super) async fn member_op<'v>(
         &self,
         class: &str,
         prop: &str,
-        value: &Value,
+        value: &'v Value,
         context: &AgentContext,
-    ) -> Result<Option<Vec<Command>>, AnyError> {
+    ) -> Result<MemberWrite<'v>, AnyError> {
         let shape = self.get_shape(class)?;
         if !membership_names(&shape).contains(prop) {
-            return Ok(None);
+            return Ok(MemberWrite::Set(value));
         }
         let (op, value) = Op::of(value);
         let predicate = match op {
-            Op::Set => return Ok(None),
+            Op::Set => return Ok(MemberWrite::Set(value)),
             Op::Add => "ad4m://adder",
             Op::Remove => "ad4m://remover",
         };
@@ -82,7 +91,7 @@ impl PerspectiveInstance {
                 ..c.clone()
             }));
         }
-        Ok(Some(commands))
+        Ok(MemberWrite::Members(commands))
     }
 
     /// The links of `base` holding the members of `name` of `class`: at its

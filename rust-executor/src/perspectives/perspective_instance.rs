@@ -5715,9 +5715,9 @@ impl PerspectiveInstance {
     /// Properties with no declared setter are skipped, exactly as in
     /// `create_subject`. An empty/absent value set is a no-op.
     ///
-    /// A relation or collection also takes `{"action": "adder" | "remover",
-    /// "value": [...]}`: its adder or remover runs once per member, as
-    /// through an abstract class.
+    /// A relation or collection also takes `{"action": "adder" | "remover" |
+    /// "setter", "value": [...]}`: its adder or remover runs once per member,
+    /// its setters get the inner value, as through an abstract class.
     pub async fn update_subject(
         &mut self,
         subject_class: SubjectClassOption,
@@ -5744,10 +5744,13 @@ impl PerspectiveInstance {
         let mut runs = Vec::new();
         if let serde_json::Value::Object(obj) = values {
             for (prop, value) in obj.iter() {
-                if let Some(member) = self.member_op(&class_name, prop, value, context).await? {
-                    commands.extend(member);
-                    continue;
-                }
+                let value = match self.member_op(&class_name, prop, value, context).await? {
+                    subject_writes::MemberWrite::Members(member) => {
+                        commands.extend(member);
+                        continue;
+                    }
+                    subject_writes::MemberWrite::Set(value) => value,
+                };
                 let Some(setter_commands) =
                     self.get_property_setter_actions(&class_name, prop).await?
                 else {
