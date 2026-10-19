@@ -10,9 +10,34 @@ import { fetchUserInfo, requestPayment } from './services/hostIndex';
 const DEFAULT_PORT = 12000;
 /** What the executor says, in words, when a call needs keys a locked wallet cannot open. */
 const LOCKED_WALLET = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+/** How the executor's close reason (code 1013) and 503 begin when its wallet is locked. */
+const EXECUTOR_LOCKED = "Executor is locked";
+
+/** Whether `error` says the node's wallet is locked: a state of the node, so the token stays. */
+const saysLocked = (error: any): boolean => {
+  const text = errorText(error);
+  return text === LOCKED_WALLET || (typeof text === 'string' && text.startsWith(EXECUTOR_LOCKED));
+};
+
+/** The executor's own words for an \`RpcError\` (its \`message\` adds "RPC error <code>: "), else the message. */
+const errorText = (error: any): string | undefined => error?.body ?? error?.message;
+
+/** The executor's words when a token itself does not hold: a bad signature, past its expiry, revoked. */
+const DEAD_TOKEN = /InvalidSignature|ExpiredSignature|Unauthorized access/;
+
+/**
+ * Whether the executor refused the token itself: 401 when it opens no session, expired or was
+ * revoked; 403 only when the reason names a dead token. A 403 for a missing capability keeps
+ * the token: it still works for the calls it covers.
+ */
+const refusesToken = (error: any): boolean =>
+  error?.name === 'RpcError' &&
+  (error.status === 401 || (error.status === 403 && DEAD_TOKEN.test(errorText(error) ?? '')));
 
 /** \`error\` is set for 'unauthenticated': the refusal, which decides whether the token is dropped. */
 type AuthReading = { state: 'authenticated' | 'locked' | 'unauthenticated'; error?: any };
+
+type ClientOptions = ConstructorParameters<typeof Ad4mClient>[2];
 
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 60000;
@@ -63,6 +88,8 @@ export default class Ad4mConnect extends EventTarget {
   lowCreditThreshold: number;
   private creditPollInterval: ReturnType<typeof setInterval> | null = null;
   private releaseCreditListener?: () => void;
+  /** How \`buildClient\` reaches the executor in embedded proxy mode; unset for a direct connection. */
+  private proxy?: { baseUrl: string; options: ClientOptions };
 
   private embeddedResolve?: (client: Ad4mClient) => void;
   private embeddedReject?: (error: Error) => void;
@@ -197,6 +224,7 @@ export default class Ad4mConnect extends EventTarget {
       this.ad4mClient.close();
     }
     this.ad4mClient = client;
+    this.watchAuth(client);
     this.notifyConnectionChange("connected");
   }
 
@@ -208,10 +236,35 @@ export default class Ad4mConnect extends EventTarget {
       this.ad4mClient.close();
     }
 
-    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token);
+    this.ad4mClient = this.proxy
+      ? new Ad4mClient(this.proxy.baseUrl, this.token, this.proxy.options)
+      : new Ad4mClient(this.baseUrl, this.token);
+    this.watchAuth(this.ad4mClient);
     this.notifyConnectionChange("connected");
 
     return this.ad4mClient;
+  }
+
+  /**
+   * A client whose token the executor refuses mid-session fails every call and stops reconnecting.
+   * Drop the token and move to 'unauthenticated', so the app asks the user to log in again.
+   */
+  private watchAuth(client: Ad4mClient): void {
+    // Optional: an older @coasys/ad4m peer has no onAuthFailed.
+    client.onAuthFailed?.((reason) => {
+      if (this.ad4mClient !== client) return;
+      console.warn('[Ad4m Connect] The executor refused the token:', reason);
+      this.discardToken();
+      this.notifyAuthChange("unauthenticated");
+    });
+  }
+
+  /** Forget the token (memory and localStorage) and rebuild the client without it. */
+  private discardToken(): void {
+    this.token = '';
+    removeLocal('ad4m-token');
+    this.notifyConfigChange("token", this.token);
+    this.buildClient();
   }
 
   private async withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
@@ -245,14 +298,14 @@ export default class Ad4mConnect extends EventTarget {
       if (!status.isInitialized) return { state: 'locked' };
       return { state: status.isUnlocked ? 'authenticated' : 'locked' };
     } catch (error) {
-      if (error?.message === LOCKED_WALLET) return { state: 'locked' };
+      if (saysLocked(error)) return { state: 'locked' };
       statusError = error;
     }
 
     try {
       if (await client.agent.isLocked()) return { state: 'locked' };
     } catch (lockErr) {
-      if (lockErr?.message === LOCKED_WALLET) return { state: 'locked' };
+      if (saysLocked(lockErr)) return { state: 'locked' };
       console.warn('[Ad4m Connect] isLocked check failed:', lockErr?.message);
     }
     return { state: 'unauthenticated', error: statusError };
@@ -271,11 +324,11 @@ export default class Ad4mConnect extends EventTarget {
     }
 
     console.error('[Ad4m Connect] Authentication check failed:', reading.error);
-    // Clear token if it's invalid (signed by different agent)
-    if (reading.error?.message === "InvalidSignature") {
-      console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
-      this.token = '';
-      removeLocal('ad4m-token');
+    // A refused token (expired, revoked, signed by another agent) cannot recover: drop it, so
+    // the next call goes out without it and the user can log in again.
+    if (this.token && refusesToken(reading.error)) {
+      console.log('[Ad4m Connect] Clearing the refused token:', errorText(reading.error));
+      this.discardToken();
     }
     this.notifyAuthChange("unauthenticated");
     return false;
@@ -463,13 +516,11 @@ export default class Ad4mConnect extends EventTarget {
 
             const fetchImpl = makePostMessageFetch(parentOrigin);
 
-            this.notifyConnectionChange('connecting');
-            this.ad4mClient = new Ad4mClient(
-              'http://proxy', // URL ignored by PostMessageWebSocket; HTTP requests are proxied via fetchImpl
-              normalizedToken,
-              { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket, fetchImpl }
-            );
-            this.notifyConnectionChange('connected');
+            this.proxy = {
+              baseUrl: 'http://proxy', // URL ignored by PostMessageWebSocket; HTTP requests are proxied via fetchImpl
+              options: { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket, fetchImpl },
+            };
+            this.buildClient();
             await this.checkAuth();
           } catch (error) {
             console.error('[Ad4m Connect] Failed to initialize proxy client from AD4M_CONFIG:', error);
@@ -518,6 +569,7 @@ export default class Ad4mConnect extends EventTarget {
           setLocal('ad4m-url', this.url);
           
           // Build the client with received credentials
+          this.proxy = undefined;
           this.ad4mClient = this.buildClient();
           await this.checkAuth();
         } catch (error) {
@@ -551,11 +603,8 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   async requestCapability(invalidateToken = false): Promise<string> {
-    if (invalidateToken) {
-      this.token = '';
-      removeLocal('ad4m-token');
-      this.notifyConfigChange("token", this.token);
-    }
+    // The client carries its token in the socket URL, so a new request needs a client without it.
+    if (invalidateToken) this.discardToken();
 
     this.requestId = await this.ad4mClient.agent.requestCapability({
       appName: this.options.appInfo.name,

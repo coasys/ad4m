@@ -16,11 +16,8 @@ async fn get_multi_user_enabled(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let enabled = Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled())
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -31,7 +28,7 @@ async fn set_multi_user_enabled(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 
@@ -44,7 +41,7 @@ async fn set_multi_user_enabled(
 }
 
 async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
+    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     if !crate::user_management::is_multi_user_enabled() {
@@ -58,7 +55,7 @@ async fn list_users(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn get_user_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
+    ctx.require(&RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let email = params.require_str("email")?;
@@ -74,7 +71,7 @@ async fn set_user_free_access(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
 
@@ -99,11 +96,8 @@ async fn set_user_free_access(
 async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     use crate::user_management as um;
 
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: CreateUserRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -123,7 +117,7 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     if user_exists {
         match um::verify_credentials(&email, &body.password) {
             Ok(()) => {
-                let did = crate::agent::AgentService::get_user_did_by_email(&email)
+                let did = crate::agent::AgentService::did_for_email(&email)
                     .map_err(|e| WsRpcError::internal(e.to_string()))?;
                 return Ok(serde_json::json!({ "did": did, "success": true }));
             }
@@ -149,12 +143,11 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             direct_message_language: None,
             perspective: Some(DomainPerspective { links: vec![] }),
         };
-        AgentService::with_global_instance(|svc| svc.store_user_agent_profile(&email, &agent))
-            .map_err(|e| {
-                WsRpcError::internal(format!("Failed to store user agent profile: {}", e))
-            })?;
+        AgentService::store_managed_agent_profile(&did, &agent).map_err(|e| {
+            WsRpcError::internal(format!("Failed to store user agent profile: {}", e))
+        })?;
 
-        let ctx = AgentContext::for_user_email(email.clone());
+        let ctx = AgentContext::managed(did.clone());
         if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
             log::warn!("Failed to publish new user to agent language: {}", e);
         }
@@ -170,7 +163,7 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 }
 
 async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
+    ctx.require(&RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersLoginParams = serde_json::from_value(params)
@@ -185,11 +178,8 @@ async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersVerifyEmailParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -205,7 +195,8 @@ async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &ALL_CAPABILITY).map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&ALL_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersEmailTestParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -260,11 +251,8 @@ async fn request_verification(
 ) -> Result<Value, WsRpcError> {
     use crate::user_management as um;
 
-    check_capability(
-        &ctx.capabilities,
-        &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    ctx.require(&RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: UsersRequestVerificationParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
