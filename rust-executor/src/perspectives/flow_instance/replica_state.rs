@@ -61,8 +61,9 @@ pub struct FlowStateEntry {
 #[serde(rename_all = "camelCase")]
 pub struct FlowStateChangedEvent {
     pub perspective_uuid: String,
-    /// The agent whose replica derived this: the event's only recipient,
-    /// when it owns the perspective.
+    /// The agent whose replica derived this: the event's only recipient when it
+    /// may read the perspective. Otherwise only the operator gets the main
+    /// agent's event, and nobody gets another agent's.
     pub agent_did: String,
     pub instance: String,
     /// The state this agent had recorded before; for a seeded row, the
@@ -92,20 +93,31 @@ pub enum PriorRow {
 
 /// Who receives a `flow-state-changed`: the agent whose bookkeeping moved
 /// (`agent_did`), and nobody else. Bookkeeping is per agent, so a co-owner, or
-/// another user of the same executor, never gets it. The agent need not own
-/// the perspective: a non-owner that may query it (the operator, a member)
-/// keeps bookkeeping once it votes, and is told about its own.
-pub(crate) fn state_changed_audience(agent_did: &str) -> Audience {
-    Audience::Dids(vec![agent_did.to_string()])
+/// another user of the same executor, never gets it. `readers` are the DIDs that may
+/// read the perspective (`perspectives::event_recipients`), as `perspective.flowStates`
+/// requires. The main agent outside them keeps bookkeeping when the operator votes on a
+/// perspective the main agent does not own: only the operator may read those rows, so
+/// only the operator's sessions get the event, not every session acting as the main
+/// agent. Any other agent outside them gets nothing.
+pub(crate) fn state_changed_audience(readers: &[String], agent_did: &str) -> Audience {
+    if readers.iter().any(|r| r == agent_did) {
+        Audience::Dids(vec![agent_did.to_string()])
+    } else if crate::agent::did_for_context(&crate::agent::AgentContext::main_agent())
+        .is_ok_and(|main| main == agent_did)
+    {
+        Audience::Operator
+    } else {
+        Audience::Dids(vec![])
+    }
 }
 
 /// The `flow-state-changed` event for `event`: to [`state_changed_audience`],
 /// needing the query capability on the perspective (`perspective.flowStates`
 /// reads the same rows).
-pub(crate) fn state_changed_event(event: &FlowStateChangedEvent) -> Event {
+pub(crate) fn state_changed_event(event: &FlowStateChangedEvent, readers: &[String]) -> Event {
     Event::new(
         Topic::FlowStateChanged,
-        state_changed_audience(&event.agent_did),
+        state_changed_audience(readers, &event.agent_did),
         event,
     )
 }
@@ -338,11 +350,16 @@ impl FlowReplicaState {
     }
 
     /// Publish `event` as `flow-state-changed` to [`state_changed_audience`]: the agent
-    /// whose bookkeeping moved.
-    pub async fn publish_state_changed(event: &FlowStateChangedEvent) {
+    /// whose bookkeeping moved, given the readers of `perspective` now. No caller holds the
+    /// perspective's handle lock while it publishes.
+    pub async fn publish_state_changed(
+        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+        event: &FlowStateChangedEvent,
+    ) {
+        let readers = crate::perspectives::event_recipients(&*perspective.persisted.lock().await);
         get_global_pubsub()
             .await
-            .publish_event(state_changed_event(event));
+            .publish_event(state_changed_event(event, &readers));
     }
 
     fn rows(

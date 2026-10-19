@@ -12,8 +12,9 @@
  */
 export type FlowStateChangedEvent = { perspectiveUuid: string, 
 /**
- * The agent whose replica derived this: the event's only recipient,
- * when it owns the perspective.
+ * The agent whose replica derived this: the event's only recipient when it
+ * may read the perspective. Otherwise only the operator gets the main
+ * agent's event, and nobody gets another agent's.
  */
 agentDid: string, instance: string, 
 /**

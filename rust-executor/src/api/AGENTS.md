@@ -372,9 +372,10 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   `events_ws::event_specs()` is keyed by `Topic`. A socket's stream
   (`events_ws::build_event_stream`) delivers an event when `Session::may_receive` and
   `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`.
-- `Audience = Everyone | Dids(Vec<String>)`. `may_receive` needs both: the session is in the
-  audience (everyone, or `Session::acts_as_did` is one of the DIDs; a grant acts as its agent,
-  the operator as the main agent it owns), and it holds `Event::capability`. `Event::new` fills
+- `Audience = Everyone | Dids(Vec<String>) | Operator`. `may_receive` needs both: the session is
+  in the audience (everyone, `Session::acts_as_did` is one of the DIDs, or for `Operator` the
+  operator principal only; a grant acts as its agent, the operator as the main agent it owns),
+  and it holds `Event::capability`. `Event::new` fills
   the capability from `Topic::capability(perspective)`, the capability of the RPC method that
   reads the same data (#1284): per-perspective topics name the event's perspective
   (`perspective.queryLinks`' `perspective_query_capability([uuid])`; a signal: neighbourhood READ
@@ -388,7 +389,8 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   (`Session::is_authenticated`: not anonymous) get a stream. The stream ends at the first event
   the session may receive after `Session::check()` fails. `audience_matrix_tests` in
   `events_ws.rs` pins who receives each audience; a new topic or audience adds its cases there.
-- The operator has no view of other agents' events: it receives what the main agent receives.
+- The operator has no view of other agents' events: it receives what the main agent receives,
+  plus `Operator` events (what only the operator may read).
 - Audiences. Every per-perspective topic reads its recipients from one helper,
   `perspectives::event_recipients`: the owners, or the main agent for an unowned perspective
   (or one whose owner list is empty), read when the event is published. No per-perspective event
@@ -407,7 +409,10 @@ covered without a new test; a method whose params need more than `uuid` adds an 
   query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
   `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
   `auto-processor-neighbourhood-state` to `event_recipients` (empty for an unknown
-  perspective). `auto_processor::events::emit` reads the handle when it publishes, so no emitter
+  perspective). `flow-state-changed` goes to the agent whose bookkeeping moved when it is one of
+  `event_recipients`; the main agent's state on a perspective it does not read (the operator
+  voted there) to `Operator` only, as `perspective.flowStates` lets only the operator read it;
+  any other agent's to nobody (`replica_state::state_changed_audience`). `auto_processor::events::emit` reads the handle when it publishes, so no emitter
   may hold the perspective's handle lock while it emits. `hosting-user-info-changed` goes out twice
   (`Event::hosting_user_info`): to the user's DID (looked up by email in the local users table
   at publish, never imported) with RUNTIME_HOSTING_READ, and to the main agent's with
