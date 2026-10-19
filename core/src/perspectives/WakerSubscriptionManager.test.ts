@@ -272,11 +272,46 @@ describe('WakerSubscriptionManager', () => {
     expect(holds('hi Data', ['', 'Bob'])).toBe(false);
   });
 
+  it('reads HTML as its visible text, and a mention by the DID in its target attribute', () => {
+    const bot = ['Data', 'did:key:zBot'];
+    const holds = (text: string) => holdsAWholeWordTerm(text, bot);
+    // Markup is not words: attribute names and values never wake "Data".
+    expect(holds('<div data-x="1">hi</div>')).toBe(false);
+    expect(holds('<p class="data">see the <a href="https://x.dev/data">notes</a></p>')).toBe(false);
+    // Another user's mention, in each app's markup.
+    expect(holds('<p>hi <a data-type="mention" href="did:key:zOther" data-label="Marvin">@Marvin</a> </p>')).toBe(false);
+    expect(holds('<span data-id="did:key:zOther">@Marvin</span> can you look?')).toBe(false);
+    expect(holds('<span class="we-mention" data-did="did:key:zOther">@Marvin</span> can you look?')).toBe(false);
+    // Visible words still count, inside and between elements.
+    expect(holds('<p>hey Data</p>')).toBe(true);
+    expect(holds('<p>hi</p><p>Data, look</p>')).toBe(true);
+    expect(holds('<p>hey <strong>@Data</strong>&nbsp;&amp; Bob</p>')).toBe(true);
+    expect(holds('meta<b>data</b>')).toBe(false);
+    // Flux's mention (tiptap `mention` node), by name and by DID alone.
+    expect(holds('<p>hi <a data-type="mention" href="did:key:zBot" data-label="Data">@Data</a> </p>')).toBe(true);
+    expect(holds('<p>hi <a data-type="mention" href="did:key:zBot" data-label="Bot">@Bot</a> </p>')).toBe(true);
+    expect(holds('<span data-id="did:key:zBot">@bot</span>')).toBe(true);
+    // We stores a block as plain `text` with the DID in `marks`, so the name is what is read;
+    // its editor's chip carries the DID in `data-did`.
+    expect(holds('hey @Data can you look?')).toBe(true);
+    expect(holds('<span class="we-mention" data-did="did:key:zBot">@Bot</span> can you look?')).toBe(true);
+    // Plain text with a bare "<" is not markup.
+    expect(holds('a < b and Data > c')).toBe(true);
+  });
+
   it('wakes only on a whole-word mention, and still wakes when one arrives later', async () => {
     const { wakes } = await wakeWith({ instances: [] }, [
       // Substring candidates the query returns: no wake.
+      // So is "bot" in the markup of someone else's mention.
       { instances: [{ id: 'test://meta', text: 'the robots are fine' }, { id: 'test://none' }], totalCount: 2 },
-      { instances: [{ id: 'test://real', text: 'hey Bot,' }, { id: 'test://meta', text: 'the robots are fine' }], totalCount: 2 },
+      {
+        instances: [
+          { id: 'test://real', text: 'hey Bot,' },
+          { id: 'test://meta', text: 'the robots are fine' },
+          { id: 'test://markup', text: '<p><span class="mention" data-bot-hint="1" data-id="did:key:zOther">@Marvin</span> hi</p>' },
+        ],
+        totalCount: 3,
+      },
     ]);
     expect(wakes.map((mentions) => mentions.map((m: any) => m.address))).toEqual([['test://real']]);
   });

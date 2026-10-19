@@ -34,6 +34,42 @@ export interface WakerSubscription {
 /** A letter, combining mark, digit or underscore: what a term must not touch. */
 const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
 
+/** A tag or comment: `<` followed by a letter, `/` or `!`, so "a < b" is text. */
+const TAG = /<!--[\s\S]*?-->|<\/?[A-Za-z][^>]*>/g;
+/** Tags that break a line: replaced by a space, so `<p>hi</p><p>Data</p>` keeps "Data" a word. */
+const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|th|table|section|article)\b/i;
+/**
+ * The attributes a mention puts its target's DID in: Flux's `<a data-type="mention"
+ * href="did:…">`, older Flux messages' `<span data-id="did:…">`, and We's editor chip
+ * `<span class="we-mention" data-did="did:…">`.
+ */
+const MENTION_TARGET = /\s(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, ref: string) => {
+    if (ref[0] !== "#") return ENTITIES[ref.toLowerCase()] ?? whole;
+    const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+}
+
+/**
+ * What a reader sees of `text`, and the DIDs its mentions point at. `text` may be
+ * HTML (TextContent allows it): tag names and attributes are markup, not words, so
+ * a bot named "Data" must not wake on `data-type="mention"` in a mention of
+ * someone else. Plain text passes through unchanged, apart from entities.
+ */
+function readableParts(text: string): { visible: string; targets: string[] } {
+  const targets: string[] = [];
+  const visible = text.replace(TAG, (tag) => {
+    for (const m of tag.matchAll(MENTION_TARGET)) targets.push(decodeEntities(m[1] ?? m[2]));
+    return BREAKING_TAG.test(tag) ? " " : "";
+  });
+  return { visible: decodeEntities(visible), targets };
+}
+
 /**
  * Whether `text` holds one of `terms` as a whole word, case-insensitively:
  * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
@@ -42,14 +78,21 @@ const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
  * that starts or ends with punctuation still matches. Same rule as #1459's
  * SPARQL `(?:^|\W)term(?:\W|$)`.
  *
+ * The rule runs on the visible text only: in HTML, tags and attributes are
+ * dropped and entities decoded first. A mention's target attribute
+ * (`href`, `data-id`, `data-did`) matches when its whole value is a term, which
+ * is how a mention by DID is found when the DID is not in the visible text.
+ *
  * The mention query's `contains` matches substrings (model query has no word
  * match); this is the check that keeps "data" from waking on "metadata".
  */
 export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
+  const { visible, targets } = readableParts(text);
   return terms.some((term) => {
     if (!term) return false;
+    if (targets.some((target) => target.toLowerCase() === term.toLowerCase())) return true;
     const escaped = term.replace(/[\\^$.*+?()[\]{}|\/]/g, "\\$&");
-    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(text);
+    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(visible);
   });
 }
 
