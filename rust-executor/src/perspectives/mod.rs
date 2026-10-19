@@ -364,17 +364,14 @@ pub async fn update_perspective_with(
         Ad4mDb::with_global_instance(|db| {
             db.update_perspective(&persisted).map_err(|e| e.to_string())
         })?;
+        // Signals reach owners through this cached copy, so it must not lag the handle
+        // (users joining later got no broadcasts). Written under the lock, so a
+        // concurrent change cannot register an older copy after a newer one.
+        if let Some(nh) = &persisted.neighbourhood {
+            register_link_language_perspective(nh.data.link_language.clone(), persisted.clone());
+        }
         persisted.clone()
     };
-
-    // Update the signal routing cache if this perspective has a link language.
-    // Without this, the cached PerspectiveHandle retains a stale owners list,
-    // causing signals (especially broadcasts) to not be delivered to owners
-    // added after the cache was first populated (e.g. managed users joining
-    // an existing neighbourhood).
-    if let Some(nh) = &handle.neighbourhood {
-        register_link_language_perspective(nh.data.link_language.clone(), handle.clone());
-    }
 
     // Publish one event per owner so each user gets their own notification
     let pubsub = get_global_pubsub().await;
@@ -514,7 +511,7 @@ pub fn register_link_language_perspective(language_address: String, handle: Pers
 }
 
 /// Look up PerspectiveHandle by link language address from cache
-fn cached_perspective_handle(language_address: &str) -> Option<PerspectiveHandle> {
+pub(crate) fn cached_perspective_handle(language_address: &str) -> Option<PerspectiveHandle> {
     LINK_LANG_TO_PERSPECTIVE_HANDLE
         .read()
         .unwrap()
@@ -538,12 +535,12 @@ async fn perspective_by_link_language(language_address: String) -> Option<Perspe
         .map(|lock| lock.read().unwrap().clone())
         .collect::<Vec<_>>();
     for perspective in perspectives.into_iter() {
-        let handle = perspective.persisted.lock().await.clone();
-
+        let handle = perspective.persisted.lock().await;
         if let Some(nh) = &handle.neighbourhood {
             if nh.data.link_language == language_address {
-                // Populate cache for future lookups
-                register_link_language_perspective(language_address, handle);
+                // Populate the cache for future lookups, under the lock like every cache write.
+                register_link_language_perspective(language_address, handle.clone());
+                drop(handle);
                 return Some(perspective);
             }
         }

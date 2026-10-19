@@ -1112,10 +1112,10 @@ impl PerspectiveInstance {
                         }
                         // Cache language→perspective mapping for fast signal routing
                         {
-                            let handle = self.persisted.lock().await.clone();
+                            let handle = self.persisted.lock().await;
                             crate::perspectives::register_link_language_perspective(
                                 nh.data.link_language.clone(),
-                                handle,
+                                handle.clone(),
                             );
                         }
                         if self.persisted.lock().await.state
@@ -1548,10 +1548,6 @@ impl PerspectiveInstance {
         if let Err(e) = self.update_perspective_state(state).await {
             log::error!("Error updating perspective state: {:?}", e);
         }
-    }
-
-    pub async fn update_from_handle(&self, handle: PerspectiveHandle) {
-        *self.persisted.lock().await = handle;
     }
 
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {

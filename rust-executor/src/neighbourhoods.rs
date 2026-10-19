@@ -51,7 +51,7 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     // Add shared perspective to original perspective and then update controller.
     // Initialize owners list with the creator's DID if not already set
     let creator_did = did_for_context(context)?;
-    let perspective_handle = update_perspective_with(&perspective.uuid, |h| {
+    update_perspective_with(&perspective.uuid, |h| {
         h.shared_url = Some(neighbourhood_url.clone());
         h.neighbourhood = Some(neighbourhood_exp);
         h.state = PerspectiveState::NeighbourhoodCreationInitiated;
@@ -223,6 +223,16 @@ mod tests {
         let url = "neighbourhood://concurrent-joins".to_string();
         let mut handle = PerspectiveHandle::new_from_name("joined by many".to_string());
         handle.shared_url = Some(url.clone());
+        let link_language = "concurrent-joins-link-language".to_string();
+        handle.neighbourhood = Some(DecoratedNeighbourhoodExpression {
+            author: "did:test:creator".to_string(),
+            timestamp: "0".to_string(),
+            data: crate::types::domain::Neighbourhood {
+                link_language: link_language.clone(),
+                meta: crate::types::domain::Perspective::default(),
+            },
+            proof: DecoratedExpressionProof::default(),
+        });
         add_perspective(handle.clone(), None).await.unwrap();
 
         let emails: Vec<String> = (0..50).map(|i| format!("joiner{i}@test")).collect();
@@ -239,7 +249,9 @@ mod tests {
                     .unwrap();
             })
         });
-        futures::future::join_all(joins).await;
+        for joined in futures::future::join_all(joins).await {
+            joined.unwrap();
+        }
 
         let in_memory = get_perspective(&handle.uuid)
             .unwrap()
@@ -252,6 +264,8 @@ mod tests {
             .into_iter()
             .find(|s| s.uuid == handle.uuid)
             .unwrap();
+        // Signals reach owners through the link language's cached handle.
+        let cached = crate::perspectives::cached_perspective_handle(&link_language).unwrap();
         for (email, did) in emails.iter().zip(&dids) {
             assert!(
                 in_memory.owners.as_ref().unwrap().contains(&did),
@@ -261,8 +275,49 @@ mod tests {
                 stored.owners.as_ref().unwrap().contains(&did),
                 "lost {email} in the db"
             );
+            assert!(
+                cached.owners.as_ref().unwrap().contains(&did),
+                "lost {email} in the signal routing cache"
+            );
         }
         // Other tests expect the global perspective map to start empty.
+        crate::perspectives::remove_perspective(&handle.uuid).await;
+    }
+
+    /// The main agent joining a neighbourhood a user already holds becomes an owner beside
+    /// the user, in memory and in the database.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_main_agent_joining_keeps_the_existing_owner() {
+        crate::test_utils::setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+        let url = "neighbourhood://main-agent-joins".to_string();
+        let user = crate::test_utils::create_test_user("held-by-user@test");
+        let mut handle = PerspectiveHandle::new_from_name("held by a user".to_string());
+        handle.shared_url = Some(url.clone());
+        handle.owners = Some(vec![user.clone()]);
+        add_perspective(handle.clone(), None).await.unwrap();
+
+        install_neighbourhood_with_context(url, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        let main = did_for_context(&AgentContext::main_agent()).unwrap();
+        let in_memory = get_perspective(&handle.uuid)
+            .unwrap()
+            .persisted
+            .lock()
+            .await
+            .clone();
+        let stored = Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.uuid == handle.uuid)
+            .unwrap();
+        for owners in [in_memory.owners.unwrap(), stored.owners.unwrap()] {
+            assert!(owners.contains(&user), "the user stays an owner");
+            assert!(owners.contains(&main), "the main agent becomes an owner");
+        }
         crate::perspectives::remove_perspective(&handle.uuid).await;
     }
 
@@ -309,7 +364,9 @@ mod tests {
                     .unwrap();
             }),
         );
-        futures::future::join_all(tasks).await;
+        for task in futures::future::join_all(tasks).await {
+            task.unwrap();
+        }
 
         let persisted = p.persisted.lock().await.clone();
         assert_eq!(
