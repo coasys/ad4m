@@ -304,7 +304,8 @@ export default function perspectiveTests(testContext: TestContext) {
                     // No class describes this node, so it is not a Container and not a parent.
                     await p.add(new Link({ source: 'test://loose', predicate: 'ad4m://has_child', target: note.id }))
 
-                    // The shape `get_mention_waker_config` returns.
+                    // The shape `get_mention_waker_config` returns, without its
+                    // `author: { not: <did> }`: here one agent writes everything.
                     await manager.subscribe({
                         id: 'waker-mention-parents',
                         type: 'mention',
@@ -314,9 +315,10 @@ export default function perspectiveTests(testContext: TestContext) {
                             where: { OR: [{ text: { contains: '@me' } }] },
                             order: { timestamp: 'DESC' },
                             limit: 50,
-                            properties: [],
+                            properties: ['text'],
                         }),
                         className: TextContent.builtinUri,
+                        terms: ['@me'],
                     })
                     note.text = 'hi @me'
                     await note.save()
