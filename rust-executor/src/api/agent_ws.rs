@@ -655,6 +655,8 @@ async fn permit_capability_handler(
 
     let mut auth: AuthInfoExtended = serde_json::from_str(&body.auth)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid auth info: {}", e)))?;
+    // Defence in depth: the handler acts on the id the guard checked. A body with two
+    // `requestId` keys never gets here, because serde's derive refuses the duplicate (400).
     auth.request_id = request_id;
     let missing = || {
         WsRpcError::not_found(
