@@ -297,6 +297,20 @@ describe('WakerSubscriptionManager', () => {
     expect(holds('<span class="we-mention" data-did="did:key:zBot">@Bot</span> can you look?')).toBe(true);
     // Plain text with a bare "<" is not markup.
     expect(holds('a < b and Data > c')).toBe(true);
+    // Nor is "<" before a known element name without a valid attribute list, or before an unknown name.
+    expect(holds('if a <b then ask Data, else c -> d')).toBe(true);
+    expect(holds('<hey Data> can you look')).toBe(true);
+    // A real tag glued to a word is still markup, and inline tags glue as a reader sees them:
+    // "a<b>Data</b>" reads "aData", like "meta<b>data</b>" above.
+    expect(holds('a<b>Data</b>')).toBe(false);
+    expect(holds('a <b class=x>Data</b>!')).toBe(true);
+    // A quoted attribute value may hold ">": the tag ends at the real ">".
+    expect(holds('<span title="a > b" data-x="Data">hi</span>')).toBe(false);
+    expect(holds('<a title="x>y" href="did:key:zBot">@Bot</a>')).toBe(true);
+    // Script and style contents are not visible text; comments are not either.
+    expect(holds('<style>.Data { color: red }</style><p>hi</p>')).toBe(false);
+    expect(holds('<script>let Data = 1</script>hi')).toBe(false);
+    expect(holds('hi <!-- Data --> there')).toBe(false);
   });
 
   it('wakes only on a whole-word mention, and still wakes when one arrives later', async () => {
