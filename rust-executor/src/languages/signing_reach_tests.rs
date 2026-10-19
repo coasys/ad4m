@@ -5,7 +5,7 @@
 //! extensions), as a managed user, instead of calling the ops' Rust bodies.
 
 use super::language_runtime_handle::LanguageRuntimeHandle;
-use crate::agent::{AgentContext, AgentService};
+use crate::agent::AgentContext;
 use serde_json::{json, Value};
 
 fn init_v8_platform() {
@@ -32,14 +32,14 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
     crate::test_utils::setup_agent();
     let alice = format!("alice.{}@example.org", uuid::Uuid::new_v4());
     let bob = format!("bob.{}@example.org", uuid::Uuid::new_v4());
-    AgentService::ensure_user_key_exists(&alice).unwrap();
-    AgentService::ensure_user_key_exists(&bob).unwrap();
+    let alice_did = crate::test_utils::create_test_user(&alice);
+    crate::test_utils::create_test_user(&bob);
 
     let dir = tempfile::tempdir().unwrap();
     let handle =
         LanguageRuntimeHandle::spawn("QmSigningReachTest".into(), dir.path().to_path_buf(), false)
             .unwrap();
-    let as_alice = AgentContext::for_user_email(alice.clone());
+    let as_alice = AgentContext::managed(alice_did.clone());
 
     let signed = run_as(
         &handle,
@@ -57,7 +57,7 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
     .await;
     assert_eq!(
         signed["alice"],
-        json!(AgentService::get_user_did_by_email(&alice).unwrap()),
+        json!(alice_did),
         "a language signs as the user it runs for"
     );
     assert_eq!(

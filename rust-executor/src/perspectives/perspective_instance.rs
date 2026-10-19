@@ -869,9 +869,11 @@ impl PerspectiveInstance {
             let users_result =
                 Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string());
             let user_tuples: Vec<(String, Option<i64>)> = match users_result {
+                // Keyed by agent DID: a user without an agent has no loop to run.
                 Ok(users) => users
                     .into_iter()
-                    .map(|u| (u.username, u.last_seen))
+                    .filter(|u| !u.did.is_empty())
+                    .map(|u| (u.did, u.last_seen))
                     .collect(),
                 Err(e) => {
                     log::warn!(
@@ -891,17 +893,17 @@ impl PerspectiveInstance {
             // longer online. `handle.abort()` unwinds the loop's await points;
             // `is_teardown` is not toggled by abort so the perspective stays
             // healthy for other tasks.
-            per_user_loops.retain(|email, handle| {
+            per_user_loops.retain(|did, handle| {
                 if handle.is_finished() {
                     log::debug!(
-                        "auto_processor supervisor `{uuid}`: loop for user `{email}` finished; \
+                        "auto_processor supervisor `{uuid}`: loop for agent `{did}` finished; \
                          removing"
                     );
                     return false;
                 }
-                if !online_set.contains(email) {
+                if !online_set.contains(did) {
                     log::info!(
-                        "auto_processor supervisor `{uuid}`: user `{email}` aged out of \
+                        "auto_processor supervisor `{uuid}`: agent `{did}` aged out of \
                          freshness window; aborting loop"
                     );
                     handle.abort();
@@ -910,26 +912,25 @@ impl PerspectiveInstance {
                 true
             });
 
-            // Spawn loops for newly-online users. `for_user_email` is a pure
-            // constructor; DID / wallet resolution happens lazily inside the
-            // loop, so an email whose key never loaded still fails loudly
-            // there — not silently at spawn.
-            for email in online {
-                if per_user_loops.contains_key(&email) {
+            // Spawn loops for newly-online users' agents. `AgentContext::managed` is a
+            // pure constructor; wallet resolution happens lazily inside the loop, so an
+            // agent whose key never loaded still fails loudly there — not silently at spawn.
+            for did in online {
+                if per_user_loops.contains_key(&did) {
                     continue;
                 }
-                let ctx = AgentContext::for_user_email(email.clone());
+                let ctx = AgentContext::managed(did.clone());
                 let this = self.clone();
                 let uuid_clone = uuid.clone();
-                let email_clone = email.clone();
+                let did_clone = did.clone();
                 let handle = tokio::spawn(async move {
                     log::info!(
-                        "auto_processor supervisor `{uuid_clone}`: starting loop for user \
-                         `{email_clone}`"
+                        "auto_processor supervisor `{uuid_clone}`: starting loop for agent \
+                         `{did_clone}`"
                     );
                     this.auto_processor_watch_loop(ctx).await;
                 });
-                per_user_loops.insert(email, handle);
+                per_user_loops.insert(did, handle);
             }
 
             sleep(Duration::from_millis(SUPERVISOR_TICK_MS)).await;
@@ -1780,8 +1781,8 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        if let Some(ref email) = context.user_email {
-            crate::billing::check_compute_credits(email)?;
+        if let Some(agent_did) = context.managed_did() {
+            crate::billing::check_compute_credits(agent_did)?;
         }
         link.validate()?;
         let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
@@ -1789,10 +1790,10 @@ impl PerspectiveInstance {
             .add_link_expression(link_expr, status, batch_id)
             .await?;
 
-        if let Some(ref email) = context.user_email {
+        if let Some(agent_did) = context.managed_did() {
             let uuid = self.uuid.clone();
             if let Err(e) = crate::billing::bill_compute(
-                email,
+                agent_did,
                 crate::billing::get_link_write_rate(),
                 "link_write",
                 Some(&format!("1 link in perspective {}", uuid)),
@@ -1887,7 +1888,7 @@ impl PerspectiveInstance {
         if inbound_touches_shacl(&decorated_diff) {
             self.forget_derived_shapes();
         }
-        // A `FlowInstance` minted by an agent this node acts for gets its
+        // A `FlowInstance` minted by an agent this executor acts for gets its
         // bookkeeping row now, before any pass can treat it as a catch-up
         // (#1424). Awaited, not spawned: a client's `start` is followed at
         // once by a propose whose pass must see the row.
@@ -2045,8 +2046,8 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        if let Some(ref email) = context.user_email {
-            crate::billing::check_compute_credits(email)?;
+        if let Some(agent_did) = context.managed_did() {
+            crate::billing::check_compute_credits(agent_did)?;
         }
         for link in &links {
             link.validate()?;
@@ -2104,11 +2105,11 @@ impl PerspectiveInstance {
             }
 
             // Bill for link writes
-            if let Some(ref email) = context.user_email {
+            if let Some(agent_did) = context.managed_did() {
                 let uuid = self.uuid.clone();
                 let link_count = decorated_link_expressions.len();
                 if let Err(e) = crate::billing::bill_compute(
-                    email,
+                    agent_did,
                     link_count as f64 * crate::billing::get_link_write_rate(),
                     "link_write",
                     Some(&format!("{} links in perspective {}", link_count, uuid)),
@@ -2132,8 +2133,8 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
         if !mutations.additions.is_empty() {
-            if let Some(ref email) = context.user_email {
-                crate::billing::check_compute_credits(email)?;
+            if let Some(agent_did) = context.managed_did() {
+                crate::billing::check_compute_credits(agent_did)?;
             }
         }
         let addition_links: Vec<Link> = mutations.additions.into_iter().map(Link::from).collect();
@@ -2146,40 +2147,53 @@ impl PerspectiveInstance {
             .map(|l| create_signed_expression(l.normalize(), context))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
-        let removals = mutations
+        // `status` applies to the additions. A removal keeps the status of the
+        // link as stored, so removing a Local link never reaches the link
+        // language, and it commits the stored expression, as `remove_link`
+        // does. A removal that matches no stored link is dropped, as
+        // `remove_links` drops it: nothing is removed, so nothing is
+        // persisted, published, committed or returned. The lookup is exact on
+        // author and timestamp, so a Local link sent back with its timestamp
+        // spelled differently must not go out under the call's status.
+        let removals: Vec<LinkExpression> = mutations
             .removals
             .into_iter()
-            .map(LinkExpression::try_from)
-            .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+            .map(|removal| {
+                let link = LinkExpression::try_from(removal)?;
+                let stored = self.sparql_store.get_link(
+                    &link.data.source,
+                    link.data.predicate.as_deref(),
+                    &link.data.target,
+                    &link.author,
+                    &link.timestamp,
+                )?;
+                Ok(stored.map(|stored| {
+                    let link_status = stored.status.clone().unwrap_or(LinkStatus::Local);
+                    let mut stored = LinkExpression::from(stored);
+                    stored.status = Some(link_status);
+                    stored
+                }))
+            })
+            .collect::<Result<Vec<Option<LinkExpression>>, AnyError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let additions: Vec<LinkExpression> = additions
+            .into_iter()
+            .map(|mut l| {
+                l.status = Some(status.clone());
+                l
+            })
+            .collect();
 
-        let store_diff = PerspectiveDiff::from(
-            additions
-                .iter()
-                .cloned()
-                .map(|mut l| {
-                    l.status = Some(status.clone());
-                    l
-                })
-                .collect(),
-            removals
-                .iter()
-                .cloned()
-                .map(|mut l| {
-                    l.status = Some(status.clone());
-                    l
-                })
-                .collect(),
-        );
+        let store_diff = PerspectiveDiff::from(additions.clone(), removals.clone());
+        let decorated = |l: LinkExpression| {
+            let link_status = l.status.clone().unwrap_or(LinkStatus::Local);
+            DecoratedLinkExpression::from((l, link_status))
+        };
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: additions
-                .into_iter()
-                .map(|l| DecoratedLinkExpression::from((l, status.clone())))
-                .collect::<Vec<DecoratedLinkExpression>>(),
-            removals: removals
-                .clone()
-                .into_iter()
-                .map(|l| DecoratedLinkExpression::from((l, status.clone())))
-                .collect::<Vec<DecoratedLinkExpression>>(),
+            additions: additions.into_iter().map(decorated).collect(),
+            removals: removals.into_iter().map(decorated).collect(),
         };
 
         // Write to SPARQL store (primary storage for links)
@@ -2188,8 +2202,17 @@ impl PerspectiveInstance {
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
-        if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&store_diff);
+        let shared = |links: &[LinkExpression]| -> Vec<LinkExpression> {
+            links
+                .iter()
+                .filter(|l| l.status == Some(LinkStatus::Shared))
+                .cloned()
+                .collect()
+        };
+        let shared_diff =
+            PerspectiveDiff::from(shared(&store_diff.additions), shared(&store_diff.removals));
+        if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
+            self.spawn_commit_and_handle_error(&shared_diff);
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
@@ -2197,10 +2220,10 @@ impl PerspectiveInstance {
         // Bill for additions only (removals are free)
         let additions_count = decorated_diff.additions.len();
         if additions_count > 0 {
-            if let Some(ref email) = context.user_email {
+            if let Some(agent_did) = context.managed_did() {
                 let uuid = self.uuid.clone();
                 if let Err(e) = crate::billing::bill_compute(
-                    email,
+                    agent_did,
                     additions_count as f64 * crate::billing::get_link_write_rate(),
                     "link_write",
                     Some(&format!(
@@ -2227,8 +2250,8 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        if let Some(ref email) = context.user_email {
-            crate::billing::check_compute_credits(email)?;
+        if let Some(agent_did) = context.managed_did() {
+            crate::billing::check_compute_credits(agent_did)?;
         }
         let handle = self.persisted.lock().await.clone();
 
@@ -2343,9 +2366,9 @@ impl PerspectiveInstance {
             }
 
             // Bill for the replacement link (1 addition; removal is free)
-            if let Some(ref email) = context.user_email {
+            if let Some(agent_did) = context.managed_did() {
                 if let Err(e) = crate::billing::bill_compute(
-                    email,
+                    agent_did,
                     crate::billing::get_link_write_rate(),
                     "link_write",
                     Some(&format!("1 link update in perspective {}", handle.uuid)),
@@ -3051,10 +3074,10 @@ impl PerspectiveInstance {
 
     /// Get the appropriate prolog pool ID for the given context
     fn get_pool_id_for_context(&self, perspective_uuid: &str, context: &AgentContext) -> String {
-        match &context.user_email {
-            Some(user_email) => {
-                // User-specific pool: "uuid_user_email"
-                format!("{}_{}", perspective_uuid, user_email)
+        match context.managed_did() {
+            Some(agent_did) => {
+                // Managed agent's pool: "uuid_agent_did"
+                format!("{}_{}", perspective_uuid, agent_did)
             }
             None => {
                 // Main agent pool: just the uuid
@@ -3457,8 +3480,8 @@ impl PerspectiveInstance {
                 };
 
                 // Use context DID as owner_did for SDNA filtering
-                let owner_did = Some(if let Some(user_email) = &context.user_email {
-                    crate::agent::AgentService::get_user_did_by_email(user_email)?
+                let owner_did = Some(if let Some(agent_did) = context.managed_did() {
+                    agent_did.to_string()
                 } else {
                     crate::agent::AgentService::with_global_instance(|service| {
                         service.did.clone().unwrap_or_default()
@@ -3494,8 +3517,8 @@ impl PerspectiveInstance {
                 };
 
                 // Use context DID as owner_did for SDNA filtering
-                let owner_did = Some(if let Some(user_email) = &context.user_email {
-                    crate::agent::AgentService::get_user_did_by_email(user_email)?
+                let owner_did = Some(if let Some(agent_did) = context.managed_did() {
+                    agent_did.to_string()
                 } else {
                     crate::agent::AgentService::with_global_instance(|service| {
                         service.did.clone().unwrap_or_default()
@@ -3560,8 +3583,8 @@ impl PerspectiveInstance {
         };
 
         let pool_id = self.get_pool_id_for_context(&perspective_uuid, context);
-        let owner_did = if let Some(user_email) = &context.user_email {
-            crate::agent::AgentService::get_user_did_by_email(user_email)?
+        let owner_did = if let Some(agent_did) = context.managed_did() {
+            agent_did.to_string()
         } else {
             crate::agent::AgentService::with_global_instance(|service| {
                 service.did.clone().unwrap_or_default()
@@ -4767,23 +4790,19 @@ impl PerspectiveInstance {
                     .await;
             };
 
-            // Check if any managed email user is the recipient
-            if let Ok(user_emails) = AgentService::list_user_emails() {
-                for user_email in user_emails {
-                    if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
-                        if user_did == remote_agent_did {
-                            if let Some(owners) = &current_perspective_handle.owners {
-                                if owners.contains(&remote_agent_did) {
-                                    log::debug!(
-                                        "Routing signal locally to managed user {} in neighbourhood {:?}",
-                                        user_email,
-                                        current_perspective_handle.shared_url
-                                    );
-                                    let handle = self.persisted.lock().await.clone();
-                                    publish_local(handle, payload, remote_agent_did).await;
-                                    return Ok(());
-                                }
-                            }
+            // Check if a managed agent is the recipient
+            if let Ok(managed) = AgentService::managed_agent_dids() {
+                if managed.contains(&remote_agent_did) {
+                    if let Some(owners) = &current_perspective_handle.owners {
+                        if owners.contains(&remote_agent_did) {
+                            log::debug!(
+                                "Routing signal locally to managed agent {} in neighbourhood {:?}",
+                                remote_agent_did,
+                                current_perspective_handle.shared_url
+                            );
+                            let handle = self.persisted.lock().await.clone();
+                            publish_local(handle, payload, remote_agent_did).await;
+                            return Ok(());
                         }
                     }
                 }
@@ -4847,37 +4866,35 @@ impl PerspectiveInstance {
 
         // Route signals to all local agents (managed users + main agent) who are owners
         if current_perspective_handle.shared_url.is_some() {
-            // Send to each local managed email user who is an explicit owner
+            // Send to each local managed agent that is an explicit owner
             if let Some(owners) = &current_perspective_handle.owners {
-                if let Ok(user_emails) = AgentService::list_user_emails() {
-                    for user_email in user_emails {
-                        if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
-                            if owners.contains(&user_did) {
-                                let handle = self.persisted.lock().await.clone();
-                                let mut signal = payload.clone();
-                                signal.verify_signatures();
+                if let Ok(managed) = AgentService::managed_agent_dids() {
+                    for user_did in managed {
+                        if owners.contains(&user_did) {
+                            let handle = self.persisted.lock().await.clone();
+                            let mut signal = payload.clone();
+                            signal.verify_signatures();
 
-                                get_global_pubsub()
-                                    .await
-                                    .publish(
-                                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                                        &serde_json::to_string(&NeighbourhoodSignalFilter {
-                                            perspective_uuid: handle.uuid.clone(),
-                                            perspective: handle,
-                                            signal,
-                                            recipient: Some(user_did),
-                                        })
-                                        .unwrap(),
-                                    )
-                                    .await;
-                            }
+                            get_global_pubsub()
+                                .await
+                                .publish(
+                                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                                    &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                        perspective_uuid: handle.uuid.clone(),
+                                        perspective: handle,
+                                        signal,
+                                        recipient: Some(user_did),
+                                    })
+                                    .unwrap(),
+                                )
+                                .await;
                         }
                     }
                 }
             }
 
             // Send to the main agent if it is an owner.
-            // The main agent is not in list_user_emails(), so it must be handled separately.
+            // The main agent is not in managed_agent_dids(), so it must be handled separately.
             // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
             let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             if let Some(main_agent_did) = main_agent_did {
@@ -6910,6 +6927,146 @@ mod tests {
         }
     }
 
+    /// A removal through `link_mutations` keeps the stored link's status, whatever
+    /// status the call names. WS `perspective.removeLinks` (no batch) calls it
+    /// with `Shared`, so removing a Local link sent that link to the link language.
+    #[tokio::test]
+    async fn link_mutations_removal_commits_only_shared_links() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap();
+        let shared = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap();
+
+        // A neighbourhood without a link language: every commit lands in the
+        // pending-diff queue, which is exactly what would reach peers.
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        let uuid = perspective.uuid.clone();
+
+        let input = |l: &DecoratedLinkExpression| {
+            serde_json::from_value(serde_json::to_value(LinkExpression::from(l.clone())).unwrap())
+                .unwrap()
+        };
+        let diff = perspective
+            .link_mutations(
+                LinkMutations {
+                    additions: vec![],
+                    removals: vec![input(&local), input(&shared)],
+                },
+                LinkStatus::Shared,
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let status_of = |l: &DecoratedLinkExpression| {
+            diff.removals
+                .iter()
+                .find(|r| r.data == l.data)
+                .and_then(|r| r.status.clone())
+        };
+        assert_eq!(status_of(&local), Some(LinkStatus::Local));
+        assert_eq!(status_of(&shared), Some(LinkStatus::Shared));
+
+        let mut pending = PerspectiveDiff::empty();
+        for _ in 0..100 {
+            (pending, _) =
+                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            if !pending.removals.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let committed: Vec<_> = pending.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(
+            committed,
+            vec![shared.data.clone()],
+            "only the Shared removal is committed"
+        );
+        assert!(perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A removal that matches no stored link is not committed, even when the
+    /// call names `Shared`. Here a Local link comes back with its timestamp
+    /// spelled differently (same instant, `+00:00` for `Z`), so the exact
+    /// lookup misses it.
+    #[tokio::test]
+    async fn link_mutations_unmatched_removal_is_not_committed() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap();
+        let shared = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        let uuid = perspective.uuid.clone();
+
+        let input = |l: &DecoratedLinkExpression| -> serde_json::Value {
+            serde_json::to_value(LinkExpression::from(l.clone())).unwrap()
+        };
+        let mut respelled = input(&local);
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&local.timestamp)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, false);
+        assert_ne!(timestamp, local.timestamp);
+        respelled["timestamp"] = serde_json::Value::String(timestamp);
+
+        let diff = perspective
+            .link_mutations(
+                LinkMutations {
+                    additions: vec![],
+                    removals: vec![
+                        serde_json::from_value(respelled).unwrap(),
+                        serde_json::from_value(input(&shared)).unwrap(),
+                    ],
+                },
+                LinkStatus::Shared,
+                &context,
+            )
+            .await
+            .unwrap();
+        // The unmatched removal removed nothing, so it is not returned either.
+        let returned: Vec<_> = diff.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(returned, vec![shared.data.clone()]);
+
+        // The Shared removal is committed in the same diff, so once it is
+        // queued the unmatched one would be too.
+        let mut pending = PerspectiveDiff::empty();
+        for _ in 0..100 {
+            (pending, _) =
+                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None)).unwrap();
+            if !pending.removals.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let committed: Vec<_> = pending.removals.iter().map(|l| l.data.clone()).collect();
+        assert_eq!(committed, vec![shared.data.clone()]);
+        let remaining: Vec<_> = perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data)
+            .collect();
+        assert_eq!(remaining, vec![local.data.clone()]);
+    }
+
     /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
     ///
     /// The store does not show a batch's own additions until it commits, so the
@@ -7374,16 +7531,14 @@ mod tests {
         assert_eq!(main_pool_id, "test-uuid");
 
         // Test user context
-        let user_context =
-            crate::agent::AgentContext::for_user_email("test@example.com".to_string());
+        let user_context = crate::agent::AgentContext::managed("did:key:z6MkOne".to_string());
         let user_pool_id = perspective.get_pool_id_for_context("test-uuid", &user_context);
-        assert_eq!(user_pool_id, "test-uuid_test@example.com");
+        assert_eq!(user_pool_id, "test-uuid_did:key:z6MkOne");
 
         // Test different users get different pools
-        let user2_context =
-            crate::agent::AgentContext::for_user_email("test2@example.com".to_string());
+        let user2_context = crate::agent::AgentContext::managed("did:key:z6MkTwo".to_string());
         let user2_pool_id = perspective.get_pool_id_for_context("test-uuid", &user2_context);
-        assert_eq!(user2_pool_id, "test-uuid_test2@example.com");
+        assert_eq!(user2_pool_id, "test-uuid_did:key:z6MkTwo");
 
         // Verify they're all different
         assert_ne!(main_pool_id, user_pool_id);
