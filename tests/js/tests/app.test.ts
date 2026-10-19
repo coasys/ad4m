@@ -36,8 +36,9 @@ describe("Apps integration tests", () => {
     }
     if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
         fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-    if(!fs.existsSync(appDataPath))
-        fs.mkdirSync(appDataPath)
+    // rmSync with force also clears a dangling symlink, which existsSync reports as missing.
+    fs.rmSync(appDataPath, { recursive: true, force: true });
+    fs.mkdirSync(appDataPath, { recursive: true });
 
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
       apiPort, hcAdminPort, hcAppPort , false, "123");

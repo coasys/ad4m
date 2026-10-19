@@ -305,7 +305,7 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         "recorded 'scoped' must be returned (fold would give 'identified' — no proposals)"
     );
 
-    // The record is per agent: another agent on the node has none, so its
+    // The record is per agent: another agent on the executor has none, so its
     // gather derives — and gets the fold's "identified".
     let bob = crate::perspectives::flow_evaluator_e2e::second_agent("bob-gather@flow.local");
     let theirs =
