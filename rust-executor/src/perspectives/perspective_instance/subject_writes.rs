@@ -125,8 +125,10 @@ impl PerspectiveInstance {
     /// it from other records (collection membership, children). Through a
     /// concrete class every link of `base` goes. Through an abstract class
     /// the destructors of the record's classes it reads run first
-    /// ([`Self::remove_subject`]); when the record has other classes, their
-    /// links and the links pointing at it stay, as the record does.
+    /// ([`Self::remove_subject`]). When the record has other classes it
+    /// stays as them: only its links at the deleted classes' predicates go,
+    /// minus those a kept class declares too. Its other links (its own
+    /// children, links another app wrote) and the links pointing at it stay.
     ///
     /// Returns the links the cascade removed.
     pub(crate) async fn remove_subject_cascading(
@@ -135,16 +137,25 @@ impl PerspectiveInstance {
         base: &str,
         context: &AgentContext,
     ) -> Result<usize, CascadeFailure> {
-        let mut kept: Option<HashSet<String>> = None;
+        // `Some`: the record stays, and only links at these predicates go.
+        let mut only: Option<HashSet<String>> = None;
         if self.is_abstract_class(class)? {
             let targets = self.write_targets(class, base)?;
             let own = self
                 .subject_classes_of(&[base.to_string()])?
                 .remove(base)
                 .unwrap_or_default();
-            let mut predicates = HashSet::new();
-            for other in own.iter().filter(|c| !targets.contains(c)) {
-                predicates.extend(self.get_shape(other)?.predicates());
+            let others: Vec<_> = own.iter().filter(|c| !targets.contains(c)).collect();
+            if !others.is_empty() {
+                let mut kept = HashSet::new();
+                for other in others {
+                    kept.extend(self.get_shape(other)?.predicates());
+                }
+                let mut deleted = HashSet::new();
+                for target in &targets {
+                    deleted.extend(self.get_shape(target)?.predicates());
+                }
+                only = Some(deleted.difference(&kept).cloned().collect());
             }
             self.remove_subject(
                 super::SubjectClassOption {
@@ -156,7 +167,6 @@ impl PerspectiveInstance {
                 context,
             )
             .await?;
-            kept = (!predicates.is_empty()).then_some(predicates);
         }
 
         let outbound = LinkQuery {
@@ -167,7 +177,7 @@ impl PerspectiveInstance {
             target: Some(base.to_string()),
             ..Default::default()
         };
-        let queries = match kept {
+        let queries = match only {
             Some(_) => vec![outbound],
             None => vec![outbound, inbound],
         };
@@ -179,7 +189,7 @@ impl PerspectiveInstance {
             })?;
             for link in links {
                 let predicate = link.data.predicate.clone().unwrap_or_default();
-                if kept.as_ref().is_some_and(|k| k.contains(&predicate)) {
+                if only.as_ref().is_some_and(|o| !o.contains(&predicate)) {
                     continue;
                 }
                 let described =

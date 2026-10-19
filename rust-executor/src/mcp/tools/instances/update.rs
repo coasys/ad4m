@@ -98,7 +98,7 @@ impl Ad4mMcpHandler {
 
     /// Remove an instance and every link touching it.
     #[tool(
-        description = "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. Through an abstract class, runs the destructor of each of the record's classes it reads first; when the record has other classes, their links and the inbound links stay. ⚠️ Irreversible."
+        description = "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. Through an abstract class, runs the destructor of each of the record's classes it reads first; when the record has other classes it stays as them: only its links at the reached classes' predicates go, and its other links and the inbound links stay. ⚠️ Irreversible."
     )]
     pub async fn instance_remove(&self, params: Parameters<InstanceRemoveParams>) -> String {
         let p = &params.0;
