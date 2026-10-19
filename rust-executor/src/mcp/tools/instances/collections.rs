@@ -298,7 +298,7 @@ pub(crate) async fn add_member(
         .update_subject(
             subject_class(class_name),
             base_uri.to_string(),
-            json!({ collection: { "action": "adder", "value": [typed_value(item)] } }),
+            json!({ collection: { "action": "adder", "value": [typed_value(wanted)] } }),
             None,
             agent_context,
         )
