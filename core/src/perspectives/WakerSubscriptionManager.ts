@@ -20,7 +20,37 @@ export interface WakerSubscription {
    * `ad4m://TextContent` (#1446).
    */
   className?: string;
+  /**
+   * A mention subscription's terms (profile names and the DID), from
+   * `get_mention_waker_config`. The query matches substrings, so a record
+   * wakes only when its text holds one of these as a whole word
+   * ({@link holdsAWholeWordTerm}); without them a mention subscription is
+   * refused.
+   */
+  terms?: string[];
   neighbourhood?: string;
+}
+
+/** A letter, combining mark, digit or underscore: what a term must not touch. */
+const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
+
+/**
+ * Whether `text` holds one of `terms` as a whole word, case-insensitively:
+ * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
+ * "database". A term is matched literally (regex characters, quotes) and must
+ * not touch a letter, mark, digit or underscore on either side, so a name
+ * that starts or ends with punctuation still matches. Same rule as #1459's
+ * SPARQL `(?:^|\W)term(?:\W|$)`.
+ *
+ * The mention query's `contains` matches substrings (model query has no word
+ * match); this is the check that keeps "data" from waking on "metadata".
+ */
+export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
+  return terms.some((term) => {
+    if (!term) return false;
+    const escaped = term.replace(/[\\^$.*+?()[\]{}|\/]/g, "\\$&");
+    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(text);
+  });
 }
 
 /** The built-in `Container` (`Container.builtinUri`; not imported, so the
@@ -199,6 +229,13 @@ export class WakerSubscriptionManager {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
+    if (sub.type === "mention" && sub.className && !sub.terms?.length) {
+      // Without terms the whole-word check cannot run, and every substring
+      // ("metadata" for "data") would wake the agent.
+      throw new Error(
+        `Waker subscription ${sub.id}: a mention subscription needs its terms (get_mention_waker_config returns them)`,
+      );
+    }
 
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
@@ -302,15 +339,21 @@ export class WakerSubscriptionManager {
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
 
+        const terms = sub.terms ?? [];
         for (const item of items) {
-          if (typeof item?.id === "string" && !currentSeen.has(item.id)) {
-            newMessages.push(item.id);
+          if (typeof item?.id !== "string" || currentSeen.has(item.id)) continue;
+          // The query matched a substring; wake only on a whole word.
+          const text = Array.isArray(item.text) ? item.text.join(" ") : item.text;
+          if (typeof text !== "string" || !holdsAWholeWordTerm(text, terms)) {
+            this.logger.debug(`[waker] ${sub.id}: ${item.id} holds no term as a whole word, skipping`);
+            continue;
           }
+          newMessages.push(item.id);
         }
 
         if (newMessages.length === 0) {
           this.logger.info(
-            `[waker] ${sub.id}: all ${items.length} items already seen, skipping`,
+            `[waker] ${sub.id}: no new whole-word mention among ${items.length} items, skipping`,
           );
           return;
         }

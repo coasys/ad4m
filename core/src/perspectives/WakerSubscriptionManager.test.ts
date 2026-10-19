@@ -1,4 +1,4 @@
-import { WakerSubscriptionManager, WakerSubscription, hintFor } from './WakerSubscriptionManager';
+import { WakerSubscriptionManager, WakerSubscription, hintFor, holdsAWholeWordTerm } from './WakerSubscriptionManager';
 import { Container } from './Container';
 import { TextContent } from './TextContent';
 
@@ -29,6 +29,7 @@ describe('WakerSubscriptionManager', () => {
     channel: '',
     className: TextContent.builtinUri,
     query: '{"where":{"OR":[{"text":{"contains":"bot"}}]}}',
+    terms: ['bot'],
   };
 
   /** A QuerySubscriptionProxy stand-in whose registration the executor rejects. */
@@ -192,7 +193,7 @@ describe('WakerSubscriptionManager', () => {
    * subscription's constructor arguments, the parent queries (class and parsed JSON) and warnings.
    * `parents` answers each parent query: instances, or a function of the query.
    */
-  async function wakeWith(parents: unknown, deliveries: any[] = [{ instances: [{ id: 'test://message' }] }], ancestorDepth?: number) {
+  async function wakeWith(parents: unknown, deliveries: any[] = [{ instances: [{ id: 'test://message', text: 'hi bot' }] }], ancestorDepth?: number) {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const opened: any[][] = [];
     const ProxyClass = function (...args: any[]) {
@@ -245,13 +246,53 @@ describe('WakerSubscriptionManager', () => {
 
   it('wakes once per new mentioned id in the model result', async () => {
     const { wakes } = await wakeWith({ instances: [] }, [
-      { instances: [{ id: 'test://a' }], totalCount: 1 },
-      { instances: [{ id: 'test://b' }, { id: 'test://a' }], totalCount: 2 },
-      { instances: [{ id: 'test://b' }, { id: 'test://a' }], totalCount: 2 },
+      { instances: [{ id: 'test://a', text: 'bot?' }], totalCount: 1 },
+      { instances: [{ id: 'test://b', text: '@bot' }, { id: 'test://a', text: 'bot?' }], totalCount: 2 },
+      { instances: [{ id: 'test://b', text: '@bot' }, { id: 'test://a', text: 'bot?' }], totalCount: 2 },
       // SPARQL rows are not a model result.
       [{ source: 'test://c' }],
     ]);
     expect(wakes.map((mentions) => mentions.map((m: any) => m.address))).toEqual([['test://a'], ['test://b']]);
+  });
+
+  // #1459's table (`mention_query_matches_the_name_as_a_whole_word_only` and the regex-characters
+  // case), now the waker's check: the query returns these as substring candidates
+  // (`the_mention_query_returns_substring_candidates_with_their_text` in Rust).
+  it('holds a term only as a whole word, case-insensitively and literally', () => {
+    const holds = (text: string, terms = ['Data']) => holdsAWholeWordTerm(text, terms);
+    expect(['hi Data!', 'DATA, look', '@data', 'data', "Data's turn"].filter((t) => !holds(t))).toEqual([]);
+    expect(['the metadata is stale', 'a database row', 'datas', '_data', 'dataé'].filter((t) => holds(t))).toEqual([]);
+    expect(holds('ask J.R. (bot) please', ['J.R. (bot)'])).toBe(true);
+    expect(holds('ask JxRx (bot) please', ['J.R. (bot)'])).toBe(false);
+    expect(holds('hi a"b\\c!', ['a"b\\c'])).toBe(true);
+    expect(holds('hi a"bc!', ['a"b\\c'])).toBe(false);
+    // The DID, inside a mention's HTML as apps write it.
+    expect(holds('<span data-id="did:key:zBot">@bot</span>', ['did:key:zBot'])).toBe(true);
+    expect(holds('did:key:zBotX', ['did:key:zBot'])).toBe(false);
+    expect(holds('hi Data', ['', 'Bob'])).toBe(false);
+  });
+
+  it('wakes only on a whole-word mention, and still wakes when one arrives later', async () => {
+    const { wakes } = await wakeWith({ instances: [] }, [
+      // Substring candidates the query returns: no wake.
+      { instances: [{ id: 'test://meta', text: 'the robots are fine' }, { id: 'test://none' }], totalCount: 2 },
+      { instances: [{ id: 'test://real', text: 'hey Bot,' }, { id: 'test://meta', text: 'the robots are fine' }], totalCount: 2 },
+    ]);
+    expect(wakes.map((mentions) => mentions.map((m: any) => m.address))).toEqual([['test://real']]);
+  });
+
+  it('refuses a mention subscription without its terms', async () => {
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: function () { throw new Error('must not open'); },
+      onWake: () => {},
+    });
+    const { terms: _terms, ...withoutTerms } = sub;
+    await expect(manager.subscribe(withoutTerms)).rejects.toThrow(/needs its terms/);
+    await expect(manager.subscribe({ ...sub, terms: [] })).rejects.toThrow(/needs its terms/);
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.getPending()).toEqual([]);
   });
 
   it('resolves the parents of a new mention with a model query on Container', async () => {
@@ -323,7 +364,7 @@ describe('WakerSubscriptionManager', () => {
   it('hands any address to the executor as a value, not as query text', async () => {
     // The model query escapes it; the waker no longer builds query text, so it has nothing to skip.
     const address = 'test://bad> . ?s ?p ?o . #';
-    const { wakes, queries, warnings } = await wakeWith(tree({ [address]: ['test://call'] }), [{ instances: [{ id: address }] }], 0);
+    const { wakes, queries, warnings } = await wakeWith(tree({ [address]: ['test://call'] }), [{ instances: [{ id: address, text: 'hi bot' }] }], 0);
     expect(queries[0].query.where.children).toEqual([address]);
     expect(wakes[0][0]).toEqual({ address, parents: ['test://call'], ancestors: [] });
     expect(warnings).toEqual([]);

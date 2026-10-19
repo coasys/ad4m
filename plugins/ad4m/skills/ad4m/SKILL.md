@@ -244,7 +244,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### The wake event hands you addresses, not types
 
-`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
+`Item` is the address of whatever instance carried your name — the mention query reads every class whose text conforms to the built-in `TextContent`, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
 
 ### Step 1: work out what you are looking at
 

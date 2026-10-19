@@ -1947,6 +1947,7 @@ describe("ad4mPlugin", () => {
                 text: JSON.stringify({
                   class: "ad4m://TextContent",
                   query: "SELECT * FROM link WHERE ...",
+                  terms: ["TestAgent", "did:key:zTest"],
                   names: ["TestAgent"],
                   did: "did:key:zTest",
                 }),
@@ -2024,6 +2025,7 @@ describe("ad4mPlugin", () => {
                 text: JSON.stringify({
                   class: "ad4m://TextContent",
                   query: "SELECT * FROM link WHERE ...",
+                  terms: ["TestAgent", "did:key:zTest"],
                   names: ["TestAgent"],
                   did: "did:key:zTest",
                 }),
@@ -2167,11 +2169,26 @@ describe("ad4mPlugin", () => {
     const { opened, active } = await subscribeToMentions({
       class: "ad4m://TextContent",
       query,
+      terms: ["TestAgent", "did:key:zTest"],
       names: ["TestAgent"],
       did: "did:key:zTest",
     });
     expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([["persp-uuid-1", query, "ad4m://TextContent"]]);
     expect(active.map((sub) => sub.className)).toEqual(["ad4m://TextContent"]);
+    // The waker's whole-word check reads them.
+    expect(active.map((sub) => sub.terms)).toEqual([["TestAgent", "did:key:zTest"]]);
+  });
+
+  it("ad4m_subscribe_to_mentions refuses a mention query without its terms", async () => {
+    const { result, opened, active } = await subscribeToMentions({
+      class: "ad4m://TextContent",
+      query: JSON.stringify({ where: { OR: [{ text: { contains: "TestAgent" } }] } }),
+      names: ["TestAgent"],
+      did: "did:key:zTest",
+    });
+    expect(JSON.stringify(result)).toContain("without its terms");
+    expect(opened).toEqual([]);
+    expect(active).toEqual([]);
   });
 
   it("ad4m_subscribe_to_mentions refuses an executor that still answers with SPARQL", async () => {
@@ -3624,6 +3641,7 @@ describe("WakerSubscriptionManager", () => {
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
+      terms: ["bot"],
     });
 
     // Deliver `false` — should be ignored
@@ -3632,7 +3650,7 @@ describe("WakerSubscriptionManager", () => {
     expect(wakeCount).toBe(0);
 
     // Deliver a real result — should fire
-    mock.deliver({ instances: [{ id: "channel-1" }], totalCount: 1 });
+    mock.deliver({ instances: [{ id: "channel-1", text: "hi bot" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
     // Seen messages should contain the message address
@@ -3661,15 +3679,16 @@ describe("WakerSubscriptionManager", () => {
       perspective: "fake-uuid",
       channel: "",
       query: "SELECT * FROM link",
+      terms: ["bot"],
     });
 
     // Deliver same message that was already seen — should NOT wake
-    mock.deliver({ instances: [{ id: "channel-1" }], totalCount: 1 });
+    mock.deliver({ instances: [{ id: "channel-1", text: "hi bot" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(0);
 
     // Deliver a new message — should wake
-    mock.deliver({ instances: [{ id: "channel-2" }, { id: "channel-1" }], totalCount: 2 });
+    mock.deliver({ instances: [{ id: "channel-2", text: "hi bot" }, { id: "channel-1", text: "hi bot" }], totalCount: 2 });
     await new Promise(r => setTimeout(r, 50));
     expect(wakeCount).toBe(1);
 
@@ -3747,10 +3766,11 @@ describe("WakerSubscriptionManager", () => {
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
+      terms: ["bot"],
     });
 
     // The mention query's result: the records whose text mentions the agent.
-    mock.deliver({ instances: [{ id: "msg-1" }, { id: "msg-2" }], totalCount: 2 });
+    mock.deliver({ instances: [{ id: "msg-1", text: "hi bot" }, { id: "msg-2", text: "hi bot" }], totalCount: 2 });
     await new Promise(r => setTimeout(r, 50));
 
     // One parent lookup per message, then one batched lookup per ancestor level.
@@ -3793,9 +3813,10 @@ describe("WakerSubscriptionManager", () => {
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
+      terms: ["bot"],
     });
 
-    mock.deliver({ instances: [{ id: "msg-1" }], totalCount: 1 });
+    mock.deliver({ instances: [{ id: "msg-1", text: "hi bot" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
 
     expect(capturedMentions).toHaveLength(1);
@@ -3831,9 +3852,10 @@ describe("WakerSubscriptionManager", () => {
       perspective: "fake-uuid",
       channel: "fallback-channel",
       query: "SELECT * FROM link",
+      terms: ["bot"],
     });
 
-    mock.deliver({ instances: [{ id: "msg-1" }], totalCount: 1 });
+    mock.deliver({ instances: [{ id: "msg-1", text: "hi bot" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 50));
 
     // Should still wake with empty parents for the message
