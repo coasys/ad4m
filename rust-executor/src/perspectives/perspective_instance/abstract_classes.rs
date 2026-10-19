@@ -20,6 +20,7 @@ use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
     self, AbstractIndex, Resolution, ViewResolver,
 };
+use crate::perspectives::model_query::builtin_classes::builtin;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
@@ -94,8 +95,22 @@ impl PerspectiveInstance {
         Ok(index)
     }
 
+    /// The name aliases key `abstract_class` by, and its shape. A built-in
+    /// by its URI, from `builtin_classes`, never from the store: an app class
+    /// of the same name does not change what it reads or writes.
+    fn abstract_shape<'a>(
+        &self,
+        abstract_class: &'a str,
+    ) -> Result<(&'a str, Arc<ModelShape>), AnyError> {
+        Ok(match builtin(abstract_class) {
+            Some(b) => (b.name, b.shape.clone()),
+            None => (abstract_class, self.get_shape(abstract_class)?),
+        })
+    }
+
     /// Every installed concrete class `abstract_class` reads, with its view.
-    /// Cached until the installed shapes change.
+    /// Cached until the installed shapes change. `abstract_class` is a stored
+    /// abstract class's name or a built-in's URI (`ad4m://TextContent`).
     pub(super) fn resolve_abstract(
         &self,
         abstract_class: &str,
@@ -108,11 +123,13 @@ impl PerspectiveInstance {
             cache.generation
         };
         let index = self.abstract_index()?;
+        let (alias_key, shape) = self.abstract_shape(abstract_class)?;
         let resolution = Arc::new(abstract_classes::resolve(
             &self.sparql_store,
             &self.shape_resolver(),
             &index,
-            abstract_class,
+            alias_key,
+            &shape,
         )?);
         let mut cache = self.abstract_cache.write().unwrap();
         if cache.generation == generation {
@@ -132,10 +149,11 @@ impl PerspectiveInstance {
         query: &ModelQueryInput,
     ) -> Result<ReadTargets, AnyError> {
         let index = self.abstract_index()?;
+        let is_abstract = |name: &str| builtin(name).is_some() || index.is_abstract(name);
         let abstract_class = match classes {
-            QueryClasses::One(name) if index.is_abstract(name) => name,
+            QueryClasses::One(name) if is_abstract(name) => name,
             QueryClasses::Union(names) => {
-                if let Some(name) = names.iter().find(|n| index.is_abstract(n)) {
+                if let Some(name) = names.iter().find(|n| is_abstract(n)) {
                     return Err(anyhow!(
                         "classNames: '{name}' is an abstract class. Query it on its own: it \
                          already reads every class that has its properties."
@@ -183,9 +201,10 @@ impl PerspectiveInstance {
         targets.resolution.as_ref().map(|_| generation)
     }
 
-    /// Whether `class_name` is an abstract class here.
+    /// Whether `class_name` is an abstract class here: a built-in's URI
+    /// (`ad4m://TextContent`), or a stored class marked abstract.
     pub(crate) fn is_abstract_class(&self, class_name: &str) -> Result<bool, AnyError> {
-        Ok(self.abstract_index()?.is_abstract(class_name))
+        Ok(builtin(class_name).is_some() || self.abstract_index()?.is_abstract(class_name))
     }
 
     /// Creating an abstract class is refused: it names what records have,
@@ -251,7 +270,7 @@ impl PerspectiveInstance {
         let Value::Object(values) = values else {
             return Ok(vec![]);
         };
-        let shape = self.get_shape(abstract_class)?;
+        let (alias_key, shape) = self.abstract_shape(abstract_class)?;
         let names: HashSet<&str> = shape
             .properties
             .iter()
@@ -282,7 +301,7 @@ impl PerspectiveInstance {
             let mut has_action = false;
             for class in &targets {
                 let own_shape = self.get_shape(class)?;
-                let Some(own) = index.own_name(class, &own_shape, name, abstract_class) else {
+                let Some(own) = index.own_name(class, &own_shape, name, alias_key) else {
                     continue;
                 };
                 let Some(actions) = self.actions_for(class, own, op, membership).await? else {

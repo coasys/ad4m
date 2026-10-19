@@ -13,6 +13,8 @@ pub enum ApiError {
     NotFound(String),
     NotImplemented(String),
     Internal(String),
+    /// The node cannot answer yet (its wallet is locked); the caller should retry.
+    Unavailable(String),
 }
 
 #[derive(Serialize)]
@@ -30,6 +32,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            ApiError::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
         };
 
         let body = ErrorResponse {
