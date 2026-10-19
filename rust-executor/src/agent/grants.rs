@@ -17,14 +17,12 @@
 //! managed agent). The admin credential is not a token and has no grant.
 
 use super::capabilities::{
-    read_stored_claims, AuthInfo, AuthInfoExtended, Capability, AGENT_AUTH_CAPABILITY,
-    TOKEN_EXPIRY_LEEWAY_SECONDS,
+    read_stored_claims, AuthInfo, Capability, AGENT_AUTH_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
 use super::session::{AuthError, TokenId};
 use super::AgentContext;
 use crate::db::{Ad4mDb, GrantRow};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -405,87 +403,11 @@ pub fn mint(
     Ok((token, grant))
 }
 
-/// The app registry file of executors before grants: apps by request id, each with its
-/// token and a revoked flag.
-#[derive(serde::Deserialize)]
-struct RegisteredApp {
-    auth_info_extended: AuthInfoExtended,
-    revoked: bool,
-    token: String,
-}
-
-/// Moves the apps of the registry file `apps_file` into grant rows, so their tokens keep
-/// working (and revoked ones stay refused), then renames the file `<name>.migrated`. An app's
-/// grant is on the main agent, or, if its token has a `sub`, on the user's agent it names.
-/// Reads each token's id and expiry without the wallet, which is locked at start. A token that
-/// does not parse, or names no user, grants nothing. Running it again changes nothing: a row
-/// with the same id stays as it is.
-pub fn migrate_apps_file(db: &Ad4mDb, apps_file: &Path) -> Result<usize, String> {
-    if !apps_file.exists() {
-        return Ok(0);
-    }
-    let text = std::fs::read_to_string(apps_file).map_err(|e| e.to_string())?;
-    let apps: HashMap<String, RegisteredApp> = serde_json::from_str(&text)
-        .map_err(|e| format!("{}: not an app registry: {e}", apps_file.display()))?;
-    let mut migrated = 0;
-    for (request_id, app) in apps {
-        let Some(claims) = read_stored_claims(&app.token) else {
-            log::warn!("Not migrating app {request_id}: its token does not parse");
-            continue;
-        };
-        // A token with `sub` was approved for a user (`userEmail`): it acts as that user's agent.
-        let agent_did = match claims.sub.as_deref() {
-            None => None,
-            Some(sub) => match managed_did_named(db, sub) {
-                Some(did) => Some(did),
-                None => {
-                    log::warn!("Not migrating app {request_id}: no user's agent is {sub}");
-                    continue;
-                }
-            },
-        };
-        let auth = AuthInfo {
-            user_email: None,
-            ..app.auth_info_extended.auth
-        };
-        let row = GrantRow {
-            id: claims.nonce().to_string(),
-            request_id,
-            agent_did,
-            auth_info: serde_json::to_string(&auth).map_err(|e| e.to_string())?,
-            revoked: app.revoked,
-            expires_at: claims.expires_at(),
-            created_at: claims.issued_at(),
-        };
-        db.add_grant(&row).map_err(|e| e.to_string())?;
-        migrated += 1;
-    }
-    let mut renamed = apps_file.as_os_str().to_owned();
-    renamed.push(".migrated");
-    std::fs::rename(apps_file, &renamed).map_err(|e| e.to_string())?;
-    Ok(migrated)
-}
-
-/// The DID of the managed agent that `sub` names in `db`: the DID itself, if a user owns it.
-fn managed_did_named(db: &Ad4mDb, sub: &str) -> Option<String> {
-    db.get_username_by_did(sub)
-        .ok()
-        .flatten()
-        .map(|_| sub.to_string())
-}
-
 /// Fills the executor's grants at start, after the database opens and before the API serves:
-/// migrates the old app registry `apps_file`, deletes expired rows, and loads the rest.
-pub fn load_at_start(apps_file: &Path) -> Result<(), String> {
-    with_db(|db| {
-        match migrate_apps_file(db, apps_file) {
-            Ok(0) => {}
-            Ok(n) => log::info!("Moved {n} apps from {} into grants", apps_file.display()),
-            // The file stays for a retry; its apps' tokens are refused until then.
-            Err(e) => log::error!("Could not migrate the app registry: {e}"),
-        }
-        Grants::global().load(db)
-    })
+/// deletes expired rows and loads the rest. The app registry of executors before grants
+/// (`apps_data.json`) is not read: data from before grants is not supported.
+pub fn load_at_start() -> Result<(), String> {
+    with_db(|db| Grants::global().load(db))
 }
 
 #[cfg(test)]
@@ -719,151 +641,5 @@ mod tests {
             panic!("poison the lock");
         }));
         assert!(grants.get(&id).is_none());
-    }
-
-    /// Writes an app registry as executors before grants did: tokens that carry the app's
-    /// `AuthInfo` as `capabilities`.
-    fn old_registry(dir: &Path) -> (std::path::PathBuf, String, String) {
-        use jsonwebtoken::{encode, EncodingKey, Header};
-        let now = now();
-        let token = |name: &str| {
-            let claims = serde_json::json!({
-                "iss": "did:key:the-main-agent",
-                "sub": null,
-                "aud": name,
-                "exp": now + 3600,
-                "iat": now,
-                "nonce": uuid::Uuid::new_v4().to_string(),
-                "capabilities": auth(name, vec![AGENT_READ_CAPABILITY.clone()]),
-            });
-            encode(&Header::default(), &claims, &EncodingKey::from_secret(b"k")).unwrap()
-        };
-        let (live, revoked) = (token("live-app"), token("revoked-app"));
-        let entry = |name: &str, token: &str, revoked: bool| {
-            serde_json::json!({
-                "auth_info_extended": {
-                    "requestId": format!("req-{name}"),
-                    "auth": auth(name, vec![AGENT_READ_CAPABILITY.clone()]),
-                },
-                "revoked": revoked,
-                "token": token,
-            })
-        };
-        let registry = serde_json::json!({
-            "req-live-app": entry("live-app", &live, false),
-            "req-revoked-app": entry("revoked-app", &revoked, true),
-            "req-garbage": entry("garbage", "not-a-jwt", false),
-        });
-        let path = dir.join("apps_data.json");
-        std::fs::write(&path, registry.to_string()).unwrap();
-        (path, live, revoked)
-    }
-
-    #[test]
-    fn the_old_app_registry_becomes_grants_on_the_main_agent() {
-        let dir = tempfile::tempdir().unwrap();
-        let (path, live, revoked) = old_registry(dir.path());
-        let db = Ad4mDb::new(":memory:").unwrap();
-
-        assert_eq!(
-            migrate_apps_file(&db, &path).unwrap(),
-            2,
-            "the garbage token is skipped"
-        );
-        assert!(!path.exists());
-        assert!(dir.path().join("apps_data.json.migrated").exists());
-
-        let grants = Grants::default();
-        grants.load(&db).unwrap();
-        let id = |token: &str| TokenId(read_stored_claims(token).unwrap().nonce().to_string());
-        let app = grants
-            .get(&id(&live))
-            .expect("the app's token keeps working");
-        assert_eq!(app.agent, AgentContext::main_agent());
-        assert_eq!(app.request_id, "req-live-app");
-        // The table names the main agent by `NULL`; a session reads the main agent's DID.
-        assert_eq!(app.did, "");
-        assert_eq!(
-            format!("{:?}", app.caps),
-            format!("{:?}", vec![AGENT_READ_CAPABILITY.clone()])
-        );
-        assert!(
-            grants.get(&id(&revoked)).is_none(),
-            "a revoked app stays revoked"
-        );
-        assert_eq!(grants.list(&AgentContext::main_agent()).len(), 2);
-
-        // A second start finds no file and changes nothing.
-        assert_eq!(migrate_apps_file(&db, &path).unwrap(), 0);
-        assert_eq!(db.grants().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn an_old_token_with_capabilities_in_its_claims_decodes() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, live, _) = old_registry(dir.path());
-        let claims = read_stored_claims(&live).expect("old claims decode");
-        assert_eq!(claims.expires_at(), claims.issued_at() + 3600);
-    }
-
-    // An app approved for a user (`userEmail`) has a token whose `sub` names that user. It
-    // used to migrate onto the main agent, where no session accepts its `sub`, yet the app
-    // list showed it active. It moves to the user's agent and acts as that user.
-    #[test]
-    fn an_old_app_approved_for_a_user_migrates_to_that_users_agent() {
-        use crate::agent::capabilities::ListenerReach;
-        use crate::agent::session::{Principal, Session};
-        setup();
-        let email = format!("legacy-app-{}@example.org", uuid::Uuid::new_v4().simple());
-        let did = crate::test_utils::create_test_user(&email);
-        let sign = |sub: &str| {
-            super::super::capabilities::token::sign_token(
-                "legacy".to_string(),
-                3600,
-                Some(sub.to_string()),
-            )
-            .unwrap()
-            .0
-        };
-        let (by_email, by_did, nobody) = (sign(&email), sign(&did), sign("gone@example.org"));
-        let entry = |token: &str| {
-            serde_json::json!({
-                "auth_info_extended": {
-                    "requestId": "req-legacy",
-                    "auth": auth("legacy", vec![AGENT_READ_CAPABILITY.clone()]),
-                },
-                "revoked": false,
-                "token": token,
-            })
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("apps_data.json");
-        let registry = serde_json::json!({
-            "req-by-email": entry(&by_email),
-            "req-by-did": entry(&by_did),
-            "req-nobody": entry(&nobody),
-        });
-        std::fs::write(&path, registry.to_string()).unwrap();
-        let db = Ad4mDb::new(":memory:").unwrap();
-        db.add_user_prehashed(&email, &did, "hash").unwrap();
-
-        assert_eq!(
-            migrate_apps_file(&db, &path).unwrap(),
-            1,
-            "an app whose sub is an email or no user's DID is skipped (no D16 migration)"
-        );
-        Grants::global().load(&db).unwrap();
-        let session = Session::open(&by_did, &None, ListenerReach::Network).unwrap();
-        assert_eq!(
-            session.principal,
-            Principal::Agent(AgentContext::managed(did.clone()))
-        );
-        assert!(session.may(&AGENT_READ_CAPABILITY));
-        assert!(Session::open(&by_email, &None, ListenerReach::Network).is_err());
-        assert!(Session::open(&nobody, &None, ListenerReach::Network).is_err());
-        assert!(Grants::global()
-            .list(&AgentContext::main_agent())
-            .iter()
-            .all(|g| g.app_name() != "legacy"));
     }
 }
