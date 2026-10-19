@@ -79,9 +79,9 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
 
 /// The claims of a token, read without the wallet and without the signature check.
 ///
-/// Never use it to decide who a caller is. It serves revocation and the migration of the old
-/// app registry: a token names its grant by id, and the operator may revoke it while the
-/// wallet is locked. Revoking needs the grant, which only a token this executor issued has.
+/// Never use it to decide who a caller is. It serves revocation: a token names its grant by
+/// id, and the operator may revoke it while the wallet is locked. Revoking needs the grant,
+/// which only a token this executor issued has.
 /// `None` when the token does not parse.
 pub fn read_stored_claims(token: &str) -> Option<Claims> {
     let mut validation = jsonwebtoken::Validation::new(Algorithm::HS256);
