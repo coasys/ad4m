@@ -2553,13 +2553,21 @@ async fn an_add_to_collection_writes_the_trimmed_item() {
         collection: "replies".into(),
         item_uri: item.into(),
     };
-    let added = parse(&handler.instance_add_to_collection(Parameters(add(" ad4m://obj/r1 "))).await);
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(add(" ad4m://obj/r1 ")))
+            .await,
+    );
     assert_eq!(added["success"], true, "{added}");
     assert_eq!(
         links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None).await,
         vec![format!("{thread} flux://thread_reply ad4m://obj/r1")]
     );
-    let again = parse(&handler.instance_add_to_collection(Parameters(add("ad4m://obj/r1"))).await);
+    let again = parse(
+        &handler
+            .instance_add_to_collection(Parameters(add("ad4m://obj/r1")))
+            .await,
+    );
     assert_eq!(again["success"], true, "{again}");
     assert_eq!(
         links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None)
