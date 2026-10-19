@@ -2541,8 +2541,8 @@ async fn a_delete_through_an_abstract_class_keeps_the_records_other_classes() {
 }
 
 /// An add writes the item trimmed, as it checks membership: a padded URI
-/// is stored as the URI, and adding it again is a no-op. A remove trims
-/// it the same way.
+/// is stored as the URI, and adding it again is a no-op. A generated remove
+/// trims it the same way.
 #[tokio::test(flavor = "multi_thread")]
 async fn collection_writes_trim_the_item() {
     let (handler, uuid, _guard) = abstract_setup().await;
@@ -2577,18 +2577,17 @@ async fn collection_writes_trim_the_item() {
         1
     );
 
-    let removed = parse(
-        &handler
-            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
-                perspective_id: uuid.clone(),
-                class_name: "Thread".into(),
-                base_uri: thread.clone(),
-                collection: "replies".into(),
-                item_uri: " ad4m://obj/r1 ".into(),
-            }))
-            .await,
-    );
-    assert_eq!(removed["links_removed"], 1, "{removed}");
+    let removed = call_tool(
+        &handler,
+        "thread_remove_replies",
+        &[
+            ("perspective_id", json!(uuid.clone())),
+            ("expression_address", json!(thread.clone())),
+            ("value", json!(" ad4m://obj/r1 ")),
+        ],
+    )
+    .await;
+    assert!(removed.contains("\"links_removed\": 1"), "{removed}");
     assert!(
         links_of(&uuid, Some(&thread), Some("flux://thread_reply"), None)
             .await
