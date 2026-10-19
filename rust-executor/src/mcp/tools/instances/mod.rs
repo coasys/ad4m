@@ -24,8 +24,8 @@
 //! rejection names the property, the expected type and the cardinality —
 //! the agent gets less schema up front than with per-property tool
 //! parameters, so the error has to carry it instead. Accepted writes go
-//! through the same `create_subject` / `update_subject` / link paths the
-//! per-class tools use. The dynamic generators themselves are untouched and
+//! through `PerspectiveInstance` (`create_subject`, `update_subject`,
+//! `remove_subject_cascading`), as the per-class tools' do. The dynamic generators themselves are untouched and
 //! keep feeding the in-process interpretation harness.
 //!
 //! ## Module layout
@@ -65,6 +65,7 @@ pub use create::InstanceCreateParams;
 pub use describe::DescribePerspectiveParams;
 pub use query::{InstanceGetParams, InstanceQueryParams};
 pub use transcript::InstanceTranscriptParams;
+pub(crate) use update::update_in_batch;
 pub use update::{InstanceRemoveParams, InstanceUpdateParams};
 pub(crate) use validate::{
     coerce_scalar, describe_value, normalize_filter, validate_properties, validation_failure,
@@ -391,28 +392,6 @@ pub(crate) async fn resolve_class(
     )))
 }
 
-/// [`resolve_class`] for the collection tools. They write membership links
-/// at one class's predicate, so through an abstract class (#1435), which
-/// has no predicate of its own, they are refused.
-pub(crate) async fn resolve_writable_class(
-    perspective: &PerspectiveInstance,
-    class_name: &str,
-) -> Result<(String, Arc<ModelShape>), String> {
-    let (class_name, shape) = resolve_class(perspective, class_name).await?;
-    if perspective
-        .is_abstract_class(&class_name)
-        .map_err(|e| error_json(format!("{e:#}")))?
-    {
-        return Err(error_json(format!(
-            "'{class_name}' is an abstract class: collection membership is written through the \
-             record's own class, the `__subjectClass` a query on '{class_name}' returns. \
-             Through '{class_name}', instance_update sets its properties and instance_remove \
-             deletes the record."
-        )));
-    }
-    Ok((class_name, shape))
-}
-
 /// Run a model query for `class_name` and return `(instances, total_count)`.
 pub(super) async fn run_model_query(
     perspective: &PerspectiveInstance,
@@ -495,7 +474,7 @@ async fn has_setter(perspective: &PerspectiveInstance, class_uri: &str, prop: &s
 }
 
 /// Reject scalar writes to properties the SDNA can't actually set.
-pub(super) async fn check_setters(
+pub(crate) async fn check_setters(
     perspective: &PerspectiveInstance,
     shape: &ModelShape,
     scalars: &Map<String, Value>,
@@ -517,7 +496,7 @@ pub(super) async fn check_setters(
     errors
 }
 
-pub(super) fn subject_class(class_name: &str) -> SubjectClassOption {
+pub(crate) fn subject_class(class_name: &str) -> SubjectClassOption {
     SubjectClassOption {
         class_name: Some(class_name.to_string()),
         query: None,
@@ -587,64 +566,12 @@ pub(super) fn instance_uri(field: &str, value: &str) -> Result<String, String> {
     )))
 }
 
-/// A link cascade that stopped on a store error, and how far it got.
-///
-/// The cascade is not batched, so the links removed before the failure
-/// stay removed — the caller has to report that, not hide it behind a
-/// success.
-#[derive(Debug)]
-pub(crate) struct CascadeFailure {
-    /// Links removed before the error.
-    pub removed: usize,
-    /// What failed.
-    pub error: String,
-}
-
-/// Remove every link touching `uri` (as source or target). Same cascade as
-/// `delete_subject` / `{class}_delete`.
-///
-/// Stops at the first `get_links` / `remove_link` error and reports it
-/// together with the number of links already removed. `Ok` means the two
-/// queries and every removal succeeded.
-pub(crate) async fn remove_all_links_of(
-    perspective: &mut PerspectiveInstance,
-    uri: &str,
-) -> Result<usize, CascadeFailure> {
-    let mut removed = 0;
-    for query in [
-        LinkQuery {
-            source: Some(uri.to_string()),
-            ..Default::default()
-        },
-        LinkQuery {
-            target: Some(uri.to_string()),
-            ..Default::default()
-        },
-    ] {
-        let links = match perspective.get_links(&query).await {
-            Ok(links) => links,
-            Err(e) => {
-                return Err(CascadeFailure {
-                    removed,
-                    error: format!("listing the links of '{uri}' failed: {e:#}"),
-                })
-            }
-        };
-        for link in links {
-            let described = format!(
-                "{} -[{}]-> {}",
-                link.data.source,
-                link.data.predicate.as_deref().unwrap_or(""),
-                link.data.target
-            );
-            if let Err(e) = perspective.remove_link(link.into(), None).await {
-                return Err(CascadeFailure {
-                    removed,
-                    error: format!("removing link {described} failed: {e:#}"),
-                });
-            }
-            removed += 1;
-        }
+/// A value an MCP tool got as a string, as the perspective writes it: an IRI
+/// as is, else its JSON reading (`"42"` is a number, `"true"` a boolean),
+/// else the string. Tool schemas declare every value a string.
+pub(crate) fn typed_value(value: &str) -> Value {
+    if is_safe_iri_target(value) {
+        return Value::String(value.to_string());
     }
-    Ok(removed)
+    serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()))
 }

@@ -181,6 +181,7 @@ This is useful for a *fixed, known* DNA where per-property tool parameters give 
 - **Collections** (`collection: true`, or no `max_count`) → `{class}_get_{collection}`, `{class}_add_{collection}`, `{class}_remove_{collection}`
 - `{class}_create` takes **every** non-collection property as a parameter, required or not; `min_count` only decides whether the description marks it with `*`, and `perspective_id` is the only entry in the schema's `required` list
 - Every instance-scoped tool identifies the instance by an **`expression_address`** parameter
+- The write tools run the class's `setter`, `adder` and `remover` actions, as the `instance_*` tools do: a property without one is read-only for them too. `{class}_add_{collection}` of a member that is already in the collection writes nothing (`already_member: true`)
 - SHACL Flow *actions* do **not** generate tools — flows are read and driven through the static `add_flow` / `get_flows` / `flow_state` / `flow_actions` tools
 
 **Example:** A `Channel` SDNA added via `add_model(class_name: "Channel", shacl_json: ...)`:

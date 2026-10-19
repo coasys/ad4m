@@ -2,10 +2,9 @@
 
 use super::{
     check_setters, error_json, fetch_instance, generate_instance_uri, link_target, pretty,
-    resolve_class, subject_class, validate_properties, validation_failure, Ad4mMcpHandler,
-    WriteMode, HAS_CHILD,
+    resolve_class, subject_class, typed_value, validate_properties, validation_failure,
+    Ad4mMcpHandler, WriteMode, HAS_CHILD,
 };
-use crate::mcp::shacl;
 use crate::types::{Link, LinkStatus};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -86,34 +85,6 @@ impl Ad4mMcpHandler {
             }
         }
 
-        // Resolve every collection predicate BEFORE creating the subject, so
-        // a bad collection name fails the whole call cleanly instead of
-        // leaving a live instance with partial collection membership.
-        let mut collection_predicates: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        // Collection links are written directly here, not through the
-        // collection's `adder` action, so the status has to be resolved from
-        // the property shape (`ad4m://local`) for each one.
-        let mut collection_statuses: std::collections::HashMap<String, LinkStatus> =
-            std::collections::HashMap::new();
-        for (collection, _) in &validated.collections {
-            collection_statuses.insert(
-                collection.clone(),
-                shacl::resolve_property_link_status(&perspective, &class_name, collection).await,
-            );
-            match shacl::resolve_property_predicate(&perspective, &class_name, collection).await {
-                Ok(pred) => {
-                    collection_predicates.insert(collection.clone(), pred);
-                }
-                Err(e) => {
-                    return error_json(format!(
-                        "Could not resolve collection '{collection}' on {class_name}: {e} — \
-                         nothing was created"
-                    ))
-                }
-            }
-        }
-
         let initial_values = if validated.scalars.is_empty() {
             None
         } else {
@@ -143,46 +114,35 @@ impl Ad4mMcpHandler {
             ));
         }
 
-        // Collections: one link per item, same path as instance_add_to_collection.
+        // Collections: each item through the collection's adder, in the
+        // same batch, as instance_add_to_collection adds one.
         let mut collections_set: Map<String, Value> = Map::new();
         for (collection, items) in &validated.collections {
-            let predicate = collection_predicates[collection].clone();
-            let status = collection_statuses
-                .get(collection)
-                .cloned()
-                .unwrap_or(LinkStatus::Shared);
-            let mut added = Vec::with_capacity(items.len());
-            for item in items {
-                let item_str = match item {
+            let items: Vec<String> = items
+                .iter()
+                .map(|item| match item {
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
-                };
-                let target = Self::create_property_expression(
-                    &perspective,
-                    &class_name,
-                    collection,
-                    &item_str,
+                })
+                .collect();
+            let members: Vec<Value> = items.iter().map(|i| typed_value(i)).collect();
+            if let Err(e) = perspective
+                .update_subject(
+                    subject_class(&class_name),
+                    base_uri.clone(),
+                    json!({ collection: { "action": "adder", "value": members } }),
+                    Some(batch_id.clone()),
                     &agent_context,
                 )
-                .await;
-                let link = Link {
-                    source: base_uri.clone(),
-                    predicate: Some(predicate.clone()),
-                    target,
-                };
-                if let Err(e) = perspective
-                    .add_link(link, status.clone(), Some(batch_id.clone()), &agent_context)
-                    .await
-                {
-                    perspective.discard_batch(&batch_id).await;
-                    return error_json(format!(
-                        "Failed to add '{item_str}' to collection '{collection}' — nothing was \
-                         created (batch abandoned): {e:#}"
-                    ));
-                }
-                added.push(Value::String(item_str));
+                .await
+            {
+                perspective.discard_batch(&batch_id).await;
+                return error_json(format!(
+                    "Failed to add {items:?} to collection '{collection}' — nothing was \
+                     created (batch abandoned): {e:#}"
+                ));
             }
-            collections_set.insert(collection.clone(), Value::Array(added));
+            collections_set.insert(collection.clone(), json!(items));
         }
 
         let parent = p.parent.as_deref().filter(|s| !s.trim().is_empty());

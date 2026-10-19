@@ -2,10 +2,11 @@
 //! instance of any subject class.
 
 use super::{
-    check_setters, error_json, fetch_instance, instance_uri, not_found, pretty,
-    remove_all_links_of, resolve_class, subject_class, validate_properties, validation_failure,
-    Ad4mMcpHandler, WriteMode,
+    check_setters, error_json, fetch_instance, instance_uri, not_found, pretty, resolve_class,
+    subject_class, validate_properties, validation_failure, Ad4mMcpHandler, WriteMode,
 };
+use crate::agent::AgentContext;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -60,16 +61,7 @@ impl Ad4mMcpHandler {
             Ok(v) => v,
             Err(errors) => return validation_failure(&class_name, &errors),
         };
-        // Through an abstract class (#1435) the record's own classes' setters
-        // write; `update_subject` checks those.
-        let is_abstract = match perspective.is_abstract_class(&class_name) {
-            Ok(is_abstract) => is_abstract,
-            Err(e) => return error_json(format!("Error reading {class_name}'s shape: {e:#}")),
-        };
-        let setter_errors = match is_abstract {
-            true => vec![],
-            false => check_setters(&perspective, &shape, &validated.scalars).await,
-        };
+        let setter_errors = check_setters(&perspective, &shape, &validated.scalars).await;
         if !setter_errors.is_empty() {
             return validation_failure(&class_name, &setter_errors);
         }
@@ -84,27 +76,16 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
-        // One batch for the whole update so remove-old + add-new per property
-        // lands atomically (same reasoning as the per-class setters: without
-        // it a peer can observe the property as unset in between).
-        let batch_id = perspective.create_batch().await;
-        if let Err(e) = perspective
-            .update_subject(
-                subject_class(&class_name),
-                base_uri.clone(),
-                Value::Object(validated.scalars.clone()),
-                Some(batch_id.clone()),
-                &agent_context,
-            )
-            .await
+        if let Err(e) = update_in_batch(
+            &mut perspective,
+            &class_name,
+            &base_uri,
+            validated.scalars.clone(),
+            &agent_context,
+        )
+        .await
         {
-            perspective.discard_batch(&batch_id).await;
-            return error_json(format!(
-                "Error updating {class_name} instance (batch abandoned): {e:#}"
-            ));
-        }
-        if let Err(e) = perspective.commit_batch(batch_id, &agent_context).await {
-            return error_json(format!("Error committing update: {e:#}"));
+            return error_json(e);
         }
 
         pretty(&json!({
@@ -117,7 +98,7 @@ impl Ad4mMcpHandler {
 
     /// Remove an instance and every link touching it.
     #[tool(
-        description = "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. Through an abstract class, runs the destructor of each of the record's classes it reads instead. ⚠️ Irreversible."
+        description = "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. Through an abstract class, runs the destructor of each of the record's classes it reads first; when the record has other classes it stays as them: only its links at the reached classes' predicates go, and its other links and the inbound links stay. ⚠️ Irreversible."
     )]
     pub async fn instance_remove(&self, params: Parameters<InstanceRemoveParams>) -> String {
         let p = &params.0;
@@ -140,36 +121,14 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
-        // Through an abstract class (#1435), the destructors of the record's
-        // classes it reads: the cascade below would delete its other classes.
-        let is_abstract = match perspective.is_abstract_class(&class_name) {
-            Ok(is_abstract) => is_abstract,
-            Err(e) => return error_json(format!("Error reading {class_name}'s shape: {e:#}")),
-        };
-        if is_abstract {
-            return match perspective
-                .remove_subject(
-                    subject_class(&class_name),
-                    base_uri.clone(),
-                    None,
-                    &agent_context,
-                )
-                .await
-            {
-                Ok(()) => pretty(&json!({
-                    "success": true,
-                    "class_name": class_name,
-                    "deleted": base_uri,
-                })),
-                Err(e) => error_json(format!("Error removing {class_name} instance: {e:#}")),
-            };
-        }
-
-        // Success only when both link queries and every removal succeeded.
-        // The cascade is not batched, so on failure the links already
-        // removed stay removed: say so, with the count, instead of
-        // reporting a deletion that did not fully happen.
-        let removed = match remove_all_links_of(&mut perspective, &base_uri).await {
+        // Success only when the delete and its whole cascade succeeded. The
+        // cascade is not batched, so on failure the links already removed
+        // stay removed: say so, with the count, instead of reporting a
+        // deletion that did not fully happen.
+        let removed = match perspective
+            .remove_subject_cascading(&class_name, &base_uri, &agent_context)
+            .await
+        {
             Ok(removed) => removed,
             Err(failure) => {
                 return pretty(&json!({
@@ -192,4 +151,38 @@ impl Ad4mMcpHandler {
             "links_removed": removed,
         }))
     }
+}
+
+/// Set `values` (validated, by their class's names) on the instance at
+/// `base_uri` through `update_subject`, in one batch, so a peer never sees
+/// a property's old value removed before its new one lands. The error is
+/// the message to return.
+pub(crate) async fn update_in_batch(
+    perspective: &mut PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+    values: Map<String, Value>,
+    agent_context: &AgentContext,
+) -> Result<(), String> {
+    let batch_id = perspective.create_batch().await;
+    if let Err(e) = perspective
+        .update_subject(
+            subject_class(class_name),
+            base_uri.to_string(),
+            Value::Object(values),
+            Some(batch_id.clone()),
+            agent_context,
+        )
+        .await
+    {
+        perspective.discard_batch(&batch_id).await;
+        return Err(format!(
+            "Error updating {class_name} instance (batch abandoned): {e:#}"
+        ));
+    }
+    perspective
+        .commit_batch(batch_id, agent_context)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Error committing update: {e:#}"))
 }

@@ -4,9 +4,10 @@
 //! This enables AI agents to work with any data model defined in a perspective,
 //! not just hardcoded tool sets.
 
-use super::Ad4mMcpHandler;
+use super::{instances, Ad4mMcpHandler};
+use crate::agent::AgentContext;
 use crate::mcp::shacl::{self, ShaclProperty};
-use crate::perspectives::perspective_instance::SubjectClassOption;
+use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::perspectives::{all_perspectives, get_perspective};
 use crate::types::Link;
 use crate::types::{LinkQuery, LinkStatus};
@@ -44,34 +45,36 @@ impl Ad4mMcpHandler {
                     continue;
                 }
 
-                // An abstract class (#1435): only its reads (see
-                // `handle_dynamic_tool`). If the index does not load, the
-                // writes are listed and refused when called.
-                let writable = !perspective.is_abstract_class(&class.name).unwrap_or(false);
-                if writable {
-                    tools.push(Self::make_create_tool(&class.name, &class.properties));
-                }
-                tools.push(Self::make_query_tool(&class.name));
-                tools.push(Self::make_list_tool(&class.name));
-                tools.push(Self::make_get_tool(&class.name));
-                if writable {
-                    tools.push(Self::make_delete_tool(&class.name));
-                }
-                // Per-property set tools and collection tools
-                for prop in &class.properties {
-                    if prop.is_collection {
-                        tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
-                        if writable {
-                            tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
-                            tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
-                        }
-                    } else if writable {
-                        tools.push(Self::make_set_property_tool(&class.name, &prop.name));
-                    }
-                }
+                // If the abstract-class index does not load, `_create` is listed and
+                // refused when called.
+                let creatable = !perspective.is_abstract_class(&class.name).unwrap_or(false);
+                tools.extend(Self::class_tools(class, creatable));
             }
         }
 
+        tools
+    }
+
+    /// The dynamic tools of `class`. `creatable` gates `_create` only: an abstract class
+    /// (#1435) is never created, and its other writes dispatch to the record's own classes.
+    fn class_tools(class: &shacl::ShaclClass, creatable: bool) -> Vec<Tool> {
+        let mut tools = Vec::new();
+        if creatable {
+            tools.push(Self::make_create_tool(&class.name, &class.properties));
+        }
+        tools.push(Self::make_query_tool(&class.name));
+        tools.push(Self::make_list_tool(&class.name));
+        tools.push(Self::make_get_tool(&class.name));
+        tools.push(Self::make_delete_tool(&class.name));
+        for prop in &class.properties {
+            if prop.is_collection {
+                tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
+                tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
+                tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
+            } else {
+                tools.push(Self::make_set_property_tool(&class.name, &prop.name));
+            }
+        }
         tools
     }
 
@@ -351,7 +354,7 @@ impl Ad4mMcpHandler {
                     ))]));
                 }
             };
-            let name = match shacl::find_class_name(&perspective, class_name_lower).await {
+            match shacl::find_class_name(&perspective, class_name_lower).await {
                 Some(name) => name,
                 None => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -359,28 +362,7 @@ impl Ad4mMcpHandler {
                         class_name_lower, perspective_id
                     ))]));
                 }
-            };
-            // The generated tools of an abstract class (#1435) only read: the
-            // write tools write links at one class's predicates.
-            let writes = matches!(
-                operation,
-                "create" | "update" | "set" | "add" | "remove" | "delete"
-            );
-            let refusal = match writes.then(|| perspective.is_abstract_class(&name)) {
-                Some(Ok(true)) => Some(format!(
-                    "'{name}' is an abstract class: its generated tools only read, and it \
-                     cannot be created. instance_update and instance_remove write a record \
-                     through it, to the record's own classes."
-                )),
-                Some(Err(e)) => Some(e.to_string()),
-                _ => None,
-            };
-            if let Some(refusal) = refusal {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Error: {refusal}"
-                ))]));
             }
-            name
         };
 
         let result = match operation {
@@ -976,161 +958,46 @@ impl Ad4mMcpHandler {
             Ok(v) => v.to_string(),
             Err(e) => return e,
         };
-
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let (mut perspective, _agent_ctx) =
-            match self.get_writable_perspective(perspective_id).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-
-        let mut updated = Vec::new();
-        for (key, value) in args {
-            if key == "perspective_id" || key == "expression_address" {
-                continue;
-            }
-            let value_str = match value.as_str() {
-                Some(s) => s.to_string(),
-                None => value.to_string(),
-            };
-
-            let predicate = match self
-                .resolve_property_predicate(&perspective, class_name, key)
-                .await
-            {
-                Ok(pred) => pred,
-                Err(e) => return format!("Error resolving property '{}': {}", key, e),
-            };
-
-            // Use batch to atomically remove old + add new for this property.
-            // Without batching, the remove can propagate to other nodes before the add,
-            // causing the property to appear as "uninitialized" temporarily.
-            let batch_id = perspective.create_batch().await;
-
-            // Remove old values
-            if let Ok(links) = perspective
-                .get_links(&LinkQuery {
-                    source: Some(expression_address.clone()),
-                    predicate: Some(predicate.clone()),
-                    ..Default::default()
-                })
-                .await
-            {
-                for link in links {
-                    if let Err(e) = perspective
-                        .remove_link(link.into(), Some(batch_id.clone()))
-                        .await
-                    {
-                        return format!(
-                            "Error removing existing '{}' link (batch abandoned): {}",
-                            key, e
-                        );
-                    }
-                }
-            }
-
-            let target = Self::create_property_expression(
-                &perspective,
-                class_name,
-                key,
-                &value_str,
-                &agent_context,
-            )
-            .await;
-
-            let link = Link {
-                source: expression_address.clone(),
-                predicate: Some(predicate),
-                target,
-            };
-
-            // Written directly, not through the property's setter action, so
-            // `ad4m://local` has to be resolved from the shape here.
-            let status =
-                crate::mcp::shacl::resolve_property_link_status(&perspective, class_name, key)
-                    .await;
-
-            if let Err(e) = perspective
-                .add_link(link, status, Some(batch_id.clone()), &agent_context)
-                .await
-            {
-                return format!("Error adding '{}' link (batch abandoned): {}", key, e);
-            }
-
-            match perspective.commit_batch(batch_id, &agent_context).await {
-                Ok(_) => updated.push(key.clone()),
-                Err(e) => return format!("Error setting property '{}': {}", key, e),
-            }
-        }
-
-        serde_json::to_string_pretty(&json!({
-            "success": true,
-            "updated_properties": updated,
-        }))
-        .unwrap_or_else(|e| format!("Error: {}", e))
+        let values = args
+            .iter()
+            .filter(|(key, _)| *key != "perspective_id" && *key != "expression_address")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.set_properties(perspective_id, class_name, &expression_address, values)
+            .await
+            .unwrap_or_else(|e| e)
     }
 
     async fn handle_dynamic_delete(
         &self,
         perspective_id: &str,
-        _class_name: &str,
+        class_name: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
         let expression_address = match Self::require_arg(args, "expression_address") {
             Ok(v) => v.to_string(),
             Err(e) => return e,
         };
-
-        let _agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let (mut perspective, _agent_ctx) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
             };
-
-        let mut removed = 0;
-        if let Ok(links) = perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                ..Default::default()
-            })
+        match perspective
+            .remove_subject_cascading(class_name, &expression_address, &agent_context)
             .await
         {
-            for link in links {
-                if perspective.remove_link(link.into(), None).await.is_ok() {
-                    removed += 1;
-                }
-            }
+            Ok(removed) => serde_json::to_string_pretty(&json!({
+                "success": true,
+                "deleted": expression_address,
+                "links_removed": removed,
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(failure) => format!(
+                "Error deleting '{}' ({} link(s) already removed): {}",
+                expression_address, failure.removed, failure.error
+            ),
         }
-
-        if let Ok(links) = perspective
-            .get_links(&LinkQuery {
-                target: Some(expression_address.clone()),
-                ..Default::default()
-            })
-            .await
-        {
-            for link in links {
-                if perspective.remove_link(link.into(), None).await.is_ok() {
-                    removed += 1;
-                }
-            }
-        }
-
-        serde_json::to_string_pretty(&json!({
-            "success": true,
-            "deleted": expression_address,
-            "links_removed": removed,
-        }))
-        .unwrap_or_else(|e| format!("Error: {}", e))
     }
 
     /// Handle {class}_set_{property} — set a single property on a subject instance
@@ -1149,88 +1016,13 @@ impl Ad4mMcpHandler {
             Ok(v) => v.to_string(),
             Err(e) => return e,
         };
-
-        let (mut perspective, _agent_ctx) =
-            match self.get_writable_perspective(perspective_id).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-
-        // Resolve property predicate via SHACL
-        let predicate = match self
-            .resolve_property_predicate(&perspective, class_name, property_name)
+        let values = [(property_name.to_string(), json!(value))]
+            .into_iter()
+            .collect();
+        match self
+            .set_properties(perspective_id, class_name, &expression_address, values)
             .await
         {
-            Ok(pred) => pred,
-            Err(e) => return format!("Error resolving property '{}': {}", property_name, e),
-        };
-
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let target = Self::create_property_expression(
-            &perspective,
-            class_name,
-            property_name,
-            &value,
-            &agent_context,
-        )
-        .await;
-
-        // Use batch to atomically remove old + add new (setSingleTarget pattern).
-        // Without batching, the remove can propagate to other nodes before the add,
-        // causing the property to appear as "uninitialized" temporarily.
-        let batch_id = perspective.create_batch().await;
-
-        // Remove existing links with this predicate
-        let existing = perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                predicate: Some(predicate.clone()),
-                ..Default::default()
-            })
-            .await;
-
-        if let Ok(links) = existing {
-            for link in links {
-                if let Err(e) = perspective
-                    .remove_link(link.into(), Some(batch_id.clone()))
-                    .await
-                {
-                    return format!(
-                        "Error removing existing '{}' link (batch abandoned): {}",
-                        property_name, e
-                    );
-                }
-            }
-        }
-
-        let link = Link {
-            source: expression_address.clone(),
-            predicate: Some(predicate),
-            target,
-        };
-
-        let status = crate::mcp::shacl::resolve_property_link_status(
-            &perspective,
-            class_name,
-            property_name,
-        )
-        .await;
-
-        if let Err(e) = perspective
-            .add_link(link, status, Some(batch_id.clone()), &agent_context)
-            .await
-        {
-            return format!(
-                "Error adding '{}' link (batch abandoned): {}",
-                property_name, e
-            );
-        }
-
-        match perspective.commit_batch(batch_id, &agent_context).await {
             Ok(_) => serde_json::to_string_pretty(&json!({
                 "success": true,
                 "expression_address": expression_address,
@@ -1238,8 +1030,58 @@ impl Ad4mMcpHandler {
                 "value": value,
             }))
             .unwrap_or_else(|e| format!("Error: {}", e)),
-            Err(e) => format!("Error setting property '{}': {}", property_name, e),
+            Err(e) => e,
         }
+    }
+
+    /// Set `values` (tool-cased names, string values) through
+    /// `update_subject`, in one batch. The error is the message to return.
+    async fn set_properties(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        expression_address: &str,
+        values: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        let (mut perspective, agent_context) =
+            self.get_writable_perspective(perspective_id).await?;
+        let shape = perspective
+            .get_shape(class_name)
+            .map_err(|e| format!("Error reading class '{class_name}': {e:#}"))?;
+        let infos = instances::class_properties(&shape);
+        let mut typed = serde_json::Map::new();
+        for (key, value) in values {
+            let Some(info) = instances::find_property(&infos, &key) else {
+                return Err(format!(
+                    "Error resolving property '{key}': not a property of '{class_name}'"
+                ));
+            };
+            let value = match value.as_str() {
+                Some(s) => instances::typed_value(s),
+                None => value,
+            };
+            typed.insert(info.name().to_string(), value);
+        }
+        let read_only = instances::check_setters(&perspective, &shape, &typed).await;
+        if let Some(e) = read_only.first() {
+            return Err(format!(
+                "Error setting property '{}': {}",
+                e.property, e.problem
+            ));
+        }
+        instances::update_in_batch(
+            &mut perspective,
+            class_name,
+            expression_address,
+            typed.clone(),
+            &agent_context,
+        )
+        .await?;
+        serde_json::to_string_pretty(&json!({
+            "success": true,
+            "updated_properties": typed.keys().collect::<Vec<_>>(),
+        }))
+        .map_err(|e| format!("Error: {}", e))
     }
 
     /// Handle {class}_get_{collection} — get items in a collection
@@ -1260,21 +1102,12 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let predicate = match self
-            .resolve_property_predicate(&perspective, class_name, collection_name)
-            .await
-        {
-            Ok(pred) => pred,
-            Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
+        let collection = match Self::collection_of(&perspective, class_name, collection_name) {
+            Ok(c) => c,
+            Err(e) => return e,
         };
-
-        // Query all links with this predicate from the expression
         match perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                predicate: Some(predicate),
-                ..Default::default()
-            })
+            .member_links(class_name, &expression_address, &collection)
             .await
         {
             Ok(links) => {
@@ -1306,61 +1139,32 @@ impl Ad4mMcpHandler {
             Ok(v) => v.to_string(),
             Err(e) => return e,
         };
-
-        let (mut perspective, _agent_ctx) =
-            match self.get_writable_perspective(perspective_id).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-
-        // Resolve collection predicate via SHACL
-        let predicate = match self
-            .resolve_property_predicate(&perspective, class_name, collection_name)
+        let (mut perspective, agent_context, collection) = match self
+            .writable_collection(perspective_id, class_name, collection_name)
             .await
         {
-            Ok(pred) => pred,
-            Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
+            Ok(v) => v,
+            Err(e) => return e,
         };
-
-        let agent_context = match self.get_agent_context().await {
-            Ok(ctx) => ctx,
-            Err(e) => return format!("Authentication error: {}", e),
-        };
-
-        let target = Self::create_property_expression(
-            &perspective,
+        match instances::collections::add_member(
+            &mut perspective,
             class_name,
-            collection_name,
+            &expression_address,
+            &collection,
             &value,
             &agent_context,
         )
-        .await;
-
-        let link = Link {
-            source: expression_address.clone(),
-            predicate: Some(predicate),
-            target,
-        };
-
-        let status = crate::mcp::shacl::resolve_property_link_status(
-            &perspective,
-            class_name,
-            collection_name,
-        )
-        .await;
-
-        match perspective
-            .add_link(link, status, None, &agent_context)
-            .await
+        .await
         {
-            Ok(_) => serde_json::to_string_pretty(&json!({
+            Ok(added) => serde_json::to_string_pretty(&json!({
                 "success": true,
                 "expression_address": expression_address,
                 "collection": collection_name,
                 "added": value,
+                "already_member": !added,
             }))
             .unwrap_or_else(|e| format!("Error: {}", e)),
-            Err(e) => format!("Error adding to collection '{}': {}", collection_name, e),
+            Err(e) => e,
         }
     }
 
@@ -1380,55 +1184,68 @@ impl Ad4mMcpHandler {
             Ok(v) => v.to_string(),
             Err(e) => return e,
         };
-
-        let (mut perspective, _agent_ctx) =
-            match self.get_writable_perspective(perspective_id).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
-
-        // Resolve collection predicate via SHACL
-        let predicate = match self
-            .resolve_property_predicate(&perspective, class_name, collection_name)
+        let (mut perspective, agent_context, collection) = match self
+            .writable_collection(perspective_id, class_name, collection_name)
             .await
         {
-            Ok(pred) => pred,
-            Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
+            Ok(v) => v,
+            Err(e) => return e,
         };
-
-        // Find and remove the link with matching target
-        let target = Self::wrap_bare_as_literal(&value);
-
-        match perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                predicate: Some(predicate),
-                target: Some(target),
-                ..Default::default()
-            })
-            .await
+        match instances::collections::remove_member(
+            &mut perspective,
+            class_name,
+            &expression_address,
+            &collection,
+            &value,
+            &agent_context,
+        )
+        .await
         {
-            Ok(links) => {
-                let mut removed = 0;
-                for link in links {
-                    if perspective.remove_link(link.into(), None).await.is_ok() {
-                        removed += 1;
-                    }
-                }
-                serde_json::to_string_pretty(&json!({
-                    "success": true,
-                    "expression_address": expression_address,
-                    "collection": collection_name,
-                    "removed": value,
-                    "links_removed": removed,
-                }))
-                .unwrap_or_else(|e| format!("Error: {}", e))
-            }
-            Err(e) => format!(
-                "Error removing from collection '{}': {}",
-                collection_name, e
-            ),
+            Ok((removed, _)) => serde_json::to_string_pretty(&json!({
+                "success": true,
+                "expression_address": expression_address,
+                "collection": collection_name,
+                "removed": value,
+                "links_removed": removed,
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e) => e,
         }
+    }
+
+    /// The writable perspective and the class's own spelling of the
+    /// collection an `{class}_add_` / `_remove_` tool names.
+    async fn writable_collection(
+        &self,
+        perspective_id: &str,
+        class_name: &str,
+        collection_name: &str,
+    ) -> Result<(PerspectiveInstance, AgentContext, String), String> {
+        let (perspective, agent_context) = self.get_writable_perspective(perspective_id).await?;
+        let collection = Self::collection_of(&perspective, class_name, collection_name)?;
+        Ok((perspective, agent_context, collection))
+    }
+
+    /// The class's own spelling of the collection a `{class}_get_` / `_add_`
+    /// / `_remove_` tool names. Reads only: the caller picks the access.
+    fn collection_of(
+        perspective: &PerspectiveInstance,
+        class_name: &str,
+        collection_name: &str,
+    ) -> Result<String, String> {
+        let shape = perspective
+            .get_shape(class_name)
+            .map_err(|e| format!("Error reading class '{class_name}': {e:#}"))?;
+        let infos = instances::class_properties(&shape);
+        instances::find_property(&infos, collection_name)
+            .filter(|info| info.collection())
+            .map(|info| info.name().to_string())
+            .ok_or_else(|| {
+                format!(
+                    "Error resolving collection '{collection_name}': not a collection of \
+                     '{class_name}'"
+                )
+            })
     }
 }
 
