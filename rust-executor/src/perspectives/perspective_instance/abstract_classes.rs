@@ -98,7 +98,7 @@ impl PerspectiveInstance {
     /// The name aliases key `abstract_class` by, and its shape. A built-in
     /// by its URI, from `builtin_classes`, never from the store: an app class
     /// of the same name does not change what it reads or writes.
-    fn abstract_shape<'a>(
+    pub(super) fn abstract_shape<'a>(
         &self,
         abstract_class: &'a str,
     ) -> Result<(&'a str, Arc<ModelShape>), AnyError> {

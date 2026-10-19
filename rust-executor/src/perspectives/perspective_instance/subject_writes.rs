@@ -97,9 +97,10 @@ impl PerspectiveInstance {
         let mut predicates = Vec::new();
         if self.is_abstract_class(class)? {
             let index = self.abstract_index()?;
+            let (alias_key, _) = self.abstract_shape(class)?;
             for target in self.write_targets(class, base)? {
                 let shape = self.get_shape(&target)?;
-                if let Some(own) = index.own_name(&target, &shape, name, class) {
+                if let Some(own) = index.own_name(&target, &shape, name, alias_key) {
                     predicates.extend(predicate_of(&shape, own));
                 }
             }
