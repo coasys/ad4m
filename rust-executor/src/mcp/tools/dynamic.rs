@@ -45,28 +45,36 @@ impl Ad4mMcpHandler {
                     continue;
                 }
 
-                // An abstract class (#1435) is never created; its other
-                // writes dispatch to the record's own classes.
-                if !perspective.is_abstract_class(&class.name).unwrap_or(false) {
-                    tools.push(Self::make_create_tool(&class.name, &class.properties));
-                }
-                tools.push(Self::make_query_tool(&class.name));
-                tools.push(Self::make_list_tool(&class.name));
-                tools.push(Self::make_get_tool(&class.name));
-                tools.push(Self::make_delete_tool(&class.name));
-                // Per-property set tools and collection tools
-                for prop in &class.properties {
-                    if prop.is_collection {
-                        tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
-                        tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
-                    } else {
-                        tools.push(Self::make_set_property_tool(&class.name, &prop.name));
-                    }
-                }
+                // If the abstract-class index does not load, `_create` is listed and
+                // refused when called.
+                let creatable = !perspective.is_abstract_class(&class.name).unwrap_or(false);
+                tools.extend(Self::class_tools(class, creatable));
             }
         }
 
+        tools
+    }
+
+    /// The dynamic tools of `class`. `creatable` gates `_create` only: an abstract class
+    /// (#1435) is never created, and its other writes dispatch to the record's own classes.
+    fn class_tools(class: &shacl::ShaclClass, creatable: bool) -> Vec<Tool> {
+        let mut tools = Vec::new();
+        if creatable {
+            tools.push(Self::make_create_tool(&class.name, &class.properties));
+        }
+        tools.push(Self::make_query_tool(&class.name));
+        tools.push(Self::make_list_tool(&class.name));
+        tools.push(Self::make_get_tool(&class.name));
+        tools.push(Self::make_delete_tool(&class.name));
+        for prop in &class.properties {
+            if prop.is_collection {
+                tools.push(Self::make_collection_get_tool(&class.name, &prop.name));
+                tools.push(Self::make_collection_add_tool(&class.name, &prop.name));
+                tools.push(Self::make_collection_remove_tool(&class.name, &prop.name));
+            } else {
+                tools.push(Self::make_set_property_tool(&class.name, &prop.name));
+            }
+        }
         tools
     }
 
@@ -1089,11 +1097,13 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (perspective, _, collection) = match self
-            .writable_collection(perspective_id, class_name, collection_name)
-            .await
-        {
-            Ok(v) => v,
+        let (perspective, _agent_ctx) = match self.get_writable_perspective(perspective_id).await {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        let collection = match Self::collection_of(&perspective, class_name, collection_name) {
+            Ok(c) => c,
             Err(e) => return e,
         };
         match perspective
@@ -1204,7 +1214,7 @@ impl Ad4mMcpHandler {
     }
 
     /// The writable perspective and the class's own spelling of the
-    /// collection a `{class}_get_` / `_add_` / `_remove_` tool names.
+    /// collection an `{class}_add_` / `_remove_` tool names.
     async fn writable_collection(
         &self,
         perspective_id: &str,
@@ -1212,11 +1222,22 @@ impl Ad4mMcpHandler {
         collection_name: &str,
     ) -> Result<(PerspectiveInstance, AgentContext, String), String> {
         let (perspective, agent_context) = self.get_writable_perspective(perspective_id).await?;
+        let collection = Self::collection_of(&perspective, class_name, collection_name)?;
+        Ok((perspective, agent_context, collection))
+    }
+
+    /// The class's own spelling of the collection a `{class}_get_` / `_add_`
+    /// / `_remove_` tool names. Reads only: the caller picks the access.
+    fn collection_of(
+        perspective: &PerspectiveInstance,
+        class_name: &str,
+        collection_name: &str,
+    ) -> Result<String, String> {
         let shape = perspective
             .get_shape(class_name)
             .map_err(|e| format!("Error reading class '{class_name}': {e:#}"))?;
         let infos = instances::class_properties(&shape);
-        let collection = instances::find_property(&infos, collection_name)
+        instances::find_property(&infos, collection_name)
             .filter(|info| info.collection())
             .map(|info| info.name().to_string())
             .ok_or_else(|| {
@@ -1224,8 +1245,7 @@ impl Ad4mMcpHandler {
                     "Error resolving collection '{collection_name}': not a collection of \
                      '{class_name}'"
                 )
-            })?;
-        Ok((perspective, agent_context, collection))
+            })
     }
 }
 
