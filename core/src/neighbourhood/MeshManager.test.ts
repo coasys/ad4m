@@ -360,6 +360,7 @@ interface MeshOptions extends ChannelOptions {
     /** What `join` is handed. An empty stream unless a test says otherwise. */
     localStream?: MediaStream
     onNetworkChange?: (callback: () => void) => () => void
+    checkConnection?: () => void
 }
 
 /** Every mesh a test made, so each is left afterwards and no timer or listener outlives its test. */
@@ -384,6 +385,7 @@ async function makeMesh(bus: InMemoryBus, selfId: string, callId: string, option
         iceServers: options.iceServers,
         now: options.now,
         onNetworkChange: options.onNetworkChange,
+        checkConnection: options.checkConnection,
         // No timer: every test drives `tick()` itself, so a sweep never fires
         // between an act and its assertion. The interval has its own test.
         sweepMs: 0,
@@ -1515,6 +1517,21 @@ describe("recovering a pair that did not connect", () => {
 
         await alice.mesh.leave()
         expect(networkListeners.size).toBe(0)
+    })
+
+    it("checks the executor socket when a pair goes disconnected", async () => {
+        // The signals of every rung go over that socket; a dead one is found in
+        // seconds, and its reconnect restarts every pair through onNetworkChange.
+        const checkConnection = jest.fn()
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, { checkConnection })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
+        await settleAll()
+        alice.live().setConnectionState("connected")
+        expect(checkConnection).not.toHaveBeenCalled()
+
+        alice.live().setConnectionState("disconnected")
+        expect(checkConnection).toHaveBeenCalledTimes(1)
     })
 
     it("rebuilds the pair, and says so, once the cheaper rungs have not worked", async () => {

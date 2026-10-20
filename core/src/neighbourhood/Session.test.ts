@@ -66,6 +66,8 @@ function fakeApi() {
         sfuCallSetQualityPreference: jest.fn(),
         sfuCallAnswerServerOffer: jest.fn(),
         sfuCallRestartIce: jest.fn(),
+        onNetworkChange: jest.fn().mockReturnValue(() => {}),
+        checkConnection: jest.fn(),
         subscribeSfuCallRenegotiationOffer: jest.fn(),
         sfuAddIceCandidate: jest.fn(),
         sfuSendData: jest.fn(),
@@ -249,6 +251,8 @@ describe("mesh path", () => {
             channel,
             callId: "my-room",
             selfId: "did:me",
+            onNetworkChange: expect.any(Function),
+            checkConnection: expect.any(Function),
         })
     })
 

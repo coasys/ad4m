@@ -6,9 +6,12 @@
  * /proc. Sockets it opens afterwards work, as on the new network. Nothing
  * closes the old ones: no FIN or RST ever arrives, so the old WebSocket stays
  * OPEN with nobody answering on it, as a browser keeps it after a network
- * switch. The SDK must notice that by itself, dial a new socket, and rebuild
- * the call over it; with no user action and no page refresh, everyone must
- * hear and see everyone again within RECOVERY_MS.
+ * switch, and no `online` event fires (Safari and Firefox fire none for a
+ * Wi-Fi to Wi-Fi switch). The SDK must notice that by itself, dial a new
+ * socket, and repair the call over it; with no user action and no page
+ * refresh, everyone must hear and see everyone again within RECOVERY_MS.
+ * ICE going disconnected makes the SDK check its socket at once
+ * (`ApiClient.checkConnection`) rather than at the next ping deadline.
  *
  * Needs `sudo -n tc`; skipped without it. Shares E6's host lease.
  */
@@ -19,7 +22,7 @@ import { e2eScenario } from "../scenario.js";
 
 const EVERYONE = ["u1", "u2", "u3"];
 /** From the switch to everyone hearing and seeing everyone again. */
-const RECOVERY_MS = 90_000;
+const RECOVERY_MS = 15_000;
 const debug = (line: string) => {
   if (process.env.E2E_DEBUG) console.log(`[e17] ${new Date().toISOString().slice(11, 23)} ${line}`);
 };

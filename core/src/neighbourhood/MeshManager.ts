@@ -347,6 +347,10 @@ export interface MeshManagerOptions {
     /** Called after a network change (see `ApiClient.onNetworkChange`): every
      *  pair restarts ICE then, rather than waiting for each to notice. */
     onNetworkChange?: (callback: () => void) => () => void
+    /** Called when a pair goes disconnected: checks the socket the signals
+     *  go over now (see `ApiClient.checkConnection`). A dead one is redialled
+     *  and `onNetworkChange` restarts every pair. */
+    checkConnection?: () => void
 }
 
 /** Public STUN, and no TURN. Two servers, because ICE queries them in parallel. */
@@ -511,6 +515,7 @@ export class MeshManager {
     private renegotiationRepairs: Map<string, number> = new Map()
     private onNetworkChange: MeshManagerOptions["onNetworkChange"]
     private unwatchNetwork: (() => void) | null = null
+    private checkConnection: MeshManagerOptions["checkConnection"]
 
     constructor(options: MeshManagerOptions) {
         this.channel = options.channel
@@ -527,6 +532,7 @@ export class MeshManager {
         this.now = options.now ?? (() => Date.now())
         this.sweepMs = options.sweepMs ?? SWEEP_INTERVAL_MS
         this.onNetworkChange = options.onNetworkChange
+        this.checkConnection = options.checkConnection
     }
 
     // ── Events ──────────────────────────────────────────────────────
@@ -961,7 +967,10 @@ export class MeshManager {
                 slot.earlyCandidates = slot.earlyCandidates.filter((held) => held.gen && held.gen !== slot.remoteGeneration)
                 if (slot.offerDeferred && pc.signalingState === "stable") void negotiate()
             }
-            if (state === "disconnected" && !slot.disconnectedAt) slot.disconnectedAt = this.now()
+            if (state === "disconnected" && !slot.disconnectedAt) {
+                slot.disconnectedAt = this.now()
+                this.checkConnection?.()
+            }
             if (state === "connected" || state === "failed") slot.disconnectedAt = 0
             this.emit("peer-state", peerId, state)
             // `failed` is actionable at once — there is nothing in flight to wait for.

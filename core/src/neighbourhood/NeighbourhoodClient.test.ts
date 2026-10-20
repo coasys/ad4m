@@ -75,4 +75,13 @@ describe("NeighbourhoodClient ICE restart", () => {
     ]);
     api.closeAll();
   });
+
+  it("checks the client's socket through its ApiClient", () => {
+    const api = new ApiClient("http://localhost:0", undefined, FakeWebSocket as unknown as new (url: string) => WebSocket);
+    const check = jest.spyOn(api, "checkConnection");
+    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
+    client.checkConnection();
+    expect(check).toHaveBeenCalledTimes(1);
+    api.closeAll();
+  });
 });

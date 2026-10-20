@@ -205,6 +205,7 @@ function fakeApi() {
             networkHandlers.add(handler)
             return () => { networkHandlers.delete(handler) }
         }),
+        checkConnection: jest.fn(() => {}),
         sfuAddIceCandidate: jest.fn(async () => true),
         sfuSendData: jest.fn(async () => true),
         subscribeSfuDataChannel: jest.fn(() => () => {}),
@@ -715,6 +716,30 @@ test("ICE disconnected asks the executor for an ICE restart at once and answers 
 
         expect(api.log).toEqual(["sfuCallRestartIce", "sfuCallAnswerServerOffer"])
         expect(FakePeerConnection.instances).toHaveLength(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("ICE disconnected also checks the executor socket once, with the restart", async () => {
+    // A network switch the platform announces nothing for: the restart may
+    // go out on a dead socket, and only the check finds that out quickly.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        api.log.length = 0
+
+        await iceState("disconnected")
+        expect(api.checkConnection).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        // Connected again: no further check.
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.checkConnection).toHaveBeenCalledTimes(1)
     } finally {
         jest.useRealTimers()
     }

@@ -56,15 +56,18 @@ export interface SfuNeighbourhoodApi {
         callback: (event: SfuCallRenegotiationOffer) => void,
     ): () => void
     /** Ask the SFU to restart ICE on this agent's connection; the offer
-     *  arrives through `subscribeSfuCallRenegotiationOffer`. Without it, a
-     *  disconnected call waits `RESTART_TIMEOUT_MS`, then is rebuilt. */
-    sfuCallRestartIce?(
+     *  arrives through `subscribeSfuCallRenegotiationOffer`. */
+    sfuCallRestartIce(
         neighbourhoodUrl: string,
         roomName: string,
     ): Promise<boolean>
-    /** Called after a network change, once calls reach the executor again.
-     *  Without it, only ICE noticing the change starts a restart. */
-    onNetworkChange?(callback: () => void): () => void
+    /** Called after a network change, once calls reach the executor again. */
+    onNetworkChange(callback: () => void): () => void
+    /** Check the executor socket now; one found dead is redialled and
+     *  `onNetworkChange` fires. Called when ICE goes disconnected, since a
+     *  network switch the platform announced nothing for leaves that socket
+     *  OPEN and dead, and the restart would go out on it. */
+    checkConnection(): void
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
@@ -338,7 +341,7 @@ export class SfuManager {
         }, SfuManager.RESTART_TIMEOUT_MS)
         // A refusal (an executor without the method, or one that lost this
         // session) leaves the decision to the timeout: a blip may still heal.
-        this.neighbourhood.sfuCallRestartIce?.(this.neighbourhoodUrl, this.roomId).catch((err) => {
+        this.neighbourhood.sfuCallRestartIce(this.neighbourhoodUrl, this.roomId).catch((err) => {
             console.warn("SFU: ICE restart refused:", err)
         })
     }
@@ -402,6 +405,9 @@ export class SfuManager {
                 this.endRestart()
                 void this.reconnect()
             } else if (pc.iceConnectionState === "disconnected") {
+                // The path may be gone with no `online` event; the restart
+                // needs a live socket, and a dead one is redialled in seconds.
+                this.neighbourhood.checkConnection()
                 this.restartIce(pc)
             } else if (
                 pc.iceConnectionState === "connected" ||
@@ -418,7 +424,7 @@ export class SfuManager {
         // reconnected. A restart already in flight went out over the old
         // network and may never have arrived, so this one replaces it, with
         // its own timeout. Listened to once per call, not per rebuild.
-        if (!this.networkUnsubscribe && this.neighbourhood.onNetworkChange) {
+        if (!this.networkUnsubscribe) {
             this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => {
                 const current = this.state.peerConnection
                 if (!current || this.reconnecting) return

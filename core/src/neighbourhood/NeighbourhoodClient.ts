@@ -220,6 +220,12 @@ export class NeighbourhoodClient {
         return this.#apiClient.onNetworkChange(callback)
     }
 
+    /** Check the client's socket now: one that says nothing within a
+     *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
+    checkConnection(): void {
+        this.#apiClient.checkConnection()
+    }
+
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
         return this.#apiClient.call("sfu.getConfig", { neighbourhoodUrl })
     }

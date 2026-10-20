@@ -65,6 +65,12 @@ const MAX_WATCH_RETRIES = 5
  *  ever arrives; this notices it within two intervals. */
 const PING_INTERVAL_MS = 10_000
 
+/** How long `checkConnection` waits for the open socket to say anything
+ *  after its ping. The executor answers a ping from its socket task, without
+ *  waiting for any running call, so on a working path the pong is one round
+ *  trip away. */
+const CHECK_CONNECTION_DEADLINE_MS = 2_000
+
 let _idCounter = 0
 function nextId(): string {
     return String(++_idCounter)
@@ -141,6 +147,8 @@ export class ApiClient {
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
     /** True once the open socket delivered a message since the last ping. */
     private _wsHeard = true
+    /** A `checkConnection` probe waiting for the open socket to say anything; null when none. */
+    private _wsProbeTimer: ReturnType<typeof setTimeout> | null = null
     // The executor sends a socket only the events it asked for (`events.watch`).
     // What the executor has for the open socket, as sent; a new socket has `{}`.
     private _watching: string | null = '{}'
@@ -194,7 +202,10 @@ export class ApiClient {
         this._wsOpen.catch(() => {})
 
         ws.onmessage = (event) => {
-            if (this._ws === ws) this._wsHeard = true
+            if (this._ws === ws) {
+                this._wsHeard = true
+                this._endProbe()
+            }
             let parsed: Record<string, unknown>
             try { parsed = JSON.parse(event.data) } catch (e) {
                 console.error('Error parsing WebSocket data:', e)
@@ -353,6 +364,8 @@ export class ApiClient {
         this._wsHeard = true
         this._wsPingTimer = setInterval(() => {
             if (this._ws !== ws) return
+            // A probe has its own, shorter deadline and decides for this ping.
+            if (this._wsProbeTimer) return
             if (!this._wsHeard) {
                 this._dropSilentSocket(ws)
                 return
@@ -375,6 +388,14 @@ export class ApiClient {
         if (this._wsPingTimer) {
             clearInterval(this._wsPingTimer)
             this._wsPingTimer = null
+        }
+        this._endProbe()
+    }
+
+    private _endProbe(): void {
+        if (this._wsProbeTimer) {
+            clearTimeout(this._wsProbeTimer)
+            this._wsProbeTimer = null
         }
     }
 
@@ -597,6 +618,28 @@ export class ApiClient {
         this._networkCallbacks.add(callback)
         this._listenForNetworkChanges()
         return () => { this._networkCallbacks.delete(callback) }
+    }
+
+    /**
+     * Check the open socket now rather than at the next ping: send a ping,
+     * and if nothing at all arrives on that socket within `deadlineMs`,
+     * treat it as a network change (drop it, dial the next one at once,
+     * `onNetworkChange` callbacks fire when it opens). Any message keeps it.
+     * For a caller that has seen its network path break, e.g. ICE going
+     * disconnected, where the platform fired no `online` event. Without an
+     * open socket, or while a check runs, this does nothing.
+     */
+    checkConnection(deadlineMs = CHECK_CONNECTION_DEADLINE_MS): void {
+        const ws = this._ws
+        if (!ws || ws.readyState !== 1 /* OPEN */ || this._wsProbeTimer) return
+        this._wsHeard = false
+        this._wsProbeTimer = setTimeout(() => {
+            this._wsProbeTimer = null
+            if (this._ws !== ws || this._wsHeard) return
+            console.warn(`WebSocket silent for ${deadlineMs} ms after a check; reconnecting`)
+            this._onNetworkChange()
+        }, deadlineMs)
+        ws.send(JSON.stringify({ type: 'ping' }))
     }
 
     /** Register a callback that fires once when the executor refuses this
