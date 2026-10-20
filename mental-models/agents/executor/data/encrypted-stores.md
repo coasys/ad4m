@@ -2,7 +2,7 @@
 
 Three kinds of store hold a person's data on an executor, and two of them are encrypted at rest. `ad4m_db.sqlite` is a **SQLCipher** file under a subkey of the executor store key, and the columns that hold a person's content are **sealed** under that person's or that perspective's store key. **Language storage** is sealed per file through the host's storage calls. Each perspective's **Oxigraph store** stays plain, behind file modes `0700`/`0600`, and opens only after unlock. `runtime.storageStatus.stores` reports each kind as `encrypted` or `plain`, and every screen picks its storage line from that report.
 
-**Why:** SQLCipher is already linked into the executor through Holochain's encryption feature, so one `PRAGMA key` covers the whole file, its journal and its WAL. Sealed columns give per-person shredding without splitting a large database layer across one connection per person; one file per person lost for that reason. Language storage is sealed by the host, not by each language, so every language gets it, and a non-system language loses direct file access so that it cannot write around the seal. No screen claims more than the report says: the links are named as not encrypted.
+**Why:** SQLCipher is already linked into the executor through Holochain's encryption feature, so one `PRAGMA key` covers the whole file, its journal and its WAL. Sealed columns give per-person shredding without splitting a large database layer across one connection per person; one file per person lost for that reason. Language storage is sealed by the host, not by each language, so every language gets it, and a non-system language loses direct file access so that it cannot write around the seal. No screen claims more than the report says: the links are named as not encrypted. SPARQL needs plaintext terms, and Oxigraph exposes no encrypted environment, so encrypting the links would need a fork of Oxigraph and its RocksDB binding; that fork lost, because executors are trusted. A file-system layer under everything (`fscrypt`, FUSE) lost too: neither gives the same result on every kind of executor.
 
 **Parent:** [Executor data](README.md)
 
@@ -15,6 +15,8 @@ Three kinds of store hold a person's data on an executor, and two of them are en
 | language storage (`AD4MSEAL` files) | the perspective's store key for its link language; the executor store key for system languages | `op_language_storage_read` / `write` replace Deno's file calls in `language_bootstrap.js` |
 | Oxigraph store | none | released `oxigraph` crate; plain RocksDB files |
 | LAN certificate key | executor store key | `ad4m/lan/key.sealed` |
+
+The server link language keeps a sealed copy of a neighbourhood's links in its language storage, while the Oxigraph store holds the same links plain.
 
 Crypto-shredding: a tenant's delete (`host.leave { keepData: false }`, `host.removeTenant`, a pending record's expiry) calls `destroy_person`. The tenant's sealed rows and language storage become unreadable; each Oxigraph store with no owner left is deleted as files, so freed blocks can hold links until the disk reuses them. "Keep" changes nothing in the keyring: the executor still opens the data for the perspectives that other owners share. Executor-scope data is never shredded per person: the users and tenants tables, settings, metering, `models.api_key` (SQLCipher only) and the storage of system languages.
 

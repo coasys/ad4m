@@ -19,6 +19,8 @@ A **room key** is a versioned AES-256-GCM key that encrypts the links of one lin
 | Link hash | `HMAC-SHA256(hash_key, canonical link)`, with `hash_key = HKDF(room key v1, "adam-server-link-language:link-hash:v1")`, so a removal matches its addition and the server cannot test a guessed link. |
 | Report | After each `rotate-needed` and each rotation, the language calls the host import `roomKeyEvent({ kind, removedKeys, version })`; it carries no key material. The executor uses it for the reach of a revocation. |
 
+Key-ring states: `none` → `ready` (genesis), `pending` → `ready` (a grant), `error` (an envelope does not open; retry after 10 s), `removed` (close `4005`). `commit()` sends nothing outside `ready`; the executor keeps the diff and reports `LinkLanguageInstalledButNotSynced`.
+
 </details>
 
 <details><summary>Where in the code</summary>

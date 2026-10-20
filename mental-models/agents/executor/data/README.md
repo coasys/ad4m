@@ -1,8 +1,8 @@
 # Executor data
 
-The executor keeps all its state under one **app data path** (default `~/.ad4m`): the wallet file, the **keyring**, one SQLite database (`ad4m_db.sqlite`), one Oxigraph store per perspective, the installed languages and their storage, and the Holochain conductor's data. The database and language storage are **encrypted at rest**: the whole SQLite file under the executor's key, plus each person's rows and each perspective's language files under keys that only that person (or the perspective's owners) can open. The Oxigraph stores, which hold the links, stay **plain** behind file permissions. In **hosted mode** the wallet and the user table come from a **hosting service** over HTTP (`SharedWallet`, `SharedDb`), and the executor backs up perspective stores as sealed snapshots.
+The executor keeps all its state under one **app data path** (default `~/.ad4m`). It holds the agent file with the encrypted keystore, the **keyring**, one SQLite database (`ad4m_db.sqlite`), one Oxigraph store per perspective, the installed languages and the Holochain conductor's data. The database and language storage are **encrypted at rest** under keys that one **storage secret** opens; the Oxigraph stores stay plain. In **hosted mode** the wallet and the user table come from a **hosting service** over HTTP (`SharedWallet`, `SharedDb`), and the executor backs up perspective stores as snapshots.
 
-**Why:** A key on the same disk in the clear would protect nothing, so every key sits in memory and the one secret that opens them sits off the data disk. Keys per person give per-person **crypto-shredding**: destroying a tenant's data key makes their encrypted rows and language storage unreadable. SPARQL needs plaintext terms, and Oxigraph exposes no encrypted environment, so encrypting the links would need a fork of Oxigraph and its RocksDB binding; that fork lost, because executors are trusted. A file-system layer under everything (`fscrypt`, FUSE) lost too: neither gives the same result on every kind of executor. All state still sits under one directory, so moving an executor is a copy of one folder and its secret.
+**Why:** All state sits under one directory, so moving or backing up an executor is a copy of one folder and its secret. The secret sits off the data disk and each person's data has its own key, so a copied disk does not read a person's data, and destroying one key shreds one person's data. Hosted mode lets several executors of one hosting service share keys and the user table.
 
 **Parent:** [Executor](../README.md)
 
@@ -13,30 +13,28 @@ The executor keeps all its state under one **app data path** (default `~/.ad4m`)
 
 <details><summary>How it works</summary>
 
-| Path (under app data path) | Content | At rest |
+| Path (under app data path) | Content | Written by |
 |---|---|---|
-| `ad4m/agent.json` | `AgentStore`: main DID, DID document, signing key id, encrypted keystore (every agent's key on a local wallet), main profile | keystore under the derived agent passphrase |
-| `ad4m/keyring.json` | `keyring_id`, the root check, every wrapped key with its versions | wrapped keys only |
-| `ad4m_db.sqlite` | `Ad4mDb`: perspective handles, diffs, users, tenants, invites, the operator record, grants, settings, key-log cache, trusted agents, notifications, AI models and tasks, billing, bot activity | SQLCipher; personal columns sealed |
-| `perspectives/<uuid>/sparql_store/` | Oxigraph (RocksDB) store of one perspective: every link with its proof ([Oxigraph store](../../../perspectives/links/oxigraph-store.md)) | plain; directory `0700`, files `0600` |
-| `ad4m/languages/<address>/` | bundles (plain) and the language's storage files ([Installing languages](../../../languages/runtime/installing/README.md)) | storage sealed per file |
-| `ad4m/lan/cert.der`, `ad4m/lan/key.sealed` | the desktop's home-network listener certificate and its private key | key sealed under the executor key |
-| `ad4m/tmp/exports/<id>` | an export while it is read out, at most 15 minutes | sealed under the person's key |
-| `ad4m/h/c`, `ad4m/h/d` | Holochain conductor config and data | Holochain's encryption, under the derived agent passphrase |
-| `ad4m/users/<username>/profile.json` | managed agent profile | plain |
-| `mainnet_seed.seed` | bootstrap seed | plain |
+| `ad4m/agent.json` | `AgentStore`: main DID, DID document, signing key id, encrypted keystore (all agents' keys on a local wallet; an empty string in hosted mode, where the keys stay with the hosting service), main profile | `AgentService::try_save` |
+| `ad4m/keyring.json` | every wrapped data key with its versions | `DataKeys` ([Keyring and storage secret](keyring.md)) |
+| `ad4m/users/<username>/profile.json` | managed agent profile | `AgentService::store_managed_agent_profile` |
+| `ad4m_db.sqlite` | `Ad4mDb`: perspective handles, diffs, users, tenants, the operator record, grants, key-log cache, settings, trusted agents, friends, entanglement proofs, notifications, AI models and tasks, billing, email codes | `Ad4mDb` |
+| `perspectives/<uuid>/` | Oxigraph (RocksDB) store of one perspective | see [Oxigraph store](../../../perspectives/links/oxigraph-store.md) |
+| `ad4m/languages/` | installed language bundles, settings and storage | see [Installing languages](../../../languages/runtime/installing/README.md) |
+| `ad4m/h/c`, `ad4m/h/d` | Holochain conductor config and data | Holochain service |
+| `mainnet_seed.seed` | bootstrap seed (system language addresses) | `ad4m-executor init` ([init.rs](../../../../rust-executor/src/init.rs)) |
 
-Some files sit under `<app_data>/ad4m/`, others directly under `<app_data>/`. Trusted agents, friends, known link languages and entanglement proofs are executor-wide tables with no agent column ([db.rs](../../../../rust-executor/src/db.rs)). They belong to the main agent; managed agents have none of these lists. Tasks, the outbox and the expression cache have an owner column. The server link language keeps a sealed copy of a neighbourhood's links in its storage, while the Oxigraph store holds the same links plain.
+Some files sit under `<app_data>/ad4m/`, others directly under `<app_data>/`. Trusted agents, friends, known link languages and entanglement proofs are executor-wide tables with no agent column ([db.rs](../../../../rust-executor/src/db.rs)). They belong to the main agent; managed agents have none of these lists.
 
-Hosted mode (`wallet_backend = "shared"`, `db_backend = "shared"`): `SharedWallet` fetches key material from `wallet_backend_url` with `internal_api_token`; `SharedDb` stores users under the namespace `shared:platform`; `perspective_snapshot` restores perspective stores at start and backs them up every `snapshot_interval_secs`, sealed ([Export and import](export-and-import.md)). A host such as Coasys cloud runs local backends; hosted mode is the platform's shared backend for executors that it provisions.
+Hosted mode (`wallet_backend = "shared"`, `db_backend = "shared"`): `SharedWallet` fetches key material from `wallet_backend_url` with `internal_api_token`; `SharedDb` stores users under the namespace `shared:platform`; `perspective_snapshot` restores perspective stores at start and backs them up every `snapshot_interval_secs`.
 
 </details>
 
 <details><summary>Where in the code</summary>
 
 - [rust-executor/src/lib.rs](../../../../rust-executor/src/lib.rs): data directories, backend choice, `Ad4mDb::init_global_instance`.
-- [rust-executor/src/db.rs](../../../../rust-executor/src/db.rs): every SQLite table and query (`Ad4mDb`); [rust-executor/src/db/grants.rs](../../../../rust-executor/src/db/grants.rs) (new): the grants table.
-- [rust-executor/src/at_rest/](../../../../rust-executor/src/at_rest) (new): the keyring, the stores' keys, export and import, the migration.
+- [rust-executor/src/db.rs](../../../../rust-executor/src/db.rs): every SQLite table and query (`Ad4mDb`).
+- `rust-executor/src/at_rest/` (new): the keyring, the stores' keys, export and import, the migration.
 - [rust-executor/src/db_backend.rs](../../../../rust-executor/src/db_backend.rs): `DbBackend`, `LocalDb`, `SharedDb`.
 - [rust-executor/src/wallet.rs](../../../../rust-executor/src/wallet.rs): `LocalWallet`, `SharedWallet`.
 - [rust-executor/src/perspective_snapshot.rs](../../../../rust-executor/src/perspective_snapshot.rs): restore and periodic backup.

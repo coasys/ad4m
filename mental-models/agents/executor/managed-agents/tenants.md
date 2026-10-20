@@ -23,7 +23,7 @@ The join gate, in order (the first failure answers its code):
 
 Then: one transaction (invite used, `TenantRecord` pending, the `users` row), a person data key, a wallet key, `ClaimService::claim_for_tenant`. The host polls the key log every 5 seconds; at `add` the record turns active and `tenant-joined` goes to the operator. A pending record expires after 10 minutes and is removed with its keys.
 
-The tenant's `did:scid` lives only in `tenants.did_scid`. The tenant's `users` row is found by `username = tenants.id`. Code that keys on `user_email` holds the tenant id there as an opaque value.
+The tenant's `did:scid` lives only in `tenants.did_scid`. The tenant's `users` row is found by `username = tenants.id`. Code that keys on `user_email` holds the tenant id there as an opaque value. The row's password is unusable. A password user becomes a tenant only by claiming a `did:scid` (`JoinRoute::Claim`); until then, the same person can be a password user and, after a `host.join`, a separate tenant on the same host.
 
 | State | Sessions | Next |
 |---|---|---|

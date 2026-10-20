@@ -25,6 +25,8 @@ Rules that hold for both:
 - A person's second device needs no invite: its key maps to a person the graph already names, so the server admits it at once.
 - `neighbourhood.setJoinMode` (admins only) writes `membership:join`; the latest counted one wins from its timestamp.
 - After an admin's `removed` link for a person, the open rule no longer counts that person's self-join; only an add by someone with the right, or a valid invite, admits them again. A person who left by their own `removed` link may rejoin an open neighbourhood.
+- A link first seen after a removal of its author's person, and timestamped before it, counts for nothing.
+- A `member` link that arrives after a person's first posts makes those posts show.
 - A rules literal without `join` reads as invite only: neighbourhoods made before the join mode keep their old rule.
 
 </details>

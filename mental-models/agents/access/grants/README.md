@@ -2,7 +2,7 @@
 
 A **grant** is the stored permission behind one token: the agent the token acts as, the capabilities it holds, the app it was issued to, its state (`active`, `revoked`) and its expiry. The executor mints one at every login and every app approval; a key login adds the person's identity and the signing key. A grant is never wider than its agent's own capabilities, and a **bot grant**, signed by the owner's master key, narrows what a bot's sessions may do to named neighbourhoods.
 
-**Why:** An app is not a separate kind of caller: it is what a person uses to reach their agent, so every token is "one agent, within a grant". The capabilities live in the grant, not in the token, so a grant can narrow, end or be listed without reissuing a token. Whoever owns the agent approves a grant on it: the operator for the main agent, a user for their managed agent. A bot's limit has two parts: its key log entry sets the ceiling (actions and expiry, public), and the bot grant picks the neighbourhoods (private, on the bot's executor only).
+**Why:** An app is not a separate kind of caller: it is what a person uses to reach their agent, so every token is "one agent, within a grant". The capabilities live in the grant, not in the token, so a grant can narrow, end or be listed without reissuing a token. Whoever owns the agent approves a grant on it: the operator for the main agent, a user for their managed agent.
 
 **Parent:** [Access](../README.md)
 

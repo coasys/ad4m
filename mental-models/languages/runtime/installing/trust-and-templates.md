@@ -31,7 +31,7 @@ Templating (`language_apply_template_on_source(source, params)`):
 
 Each language names its own template variables, and keys are case-sensitive. p-diff-sync uses `uid`; the server link language uses `UID`, `SERVER_URL` and `CREATOR`. A `uid` param sets the DNA network seed (step 2); it does not fill a `UID` constant.
 
-The server link language's template: `SERVER_URL` (from the [link-server directory](../../link-languages/server-link-language/link-server-directory.md)), `UID` (32 random bytes, base58) and `CREATOR` (the creator's `did:scid`). Only `neighbourhood.create` fills it; because the filled bundle fixes the address, a neighbourhood URL binds the server, the room and the creator.
+The server link language's template: `SERVER_URL` (from the [link-server directory](../../link-languages/server-link-language/link-server-directory.md)), `UID` (32 random bytes, base58) and `CREATOR` (the creator's `did:scid`). Only `neighbourhood.create` fills it; because the filled bundle fixes the address, a neighbourhood URL binds the server, the room and the creator. `neighbourhood.publish` refuses a copy of that template made any other way.
 
 </details>
 

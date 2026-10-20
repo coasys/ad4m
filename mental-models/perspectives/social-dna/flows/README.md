@@ -1,6 +1,6 @@
 # Flows
 
-A **flow** (`SHACLFlow`) is a state machine stored as SDNA: named states with values, transitions, optional **flow guards** (model queries that must match) and a **consensus rule** (how many distinct DIDs, optionally holding a role, must sign). A **flow instance** binds one flow to one **base**. No link stores the instance's current state; every executor **derives** it from the signed **transition proposals** and votes in the perspective. Each proposal and vote is a link signed by the device key of the agent that acts: a person's app session, the evaluator after interpretation, or a bot agent with `write` in its bot grant for this neighbourhood.
+A **flow** (`SHACLFlow`) is a state machine stored as SDNA: named states with values, transitions, optional **guards** (model queries that must match) and a **consensus rule** (how many distinct DIDs, optionally holding a role, must sign). A **flow instance** binds one flow to one **base**. No link stores the instance's current state; every executor **derives** it from the signed **transition proposals** and votes in the perspective.
 
 **Why:** A group process, such as a task moving to "done", must reach the same answer on every executor without a coordinator. State derived from signed links is the same for anyone with the same links, also for a verifier outside the neighbourhood.
 
@@ -8,7 +8,7 @@ A **flow** (`SHACLFlow`) is a state machine stored as SDNA: named states with va
 
 ## Parts
 - [Flow consensus](consensus.md): proposals, votes, role gates, and the fold that derives a flow instance's state.
-- [Flow spawn and guards](spawn-and-guards.md): how flow instances start (by hand or after interpretation), and how flow guards write proposals.
+- [Flow spawn and guards](spawn-and-guards.md): how flow instances start (by hand or after interpretation), and how guards write proposals.
 - [Flow receipts](receipts.md): the record a finished flow run leaves, and how any executor checks it.
 
 <details><summary>How it works</summary>
@@ -22,7 +22,7 @@ FlowTransitionProposal (signed links)   ── toState, proposer, evidence seal,
    │
 fold(read set) → DerivedState { state, settled, contested }   (every replica, on demand)
    │
-FlowReplicaState (SQLite, per agent DID) ── cached state (sealed) + fired marks, `flow-state-changed` event
+FlowReplicaState (SQLite, per agent)    ── cached state + fired marks, `flow-state-changed` event
 ```
 
 RPC: `perspective.proposeFlowTransition`, `acceptFlowProposal`, `rejectFlowProposal`, `flowStates`, `flowFired`, `flowValidOutputs`, `mintFlowReceipt`, `verifyFlowReceipt`. Minting an instance or a proposal registers the hard-wired `FlowInstance` and `FlowTransitionProposal` classes first (`ensure_flow_model_classes`); so does `add_sdna` with type `flow`.
