@@ -2,7 +2,7 @@
 
 An **interpretation overlay** (`InterpretationOverlay`) is a second instance on the same base as an instance the LLM wrote. It records how the instance was written (`kind`: create or update) and which interpretation run wrote it. It holds the LLM's value for each affected property as a parallel `ad4m://interp/inferred/<predicate>` link. Each base has exactly one overlay, updated in place across runs.
 
-**Why:** LLM output must not silently overwrite what a person wrote. The overlay is the evidence that the LLM owns a value: the engine overwrites a value only when the overlay shows the LLM set it and nobody changed it since. The parallel `inferred/` links keep the real property links clean, so readers that do not know about overlays see a plain instance. The link author's DID says who ran the pass, so the run stores no agent field.
+**Why:** LLM output must not silently overwrite what a person wrote. The overlay is the evidence that the LLM owns a value: the engine overwrites a value only when the overlay shows the LLM set it and nobody changed it since. The parallel `inferred/` links keep the real property links clean, so readers that do not know about overlays see a plain instance. The links' author (the device key of the agent that ran the pass) says who ran it, and `author_of` gives the person, so the run stores no agent field.
 
 **Parent:** [Interpretation](README.md)
 

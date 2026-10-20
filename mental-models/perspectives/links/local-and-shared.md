@@ -15,6 +15,7 @@ Every stored link has a **link status**: `Shared` (the default) or `Local`. In a
 | Model property declared `local: true`, SHACL action with `local` | `Local` (`execute_commands`) |
 | Links that arrive from the link language | always `Shared` (`diff_from_link_language`) |
 | SDNA and SHACL links (`add_sdna`) | always `Shared` |
+| Membership links (named graph `coasys:membership`) | always `Shared`; on the server link language they travel in plaintext through the room's membership channel, never inside an encrypted diff ([Membership](../neighbourhoods/membership/README.md)) |
 | Built-in `InterpretationRun.debugPrompt` / `debugResponse` | `Local` ([hardwired_sdna/interpretation_run.json](../../../rust-executor/src/perspectives/hardwired_sdna/interpretation_run.json)) |
 
 1. The status is stored as the literal `"Local"` or `"Shared"` on the link's reifier (`ad4m://ontology/status`).

@@ -21,7 +21,9 @@ Payloads: with `signed: true` (default) the caller sends link expressions and th
 
 `hosted_status` is a process-wide map in memory. After a restart, it is empty until each agent sets a status again.
 
-Inbound: the link language calls `handle_telepresence_signal_from_link_language`, which verifies signatures and publishes on the neighbourhood signal topic for the recipient (or every owner). A cached language → perspective mapping keeps this path fast.
+Inbound: the link language calls `handle_telepresence_signal_from_link_language`, which verifies signatures and publishes a typed `signal` event: its audience is the recipient's DID, or without one, the perspective's owners, never everyone ([Events](../../agents/interfaces/events.md)). A cached language → perspective mapping keeps this path fast.
+
+On the server link language, the link server carries telepresence only for keys the room's membership graph admits. When a member is removed or a key is revoked, the server closes that key's sockets, so it stops sending and receiving presence and signals ([Link server](../../languages/link-languages/server-link-language/link-server.md)). Statuses and signals name device keys (`did:key`); a person online from two devices appears twice.
 
 </details>
 

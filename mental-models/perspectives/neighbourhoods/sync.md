@@ -20,10 +20,11 @@ Loops (`start_background_tasks`):
 
 1. `ensure_link_language`: every 5 s until loaded: `language_by_address`, else `install_language`; then `set_local_agents(owners)` and register the address → perspective mapping.
 2. `nh_sync_loop`: `sync()` every 3 s, doubling up to 5 min after failures.
-3. Outbound: `commit(diff)` sends at once while the queue is empty and "immediate commits" are left (20, refilled after each queue flush). Otherwise the diff goes to `perspective_diff` in SQLite. `pending_diffs_loop` (100 ms tick) flushes the queue after 1 s without new diffs, 3 s after a burst began, or at 150 diffs; one commit carries up to 3 MB.
-4. `fallback_sync_loop` (when `Synced`, every 30 s up to 5 min): `ensure_public_links_are_shared` compares local shared links with `render()` and commits the missing ones.
-5. Inbound: the link language calls back; `handle_perspective_diff_from_link_language` finds the perspective by language address and calls `diff_from_link_language` ([Link write path](../links/write-path.md)).
-6. The link language can also set the state: its `emitSyncStateChange` callback reaches `handle_sync_state_changed_from_link_language`, which calls `update_perspective_state` on the perspective.
+3. Outbound: `commit(diff)` sends at once while the queue is empty and "immediate commits" are left (20, refilled after each queue flush). Otherwise the diff goes to `perspective_diff` in SQLite, its additions and removals sealed under the perspective's store key. `pending_diffs_loop` (100 ms tick) flushes the queue after 1 s without new diffs, 3 s after a burst began, or at 150 diffs; one commit carries up to 3 MB.
+4. On the server link language, a commit sends nothing while the language has no usable room key (states `pending`, `error`, `removed`): the diff stays queued and the state reads `LinkLanguageInstalledButNotSynced` ([Room keys](../../languages/link-languages/server-link-language/room-keys.md)). Membership links do not go in a diff; they take the membership channel ([Membership](membership/README.md)).
+5. `fallback_sync_loop` (when `Synced`, every 30 s up to 5 min): `ensure_public_links_are_shared` compares local shared links with `render()` and commits the missing ones.
+6. Inbound: the link language calls back; `handle_perspective_diff_from_link_language` finds the perspective by language address and calls `diff_from_link_language`, which checks each addition's author and filters membership links ([Link write path](../links/write-path.md)).
+7. The link language can also set the state: its `emitSyncStateChange` callback reaches `handle_sync_state_changed_from_link_language`, which calls `update_perspective_state` on the perspective.
 
 </details>
 

@@ -10,14 +10,17 @@ The **local link language** (`local-link-language`) is a link language with no n
 
 1. A `//!@ad4m-template-variable` `uid` constant gives each neighbourhood its own copy, address and storage.
 2. The language imports only `storageGet`, `storagePut`, `agentDid` and `emitPerspectiveDiff`.
-3. `perspectiveCommit` applies the diff to the stored link list, increments a revision counter and saves to the KV store (`link-state`). It emits nothing.
+3. `perspectiveCommit` applies the diff to the stored link list, increments a revision counter and saves to the KV store (`link-state`), which the host seals under the perspective's store key. It emits nothing.
 4. The first `perspectiveSyncSync` after load emits all stored links once with `emitPerspectiveDiff`; later calls do nothing. `peersRemote` returns `[]`.
 5. Shared-directory mode is for the sibling languages, not this one:
    - The language language, neighbourhood language and agent language in `bootstrap-languages/local/` accept a `storagePath` setting.
    - With it, they read and write files in that directory (the optional File I/O extension).
    - The directory must lie inside the executor's working directory: only there may a system language write (`JsCore::new_for_language` in [js_core/mod.rs](../../../rust-executor/src/js_core/mod.rs)).
+   - Files there lie outside the language's storage directory, so the host's storage seal does not cover them: the executor writes them plain and logs a warning once per language (`op_language_storage_write` in [languages_extension.rs](../../../rust-executor/src/js_core/languages_extension.rs)).
    - Several executors that point at one directory see each other's languages, neighbourhoods and profiles.
    - The link language has no such mode.
+
+`neighbourhood.create` offers the server link language or Holochain, and the local seed carries neither a server link language nor `linkServers`. So a neighbourhood on this language comes only through `neighbourhood.publish` with a templated copy ([create.rs](../../../rust-executor/src/neighbourhoods/create.rs) (new)).
 
 Run with `ad4m-executor run --run-holochain false` and a seed from `node generate-seed.mjs . dist`.
 

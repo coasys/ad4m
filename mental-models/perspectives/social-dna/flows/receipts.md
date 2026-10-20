@@ -18,7 +18,7 @@ FlowReceipt
 ```
 
 1. **Mint**: run `fold_read_set` on this replica; refuse unless the derived state is terminal and not contested; refuse outputs that do not hash to the commitment every counted vote signed.
-2. **Verify**: re-verify every signature, rebuild role windows from the carried grant links, re-run the fold against the verifier's own flow definition, re-hash the outputs. The result is a `ReceiptVerdict`.
+2. **Verify**: re-verify every signature, rebuild role windows from the carried grant links, re-run the fold against the verifier's own flow definition, re-hash the outputs. The result is a `ReceiptVerdict`. An anchored link in the read set verifies against its author's key log at the anchor, through the verifier's own resolver ([Link verdicts](../../links/verdicts.md)); the receipt carries no key-log material. A verifier whose resolver has no answer for such a log gets `CantCheck` for that link.
 3. Voters bind outputs before they sign: each voter loads every named output through its class on its own replica and recomputes `outputs_hash` (`check_outputs_commitment`).
 4. **Consume** (`produced.rs`): an instance is a valid output of flow F when some receipt in the perspective verifies, names F and the instance, and (if asked) settled in state S. Three readers use this: the `producedByFlow` role gate (`grant.rs`), `perspective.flowValidOutputs`, and the model-query filter `where: { producedByFlow }`. `load_flow_receipts` returns an error, not a partial answer, when a flow has more than `MAX_FLOW_RECEIPTS` (256) receipts to read.
 

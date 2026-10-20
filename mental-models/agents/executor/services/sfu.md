@@ -19,7 +19,9 @@ The **SFU** (selective forwarding unit) is a WebRTC media server inside the exec
    | `cascaded` | this SFU and its configured cascade peers |
 
 3. A member calls `sfu.callJoin(neighbourhoodUrl, roomName, sdpOffer)`. The handler checks that the caller is a neighbourhood member (`member_did`) and returns an SDP answer. With `acceptRedirect`, the SFU may send the caller to the least-loaded SFU in the cascade.
-4. Cascade SFUs announce their capacity over TCP gossip (`sfu_cascade_listen`, `sfu_cascade_peers`, a static list of peers). They move media over str0m-to-str0m pipe transports. An SFU's identity in the cascade is the config string `sfu_local_did`, read in `run()` ([lib.rs](../../../../rust-executor/src/lib.rs)); it is separate from the executor's agent DID.
+4. Cascade SFUs announce their capacity over TCP gossip (`sfu_cascade_listen`, `sfu_cascade_peers`, a static list of peers). They move media over str0m-to-str0m pipe transports. An SFU's identity in the cascade is the config string `sfu_local_did`, read in `run()` ([lib.rs](../../../../rust-executor/src/lib.rs)); it is separate from the executor's device key and from its operator's identity.
+5. Every `sfu.*` method declares its guard; a tenant joins calls on its host as any member does. A host that serves calls needs its media UDP range reachable, so it cannot sit behind an HTTP-only tunnel.
+6. The SFU's limits and `member_did` use the caller's device `did:key`. Neighbourhoods count members by person through `author_of` ([Counts by person](../../../perspectives/neighbourhoods/membership/counts-by-person.md)).
 
 Two checks decide who controls calls:
 

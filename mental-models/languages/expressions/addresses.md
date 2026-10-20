@@ -11,7 +11,7 @@ A **language address** is the content hash of a language's `bundle.js`: `Qm` fol
 | Form | Example | Resolves to |
 |---|---|---|
 | `<hash>://<addr>` | `QmzSYwd…://abc` | the language with that hash |
-| alias `did` | `did:key:z6Mk…` | the agent language; the whole DID is the expression address |
+| alias `did` | `did:key:z6Mk…`, `did:scid:coasys:1:Qm…` | the agent language; the whole DID is the expression address. A `did:key` names a device key; a `did:scid` names a person ([Agent language](../other-kinds/agent-language/README.md)) |
 | alias `lang` | `lang://<hash>` | the language language |
 | alias `neighbourhood` | `neighbourhood://<addr>` | the neighbourhood language |
 | alias `perspective` | `perspective://<addr>` | the perspective language |
@@ -20,7 +20,7 @@ A **language address** is the content hash of a language's `bundle.js`: `Qm` fol
 1. `load_core_system_languages` registers the four aliases after it loads the system languages.
 2. Controller entry points (`execute_on_language`, `get_expression`, `unload_language`, `language_by_ref`, …) resolve an alias to the hash first.
 3. `expression_create` maps a hash back to its alias, so it returns `neighbourhood://…` rather than `<hash>://…`.
-4. A `did:` URL has no `://`. Both URL parsers, `parse_expr_url` and `ExpressionRef::try_from`, treat it as a special case.
+4. A `did:` URL (`did:key` or `did:scid`) has no `://`. Both URL parsers, `parse_expr_url` and `ExpressionRef::try_from`, treat it as a special case.
 
 </details>
 

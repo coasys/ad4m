@@ -2,7 +2,7 @@
 
 The **language language** is the system language that stores and serves other languages. Its expressions are language meta records (`LanguageMeta`), signed by the publisher. Its expression address is the language address, and `languageGetSource(address)` returns the bundle. The executor loads it first, from the bundle text inside the bootstrap seed, under alias `lang`.
 
-**Why:** Install-by-address needs one place every executor can ask. When that place is a language, the store can change (central store, shared directory) without a change to the executor. The executor checks the bundle hash, so the store need not be trusted for integrity.
+**Why:** Install-by-address needs one place every executor can ask. When that place is a language, the store can change (central store, shared directory) without a change to the executor. The executor checks the bundle hash, so the store need not be trusted for integrity. The registry behind the default language language is also the only control on which languages reach a host: hosts run no language allowlist, and a tenant installs only what this registry holds from an author the host trusts ([Language trust and templates](trust-and-templates.md)).
 
 **Parent:** [Installing languages](README.md)
 
@@ -10,7 +10,7 @@ The **language language** is the system language that stores and serves other la
 
 | Variant | Storage | Used by |
 |---|---|---|
-| `bootstrap-languages/language-language` | HTTP: a Cloudflare Workers KV (key-value) proxy (`PROXY_URL` constant) | the default `mainnet_seed.json` |
+| `bootstrap-languages/language-language` | HTTP: the language store, a Cloudflare Worker (`PROXY_URL` constant): `POST {key, value}` refuses an existing key; `GET ?key=` answers a signed URL; no delete route | the default `mainnet_seed.json` |
 | `bootstrap-languages/local/language-language.js` | `ad4m:host` KV, or files in `storagePath` | local seed, Docker, integration tests |
 
 1. Publish: `expressionCreate({bundle, meta})` hashes the bundle, signs `meta` with `agentCreateSignedExpression`, and stores `meta-<hash>` and then the bundle.

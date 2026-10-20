@@ -2,13 +2,13 @@
 
 The **Holochain service** (`HolochainService`) runs an embedded Holochain **conductor** on its own thread and Tokio runtime. Rust code and language isolates reach it through one actor channel (`HolochainServiceInterface`). Languages see it as the `holochain*` functions of `ad4m:host`. The Unyt payment DNA also runs on it. The conductor has one agent key for the executor: `HolochainService::get_agent_key` takes the first key of the conductor keystore, so every agent on the executor uses the same cell per DNA.
 
-**Why:** Holochain languages need a conductor: p-diff-sync, the Holochain agent language and the Holochain file-storage language. A conductor inside the executor removes a second daemon. The actor channel lets the conductor's app set change under a write lock while zome calls run concurrently.
+**Why:** Holochain languages need a conductor: p-diff-sync in neighbourhoods that started on it, the Holochain agent language and the Holochain file-storage language; so does the Unyt DNA. A new neighbourhood defaults to the server link language, and the executor refuses Holochain as a new neighbourhood's sync choice, so the conductor is optional for an executor that hosts tenants. A conductor inside the executor removes a second daemon. The actor channel lets the conductor's app set change under a write lock while zome calls run concurrently.
 
 **Parent:** [Executor services](README.md)
 
 <details><summary>How it works</summary>
 
-1. On agent generate or unlock, `conductor_startup` starts `HolochainService::init` in a background task and loads the system languages beside it. The RPC reply may go out before the conductor is up. `run_holochain: false` skips this step ([Executor startup](../startup.md)).
+1. When the wallet opens (agent generate or unlock), `conductor_startup` starts `HolochainService::init` in a background task and loads the system languages beside it. The conductor's databases and lair are encrypted under the agent passphrase that the executor derives from its storage secret ([Keyring and storage secret](../data/keyring.md)). The RPC reply may go out before the conductor is up. `run_holochain: false` skips this step ([Executor startup](../startup.md)); a host may run without Holochain, and then runs no Unyt cell.
 2. A language calls `holochainRegisterDnas([{nick, bundle}])`. The language installs a hApp (Holochain app) for itself and registers its cells in `HOLOCHAIN_SIGNAL_HANDLERS` (cell id → language address). Templating sets each copy's DNA network seed and properties ([Language trust and templates](../../../languages/runtime/installing/trust-and-templates.md)).
 3. `holochainCall(nick, zome, fn, params)` becomes a `HolochainServiceRequest`. `run_dispatch_loop` runs it in one of three lanes, each with a timeout and a queue deadline:
 

@@ -13,10 +13,10 @@ A **live query** is a SPARQL or model query that the executor re-runs after rele
 3. `subscribed_queries_loop` checks the flag every 200 ms. When it is set, it waits 250 ms to collect a burst, then runs `check_subscribed_queries`.
 4. A subscription is skipped when the writes cannot affect it: SPARQL by predicate overlap; model queries by `TriggerRules` (`any`, `joins`, `near`, `via`), which also watch classes reached through `include`, projections and `where`.
 5. Re-run the whole query and compare with `last_result` (`result_delta`). The delta makes the update small on the socket; the executor still computes the full result. Model results send `ids`, `upsert`, `totalCount`; SPARQL results send `added` / `removed` rows; otherwise the whole `result`.
-6. `send_delta_update` publishes on the query-subscription topic with the connection id. The event stream delivers it only to that connection ([Events](../../agents/interfaces/events.md)).
+6. `send_delta_update` publishes a typed `query-subscription-update` event. Its audience is the subscribing agent, when that agent is still an owner; the subscription's connection is its routing key. A socket drops another connection's update, then checks that its session may receive the event ([Events](../../agents/interfaces/events.md)). A co-owner on the same executor gets no copy. A lagging stream gets `{ lagged: true }`.
 7. A client that misses a revision calls `perspective.resyncSubscription`. Closing the socket disposes its subscriptions (`dispose_connection_subscriptions`).
 
-Notifications: `notification_check_loop` checks its flag every 5 s. When writes happened, it runs each granted notification's SPARQL trigger, subtracts the previous matches and publishes only the new ones (`publish_notification_matches`). Triggers run through the internal `SparqlStore::query`, which re-encodes `?target` / `?t` bindings as `literal:` strings; client SPARQL does not ([SPARQL queries](sparql.md)). Who may receive a notification is in [Access checks](../../agents/access/checks.md).
+Notifications: `notification_check_loop` checks its flag every 5 s. When writes happened, it runs each granted notification's SPARQL trigger, subtracts the previous matches and publishes only the new ones (`publish_notification_matches`). Triggers run through the internal `SparqlStore::query`, which re-encodes `?target` / `?t` bindings as `literal:` strings; client SPARQL does not ([SPARQL queries](sparql.md)). Who may receive a notification is in [Guards](../../agents/access/guards.md).
 
 </details>
 
@@ -25,6 +25,7 @@ Notifications: `notification_check_loop` checks its flag every 5 s. When writes 
 - [perspectives/perspective_instance/subscriptions.rs](../../../rust-executor/src/perspectives/perspective_instance/subscriptions.rs): `open_subscription`, `send_delta_update`, `subscription_state`, `dispose_*`, `result_delta`.
 - [perspectives/perspective_instance/subscription_triggers.rs](../../../rust-executor/src/perspectives/perspective_instance/subscription_triggers.rs): `TriggerRules`, which writes re-run a model subscription.
 - [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `subscribe_and_query`, `model_subscribe_and_query`, `subscribed_queries_loop`, `check_subscribed_queries`, `notification_check_loop`, `calc_notification_trigger_matches`.
+- [events.rs](../../../rust-executor/src/events.rs) (new): `Event::for_connection`, the typed live-query event.
 - [runtime_service/notification_access.rs](../../../rust-executor/src/runtime_service/notification_access.rs): which notifications may fire.
 - SDK: [core/src/perspectives/LiveQuery.ts](../../../core/src/perspectives/LiveQuery.ts) (applies deltas), [core/src/perspectives/WakerSubscriptionManager.ts](../../../core/src/perspectives/WakerSubscriptionManager.ts), `subscribeQuery` / `modelSubscribe` in [PerspectiveProxy.ts](../../../core/src/perspectives/PerspectiveProxy.ts).
 

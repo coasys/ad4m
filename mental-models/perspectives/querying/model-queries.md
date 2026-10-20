@@ -11,14 +11,14 @@ A **model query** asks for instances of one or more subject classes: `perspectiv
 `execute_model_query` (pipeline diagram in [model_query/mod.rs](../../../rust-executor/src/perspectives/model_query/mod.rs)):
 
 1. **Shape**: `get_shape(class)` returns a cached `Arc<ModelShape>` parsed from SHACL links. In a neighbourhood, `get_shape_or_wait` waits up to 20 s (`MODEL_QUERY_SHAPE_WAIT`) for SHACL that has not synced yet.
-2. **SPARQL build** (`sparql_builder`): conformance patterns (which triples make a URI an instance), pushed-down `where` filters, the link guard (status and signature), paging.
+2. **SPARQL build** (`sparql_builder`): conformance patterns (which triples make a URI an instance), pushed-down `where` filters, the link guard (status and verdict), paging.
 3. **Store**: run on the `SparqlStore`.
-4. **Hydration**: group rows by instance, decode `literal:` values, collect relation arrays, apply collection ordering, add author and timestamp.
-5. **Filtering and sorting** for conditions SPARQL could not express.
+4. **Hydration**: group rows by instance, decode `literal:` values, collect relation arrays, apply collection ordering, add author (the device key) and timestamp.
+5. **Filtering and sorting** for conditions SPARQL could not express, among them the member filter: in a neighbourhood, drop links whose author maps to no member at the link's time (the replay is not in the store).
 6. **Getters and relations**: SPARQL `ASK` / `SELECT` getters, reverse relations, recursive `include`.
 7. **Projections**: counts and lists over relation edges.
 
-Query input (`ModelQueryInput`): `where`, `order`, `limit`, `offset`, `count`, `properties`, `include`, `projections`, `parent` scope, `polymorphic`, `preferClasses`, `linkStatus`, `includeUnverified`. By default only links whose signature verifies are read. Several classes in one query go through `execute_union_query`. Abstract classes (for example the built-in `ad4m://TextContent`) resolve to the concrete classes that implement them.
+Query input (`ModelQueryInput`): `where`, `order`, `limit`, `offset`, `count`, `properties`, `include`, `projections`, `parent` scope, `polymorphic`, `preferClasses`, `linkStatus`, `includeUnverified`. A model query is a logic read: by default it reads only `Valid` links ([Link verdicts](../links/verdicts.md)). Several classes in one query go through `execute_union_query`. Abstract classes (for example the built-in `ad4m://TextContent`) resolve to the concrete classes that implement them.
 
 </details>
 

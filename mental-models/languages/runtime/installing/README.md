@@ -24,7 +24,7 @@ Four install paths exist:
 | Path | Used by | Checks |
 |---|---|---|
 | `language_by_ref(addr)` | RPC `language.get`, model queries, MCP profile tool | proof valid; author trusted, or a template of a trusted source; then `install_language` |
-| `LanguageController::install_language(addr)` | neighbourhood publish and join, the `ensure_link_language` retry loop | hash only; up to 10 attempts each for meta and bundle, sleeping 5 s × n after each miss |
+| `LanguageController::install_language(addr)` | neighbourhood create, publish and join, the `ensure_link_language` retry loop | hash only; up to 10 attempts each for meta and bundle, sleeping 5 s × n after each miss |
 | `install_language_from_address(addr, true)` | system languages, known link languages at boot | hash only; one attempt |
 | `load_installed_languages` | boot | none: loads every `languages/<dir>/bundle.js` |
 
@@ -32,9 +32,10 @@ When the link-language install fails on join, `install_neighbourhood_with_contex
 
 Publishing:
 
-1. `language.publish` (refused to user sessions) reads `languagePath` from the executor's file system, hashes it, and calls `expressionCreate({bundle, meta})` on the language language as the main agent.
-2. `language.applyTemplate` builds a templated copy and publishes it as the caller (`ctx.acts_as()`), so managed agents can create neighbourhoods.
-3. Both then load the new bundle locally.
+1. `language.publish` (refused to tenant and user sessions) reads `languagePath` from the executor's file system, hashes it, and calls `expressionCreate({bundle, meta})` on the language language as the main agent.
+2. `language.applyTemplate` builds a templated copy and publishes it as the caller (`ctx.acts_as()`). It stays open to managed agents for other languages.
+3. `neighbourhood.create` templates the server link language itself (`SERVER_URL`, `UID`, `CREATOR`) and publishes it as the caller; `neighbourhood.publish` refuses a copy of that template made any other way ([Language trust and templates](trust-and-templates.md)).
+4. Each path then loads the new bundle locally.
 
 </details>
 
@@ -43,7 +44,7 @@ Publishing:
 - [rust-executor/src/languages/mod.rs](../../../../rust-executor/src/languages/mod.rs): `install_language_from_address`, `load_installed_languages`, `install_language`, `language_by_ref`, `save_language_bundle`, `language_remove`.
 - [rust-executor/src/languages/conductor_languages.rs](../../../../rust-executor/src/languages/conductor_languages.rs): `load_link_and_installed_languages`.
 - [rust-executor/src/api/languages_ws.rs](../../../../rust-executor/src/api/languages_ws.rs): `publish_language`, `apply_template`, `remove_language`, `write_settings`.
-- [rust-executor/src/neighbourhoods.rs](../../../../rust-executor/src/neighbourhoods.rs): install calls on publish and join (`install_neighbourhood_with_context`).
+- [rust-executor/src/neighbourhoods.rs](../../../../rust-executor/src/neighbourhoods.rs): install calls on publish and join (`install_neighbourhood_with_context`); [neighbourhoods/create.rs](../../../../rust-executor/src/neighbourhoods/create.rs) (new): template, publish and install on create.
 - [rust-executor/src/types/domain.rs](../../../../rust-executor/src/types/domain.rs): `LanguageMeta`, `LanguageLanguageInput`.
 - [cli/src/languages.rs](../../../../cli/src/languages.rs): CLI `languages` commands.
 

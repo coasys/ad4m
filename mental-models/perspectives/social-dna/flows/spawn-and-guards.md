@@ -1,6 +1,6 @@
 # Flow spawn and guards
 
-A flow instance starts in one of two ways. A client starts it by hand (`FlowInstance.start` in the SDK), or the executor **spawns** it after an interpretation run. Spawn happens when a newly created instance's subject class is in the flow's `inputTypes`. After the same run, the **flow evaluator** checks the **guards** of the states reachable from each affected flow instance. It writes a transition proposal for every guard that now holds. An optional **semantic check** asks the LLM to confirm a transition first.
+A flow instance starts in one of two ways. A client starts it by hand (`FlowInstance.start` in the SDK), or the executor **spawns** it after an interpretation run. Spawn happens when a newly created instance's subject class is in the flow's `inputTypes`. After the same run, the **flow evaluator** checks the **flow guards** of the states reachable from each affected flow instance. It writes a transition proposal for every flow guard that now holds. An optional **semantic check** asks the LLM to confirm a transition first.
 
 **Why:** Interpretation writes the evidence (a scope, a deliverable), but an LLM often forgets to propose the transition that the evidence allows. A deterministic pass after every run keeps flows moving without trusting the LLM's own proposals. Spawn needs an explicit class match, so automatic starts stay opt-in; a catch-all flow would otherwise start on every instance.
 

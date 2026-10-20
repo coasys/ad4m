@@ -21,8 +21,9 @@ Calls:
 
 1. `execute_on_language(addr, js)` resolves the alias and sends `Execute(js, AgentContext::main_agent())`.
 2. `execute_on_language_with_context(addr, js, ctx)` sends the caller's `AgentContext` instead.
-3. `Language::new(addr)` (in `language.rs`) is the typed wrapper for link-language calls: `commit`, `sync`, `current_revision`, `render`, `set_local_agents`, `others`, telepresence. Each method checks the cached language capability set first and returns a default when the language lacks that language capability.
-4. `Language::commit`, `sync`, `render`, `set_local_agents` and the telepresence calls use `execute_on_language`, so link-language calls run as the main agent. Inside the language, `agentDid()` returns the main agent's DID, also for a neighbourhood that a managed agent owns. A link language learns the local owners of its neighbourhood through `peersSetLocal` and `agentGetAllLocalUserDids` ([Managed agents](../../agents/executor/managed-agents.md)).
+3. `Language::new(addr)` (in `language.rs`) is the typed wrapper for link-language calls: `commit`, `sync`, `current_revision`, `render`, `set_local_agents`, `others`, telepresence, and `handleMembershipChange`. Each method checks the cached language capability set first and returns a default when the language lacks that language capability.
+4. `Language::commit`, `sync`, `render`, `set_local_agents` and the telepresence calls use `execute_on_language`, so link-language calls run as the main agent. Inside the language, `agentDid()` returns the main agent's DID, also for a neighbourhood that a managed agent owns. A link language learns the local owners of its neighbourhood through `peersSetLocal` and `agentGetAllLocalUserDids` ([Managed agents](../../agents/executor/managed-agents/README.md)). The server link language's room session authenticates with the key it learned at `init()` ([Server link language](../link-languages/server-link-language/README.md)).
+5. The `Identity*` and `Token*` calls go only to `system_addresses.agent_language`. The executor's `IdentityBackend` makes them with a 5-second timeout and a circuit breaker per backend, so an outage turns into `unavailable` quickly ([Identity interface](../other-kinds/agent-language/identity-interface.md)). A token call to an agent language without the token group answers `disabled`.
 
 </details>
 
@@ -32,6 +33,7 @@ Calls:
 - [rust-executor/src/languages/language.rs](../../../rust-executor/src/languages/language.rs): `Language`, the per-capability call wrappers.
 - [rust-executor/src/languages/language_runtime_handle.rs](../../../rust-executor/src/languages/language_runtime_handle.rs): `LanguageRuntimeHandle::execute` (sends `AgentContext::main_agent()`), `execute_with_context`.
 - [rust-executor/src/languages/error.rs](../../../rust-executor/src/languages/error.rs): `LanguageError`.
+- [rust-executor/src/identity/backend.rs](../../../rust-executor/src/identity/backend.rs) (new): `IdentityBackend`, the one caller of the identity calls.
 - [rust-executor/src/lib.rs](../../../rust-executor/src/lib.rs): boot order (`LanguageController` after V8 init).
 
 </details>
