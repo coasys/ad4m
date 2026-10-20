@@ -28,7 +28,8 @@ rate-limit.ts   sliding-window limiter, fully standalone
 telepresence.ts online/offline + grace-period timers; DOES NOT import ws.ts (returns state, caller broadcasts) to avoid a cycle
 ws.ts           WebSocket connection registry + telepresence message routing; imports auth.ts + telepresence.ts
 routes.ts       all HTTP handlers; imports everything above
-operator.ts     optional loopback-only operator app (admission UI + /api); shares db/auth/ws with routes.ts, page in operator-page.ts
+log-tail.ts     in-memory ring buffer of recent log lines (both apps' pino output, teed from stdout) for the operator's live log view
+operator.ts     optional loopback-only operator app (admission UI + /api, incl. the /api/logs SSE stream); shares db/auth/ws with routes.ts, page in operator-page.ts
 server.ts       composition root: builds db/auth/telepresence/ws, registers routes, builds the operator app when asked
 index.ts        CLI arg parsing, calls buildServer + app.listen
 ```
@@ -69,7 +70,9 @@ There's no dedicated "enable E2E" endpoint. **The first call to `POST /rooms/:ro
 - The token comes from a mode-600 file only (never argv/URL), and the request log never sees headers.
 - Every `/api` call carries the signed-in login (`X-Forwarded-User`, set by the proxy; trusted only because the listener is loopback). Every ACL change is stored in `acl_changes` with that login. The `/acl` route stores the admin DID.
 - Every POST carries an allowed `Origin` (or `Referer`), as a CSRF guard for the cookie sign-in.
-- Removal goes through `removeMember()` in `routes.ts` (ACL row, sessions and sockets together). The page script builds DOM with `textContent` only, because room ids and DIDs are client-chosen strings.
+- Removal goes through `removeMember()` in `routes.ts` (ACL row, sessions and sockets together). The page script builds DOM with `textContent` only, because room ids and DIDs are client-chosen strings (log lines carry them too).
+- Admission (`tests/admission.test.ts`): allowlist unless `autoAdmit`. The mode is logged at startup and returned by `/api/whoami`; the page shows it. The server keeps no queue of refused joins: the operator admits a DID the person sends them.
+- `GET /api/logs` (`tests/log-stream.test.ts`) streams `LogTail` as Server-Sent Events and hijacks the reply, so the `onSend` hook does not run for it: it sets its own headers. Its open streams are ended in a `preClose` hook, or `close()` would wait on them. Events carry no id: every (re)connect gets the whole buffer and the page clears its list on `open`, keeping at most as many rows as `LogTail` holds (1000), so a row goes when its line leaves the buffer. Both apps log through one tee destination (`server.ts`); tests pass `logger: true` with a `logDestination` sink to keep stdout quiet.
 
 ## Known gotchas
 
