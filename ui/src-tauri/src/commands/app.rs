@@ -15,6 +15,16 @@ use tauri::Size;
 use tauri::{LogicalSize, Manager};
 use tauri_plugin_positioner::{Position, WindowExt};
 
+/// The commit this launcher was built from, recorded by `build.rs`: the full
+/// hash, `-dirty` appended for an unclean tree, `unknown` without git.
+pub const GIT_COMMIT: &str = env!("AD4M_GIT_COMMIT");
+
+/// The first eight hex digits of [`GIT_COMMIT`], with its suffix.
+#[tauri::command]
+pub fn get_build_commit() -> String {
+    env!("AD4M_GIT_COMMIT_SHORT").to_string()
+}
+
 #[tauri::command]
 pub fn close_application(app_handle: tauri::AppHandle) {
     app_handle.exit(0);

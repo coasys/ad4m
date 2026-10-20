@@ -57,7 +57,7 @@ use startup::executor_data_path;
 /// Provides all means of interacting with the AD4M executor / agent.
 /// See help of commands for more information.
 #[derive(Parser, Debug)]
-#[command(author, version, verbatim_doc_comment)]
+#[command(author, version = util::VERSION, verbatim_doc_comment)]
 struct ClapApp {
     #[command(subcommand)]
     domain: Domain,

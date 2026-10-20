@@ -253,6 +253,7 @@ mockito = "1"
 tokio-tungstenite = "0.29"
 
 [build-dependencies]
+ad4m-build-support = { path = "../build-support" }
 fs_extra = "1.3.0"
 
 

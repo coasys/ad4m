@@ -215,9 +215,7 @@ async fn system_commands(_perspective: &PerspectiveProxy, line: &String) -> bool
             );
             println!("\x1b[36mPackage: \x1b[97m{}", env!("CARGO_PKG_NAME"));
 
-            let git_commit = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
-            let git_dirty = option_env!("GIT_DIRTY").unwrap_or("N/A");
-            println!("\x1b[36mGit Commit: \x1b[97m{} ({})", git_commit, git_dirty);
+            println!("\x1b[36mGit Commit: \x1b[97m{}", crate::util::GIT_COMMIT);
 
             println!("\x1b[36mHomepage: \x1b[97m{}", env!("CARGO_PKG_HOMEPAGE"));
             println!(

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "build-support",
     "cli",
     "rust-client",
     "rust-executor",

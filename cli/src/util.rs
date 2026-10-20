@@ -4,6 +4,20 @@ use anyhow::{anyhow, Result};
 
 pub const DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.fZ";
 
+/// The commit this binary was built from, recorded by `build.rs`: the full
+/// hash, `-dirty` appended for an unclean tree, `unknown` without git.
+pub const GIT_COMMIT: &str = env!("AD4M_GIT_COMMIT");
+
+/// `--version`: `<version> (<short commit>)`, e.g. `0.13.0 (1a2b3c4d)`.
+/// The full commit is in `runtimeInfo`, the startup log and the repl's
+/// `version` command.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("AD4M_GIT_COMMIT_SHORT"),
+    ")"
+);
+
 pub fn maybe_parse_datetime(
     maybe_date: Option<String>,
 ) -> Result<Option<chrono::naive::NaiveDateTime>> {
