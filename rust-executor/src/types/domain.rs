@@ -768,8 +768,8 @@ pub struct ResourceInput {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
-    /// The commit the executor was built from, or None when the build could not tell. Every build
-    /// between two releases reports the same version, so this is what names one exactly.
+    /// The commit the executor was built from, or nothing when the build could not tell (no git
+    /// checkout). Every build between two releases reports one version; this names the build.
     pub ad4m_executor_commit: Option<String>,
     pub is_initialized: bool,
     pub is_unlocked: bool,
