@@ -448,7 +448,7 @@ impl SfuServer {
         local_addr: SocketAddr,
         advertised: Option<SocketAddr>,
     ) -> Result<(Rtc, String), String> {
-        let mut rtc = Rtc::builder().build();
+        let mut rtc = Rtc::builder().build(Instant::now());
 
         let candidate = Candidate::host(local_addr, "udp")
             .map_err(|e| format!("Failed to create host candidate: {}", e))?;
@@ -1399,7 +1399,7 @@ mod tests {
 
     /// A browser's offer: one audio section, as a caller sends to join.
     fn caller_offer() -> SdpOffer {
-        let mut caller = Rtc::builder().build();
+        let mut caller = Rtc::builder().build(Instant::now());
         let mut change = caller.sdp_api();
         change.add_media(
             str0m::media::MediaKind::Audio,
@@ -1455,6 +1455,180 @@ mod tests {
         let lines = candidates(&answer);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("typ host"), "{lines:?}");
+    }
+
+    /// What one side of an in-memory call did, on the simulated clock.
+    #[derive(Default)]
+    struct Seen {
+        ice: Vec<(Duration, IceConnectionState)>,
+        data: Vec<Duration>,
+        channel: Option<ChannelId>,
+    }
+
+    /// Feed `rtc` the clock, then drain it: events go to `seen`, packets
+    /// are returned for the network to route. Returns the next deadline.
+    fn drive(
+        rtc: &mut Rtc,
+        now: Instant,
+        start: Instant,
+        seen: &mut Seen,
+        sent: &mut Vec<(SocketAddr, SocketAddr, Vec<u8>)>,
+    ) -> Instant {
+        rtc.handle_input(Input::Timeout(now)).unwrap();
+        loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => return t,
+                Output::Transmit(t) => sent.push((t.source, t.destination, t.contents.to_vec())),
+                Output::Event(Event::IceConnectionStateChange(s)) => {
+                    seen.ice.push((now - start, s))
+                }
+                Output::Event(Event::ChannelOpen(id, _)) => seen.channel = Some(id),
+                Output::Event(Event::ChannelData(_)) => seen.data.push(now - start),
+                Output::Event(_) => {}
+            }
+        }
+    }
+
+    fn receive(
+        rtc: &mut Rtc,
+        now: Instant,
+        source: SocketAddr,
+        destination: SocketAddr,
+        data: &[u8],
+    ) {
+        rtc.handle_input(Input::Receive(
+            now,
+            Receive {
+                proto: Protocol::Udp,
+                source,
+                destination,
+                contents: data.try_into().unwrap(),
+            },
+        ))
+        .unwrap();
+    }
+
+    /// A STUN Binding request (RFC 5389: message type 0x0001).
+    fn is_binding_request(packet: &[u8]) -> bool {
+        packet.len() >= 20 && packet[0] == 0x00 && packet[1] == 0x01
+    }
+
+    /// The production failure (Chrome/Edge 144+, str0m issue #846): a caller
+    /// whose own checks reach the SFU through the router's port forward, but
+    /// which never answers the SFU's checks. The SFU must keep that caller as
+    /// long as the caller's checks keep arriving. str0m before 0.16.1 prunes
+    /// the pair, nominated or not, once its own checks time out (~18.75 s),
+    /// and goes Disconnected.
+    ///
+    /// The network: the SFU binds 192.168.0.10:40000 behind a router that
+    /// forwards 198.51.100.7:40000 to it; the caller cannot reach the
+    /// private address. Every binding request the SFU sends is lost;
+    /// responses, DTLS, SCTP and media pass.
+    #[test]
+    fn a_caller_whose_network_drops_the_sfus_checks_stays_connected() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let public: SocketAddr = "198.51.100.7:40000".parse().unwrap();
+        let caller_addr: SocketAddr = "203.0.113.20:50000".parse().unwrap();
+
+        let mut caller = Rtc::builder().build(Instant::now());
+        caller.add_local_candidate(Candidate::host(caller_addr, "udp").unwrap());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            str0m::media::MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let cid = change.add_channel("sfu-data".into());
+        let (offer, pending) = change.apply().unwrap();
+        let (mut sfu, answer) = SfuServer::create_rtc_for_offer(offer, bind, Some(public)).unwrap();
+        let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
+        caller.sdp_api().accept_answer(pending, answer).unwrap();
+
+        let start = Instant::now();
+        let mut now = start;
+        let (mut caller_seen, mut sfu_seen) = (Seen::default(), Seen::default());
+        let mut next_write = Duration::ZERO;
+        let mut sfu_checks_dropped = 0;
+        let end = Duration::from_secs(60);
+        while now - start < end {
+            let mut sent = Vec::new();
+            let caller_next = drive(&mut caller, now, start, &mut caller_seen, &mut sent);
+            for (_, destination, data) in sent.drain(..) {
+                // The router forwards the public address to the bind
+                // address; the private address is unreachable.
+                if destination == public {
+                    receive(&mut sfu, now, caller_addr, bind, &data);
+                }
+            }
+            let sfu_next = drive(&mut sfu, now, start, &mut sfu_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                assert_eq!(source, bind, "the SFU sends from its socket");
+                assert_eq!(destination, caller_addr);
+                if is_binding_request(&data) {
+                    sfu_checks_dropped += 1;
+                    continue;
+                }
+                // The router rewrites the source to the public address.
+                receive(&mut caller, now, public, caller_addr, &data);
+            }
+
+            // Both sides talk on the data channel twice a second once open.
+            if now - start >= next_write {
+                if let Some(mut ch) = caller.channel(cid) {
+                    ch.write(true, b"caller").unwrap();
+                }
+                if let Some(mut ch) = sfu_seen.channel.and_then(|id| sfu.channel(id)) {
+                    ch.write(true, b"sfu").unwrap();
+                }
+                next_write += Duration::from_millis(500);
+            }
+
+            let next = caller_next.min(sfu_next).min(start + next_write);
+            now = next.clamp(
+                now + Duration::from_millis(1),
+                now + Duration::from_millis(50),
+            );
+        }
+
+        // What counts is losing the caller once connected.
+        let up = sfu_seen
+            .ice
+            .iter()
+            .position(|(_, s)| {
+                matches!(
+                    s,
+                    IceConnectionState::Connected | IceConnectionState::Completed
+                )
+            })
+            .unwrap_or_else(|| panic!("the SFU never connected: {:?}", sfu_seen.ice));
+        assert!(
+            sfu_seen.ice[up].0 < Duration::from_secs(1),
+            "{:?}",
+            sfu_seen.ice
+        );
+        let disconnected = sfu_seen.ice[up..]
+            .iter()
+            .find(|(_, s)| *s == IceConnectionState::Disconnected);
+        assert!(
+            disconnected.is_none(),
+            "the SFU dropped a caller whose checks keep arriving: {:?} (states {:?}, \
+             {sfu_checks_dropped} SFU binding requests dropped)",
+            disconnected,
+            sfu_seen.ice
+        );
+        let recent = end - Duration::from_secs(5);
+        assert!(
+            sfu_seen.data.last().is_some_and(|t| *t >= recent),
+            "the SFU stopped receiving at {:?}",
+            sfu_seen.data.last()
+        );
+        assert!(
+            caller_seen.data.last().is_some_and(|t| *t >= recent),
+            "the caller stopped receiving at {:?}",
+            caller_seen.data.last()
+        );
     }
 
     /// A fixed port is bound exactly; the STUN probe runs on that socket and
@@ -1625,14 +1799,14 @@ mod tests {
             pid_b.clone(),
             room_id.clone(),
             "did:key:peerB".to_string(),
-            Rtc::builder().build(),
+            Rtc::builder().build(Instant::now()),
             false,
         );
         let mut peer_c = SfuPeer::new(
             pid_c.clone(),
             room_id.clone(),
             "did:key:peerC".to_string(),
-            Rtc::builder().build(),
+            Rtc::builder().build(Instant::now()),
             false,
         );
 
@@ -1653,7 +1827,7 @@ mod tests {
         );
 
         // Use a separate Rtc to allocate an origin Mid
-        let mut scratch_rtc = Rtc::builder().build();
+        let mut scratch_rtc = Rtc::builder().build(Instant::now());
         let origin_mid = scratch_rtc.sdp_api().add_media(
             MediaKind::Audio,
             str0m::media::Direction::RecvOnly,
