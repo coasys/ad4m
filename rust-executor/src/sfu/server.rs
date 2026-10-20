@@ -1096,13 +1096,18 @@ impl SfuServer {
                         if !route.forward {
                             continue;
                         }
+                        // One RTP clock per receiver across layer switches.
+                        let time = layers.rtp_time(
+                            data.network_time,
+                            target_pid,
+                            &track,
+                            data.rid.as_ref(),
+                            data.time,
+                        );
                         if let Some(writer) = target_peer.rtc.writer(out_mid) {
-                            if let Err(e) = writer.write(
-                                data.pt,
-                                data.network_time,
-                                data.time,
-                                data.data.clone(),
-                            ) {
+                            if let Err(e) =
+                                writer.write(data.pt, data.network_time, time, data.data.clone())
+                            {
                                 warn!(
                                     "SFU: failed to write media to peer {} mid {}: {:?}",
                                     target_pid, out_mid, e
