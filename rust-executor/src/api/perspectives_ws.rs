@@ -17,7 +17,7 @@ use crate::perspectives::perspective_instance::{
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
-    remove_perspective, update_perspective,
+    remove_perspective, update_perspective_with,
     utils::prolog_resolution_to_string,
 };
 use crate::pubsub::mark_credits_dirty;
@@ -391,9 +391,7 @@ async fn update_perspective_handler(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let mut handle = perspective.persisted.lock().await.clone();
-    handle.name = Some(body.name);
-    update_perspective(&handle)
+    let handle = update_perspective_with(&perspective.uuid, |h| h.name = Some(body.name))
         .await
         .map_err(|e| WsRpcError::internal(e))?;
 
