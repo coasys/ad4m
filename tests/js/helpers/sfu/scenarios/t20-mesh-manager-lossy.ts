@@ -35,6 +35,11 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { MeshManager, type SignallingChannel } from "@coasys/ad4m";
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
+// The e2e suite's peer connection: the spec behaviours perfect negotiation
+// relies on, and Chromium's refusal of a description without `sdp`.
+import { specPeerConnection } from "../e2e/webrtc.js";
+
+export { specPeerConnection };
 
 const require_ = createRequire(import.meta.url);
 let wrtc: any;
@@ -47,69 +52,6 @@ try {
 const CALL_ID = "t20-mesh-manager-lossy";
 const AGENTS = ["did:test:t20-alice", "did:test:t20-bob", "did:test:t20-carol"];
 const CONNECT_TIMEOUT_MS = 90_000;
-
-/**
- * A `@roamhq/wrtc` peer connection with the spec behaviours the binding lacks
- * and every current browser has, and which perfect negotiation relies on:
- *
- * - `setLocalDescription()` with no argument creates the offer or answer the
- *   signalling state calls for *when it runs*;
- * - an incoming offer in `have-local-offer` rolls the local one back;
- * - both run on one operations chain, so a description applied while an offer
- *   is being created waits its turn instead of racing it.
- */
-export function specPeerConnection(configuration: RTCConfiguration): RTCPeerConnection {
-  // Host candidates only: the agents share a machine, and CI has no STUN route.
-  const pc = new wrtc.RTCPeerConnection({ ...configuration, iceServers: [] });
-  const setLocal = pc.setLocalDescription.bind(pc);
-  const setRemote = pc.setRemoteDescription.bind(pc);
-  let operations: Promise<unknown> = Promise.resolve();
-  const chain = <T>(operation: () => Promise<T>): Promise<T> => {
-    const result = operations.then(operation);
-    operations = result.catch(() => {});
-    return result;
-  };
-  pc.setLocalDescription = (description?: RTCSessionDescriptionInit) =>
-    chain(async () => {
-      if (description?.sdp) return setLocal(description);
-      const type = description?.type ?? (pc.signalingState === "have-remote-offer" ? "answer" : "offer");
-      if (type === "rollback") return setLocal({ type: "rollback" });
-      return setLocal(type === "offer" ? await pc.createOffer() : await pc.createAnswer());
-    });
-  pc.setRemoteDescription = (description: RTCSessionDescriptionInit) =>
-    chain(async () => {
-      if (description.type === "offer" && pc.signalingState === "have-local-offer") {
-        await setLocal({ type: "rollback" });
-      }
-      return setRemote(description);
-    });
-
-  /*
-   * The binding segfaults when a connection is closed under an operation that
-   * is still running, or asked to do anything after it closed — both of which
-   * the mesh does on purpose when it rebuilds a pair. A browser answers those
-   * with an InvalidStateError, so do that, and close only once the chain has
-   * drained.
-   */
-  let closed = false;
-  const refuse = () => Promise.reject(new Error("InvalidStateError: the connection is closed"));
-  const closeNative = pc.close.bind(pc);
-  const addCandidate = pc.addIceCandidate.bind(pc);
-  const guarded = <A extends unknown[], T>(op: (...args: A) => Promise<T>) => (...args: A): Promise<T> =>
-    closed ? refuse() : op(...args);
-  pc.setLocalDescription = guarded(pc.setLocalDescription);
-  pc.setRemoteDescription = guarded(pc.setRemoteDescription);
-  pc.addIceCandidate = guarded((candidate: RTCIceCandidateInit) => chain(() => addCandidate(candidate)));
-  pc.restartIce = ((restart) => () => {
-    if (!closed) restart();
-  })(pc.restartIce.bind(pc));
-  pc.close = () => {
-    if (closed) return;
-    closed = true;
-    void operations.then(closeNative);
-  };
-  return pc as RTCPeerConnection;
-}
 
 /**
  * Telepresence as the mesh meets it. Every message is delivered after a random

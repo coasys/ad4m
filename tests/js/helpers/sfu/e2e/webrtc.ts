@@ -9,7 +9,14 @@
  * - `setLocalDescription()` with no argument creates the offer or answer
  *   the signalling state calls for when it runs;
  * - an offer arriving in `have-local-offer` rolls the local one back;
- * - operations run one at a time on one chain.
+ * - operations, `createOffer` and `createAnswer` included, run one at a
+ *   time on one chain.
+ *
+ * It refuses a description with a type but no `sdp` (other than a
+ * rollback), with the parse error a Chromium client reported for it, so the
+ * SDK must create its offers and answers explicitly. That is stricter than
+ * the spec, which reads such a description as implicit, as Chrome 151 and
+ * Firefox 153 do.
  *
  * It also guards two ways the binding crashes where a browser would throw:
  * an operation on a closed connection, and closing under a running
@@ -45,6 +52,8 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
   const pc = new wrtc.RTCPeerConnection({ ...configuration, iceServers: [] });
   open.add(pc);
   const setLocal = pc.setLocalDescription.bind(pc);
+  const createOffer = pc.createOffer.bind(pc);
+  const createAnswer = pc.createAnswer.bind(pc);
   const setRemote = pc.setRemoteDescription.bind(pc);
   const addCandidate = pc.addIceCandidate.bind(pc);
   const closeNative = pc.close.bind(pc);
@@ -62,11 +71,20 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
 
   pc.setLocalDescription = guarded((description?: RTCSessionDescriptionInit) =>
     chain(async () => {
-      if (description?.sdp) return setLocal(description);
-      const type = description?.type ?? (pc.signalingState === "have-remote-offer" ? "answer" : "offer");
-      if (type === "rollback") return setLocal({ type: "rollback" });
-      return setLocal(type === "offer" ? await pc.createOffer() : await pc.createAnswer());
+      if (description?.type === "rollback") return setLocal({ type: "rollback" });
+      if (description?.type) {
+        if (!description.sdp) {
+          throw new Error(
+            "OperationError: Failed to execute 'setLocalDescription' on 'RTCPeerConnection': " +
+              "Failed to parse SessionDescription.  Expect line: v=",
+          );
+        }
+        return setLocal(description);
+      }
+      return setLocal(pc.signalingState === "have-remote-offer" ? await createAnswer() : await createOffer());
     }));
+  pc.createOffer = guarded((options?: RTCOfferOptions) => chain(() => createOffer(options)));
+  pc.createAnswer = guarded((options?: RTCAnswerOptions) => chain(() => createAnswer(options)));
   pc.setRemoteDescription = guarded((description: RTCSessionDescriptionInit) =>
     chain(async () => {
       if (description.type === "offer" && pc.signalingState === "have-local-offer") {
