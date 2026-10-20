@@ -46,7 +46,9 @@
     "test-sfu-cascade": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/sfu-cascade.test.ts",
     "test-sfu-session": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/sfu-session.test.ts",
     "test-sfu-e2e": "ts-mocha -p tsconfig.json --timeout 1800000 --exit tests/sfu-e2e.test.ts",
-    "test-main-sfu-e2e": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test-sfu-e2e && node scripts/cleanup.js && node scripts/cleanTestingData.js",
+    "test-sfu-browser": "ts-mocha -p tsconfig.json --timeout 600000 --exit tests/sfu-browser-mesh.test.ts",
+    "test-main-sfu-browser": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test-sfu-browser && node scripts/cleanup.js && node scripts/cleanTestingData.js",
+    "test-main-sfu-e2e":"export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test-sfu-e2e && node scripts/cleanup.js && node scripts/cleanTestingData.js",
     "test-sfu": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/sfu-cascade.test.ts tests/sfu-session.test.ts tests/sfu-mesh.test.ts"
   },
   "devDependencies": {
