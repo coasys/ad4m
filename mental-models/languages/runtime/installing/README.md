@@ -28,7 +28,7 @@ Four install paths exist:
 | `install_language_from_address(addr, true)` | system languages, known link languages at boot | hash only; one attempt |
 | `load_installed_languages` | boot | none: loads every `languages/<dir>/bundle.js` |
 
-When the link-language install fails on join, `install_neighbourhood_with_context` still creates the perspective, with state `LinkLanguageFailedToInstall`. `ensure_link_language` then retries the install every 5 s.
+When the link-language install fails on join, `install_neighbourhood_with_context` still creates the perspective, with state `LinkLanguageFailedToInstall`. `ensure_link_language` then retries the install after 0.5 s, doubling up to 30 s ([Neighbourhood sync](../../../perspectives/neighbourhoods/sync.md)).
 
 Publishing:
 

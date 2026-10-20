@@ -39,7 +39,7 @@ Terms: [Glossary](GLOSSARY.md).
 3. In a [neighbourhood](perspectives/neighbourhoods/README.md), shared links go to the [link language](languages/link-languages/README.md) (the server link language by default), which carries them to the other members' executors. Their diffs come back the same way. [Membership](perspectives/neighbourhoods/membership/README.md) admits members by person.
 4. Every change emits events and updates live queries on the caller's socket ([Events](agents/interfaces/events.md), [Live queries](perspectives/querying/live-queries.md)).
 
-Beside agents, languages and perspectives, the executor holds AI, SFU, Holochain and billing as process-wide services ([Executor services](agents/executor/services/README.md)). Every perspective runs its background loops on fixed intervals ([Neighbourhood sync](perspectives/neighbourhoods/sync.md)). In the default network, languages and neighbourhoods are published to central HTTP services, and key logs and agent records to the shared store; link sync can also run peer-to-peer over Holochain ([Bootstrap languages](languages/runtime/bootstrap-languages.md)).
+Beside agents, languages and perspectives, the executor holds AI, SFU, Holochain and billing as process-wide services ([Executor services](agents/executor/services/README.md)). Every perspective runs background loops: some wake on events, the others poll on fixed intervals ([Neighbourhood sync](perspectives/neighbourhoods/sync.md)). In the default network, languages and neighbourhoods are published to central HTTP services, and key logs and agent records to the shared store; link sync can also run peer-to-peer over Holochain ([Bootstrap languages](languages/runtime/bootstrap-languages.md)).
 
 </details>
 

@@ -21,7 +21,7 @@ The **link server** is a Node.js process, separate from the executor, that store
 1. At auth and on every request the server checks the key's admission from its cache. It refreshes a key's log head at each auth and at most every 10 minutes for a key that holds a socket. On a revocation or a counted `removed` link it deletes the key's sessions, closes its sockets with `4005`, and sends `rotate-needed`. When `author_of` is unavailable, it admits no new key and keeps the admitted ones.
 2. The store client reads the shared store's address from `STORE_URL` and refuses a key-index answer whose head no key in `STORE_HEAD_KEYS` signed.
 3. **Legacy rooms**, made before protocol 2 with no creator binding, keep the ACL table and its admin role ([db.ts](../../../../link-server/src/db.ts)); rooms with a creator binding admit from the membership graph. `AUTO_ADMIT` works per room for tests; the server refuses to start with it and `NODE_ENV=production`.
-4. `--operator-port` starts a loopback-only listener for the **link-server operator**: rooms, members as the replay names them, key versions, sockets, health, and `POST /api/rooms/:id/suspend` and `…/resume`. No route admits or removes a person. The link-server operator is whoever runs the server; in the rest of ADAM, the operator is the identity in an executor's operator record.
+4. `--operator-port` starts a loopback-only listener for the **link-server operator**: rooms, members as the replay names them, key versions, sockets, health, live server logs, and `POST /api/rooms/:id/suspend` and `…/resume`. No route admits or removes a person. `GET /api/logs` streams the last 1000 log lines of both apps (`LogTail`), then each new one, as Server-Sent Events. The link-server operator is whoever runs the server; in the rest of ADAM, the operator is the identity in an executor's operator record.
 5. `/membership` takes at most 30 self-join attempts per room per hour per source address.
 
 </details>
@@ -34,7 +34,8 @@ The **link server** is a Node.js process, separate from the executor, that store
 - [link-server/src/db.ts](../../../../link-server/src/db.ts): schema (rooms with creator binding, membership links, legacy ACL), `applyDiffAndAppend`.
 - [link-server/src/auth.ts](../../../../link-server/src/auth.ts): `did:key` decoding, challenges, the ownership check, JWT sessions.
 - `ad4m-identity-core` (WASM build, `membership.rs`): the replay; the `author_of` store client with its cache.
-- [link-server/src/operator.ts](../../../../link-server/src/operator.ts), [ws.ts](../../../../link-server/src/ws.ts), [telepresence.ts](../../../../link-server/src/telepresence.ts), [encryption.ts](../../../../link-server/src/encryption.ts), [rate-limit.ts](../../../../link-server/src/rate-limit.ts).
+- [link-server/src/operator.ts](../../../../link-server/src/operator.ts), [ws.ts](../../../../link-server/src/ws.ts), [telepresence.ts](../../../../link-server/src/telepresence.ts), [encryption.ts](../../../../link-server/src/encryption.ts), [rate-limit.ts](../../../../link-server/src/rate-limit.ts), [operator-page.ts](../../../../link-server/src/operator-page.ts).
+- [link-server/src/log-tail.ts](../../../../link-server/src/log-tail.ts): `LogTail`, the in-memory buffer of recent log lines; `teeDestination`.
 - [link-server/tests/](../../../../link-server/tests): every test boots a real server.
 
 </details>
