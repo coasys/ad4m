@@ -191,6 +191,7 @@ fn selection_a_guarded_walk_over_a_signed_cycle_terminates() {
     // a cycle reaches itself.
     assert_eq!(ids(&answers[0].0), ["sg://g/b"], "out");
     assert_eq!(ids(&answers[1].0), ["sg://g/b"], "in");
+    assert_eq!(ids(&answers[2].0), ["sg://g/a", "sg://g/b"], "projection");
     for inst in answers[2].0["instances"].as_array().unwrap() {
         assert_eq!(inst["$n"], json!(2), "{inst}");
         assert_eq!(inst["$all"], json!(["sg://g/a", "sg://g/b"]), "{inst}");
