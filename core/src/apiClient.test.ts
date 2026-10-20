@@ -381,6 +381,21 @@ describe('ApiClient notices a socket that went silent', () => {
         expect(socket(0).readyState).toBe(2)
     })
 
+    it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
+        // A socket with no traffic hears nothing until its first ping is answered.
+        // Silence is counted from that ping, not from the last message.
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(9_990)
+        jest.setSystemTime(Date.now() + 50) // the interval fires 40 ms late
+        await jest.advanceTimersByTimeAsync(10)
+        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(0).readyState).toBe(1)
+        // Unanswered for a whole interval after that ping: dropped.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
     it('ignores events that reach a socket after it was dropped', async () => {
         const seen = jest.fn()
         client.on('agent-updated', seen)
