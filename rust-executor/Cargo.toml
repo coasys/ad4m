@@ -90,7 +90,11 @@ sys_traits = "0.1.28"
 tokio = { version = "1.25.0", features = ["full"] }
 # WebRTC SFU — str0m is a pure-Rust sans-I/O WebRTC stack. We drive the
 # event loop ourselves over a UDP socket in `rust-executor/src/sfu`.
-str0m = "0.9"
+# 0.16.1+ keeps a pair while the remote's checks arrive (Chrome/Edge 144+
+# stop answering ours: str0m#846). Crypto and DTLS: aws-lc-rs + dimpl, the
+# upstream default; aws-lc-rs is already built for deno_crypto. Without the
+# default `examples` feature, which pulls in an HTTP server.
+str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"] }
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"
