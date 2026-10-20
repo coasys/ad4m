@@ -289,6 +289,22 @@ impl LanguageController {
         Ok(language_address)
     }
 
+    /// Test-only: serve `address` from `handle` (see
+    /// `LanguageRuntimeHandle::from_channel`), or stop serving it with `None`.
+    /// No load, no teardown.
+    #[cfg(test)]
+    pub(crate) async fn set_runtime_for_test(
+        &self,
+        address: &str,
+        handle: Option<LanguageRuntimeHandle>,
+    ) {
+        let mut runtimes = self.runtimes.lock().await;
+        match handle {
+            Some(handle) => runtimes.insert(address.to_string(), handle),
+            None => runtimes.remove(address),
+        };
+    }
+
     /// Unload a language and clean up
     pub async fn unload_language(&self, language_address: &str) -> Result<(), LanguageError> {
         // Resolve system aliases up front — the runtimes map is keyed
