@@ -235,12 +235,12 @@ impl CascadeManager {
             return Err("Pipe transport already exists".to_string());
         }
 
-        let mut rtc = Rtc::builder().build();
+        let mut rtc = Rtc::builder().build(Instant::now());
         let candidate = Candidate::host(self.local_addr, "udp")
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
         rtc.add_local_candidate(candidate);
 
-        // Create offer via SDP API.  str0m 0.9 requires at least one
+        // Create offer via SDP API.  str0m requires at least one
         // queued change before `apply()` produces an offer, so we open
         // a control data channel for the pipe transport.  Media
         // transceivers are added later via the renegotiation pipeline
@@ -298,7 +298,7 @@ impl CascadeManager {
         let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
             .map_err(|e| format!("Invalid pipe SDP offer: {}", e))?;
 
-        let mut rtc = Rtc::builder().build();
+        let mut rtc = Rtc::builder().build(Instant::now());
         let candidate = Candidate::host(self.local_addr, "udp")
             .map_err(|e| format!("Failed to create candidate: {}", e))?;
         rtc.add_local_candidate(candidate);
