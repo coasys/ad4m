@@ -60,7 +60,8 @@ export const e17NetworkSwitch = e2eScenario({
         const left = () => Math.max(1, RECOVERY_MS - (Date.now() - switched));
         await call.eventually(call.rosterIsEveryone(), left(), "roster after the switch");
         await call.eventually(call.hearsEveryone(), left(), "audio after the switch");
-        await call.eventually(call.seesEveryone(CAMERA), left(), "video after the switch");
+        // Video flowing again, at whatever layer the sender's bandwidth estimate runs: full size is E9's.
+        await call.eventually(call.seesEveryone(), left(), "video after the switch");
         return Date.now() - switched;
       }));
 

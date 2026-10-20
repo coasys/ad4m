@@ -47,7 +47,9 @@ pub(crate) struct LayerSelector {
     last_seen: HashMap<Track, HashMap<Rid, Instant>>,
     /// The layer each receiver gets of each track.
     forwarding: HashMap<(ParticipantId, Track), Rid>,
-    last_request: HashMap<(Track, Rid), Instant>,
+    /// When a keyframe was last asked for, per layer (`None`: a sender
+    /// without simulcast).
+    last_request: HashMap<(Track, Option<Rid>), Instant>,
     /// Each receiver's RTP clock of each track.
     timelines: HashMap<(ParticipantId, Track), Timeline>,
 }
@@ -199,6 +201,14 @@ impl LayerSelector {
             .copied()
     }
 
+    /// A video packet of `track` on layer `rid` came after a gap in its
+    /// sequence (str0m's `contiguous == false`, e.g. after an outage): the
+    /// receivers' decoders may have lost a reference frame and need a
+    /// keyframe. Whether to ask the sender for one on that layer now.
+    pub fn gap(&mut self, now: Instant, track: &Track, rid: Option<&Rid>) -> bool {
+        self.may_request(now, track, rid.copied())
+    }
+
     /// Drop all state of a participant that left, as sender and as receiver.
     pub fn forget(&mut self, participant: &ParticipantId) {
         self.last_seen
@@ -212,14 +222,20 @@ impl LayerSelector {
     }
 
     fn throttle(&mut self, now: Instant, track: &Track, rid: Rid) -> Option<Rid> {
+        self.may_request(now, track, Some(rid)).then_some(rid)
+    }
+
+    /// Whether a keyframe request for `rid` of `track` is due, recording it
+    /// when it is: at most one per [`KEYFRAME_REQUEST_INTERVAL`].
+    fn may_request(&mut self, now: Instant, track: &Track, rid: Option<Rid>) -> bool {
         let key = (track.clone(), rid);
         if let Some(last) = self.last_request.get(&key) {
             if now.duration_since(*last) < KEYFRAME_REQUEST_INTERVAL {
-                return None;
+                return false;
             }
         }
         self.last_request.insert(key, now);
-        Some(rid)
+        true
     }
 }
 
@@ -455,6 +471,24 @@ mod tests {
             s.rtp_time(Instant::now(), &RECEIVER, &track(), None, time),
             time
         );
+    }
+
+    #[test]
+    fn a_gap_asks_for_a_keyframe_on_its_layer_throttled() {
+        let now = Instant::now();
+        let high = Rid::from("high");
+        let mut s = selector(now, &["high", "low"]);
+        assert!(s.gap(now, &track(), Some(&high)));
+        // The next packets after the gap ask no more within the interval,
+        let soon = now + Duration::from_millis(20);
+        assert!(!s.gap(soon, &track(), Some(&high)));
+        // and neither does a switch that waits for a keyframe on that layer.
+        assert_eq!(route(&mut s, soon, "high", false, Some("high")), DROP);
+        // Another layer has its own throttle.
+        assert!(s.gap(soon, &track(), Some(&Rid::from("low"))));
+        assert!(s.gap(now + KEYFRAME_REQUEST_INTERVAL, &track(), Some(&high)));
+        // A sender without simulcast is asked too.
+        assert!(s.gap(now, &(SENDER, Mid::from("2")), None));
     }
 
     #[test]

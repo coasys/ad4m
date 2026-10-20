@@ -1052,7 +1052,7 @@ impl SfuServer {
 
             // Relay media data to other peers in the same room
             let now = Instant::now();
-            let mut layer_keyframes: Vec<(ParticipantId, Mid, Rid)> = Vec::new();
+            let mut layer_keyframes: Vec<(ParticipantId, Mid, Option<Rid>)> = Vec::new();
             for (origin_pid, data) in &media_to_relay {
                 let origin_room = match peers.get(origin_pid) {
                     Some(p) => p.room_id.clone(),
@@ -1067,6 +1067,14 @@ impl SfuServer {
                 let track = (origin_pid.clone(), data.mid);
                 layers.observe(now, &track, data.rid.as_ref());
                 let keyframe = is_keyframe(&data.codec_extra);
+                // A gap in the origin's sequence (e.g. after an outage or an
+                // ICE restart): receivers may need a keyframe to decode again.
+                if !data.contiguous
+                    && data.params.spec().codec.is_video()
+                    && layers.gap(now, &track, data.rid.as_ref())
+                {
+                    layer_keyframes.push((origin_pid.clone(), data.mid, data.rid));
+                }
 
                 // Forward to all other peers in the same room
                 for (target_pid, target_peer) in peers.iter_mut() {
@@ -1091,7 +1099,7 @@ impl SfuServer {
                             quality_preferences.get(target_pid).map(|s| s.as_str()),
                         );
                         if let Some(rid) = route.request_keyframe {
-                            layer_keyframes.push((origin_pid.clone(), data.mid, rid));
+                            layer_keyframes.push((origin_pid.clone(), data.mid, Some(rid)));
                         }
                         if !route.forward {
                             continue;
@@ -1120,7 +1128,7 @@ impl SfuServer {
             for (origin_pid, mid, rid) in layer_keyframes {
                 if let Some(mut writer) = peers.get_mut(&origin_pid).and_then(|p| p.rtc.writer(mid))
                 {
-                    let _ = writer.request_keyframe(Some(rid), KeyframeRequestKind::Pli);
+                    let _ = writer.request_keyframe(rid, KeyframeRequestKind::Pli);
                 }
             }
 

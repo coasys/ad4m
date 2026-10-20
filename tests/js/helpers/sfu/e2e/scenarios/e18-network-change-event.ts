@@ -61,7 +61,8 @@ export const e18NetworkChangeEvent = e2eScenario({
         const left = () => Math.max(1, RECOVERY_MS - (Date.now() - changed));
         await call.eventually(call.rosterIsEveryone(), left(), "roster after the change");
         await call.eventually(call.hearsEveryone(), left(), "audio after the change");
-        await call.eventually(call.seesEveryone(CAMERA), left(), "video after the change");
+        // Video flowing again, at whatever layer the sender's bandwidth estimate runs: full size is E9's.
+        await call.eventually(call.seesEveryone(), left(), "video after the change");
         return Date.now() - changed;
       }));
       // A rebuilt call drops and re-adds every participant; an ICE restart keeps them.
