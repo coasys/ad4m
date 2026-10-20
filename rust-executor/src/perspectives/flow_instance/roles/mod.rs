@@ -26,6 +26,14 @@
 //! instance vanish from historical verdicts too, un-settling edges its votes once
 //! settled. State that changes belongs in new instances, not in edited ones.
 //!
+//! **A role class must be concrete.** Rule 2 below reads the grantee's own
+//! links on the predicates of the class `fromRole` names (`get_shape`). For
+//! an abstract class (#1435) those are the abstract shape's predicates, but a
+//! conforming concrete class can keep a property on another predicate or
+//! under an alias. Its rows then carry no grantee link the rule can read, so
+//! under `author: "$did"` the role fails closed and grants nobody: a `warn!`,
+//! or an `Err` when a row has no `links` key that the query asked for.
+//!
 //! ## As-of gating
 //!
 //! Every vote is gated against the graph *as it stood at the vote's
