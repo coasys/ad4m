@@ -372,7 +372,17 @@ pub async fn update_perspective_with(
         get_perspective(uuid).ok_or_else(|| format!("Perspective with uuid {} not found", uuid))?;
     let handle = {
         let mut persisted = instance.persisted.lock().await;
+        let link_language = |h: &PerspectiveHandle| {
+            h.neighbourhood
+                .as_ref()
+                .map(|nh| nh.data.link_language.clone())
+        };
+        let before = link_language(&persisted);
         change(&mut persisted);
+        // A publish sets the link language: wake the loop that attaches it.
+        if link_language(&persisted) != before {
+            instance.link_language_changed();
+        }
         Ad4mDb::with_global_instance(|db| {
             db.update_perspective(&persisted).map_err(|e| e.to_string())
         })?;

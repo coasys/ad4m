@@ -104,9 +104,7 @@ pub async fn install_neighbourhood_with_context(
                     .map_err(|e| anyhow!(e))?;
 
                 // Update link language with new owners list
-                if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
-                }
+                p.update_local_agents().await;
 
                 log::info!(
                     "Added agent {} to existing neighbourhood {}. Link language has been updated with new owners.",
@@ -130,9 +128,7 @@ pub async fn install_neighbourhood_with_context(
                     .map_err(|e| anyhow!(e))?;
 
                 // Update link language with new owners list
-                if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
-                }
+                p.update_local_agents().await;
 
                 log::info!(
                     "Added main agent to existing neighbourhood {}. Link language has been updated with new owners.",
