@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import { didToPublicKey, type AuthManager } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
+import type { LogEntry, LogTail } from "./log-tail.js";
 import { OPERATOR_PAGE_CSS, OPERATOR_PAGE_HTML, OPERATOR_PAGE_JS } from "./operator-page.js";
 import { removeMember } from "./routes.js";
 import type { TelepresenceManager } from "./telepresence.js";
@@ -40,6 +41,24 @@ export interface OperatorContext {
   auth: AuthManager;
   ws: WsManager;
   telepresence: TelepresenceManager;
+  /** The server's recent log lines; without it, `GET /api/logs` answers 404 (logging is off). */
+  logTail?: LogTail;
+  /** Whether the public app admits every authenticated DID (else allowlist). */
+  autoAdmit: boolean;
+}
+
+/** Live log streams one listener serves at once; each holds a socket open. */
+export const MAX_LOG_STREAMS = 8;
+
+/** A comment line this often keeps proxies (nginx: 60 s read timeout) from closing an idle stream. */
+const LOG_STREAM_HEARTBEAT_MS = 15_000;
+
+/** Bytes a log stream may have queued for a slow client before it is dropped. */
+const MAX_LOG_STREAM_BUFFER = 1024 * 1024;
+
+/** One Server-Sent Event carrying one log line. */
+function logEvent(entry: LogEntry): string {
+  return `data: ${JSON.stringify(entry)}\n\n`;
 }
 
 export const MIN_OPERATOR_TOKEN_LENGTH = 32;
@@ -159,6 +178,12 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
   }
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 16 * 1024 });
 
+  // Open log streams never finish on their own; end them so close() does not wait on them.
+  const logStreams = new Set<() => void>();
+  app.addHook("preClose", async () => {
+    for (const end of [...logStreams]) end();
+  });
+
   app.addHook("onSend", async (_request, reply) => {
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Cache-Control", "no-store");
@@ -204,7 +229,56 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       }
     });
 
-    api.get("/whoami", async (request) => ({ operator: operatorOf(request.headers), instance: opts.label ?? null }));
+    api.get("/whoami", async (request) => ({
+      operator: operatorOf(request.headers),
+      instance: opts.label ?? null,
+      admission: ctx.autoAdmit ? "auto" : "allowlist",
+    }));
+
+    // Live logs as Server-Sent Events: the buffered lines first, then each new
+    // one. A reconnect gets the whole buffer again; the page starts over.
+    api.get("/logs", async (_request, reply) => {
+      const tail = ctx.logTail;
+      if (!tail) return reply.code(404).send({ error: "logging is off on this server" });
+      if (logStreams.size >= MAX_LOG_STREAMS) {
+        return reply.code(429).send({ error: `at most ${MAX_LOG_STREAMS} log streams at once` });
+      }
+
+      reply.hijack();
+      const raw = reply.raw;
+      raw.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        // nginx buffers proxied responses unless told not to; a log stream must arrive line by line.
+        "X-Accel-Buffering": "no",
+        Connection: "keep-alive",
+      });
+      raw.write("retry: 3000\n\n" + tail.lines().map(logEvent).join(""));
+
+      let unsubscribe = () => {};
+      let heartbeat: NodeJS.Timeout | undefined;
+      const end = () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+        logStreams.delete(end);
+        if (!raw.writableEnded && !raw.destroyed) raw.end();
+      };
+      logStreams.add(end);
+      raw.on("close", end);
+      unsubscribe = tail.subscribe((entry) => {
+        // A client this far behind is dropped: destroyed, not ended, since
+        // end() would wait for it to read the queued megabyte first.
+        if (raw.writableLength > MAX_LOG_STREAM_BUFFER) {
+          raw.destroy();
+          end();
+          return;
+        }
+        raw.write(logEvent(entry));
+      });
+      heartbeat = setInterval(() => raw.write(": ping\n\n"), LOG_STREAM_HEARTBEAT_MS);
+      heartbeat.unref();
+    });
 
     api.get("/rooms", async () => ({
       rooms: ctx.db.listRooms().map((r) => ({
