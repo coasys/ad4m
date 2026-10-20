@@ -4,7 +4,7 @@ use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_shacl_to_links};
-use super::update_perspective;
+use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::{AgentContext, AgentService};
@@ -1107,7 +1107,7 @@ impl PerspectiveInstance {
 
     /// Attach this neighbourhood's link language as soon as it can be: at
     /// once for a perspective that is one, the moment a publish makes it one
-    /// (`update_from_handle` wakes this loop), and with backoff while the
+    /// (`update_perspective_with` wakes this loop), and with backoff while the
     /// install fails. A private perspective waits without a timer.
     async fn ensure_link_language(&self) {
         let mut retry = LINK_LANGUAGE_RETRY_MIN;
@@ -1195,10 +1195,10 @@ impl PerspectiveInstance {
             .await;
         // Cache language→perspective mapping for fast signal routing
         {
-            let handle = self.persisted.lock().await.clone();
+            let handle = self.persisted.lock().await;
             crate::perspectives::register_link_language_perspective(
                 nh.data.link_language.clone(),
-                handle,
+                handle.clone(),
             );
         }
         if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
@@ -1571,10 +1571,9 @@ impl PerspectiveInstance {
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
         if self.persisted.lock().await.state != state {
-            let mut handle = self.persisted.lock().await.clone();
-            handle.state = state.clone();
-
-            update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
+            let handle = update_perspective_with(&self.uuid, |h| h.state = state.clone())
+                .await
+                .map_err(|e| anyhow!(e))?;
 
             get_global_pubsub()
                 .await
@@ -1598,21 +1597,11 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn update_from_handle(&self, handle: PerspectiveHandle) {
-        let link_language = |h: &PerspectiveHandle| {
-            h.neighbourhood
-                .as_ref()
-                .map(|nh| nh.data.link_language.clone())
-        };
-        let mut persisted = self.persisted.lock().await;
-        let changed = link_language(&persisted) != link_language(&handle);
-        *persisted = handle;
-        // A publish sets the link language here; wake the loop to attach it.
-        // Only on a change: the loop writes its own state through here and
-        // must not cut its backoff short.
-        if changed {
-            self.wakes.link_language.notify_one();
-        }
+    /// Wakes the link-language loop: a change set or replaced the handle's link language
+    /// (a publish). Only `update_perspective_with` calls it, and only on such a change: the
+    /// loop writes its own state through there and must not cut its backoff short.
+    pub(crate) fn link_language_changed(&self) {
+        self.wakes.link_language.notify_one();
     }
 
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
@@ -7004,17 +6993,19 @@ mod tests {
     /// What `neighbourhood_publish_from_perspective` writes: a neighbourhood
     /// on a link language this executor has never loaded.
     async fn publish(instance: &PerspectiveInstance) {
-        let mut handle = instance.persisted.lock().await.clone();
-        handle.shared_url = Some(format!("neighbourhood://{}", Uuid::new_v4()));
-        handle.neighbourhood = Some(crate::types::DecoratedNeighbourhoodExpression {
-            data: crate::types::domain::Neighbourhood {
-                link_language: format!("QmNotLoaded{}", Uuid::new_v4().simple()),
+        update_perspective_with(&instance.uuid, |h| {
+            h.shared_url = Some(format!("neighbourhood://{}", Uuid::new_v4()));
+            h.neighbourhood = Some(crate::types::DecoratedNeighbourhoodExpression {
+                data: crate::types::domain::Neighbourhood {
+                    link_language: format!("QmNotLoaded{}", Uuid::new_v4().simple()),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        });
-        handle.state = PerspectiveState::NeighbourhoodCreationInitiated;
-        update_perspective(&handle).await.unwrap();
+            });
+            h.state = PerspectiveState::NeighbourhoodCreationInitiated;
+        })
+        .await
+        .unwrap();
     }
 
     async fn state_of(instance: &PerspectiveInstance) -> PerspectiveState {
