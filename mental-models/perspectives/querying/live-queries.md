@@ -16,7 +16,7 @@ A **live query** is a SPARQL or model query that the executor re-runs after rele
 6. `send_delta_update` publishes on the query-subscription topic with the connection id. The event stream delivers it only to that connection ([Events](../../agents/interfaces/events.md)).
 7. A client that misses a revision calls `perspective.resyncSubscription`. Closing the socket disposes its subscriptions (`dispose_connection_subscriptions`).
 
-Notifications: `notification_check_loop` checks its flag every 5 s. When writes happened, it runs each granted notification's SPARQL trigger, subtracts the previous matches and publishes only the new ones (`publish_notification_matches`). Triggers run through the internal `SparqlStore::query`, which re-encodes `?target` / `?t` bindings as `literal:` strings; client SPARQL does not ([SPARQL queries](sparql.md)). Who may receive a notification is in [Access checks](../../agents/access/checks.md).
+Notifications: a write sets the notification flag and wakes `notification_check_loop` (`request_notification_check`). The loop waits 100 ms to collect a burst and runs at most one check per second. It runs each granted notification's SPARQL trigger, subtracts the previous matches and publishes only the new ones (`publish_notification_matches`). Triggers run through the internal `SparqlStore::query`, which re-encodes `?target` / `?t` bindings as `literal:` strings; client SPARQL does not ([SPARQL queries](sparql.md)). Who may receive a notification is in [Access checks](../../agents/access/checks.md).
 
 </details>
 

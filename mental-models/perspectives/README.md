@@ -28,7 +28,7 @@ PerspectiveInstance (one per uuid, in PERSPECTIVES)   │ (see Languages)
 ```
 
 1. `perspectives::add_perspective` stores a `PerspectiveHandle` (uuid, name, shared URL, neighbourhood, state, owners) in SQLite and puts a `PerspectiveInstance` in the global registry `PERSPECTIVES`.
-2. The instance opens its own Oxigraph store and starts its background loops (`start_background_tasks`). The loops run on fixed intervals, also when the perspective is idle.
+2. The instance opens its own Oxigraph store and starts its background loops (`start_background_tasks`). The link-language and notification loops wait for an event (a publish, a link change); the sync, commit-queue, fallback-sync, live-query and auto-processor loops poll on fixed intervals, also when the perspective is idle.
 3. Callers reach it through the RPC handlers. Every `perspective.*` handler checks the caller against the handle's `owners` (`get_perspective_with_access`; see [Access checks](../agents/access/checks.md)).
 
 </details>
@@ -37,7 +37,7 @@ PerspectiveInstance (one per uuid, in PERSPECTIVES)   │ (see Languages)
 
 - [rust-executor/src/perspectives/](../../rust-executor/src/perspectives): the whole subsystem. Start with its [AGENTS.md](../../rust-executor/src/perspectives/AGENTS.md).
 - [perspectives/mod.rs](../../rust-executor/src/perspectives/mod.rs): registry `PERSPECTIVES`, `add_perspective`, `get_perspective`, `remove_perspective`, `import_perspective` / `export_perspective`, routing of link-language callbacks.
-- [perspectives/perspective_instance.rs](../../rust-executor/src/perspectives/perspective_instance.rs): `PerspectiveInstance`, one `impl` block in a file of about 9,800 lines (tests included). It holds link writes, sync, SDNA, subjects, queries, subscriptions, telepresence and the auto-processor.
+- [perspectives/perspective_instance.rs](../../rust-executor/src/perspectives/perspective_instance.rs): `PerspectiveInstance`, one `impl` block in a file of about 9,900 lines (tests included). It holds link writes, sync, SDNA, subjects, queries, subscriptions, telepresence and the auto-processor.
 - [types/domain.rs](../../rust-executor/src/types/domain.rs): `PerspectiveHandle`, `PerspectiveState`.
 - [api/perspectives_ws.rs](../../rust-executor/src/api/perspectives_ws.rs): every `perspective.*` RPC method; `get_perspective_with_access`.
 - SDK: [core/src/perspectives/PerspectiveProxy.ts](../../core/src/perspectives/PerspectiveProxy.ts).

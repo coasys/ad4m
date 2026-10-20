@@ -21,7 +21,7 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 1. The first DID that authenticates to an unknown room id creates the room and becomes its admin.
 2. Other DIDs need an ACL entry (or `--auto-admit`). Removing a DID from the ACL deletes its sessions and closes its sockets.
 3. A removal resends the original `LinkExpression`, so its hash equals the addition's. For plaintext links the server requires `author` = session DID. For encrypted links the hash is the client-supplied `link_hash`.
-4. `--operator-port` with `--operator-token-file` starts a second, loopback-only app for the **link-server operator** (list rooms, change ACLs, audit log). The link-server operator is the person who runs the server; in the rest of ADAM, "operator" is the executor's administrator.
+4. `--operator-port` with `--operator-token-file` starts a second, loopback-only app for the **link-server operator** (list rooms, change ACLs, audit log, the admission mode, live server logs). `GET /api/logs` streams the last 1000 log lines of both apps (`LogTail`), then each new one, as Server-Sent Events. The link-server operator is the person who runs the server; in the rest of ADAM, "operator" is the executor's administrator.
 
 </details>
 
@@ -32,7 +32,8 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 - [link-server/src/routes.ts](../../../link-server/src/routes.ts): HTTP routes, `removeMember`.
 - [link-server/src/db.ts](../../../link-server/src/db.ts): schema, `applyDiffAndAppend`.
 - [link-server/src/auth.ts](../../../link-server/src/auth.ts): `did:key` decoding, challenges, `hashMessageForVerify`, JWT sessions.
-- [link-server/src/encryption.ts](../../../link-server/src/encryption.ts), [ws.ts](../../../link-server/src/ws.ts), [telepresence.ts](../../../link-server/src/telepresence.ts), [operator.ts](../../../link-server/src/operator.ts).
+- [link-server/src/encryption.ts](../../../link-server/src/encryption.ts), [ws.ts](../../../link-server/src/ws.ts), [telepresence.ts](../../../link-server/src/telepresence.ts), [operator.ts](../../../link-server/src/operator.ts), [operator-page.ts](../../../link-server/src/operator-page.ts).
+- [link-server/src/log-tail.ts](../../../link-server/src/log-tail.ts): `LogTail`, the in-memory buffer of recent log lines; `teeDestination`.
 - [link-server/tests/](../../../link-server/tests): every test boots a real server.
 
 </details>
