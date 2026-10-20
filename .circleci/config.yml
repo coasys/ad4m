@@ -367,6 +367,17 @@ jobs:
       - build_adam
       - build_integration_inputs
       - run:
+          # The newest glibc symbol the executor needs decides which Linux it runs on: one built
+          # here needs at least the glibc of the machine that built it, as far as the symbols it
+          # uses go. Printed so a binary meant for other machines can be checked against them
+          # (Ubuntu 24.04 has 2.39, 22.04 has 2.35).
+          name: Report the executor's glibc floor
+          command: |
+            if ! command -v objdump >/dev/null; then echo "objdump not installed"; exit 0; fi
+            floor="$(objdump -T target/release/ad4m-executor | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+            echo "ad4m-executor needs ${floor:-no versioned glibc symbols}"
+            echo "This machine: $(ldd --version | head -1)"
+      - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
             # Write to a temp name and rename: a rerun of build for the same
