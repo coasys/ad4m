@@ -289,6 +289,7 @@ export class WakerSubscriptionManager {
 
         for (const item of result) {
           if (item && item.source && !currentSeen.has(item.source)) {
+            currentSeen.add(item.source);
             newMessages.push(item.source);
           }
         }
@@ -317,10 +318,6 @@ export class WakerSubscriptionManager {
           mentions.push({ address: msgAddr, parents, ancestors });
         }
 
-        // Mark all new messages as seen
-        for (const addr of newMessages) {
-          currentSeen.add(addr);
-        }
         this.seenMessages.set(sub.id, currentSeen);
 
         // Debounce the wake callback
