@@ -279,33 +279,40 @@ impl Grants {
         self.revoke(&grant.into_iter().collect::<Vec<_>>())
     }
 
-    /// Revokes every active grant on `agent`. Returns how many there were.
+    /// Revokes every grant on `agent`. Returns how many were active. It writes the ended
+    /// ones too: `revoke` ends a grant before its write, so after a failed write the
+    /// grant is ended here but active in the database, which a restart loads.
     pub fn revoke_agent(&self, agent: &AgentContext) -> Result<usize, GrantError> {
         let grants: Vec<Arc<LiveGrant>> = read(&self.live)
             .values()
-            .filter(|g| g.agent == *agent && !g.is_ended())
+            .filter(|g| g.agent == *agent)
             .cloned()
             .collect();
         if grants.is_empty() {
             return Ok(0);
         }
-        self.revoke(&grants).map(|_| grants.len())
+        let active = grants.iter().filter(|g| !g.is_ended()).count();
+        self.revoke(&grants).map(|_| active)
     }
 
     /// Deletes the grants `grants`: their tokens stop working as a revoked token does.
+    /// They stay here, ended, until the database delete succeeds, so a retry after a
+    /// failed delete still finds them.
     pub fn remove(&self, grants: &[Arc<LiveGrant>]) -> Result<(), GrantError> {
         if grants.is_empty() {
             return Err(GrantError::NotFound);
         }
-        {
-            let mut live = write(&self.live);
-            for grant in grants {
-                grant.ended.cancel();
-                live.remove(&grant.id);
-            }
+        for grant in grants {
+            grant.ended.cancel();
         }
         let ids: Vec<String> = grants.iter().map(|g| g.id.0.clone()).collect();
-        with_db(|db| db.delete_grants(&ids).map_err(|e| e.to_string())).map_err(GrantError::Store)
+        with_db(|db| db.delete_grants(&ids).map_err(|e| e.to_string()))
+            .map_err(GrantError::Store)?;
+        let mut live = write(&self.live);
+        for grant in grants {
+            live.remove(&grant.id);
+        }
+        Ok(())
     }
 
     /// The unexpired grants on `agent`, active and revoked, oldest first.
@@ -599,6 +606,42 @@ mod tests {
             reloaded.get(&revoked.id).is_none(),
             "the revoked grant stays revoked"
         );
+    }
+
+    /// `revoke` ends grants in memory before it writes them. When that write fails, a
+    /// retried revoke-all must still write them: the database, not `ended`, is what a
+    /// restart loads.
+    #[test]
+    fn revoking_an_agent_again_writes_grants_already_ended_in_memory() {
+        setup();
+        let alice = user("alice");
+        let insert = |name: &str| {
+            let id = uuid::Uuid::new_v4().to_string();
+            Grants::global()
+                .insert(LiveGrant::new(
+                    TokenId(id.clone()),
+                    id,
+                    alice.clone(),
+                    "did:key:test".into(),
+                    auth(name, vec![]),
+                    now() + 3600,
+                    now(),
+                ))
+                .unwrap()
+        };
+        let (failed, active) = (insert("write-failed"), insert("active"));
+        // What a revoke whose database write failed leaves: ended here, active in the db.
+        failed.ended.cancel();
+
+        assert_eq!(Grants::global().revoke_agent(&alice).unwrap(), 1);
+
+        let reloaded = Grants::default();
+        Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        assert!(
+            reloaded.get(&failed.id).is_none(),
+            "the retry wrote the ended grant"
+        );
+        assert!(reloaded.get(&active.id).is_none());
     }
 
     #[test]
