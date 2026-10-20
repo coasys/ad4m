@@ -17,6 +17,11 @@ class TestSocket {
     static autoOpen = false
     /** Fire onclose some time after close(), like browsers and `ws`. */
     static asyncClose = false
+    /** close() never fires onclose: a dead TCP connection, whose close frame
+     *  no peer answers, can stay CLOSING for minutes. */
+    static closeHangs = false
+    /** Answer `ping` with `pong`, as the executor does while calls run. */
+    static answersPings = true
 
     readyState = 0
     sent: AnyMsg[] = []
@@ -29,9 +34,17 @@ class TestSocket {
         TestSocket.instances.push(this)
         if (TestSocket.autoOpen) queueMicrotask(() => this.open())
     }
-    send(data: string) { this.sent.push(JSON.parse(data)) }
+    send(data: string) {
+        const msg = JSON.parse(data)
+        this.sent.push(msg)
+        if (msg.type === 'ping' && TestSocket.answersPings) {
+            queueMicrotask(() => { if (this.readyState === 1) this.reply({ type: 'pong' }) })
+        }
+    }
     close() {
-        if (TestSocket.asyncClose) {
+        if (TestSocket.closeHangs) {
+            this.readyState = 2
+        } else if (TestSocket.asyncClose) {
             this.readyState = 2
             setTimeout(() => this.drop(), 5)
         } else {
@@ -56,6 +69,8 @@ beforeEach(() => {
     TestSocket.instances = []
     TestSocket.autoOpen = true
     TestSocket.asyncClose = false
+    TestSocket.closeHangs = false
+    TestSocket.answersPings = true
     client = new ApiClient(url, undefined, TestSocket as unknown as new (url: string) => WebSocket)
 })
 afterEach(() => client.closeAll())
@@ -302,6 +317,73 @@ describe('ApiClient retries idempotent reads once after a reconnect', () => {
         reconnect(0)
         socket(1).drop()
         await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    })
+})
+
+describe('ApiClient notices a socket that went silent', () => {
+    // A network switch leaves the old socket OPEN: no FIN or RST ever arrives,
+    // so no close event comes, and nothing the client sends gets an answer.
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    it('drops a socket whose ping goes unanswered and redials; a pending write fails, a pending read is resent', async () => {
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 120_000 }))
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+        expect(socket(0).sent.map(m => m.type)).toEqual(['events.watch', 'perspective.addLink', 'perspective.all'])
+
+        // Silent from here on: no pong, no reply, no close event.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(0).readyState).toBe(2)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+
+        await jest.advanceTimersByTimeAsync(500)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        const sent = socket(1).sent.map(m => m.type)
+        expect(sent).toContain('events.watch')
+        expect(sent).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+
+        const next = call<number>('agent.status')
+        socket(1).reply({ id: socket(1).sent.at(-1)!.id, result: 1 })
+        await expect(next).resolves.toBe(1)
+
+        // The dead socket's close event, if it ever comes, leaves its successor alone.
+        socket(0).drop()
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(1).readyState).toBe(1)
+    })
+
+    it('keeps a socket that answers its pings or sends anything else', async () => {
+        open()
+        socket(0).open()
+        // Replies by hand: a pong after some pings, an event after the others.
+        for (let i = 0; i < 6; i++) {
+            await jest.advanceTimersByTimeAsync(10_000)
+            if (i % 2 === 0) socket(0).reply({ type: 'pong' })
+            else socket(0).reply({ type: 'agent-updated' })
+        }
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('leaves no timers after closeAll on an open socket', async () => {
+        const promise = call('agent.status')
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await promise
+        client.closeAll()
+        expect(jest.getTimerCount()).toBe(0)
     })
 })
 
