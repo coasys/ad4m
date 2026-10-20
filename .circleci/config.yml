@@ -391,6 +391,42 @@ jobs:
               cp "target/release/$bin" "$dst/$bin.tmp" || exit 1
               mv "$dst/$bin.tmp" "$dst/$bin"
             done
+      # The executor for this commit, for use outside this host: an app or a test suite that pins
+      # this commit's snapshot of @coasys/ad4m fetches the executor built from the same commit
+      # instead of compiling it, which takes most of an hour on a hosted runner. Compressed, with
+      # its sha256 and a manifest naming the file. A consumer is expected to fetch it soon after
+      # the commit appears and cache it, so the project's artifact retention only has to cover
+      # that window.
+      #
+      # zstd -19: about 90 MB from 370, against 130 MB with gzip, in about 13 seconds. Debug
+      # symbols are kept: stripping saves under 10 MB compressed and loses the function names a
+      # panic's backtrace prints. gzip only if zstd is missing, so a missing tool cannot fail the
+      # job every other job waits on; the manifest says which file was written.
+      #
+      # Linux x64 only. The binary needs the glibc the previous step reports, which is what
+      # decides the distributions it runs on.
+      - run:
+          name: Package the executor for download
+          command: |
+            out=/tmp/executor-artifact
+            rm -rf "$out" && mkdir -p "$out"
+            if command -v zstd >/dev/null; then
+              file=ad4m-executor.zst
+              zstd -19 -T0 -q -c target/release/ad4m-executor > "$out/$file"
+            else
+              echo "zstd not installed: falling back to gzip"
+              file=ad4m-executor.gz
+              gzip -6 -c target/release/ad4m-executor > "$out/$file"
+            fi
+            (cd "$out" && sha256sum "$file" > "$file.sha256")
+            floor="$(objdump -T target/release/ad4m-executor 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+            printf '{\n  "commit": "%s",\n  "platform": "linux-x64",\n  "file": "%s",\n  "sha256": "%s",\n  "glibc": "%s",\n  "size": %s\n}\n' \
+              "$CIRCLE_SHA1" "$file" "$(cut -d' ' -f1 "$out/$file.sha256")" "${floor#GLIBC_}" \
+              "$(stat -c %s target/release/ad4m-executor)" > "$out/manifest.json"
+            ls -l "$out" && cat "$out/manifest.json"
+      - store_artifacts:
+          path: /tmp/executor-artifact
+          destination: executor
       - run:
           # clippy and rust-tests compile on other runners. These generated files are
           # embedded by that compile (include_bytes!/include!/include_dir!) and are
