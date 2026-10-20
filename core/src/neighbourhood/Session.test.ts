@@ -65,6 +65,7 @@ function fakeApi() {
         sfuCallLeave: jest.fn(),
         sfuCallSetQualityPreference: jest.fn(),
         sfuCallAnswerServerOffer: jest.fn(),
+        sfuCallRestartIce: jest.fn(),
         subscribeSfuCallRenegotiationOffer: jest.fn(),
         sfuAddIceCandidate: jest.fn(),
         sfuSendData: jest.fn(),

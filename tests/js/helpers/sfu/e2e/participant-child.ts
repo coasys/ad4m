@@ -17,6 +17,18 @@ import { installWebRtc, selectedRemoteAddresses } from "./webrtc.js";
 
 installWebRtc();
 
+// A browser's global object is an EventTarget that fires `online` when a
+// network comes up; Node's is not. Give it that much, so the SDK hears a
+// scenario's network change where it listens for one in a browser.
+if (typeof (globalThis as any).addEventListener !== "function") {
+  const target = new EventTarget();
+  Object.assign(globalThis, {
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
+    dispatchEvent: target.dispatchEvent.bind(target),
+  });
+}
+
 let client: Ad4mClient | null = null;
 let session: Session | null = null;
 let options: JoinOptions | null = null;
@@ -164,6 +176,9 @@ async function run(command: Command): Promise<unknown> {
       return session!.setQualityPreference(command.preference);
     case "send":
       return session!.sendData(command.label, command.data, command.binary);
+    case "networkChanged":
+      (globalThis as unknown as EventTarget).dispatchEvent(new Event("online"));
+      return;
     case "snapshot":
       return snapshot();
     case "close":

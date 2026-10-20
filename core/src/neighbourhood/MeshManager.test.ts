@@ -359,6 +359,7 @@ interface MeshOptions extends ChannelOptions {
     now?: () => number
     /** What `join` is handed. An empty stream unless a test says otherwise. */
     localStream?: MediaStream
+    onNetworkChange?: (callback: () => void) => () => void
 }
 
 /** Every mesh a test made, so each is left afterwards and no timer or listener outlives its test. */
@@ -382,6 +383,7 @@ async function makeMesh(bus: InMemoryBus, selfId: string, callId: string, option
         selfId,
         iceServers: options.iceServers,
         now: options.now,
+        onNetworkChange: options.onNetworkChange,
         // No timer: every test drives `tick()` itself, so a sweep never fires
         // between an act and its assertion. The interval has its own test.
         sweepMs: 0,
@@ -1482,6 +1484,37 @@ describe("recovering a pair that did not connect", () => {
         alice.mesh.tick()
         await settle()
         expect(alice.recoveries).toEqual([])
+    })
+
+    it("restarts ICE on every pair at once when the network changes, connected or not", async () => {
+        // A Wi-Fi switch: every path is gone, though ICE has noticed on none yet.
+        const networkListeners = new Set<() => void>()
+        const onNetworkChange = (cb: () => void) => {
+            networkListeners.add(cb)
+            return () => { networkListeners.delete(cb) }
+        }
+        const roster = ["did:alice", "did:bob", "did:carol"]
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, { onNetworkChange })
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        const carol = await makeMesh(bus, "did:carol", CALL_ID)
+        for (const m of [alice, bob, carol]) m.mesh.setRoster(roster)
+        await settleAll()
+        expect(alice.connections).toHaveLength(2)
+        alice.connections[0].setConnectionState("connected")
+        alice.connections[1].setConnectionState("disconnected")
+
+        for (const cb of networkListeners) cb()
+        await settle()
+
+        expect(alice.connections.map((pc) => pc.restartIceCalls)).toEqual([1, 1])
+        expect(alice.recoveries.map((r) => [r.peerId, r.rung]).sort()).toEqual([
+            ["did:bob", "ice-restart"],
+            ["did:carol", "ice-restart"],
+        ])
+        expect(alice.connections).toHaveLength(2)
+
+        await alice.mesh.leave()
+        expect(networkListeners.size).toBe(0)
     })
 
     it("rebuilds the pair, and says so, once the cheaper rungs have not worked", async () => {

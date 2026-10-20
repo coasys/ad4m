@@ -387,6 +387,135 @@ describe('ApiClient notices a socket that went silent', () => {
     })
 })
 
+describe('ApiClient on a network change', () => {
+    // A browser says the network changed with `online` on the window and
+    // `change` on `navigator.connection` (Chromium). Node has neither, so the
+    // tests install both, then take them away again.
+    let window: EventTarget
+    let connection: EventTarget
+    const navigatorBefore = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    const g = globalThis as unknown as Record<string, unknown>
+
+    beforeEach(() => {
+        window = new EventTarget()
+        connection = new EventTarget()
+        g.addEventListener = window.addEventListener.bind(window)
+        g.removeEventListener = window.removeEventListener.bind(window)
+        Object.defineProperty(globalThis, 'navigator', { value: { connection }, configurable: true })
+        // The old socket's close event never comes, as on a dead network.
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => {
+        jest.useRealTimers()
+        delete g.addEventListener
+        delete g.removeEventListener
+        if (navigatorBefore) Object.defineProperty(globalThis, 'navigator', navigatorBefore)
+    })
+
+    const online = () => window.dispatchEvent(new Event('online'))
+
+    it('redials at once on "online": a sent write fails, a sent read is resent, and onNetworkChange fires once the new socket opens', async () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 120_000 }))
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+
+        online()
+        // No ping deadline and no backoff: the next socket is dialled now.
+        expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
+        await jest.advanceTimersByTimeAsync(0)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+        expect(changed).not.toHaveBeenCalled()
+
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+        const sent = socket(1).sent.map(m => m.type)
+        expect(sent[0]).toBe('events.watch')
+        expect(sent).toContain('perspective.all')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('treats a change of navigator.connection the same way', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        connection.dispatchEvent(new Event('change'))
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('dials once for a burst of change events while the new socket connects', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        online()
+        connection.dispatchEvent(new Event('change'))
+        online()
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('skips the reconnect backoff when the change comes while waiting to redial', async () => {
+        open()
+        socket(0).open()
+        socket(0).drop()
+        jest.advanceTimersByTime(500)
+        socket(1).drop()
+        // Backing off for 1 s now; the network change cuts it short.
+        expect(TestSocket.instances).toHaveLength(2)
+        online()
+        expect(TestSocket.instances).toHaveLength(3)
+    })
+
+    it('fires onNetworkChange at once when no socket is wanted', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        online()
+        expect(TestSocket.instances).toHaveLength(0)
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops listening once unsubscribed, and after closeAll', () => {
+        const changed = jest.fn()
+        const unsubscribe = client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        unsubscribe()
+        online()
+        socket(1).open()
+        expect(changed).not.toHaveBeenCalled()
+
+        client.closeAll()
+        online()
+        connection.dispatchEvent(new Event('change'))
+        jest.advanceTimersByTime(60_000)
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('works without a global event target or navigator.connection, as in Node', () => {
+        delete g.addEventListener
+        delete g.removeEventListener
+        Object.defineProperty(globalThis, 'navigator', { value: {}, configurable: true })
+        open()
+        socket(0).open()
+        expect(socket(0).sent.map(m => m.type)).toEqual(['events.watch'])
+        client.closeAll()
+    })
+})
+
 describe('ApiClient.onReconnect', () => {
     beforeEach(() => { TestSocket.autoOpen = false })
 

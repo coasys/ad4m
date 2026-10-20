@@ -344,6 +344,9 @@ export interface MeshManagerOptions {
     /** How often the mesh looks at its own connections. `0` disables the timer;
      *  {@link MeshManager.tick} still works, which is how tests drive it. */
     sweepMs?: number
+    /** Called after a network change (see `ApiClient.onNetworkChange`): every
+     *  pair restarts ICE then, rather than waiting for each to notice. */
+    onNetworkChange?: (callback: () => void) => () => void
 }
 
 /** Public STUN, and no TURN. Two servers, because ICE queries them in parallel. */
@@ -506,6 +509,8 @@ export class MeshManager {
      * Cleared only when a renegotiation is answered.
      */
     private renegotiationRepairs: Map<string, number> = new Map()
+    private onNetworkChange: MeshManagerOptions["onNetworkChange"]
+    private unwatchNetwork: (() => void) | null = null
 
     constructor(options: MeshManagerOptions) {
         this.channel = options.channel
@@ -521,6 +526,7 @@ export class MeshManager {
             ?? ((configuration) => new RTCPeerConnection(configuration))
         this.now = options.now ?? (() => Date.now())
         this.sweepMs = options.sweepMs ?? SWEEP_INTERVAL_MS
+        this.onNetworkChange = options.onNetworkChange
     }
 
     // ── Events ──────────────────────────────────────────────────────
@@ -627,11 +633,14 @@ export class MeshManager {
         this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, warm: true })
 
         if (this.sweepMs > 0) this.sweep = setInterval(() => this.tick(), this.sweepMs)
+        this.unwatchNetwork = this.onNetworkChange?.(() => this.restartAll()) ?? null
     }
 
     async leave(): Promise<void> {
         this.closed = true
         if (this.sweep) { clearInterval(this.sweep); this.sweep = null }
+        this.unwatchNetwork?.()
+        this.unwatchNetwork = null
         this.unwatchPublish?.()
         this.unwatchPublish = null
         if (this.channelUnsubscribe) {
@@ -1290,6 +1299,30 @@ export class MeshManager {
         // Undo the increment `rebuild` is about to make again, so one repair counts once.
         slot.attempts = attempts - 1
         this.rebuild(peerId, { announce: true, rung: "rebuild" })
+    }
+
+    /**
+     * The network changed: every pair's path is likely gone, though ICE has
+     * noticed on none yet. Each negotiated pair takes the ladder's first rung
+     * now, all at once — an ICE restart is one offer per pair, and waiting
+     * for each to time out costs seconds of silence. Pairs still negotiating
+     * have nothing to restart; the sweep keeps looking after them.
+     */
+    private restartAll(): void {
+        if (this.closed) return
+        const at = this.now()
+        for (const [peerId, slot] of this.slots) {
+            if (!slot.remoteReady || typeof slot.pc.restartIce !== "function") continue
+            slot.lastAttempt = at
+            slot.attempts += 1
+            try {
+                slot.pc.restartIce()
+                this.emit("peer-recovery", peerId, { rung: "ice-restart", attempts: slot.attempts })
+            } catch (error) {
+                this.fail(`restarting ice with ${peerId}`, error)
+            }
+        }
+        this.lastRepairAt = at
     }
 
     /** Whether this pair has been given long enough, and whether it is this side's turn to act. */

@@ -58,3 +58,21 @@ describe("NeighbourhoodClient signal routing", () => {
     expect(receivedB).toEqual([]);
   });
 });
+
+describe("NeighbourhoodClient ICE restart", () => {
+  it("asks the executor to restart ICE on the caller's call connection", async () => {
+    const api = new ApiClient("http://localhost:0", undefined, FakeWebSocket as unknown as new (url: string) => WebSocket);
+    const sent: Record<string, unknown>[] = [];
+    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
+    const restarted = client.sfuCallRestartIce("neighbourhood://n", "room");
+    const socket = FakeWebSocket.last;
+    const send = socket.send.bind(socket);
+    socket.send = (data: string) => { sent.push(JSON.parse(data)); send(data); };
+
+    await expect(restarted).resolves.toBe(true);
+    expect(sent).toEqual([
+      expect.objectContaining({ type: "sfu.callRestartIce", params: { neighbourhoodUrl: "neighbourhood://n", roomName: "room" } }),
+    ]);
+    api.closeAll();
+  });
+});

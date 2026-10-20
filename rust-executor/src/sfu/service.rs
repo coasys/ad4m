@@ -1262,6 +1262,35 @@ impl SfuService {
         Ok(true)
     }
 
+    /// The client asks for an ICE restart of its own connection, e.g. after
+    /// its network changed. The SFU offers new ICE credentials over the
+    /// server-offer path (`sfu-call-renegotiation-offer`); the client answers
+    /// with `call_answer_server_offer`. The same connection, DTLS session and
+    /// tracks carry on.
+    pub async fn call_restart_ice(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+    ) -> Result<bool, String> {
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let rooms = self.rooms.read().await;
+        let room = rooms
+            .get_room(&room_id)
+            .ok_or_else(|| RoomError::NotFound.to_string())?;
+        let pid = room
+            .participant_id_for_did(agent_did)
+            .ok_or_else(|| "Agent not in room".to_string())?;
+        self.server
+            .command_tx
+            .send(SfuCommand::RestartIce {
+                participant_id: pid,
+            })
+            .await
+            .map_err(|e| format!("Failed to send RestartIce command: {}", e))?;
+        Ok(true)
+    }
+
     /// Trickle ICE: add a remote ICE candidate to a participant's
     /// WebRTC connection.  The candidate arrives as the raw SDP
     /// candidate-attribute string (the `candidate:` line extracted from

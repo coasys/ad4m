@@ -150,6 +150,13 @@ export class ApiClient {
     private _watchSent: Promise<void> = Promise.resolve()
     private _watchRetries = 0
     private _watchRetryTimer: ReturnType<typeof setTimeout> | null = null
+    private _networkCallbacks = new Set<() => void>()
+    /** Removes the network-change listeners; null while not listening. */
+    private _unlistenNetwork: (() => void) | null = null
+    /** A network change waits for its socket to open, then tells `onNetworkChange`. */
+    private _networkChanged = false
+    /** The socket dialled for the last network change. */
+    private _networkDial: WebSocket | null = null
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -162,6 +169,7 @@ export class ApiClient {
     private _ensureWs(): void {
         if (this._ws) return
         if (this._authFailed !== null) throw new RpcError(401, this._authFailed)
+        this._listenForNetworkChanges()
         const WsImpl = this._webSocketImpl ?? globalThis.WebSocket
         const ws = new WsImpl(this._getWsUrl())
         this._ws = ws
@@ -247,6 +255,67 @@ export class ApiClient {
             }
         }
         this._hasConnectedOnce = true
+        if (this._networkChanged) {
+            this._networkChanged = false
+            this._notifyNetworkChange()
+        }
+    }
+
+    /**
+     * Hear of network changes where the platform says so: `online` on the
+     * global object (browsers, Deno) and `change` on `navigator.connection`
+     * (Chromium). Elsewhere, e.g. Node, nothing is heard and the ping
+     * deadline notices a dead socket on its own.
+     */
+    private _listenForNetworkChanges(): void {
+        if (this._unlistenNetwork) return
+        const handler = () => this._onNetworkChange()
+        const removers: (() => void)[] = []
+        const target = globalThis as unknown as Partial<EventTarget>
+        if (typeof target.addEventListener === 'function') {
+            target.addEventListener('online', handler)
+            removers.push(() => target.removeEventListener?.('online', handler))
+        }
+        const connection = (globalThis as { navigator?: { connection?: Partial<EventTarget> } }).navigator?.connection
+        if (typeof connection?.addEventListener === 'function') {
+            connection.addEventListener('change', handler)
+            removers.push(() => connection.removeEventListener?.('change', handler))
+        }
+        this._unlistenNetwork = () => { for (const remove of removers) remove() }
+    }
+
+    /**
+     * The network changed: the open socket most likely runs over a path that
+     * is gone, and nothing would say so before the ping deadline. Drop it as
+     * a silent socket is dropped and dial the next one now, without backoff.
+     * `onNetworkChange` callbacks fire once that socket opens.
+     */
+    private _onNetworkChange(): void {
+        if (this._authFailed !== null) return
+        const ws = this._ws
+        // A socket dialled for an earlier change is on the new network already.
+        if (ws && ws === this._networkDial && ws.readyState === 0 /* CONNECTING */) return
+        if (ws) {
+            console.info('Network changed; reconnecting the WebSocket')
+            this._onClose(ws)
+            ws.close()
+        }
+        if (this._wsReconnectTimer) {
+            clearTimeout(this._wsReconnectTimer)
+            this._wsReconnectTimer = null
+        }
+        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        if (this._handlers.size === 0 && this._pendingCalls.size === 0) {
+            this._notifyNetworkChange()
+            return
+        }
+        this._networkChanged = true
+        this._ensureWs()
+        this._networkDial = this._ws
+    }
+
+    private _notifyNetworkChange(): void {
+        for (const cb of [...this._networkCallbacks]) callSafely(cb, 'Error in network-change callback:')
     }
 
     /** `reason` is set when the executor asked to try again later; calls that fail carry it. */
@@ -520,6 +589,16 @@ export class ApiClient {
         return () => { this._reconnectCallbacks.delete(callback) }
     }
 
+    /** Register a callback that fires after the network changed (`online`,
+     *  or a `navigator.connection` change), once the socket dialled for the
+     *  new network is open and its event watch sent. Calls made from it go
+     *  out on that socket. Returns an unsubscribe function. */
+    onNetworkChange(callback: () => void): () => void {
+        this._networkCallbacks.add(callback)
+        this._listenForNetworkChanges()
+        return () => { this._networkCallbacks.delete(callback) }
+    }
+
     /** Register a callback that fires once when the executor refuses this
      *  client's token: a 401 reply, or a socket closed with code 1008. Every
      *  call then fails with a 401 `RpcError` and the client does not reconnect;
@@ -538,6 +617,11 @@ export class ApiClient {
         this._handlers.clear()
         this._reconnectCallbacks.clear()
         this._authFailedCallbacks.clear()
+        this._networkCallbacks.clear()
+        this._unlistenNetwork?.()
+        this._unlistenNetwork = null
+        this._networkChanged = false
+        this._networkDial = null
         // A reused client must not fire onReconnect on its next first open.
         this._hasConnectedOnce = false
     }

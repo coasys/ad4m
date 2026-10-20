@@ -55,6 +55,16 @@ export interface SfuNeighbourhoodApi {
         targetDid: string,
         callback: (event: SfuCallRenegotiationOffer) => void,
     ): () => void
+    /** Ask the SFU to restart ICE on this agent's connection; the offer
+     *  arrives through `subscribeSfuCallRenegotiationOffer`. Without it, a
+     *  disconnected call waits `RESTART_TIMEOUT_MS`, then is rebuilt. */
+    sfuCallRestartIce?(
+        neighbourhoodUrl: string,
+        roomName: string,
+    ): Promise<boolean>
+    /** Called after a network change, once calls reach the executor again.
+     *  Without it, only ICE noticing the change starts a restart. */
+    onNetworkChange?(callback: () => void): () => void
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
@@ -184,8 +194,8 @@ export class SfuManager {
     private static readonly MAX_RECONNECTS = 3
     /** How long one rebuild keeps retrying a join the executor cannot take yet. */
     private static readonly REJOIN_WINDOW_MS = 120_000
-    /** How long ICE may stay disconnected before a rebuild: the executor's `ICE_DISCONNECT_GRACE`. */
-    private static readonly DISCONNECT_GRACE_MS = 10_000
+    /** How long an ICE restart has to bring the connection back before a rebuild. */
+    private static readonly RESTART_TIMEOUT_MS = 5_000
     /** A rebuild is running: a second failure signal joins it rather than starting another. */
     private reconnecting = false
     /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
@@ -205,7 +215,10 @@ export class SfuManager {
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
     private dataChannelUnsubscribe: (() => void) | null = null
-    private disconnectedTimer: ReturnType<typeof setTimeout> | null = null
+    /** An ICE restart is in flight until this fires: ICE going disconnected
+     *  again joins it, a network change replaces it. */
+    private restartTimer: ReturnType<typeof setTimeout> | null = null
+    private networkUnsubscribe: (() => void) | null = null
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -269,6 +282,7 @@ export class SfuManager {
             `SFU: connection failed, reconnecting (${this.reconnectAttempts}/${SfuManager.MAX_RECONNECTS})`,
         )
         this.reconnecting = true
+        this.endRestart()
         try {
             const deadline = Date.now() + SfuManager.REJOIN_WINDOW_MS
             for (let delay = 1000; ; delay = Math.min(delay * 2, 10_000)) {
@@ -302,6 +316,37 @@ export class SfuManager {
             }
         } finally {
             this.reconnecting = false
+        }
+    }
+
+    /**
+     * Repair the connection in place: the SFU offers new ICE credentials
+     * (`sfuCallRestartIce`), the offer is answered like any server offer,
+     * and the browser gathers candidates on whatever network it has now.
+     * DTLS, tracks and the room slot stay. If the connection is not back
+     * within `RESTART_TIMEOUT_MS`, the call is rebuilt. One restart at a
+     * time: a call while one is in flight does nothing.
+     */
+    private restartIce(pc: RTCPeerConnection): void {
+        if (this.restartTimer || this.reconnecting || this.state.peerConnection !== pc) return
+        console.info("SFU: restarting ICE")
+        this.restartTimer = setTimeout(() => {
+            this.restartTimer = null
+            if (this.state.peerConnection !== pc) return
+            if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
+            void this.reconnect()
+        }, SfuManager.RESTART_TIMEOUT_MS)
+        // A refusal (an executor without the method, or one that lost this
+        // session) leaves the decision to the timeout: a blip may still heal.
+        this.neighbourhood.sfuCallRestartIce?.(this.neighbourhoodUrl, this.roomId).catch((err) => {
+            console.warn("SFU: ICE restart refused:", err)
+        })
+    }
+
+    private endRestart(): void {
+        if (this.restartTimer) {
+            clearTimeout(this.restartTimer)
+            this.restartTimer = null
         }
     }
 
@@ -348,48 +393,38 @@ export class SfuManager {
         const pc = new RTCPeerConnection({ iceServers: this.iceServers })
         this.state.peerConnection = pc
 
-        // ICE state monitoring for reconnecting.
-        // "disconnected" is often transient (network blip, route change):
-        // the connection gets the same grace the server gives it before
-        // dropping the peer, and a rebuild only follows once the server
-        // would have dropped it anyway.  "failed" reconnects at once.
+        // ICE state monitoring for recovery. "disconnected" (a route change,
+        // a network switch, a blip) restarts ICE on this connection at once;
+        // "failed" rebuilds the call at once.
         pc.oniceconnectionstatechange = () => {
             if (this.state.peerConnection !== pc) return // superseded
             if (pc.iceConnectionState === "failed") {
-                if (this.disconnectedTimer) {
-                    clearTimeout(this.disconnectedTimer)
-                    this.disconnectedTimer = null
-                }
-                this.reconnect()
+                this.endRestart()
+                void this.reconnect()
             } else if (pc.iceConnectionState === "disconnected") {
-                if (!this.disconnectedTimer) {
-                    this.disconnectedTimer = setTimeout(() => {
-                        this.disconnectedTimer = null
-                        // Only reconnect if this pc is still the active one
-                        // and still disconnected.
-                        if (
-                            this.state.peerConnection === pc &&
-                            pc.iceConnectionState === "disconnected"
-                        ) {
-                            this.reconnect()
-                        }
-                    }, SfuManager.DISCONNECT_GRACE_MS)
-                }
-            } else {
-                // Any other state (connected, completed, checking) cancels
-                // the pending disconnected timer; a working path ends a run
-                // of reconnects.
-                if (
-                    pc.iceConnectionState === "connected" ||
-                    pc.iceConnectionState === "completed"
-                ) {
-                    this.reconnectAttempts = 0
-                }
-                if (this.disconnectedTimer) {
-                    clearTimeout(this.disconnectedTimer)
-                    this.disconnectedTimer = null
-                }
+                this.restartIce(pc)
+            } else if (
+                pc.iceConnectionState === "connected" ||
+                pc.iceConnectionState === "completed"
+            ) {
+                // A working path ends a restart and a run of reconnects.
+                this.reconnectAttempts = 0
+                this.endRestart()
             }
+        }
+
+        // A network change: the path ICE uses is likely gone, though ICE may
+        // not have noticed yet. Restart it now, on the socket the change
+        // reconnected. A restart already in flight went out over the old
+        // network and may never have arrived, so this one replaces it, with
+        // its own timeout. Listened to once per call, not per rebuild.
+        if (!this.networkUnsubscribe && this.neighbourhood.onNetworkChange) {
+            this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => {
+                const current = this.state.peerConnection
+                if (!current || this.reconnecting) return
+                this.endRestart()
+                this.restartIce(current)
+            })
         }
 
         // Both kinds of local media, send-only, declared now whether or not a
@@ -645,10 +680,9 @@ export class SfuManager {
     async leave(): Promise<void> {
         this.generation++
         this.releaseServerEvents()
-        if (this.disconnectedTimer) {
-            clearTimeout(this.disconnectedTimer)
-            this.disconnectedTimer = null
-        }
+        this.endRestart()
+        this.networkUnsubscribe?.()
+        this.networkUnsubscribe = null
         this.senders.clear()
         this.replacedTracks.clear()
         this.qualityPreference = null
