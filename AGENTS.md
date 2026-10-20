@@ -21,6 +21,7 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `tests/js/` | Integration test suites run against a built `ad4m-executor` binary | TS |
 | `test-runner/` | Language test harness | TS |
 | `docs-src/` | Docs site sources + language interface specs (`language-interface-spec.md`, `host-contract.md`) | MD |
+| `mental-models/` | The mental models of this code base: a tree of short pages, one concept each, from ADAM down to links into the code. **Start at `mental-models/README.md`.** | MD |
 | `planning/` | Dated design + refactoring specs. Current: `rust-executor-refactoring-spec-2026-09-04.md` | MD |
 
 There is no `executor/` package any more: the JS executor was folded into
@@ -48,6 +49,21 @@ it in older docs.
   than leaving them beside current ones.
 - Per-directory agent docs: canonical file is `AGENTS.md`. Sibling `CLAUDE.md`
   contains only `@AGENTS.md`.
+- **Keep `mental-models/` true in the same PR.** A change to how the system works
+  (a component, a flow, who decides what, where a rule lives, what a term means)
+  updates the page that owns that concept in the same PR. A change that only
+  touches internals no page describes updates nothing. Follow
+  `mental-models/CONVENTIONS.md`, and keep the update small:
+  - Change only the sentences the code makes untrue, with the fewest words, at
+    the level the change lives. A parent page changes only when its own model
+    changes; detail goes into the leaf page and its diagram.
+  - A new concept gets its own page under the right parent, plus one line in the
+    parent's Parts list. A removed concept loses its page and that line.
+  - State the code as it is after the PR: no plans, open questions, defects,
+    PR numbers or history. Relative links to code, no line numbers.
+  - Use the terms in `mental-models/GLOSSARY.md`; add a term there when a page
+    needs a new one.
+  - Before pushing, check that every relative link in the changed pages resolves.
 - **RPC contracts are generated.** Every executor method registers
   `map.method::<Params, Result>(name, handler)` (`.read()` for idempotent reads,
   `.long()` for calls that run for minutes); dispatch rejects params outside the
