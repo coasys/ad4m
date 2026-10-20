@@ -18,9 +18,9 @@
 //!   reads, only its creator may write; listings show only the caller's
 //!   neighbourhoods.
 //!
-//! The admin credential passes both, except for the call config: it is
+//! The operator passes both, except for the call config: it is
 //! signed as the caller, and a non-creator's config would be ignored.
-//! `ensureMembership` requires the admin credential.
+//! `ensureMembership` requires the operator.
 //!
 //! The SFU service is *always* available — there's no feature gate.
 //! When `get_sfu_service()` returns None it means the service hasn't
@@ -32,10 +32,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use ts_rs::TS;
 
-use crate::agent::capabilities::{
-    check_capability, NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY,
-};
-use crate::agent::AgentContext;
+use crate::agent::capabilities::{NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY};
 use crate::db::Ad4mDb;
 use crate::sfu::{get_sfu_service, CallSessionInfo, SfuConfig, SfuRoomInfo};
 use crate::types::RequestContext;
@@ -65,25 +62,16 @@ fn parse<P: DeserializeOwned>(params: Value) -> Result<P, WsRpcError> {
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))
 }
 
-/// The DID the caller acts as: a user token's own DID; a token that names
-/// no user acts as the main agent, as everywhere else
-/// (`AgentContext::from_request`) — the admin credential and, on a
-/// single-user node, the app tokens ad4m-connect hands out. A user token
-/// whose DID could not be resolved is refused, never promoted to the main
-/// agent. Handlers check a capability first, so an anonymous caller never
-/// reaches this.
+/// The DID the caller acts as, from its session: a user's own DID; the main agent's for the
+/// operator and for a grant on the main agent (the app tokens ad4m-connect hands out on a
+/// single-user executor). A session whose DID does not resolve is refused, never promoted to
+/// the main agent. Handlers check a capability first, so an anonymous caller never reaches
+/// this.
 fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
-    if ctx.user_email.is_some() {
-        return ctx
-            .user_did
-            .clone()
-            .ok_or_else(|| WsRpcError::unauthorized("Caller's user DID not resolved"));
-    }
-    if let Some(did) = ctx.user_did.clone() {
-        return Ok(did);
-    }
-    crate::agent::did_for_context(&AgentContext::main_agent())
-        .map_err(|e| WsRpcError::unauthorized(format!("Caller DID not resolved: {}", e)))
+    ctx.session
+        .acts_as_did()
+        .map(str::to_string)
+        .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved"))
 }
 
 /// This node's members of `neighbourhood_url`, first member first.
@@ -93,10 +81,10 @@ fn neighbourhood_members(neighbourhood_url: &str) -> Vec<String> {
 }
 
 /// The caller's DID, once it is a member of `neighbourhood_url` on this
-/// node. The admin credential passes.
+/// node. The operator passes.
 fn member_did(ctx: &RequestContext, neighbourhood_url: &str) -> Result<String, WsRpcError> {
     let did = caller_did(ctx)?;
-    if ctx.is_admin_credential || neighbourhood_members(neighbourhood_url).contains(&did) {
+    if ctx.is_operator() || neighbourhood_members(neighbourhood_url).contains(&did) {
         Ok(did)
     } else {
         Err(WsRpcError::forbidden(
@@ -105,12 +93,12 @@ fn member_did(ctx: &RequestContext, neighbourhood_url: &str) -> Result<String, W
     }
 }
 
-/// Room and config writes: the admin credential, or the neighbourhood's
+/// Room and config writes: the operator, or the neighbourhood's
 /// owner on this node — its first member, which is its creator here or,
 /// for one created elsewhere, the first local user to join it. Rooms and
 /// config are this node's state, so this node's owner governs them.
 fn require_owner(ctx: &RequestContext, neighbourhood_url: &str) -> Result<(), WsRpcError> {
-    if ctx.is_admin_credential {
+    if ctx.is_operator() {
         return Ok(());
     }
     let did = caller_did(ctx)?;
@@ -122,14 +110,14 @@ fn require_owner(ctx: &RequestContext, neighbourhood_url: &str) -> Result<(), Ws
     }
 }
 
-/// Keeps the entries of neighbourhoods the caller belongs to. The admin
-/// credential sees everything. Membership is looked up once per neighbourhood.
+/// Keeps the entries of neighbourhoods the caller belongs to. The operator
+/// sees everything. Membership is looked up once per neighbourhood.
 fn visible_to<T>(
     ctx: &RequestContext,
     items: Vec<T>,
     neighbourhood_of: impl Fn(&T) -> Option<String>,
 ) -> Result<Vec<T>, WsRpcError> {
-    if ctx.is_admin_credential {
+    if ctx.is_operator() {
         return Ok(items);
     }
     let did = caller_did(ctx)?;
@@ -148,7 +136,7 @@ fn visible_to<T>(
 // ── Room management ────────────────────────────────────────────────────────
 
 async fn start_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuRoomParams = parse(params)?;
     require_owner(&ctx, &p.neighbourhood_url)?;
@@ -160,7 +148,7 @@ async fn start_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 async fn stop_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuRoomParams = parse(params)?;
     require_owner(&ctx, &p.neighbourhood_url)?;
@@ -172,7 +160,7 @@ async fn stop_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn list_rooms(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let rooms = visible_to(&ctx, service()?.list_rooms().await, |room| {
         Some(room.neighbourhood_url.clone())
@@ -183,7 +171,7 @@ async fn list_rooms(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 // ── Call control (per-participant) ──────────────────────────────────────────
 
 async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuCallJoinParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
@@ -201,7 +189,7 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn call_leave(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuRoomParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
@@ -216,7 +204,7 @@ async fn call_set_quality_preference(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuQualityPreferenceParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
@@ -235,7 +223,7 @@ async fn call_set_quality_preference(
 // ── Config (per-neighbourhood) ──────────────────────────────────────────────
 
 async fn get_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuNeighbourhoodParams = parse(params)?;
     member_did(&ctx, &p.neighbourhood_url)?;
@@ -244,7 +232,7 @@ async fn get_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 }
 
 async fn set_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuSetConfigParams = parse(params)?;
     // The config is a link every member's node reads, and they read only
@@ -255,7 +243,7 @@ async fn set_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
             "Only the neighbourhood's creator can change its call config".to_string(),
         ));
     }
-    let context = AgentContext::from_request(&ctx);
+    let context = ctx.acts_as();
     service()?
         .set_config(&p.neighbourhood_url, p.config, &context)
         .await
@@ -267,7 +255,7 @@ async fn sfu_peer_for_neighbourhood(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuNeighbourhoodParams = parse(params)?;
     member_did(&ctx, &p.neighbourhood_url)?;
@@ -281,7 +269,7 @@ async fn sfu_peers_for_neighbourhood(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuNeighbourhoodParams = parse(params)?;
     member_did(&ctx, &p.neighbourhood_url)?;
@@ -302,7 +290,7 @@ async fn call_answer_server_offer(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuAnswerServerOfferParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
@@ -326,7 +314,7 @@ async fn call_answer_server_offer(
 // Rtc instance via `Rtc::add_remote_candidate`.
 
 async fn add_ice_candidate(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuAddIceCandidateParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
@@ -346,7 +334,7 @@ async fn add_ice_candidate(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 // on the `sfu-data` event.
 
 async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuSendDataParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
@@ -379,7 +367,7 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 /// (`PerspectiveInstance::others`); hosted are the main agent and the managed
 /// users. A neighbourhood with no known member answers `false`.
 async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuPerspectiveParams = parse(params)?;
     let perspective = crate::perspectives::get_perspective(&p.uuid).ok_or_else(|| {
@@ -403,7 +391,7 @@ async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .into_iter()
         .map(|user| user.did)
         .collect();
-    hosted.extend(crate::agent::did_for_context(&AgentContext::main_agent()).ok());
+    hosted.extend(crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).ok());
     Ok(Value::Bool(all_hosted(&members, &hosted)))
 }
 
@@ -415,7 +403,7 @@ fn all_hosted(members: &[String], hosted: &[String]) -> bool {
 /// Clients use this to determine whether this executor can serve as an
 /// SFU relay for remote participants.
 async fn sfu_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let svc = service()?;
     let reach = svc.reachability();
@@ -423,6 +411,7 @@ async fn sfu_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         reachability: reach.label().to_string(),
         is_public: reach.is_public(),
         bind_address: svc.local_addr().to_string(),
+        advertised_address: svc.advertised_addr().map(|a| a.to_string()),
         detail: reach.to_string(),
     })?)
 }
@@ -431,7 +420,7 @@ async fn sfu_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 /// established right now.  The cascade scenarios poll this to assert
 /// the gossip-driven offer/answer round-trip lit up.
 async fn cascade_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let svc = service()?;
     let room_neighbourhoods = svc.room_neighbourhoods().await;
@@ -465,12 +454,12 @@ async fn cascade_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 // separate whitelist, no backdoor.
 
 async fn ensure_membership(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // Admin-only: arbitrary DID registration for test harnesses and bridge
+    // Operator-only: arbitrary DID registration for test harnesses and bridge
     // deployments.  Regular users get membership through the neighbourhood
     // join flow, not this RPC.
-    if !ctx.is_admin_credential {
+    if !ctx.is_operator() {
         return Err(WsRpcError::forbidden(
-            "Admin credential required for ensureMembership".to_string(),
+            "Only the executor's operator can call ensureMembership".to_string(),
         ));
     }
     let p: SfuEnsureMembershipParams = parse(params)?;
@@ -486,7 +475,7 @@ async fn quality_preferences(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+    ctx.require(&NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let svc = service()?;
     let participant_neighbourhoods = svc.participant_neighbourhoods().await;
@@ -664,6 +653,11 @@ pub struct SfuStatus {
     pub is_public: bool,
     /// The SFU server's bound UDP address (`ip:port`).
     pub bind_address: String,
+    /// The public address (`ip:port`) offered next to the bind address
+    /// behind NAT, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub advertised_address: Option<String>,
     /// Human-readable reachability detail.
     pub detail: String,
 }
@@ -772,6 +766,7 @@ mod tests {
             reachability: "nat".into(),
             is_public: false,
             bind_address: "10.0.0.1:9000".into(),
+            advertised_address: None,
             detail: "nat".into(),
         })
         .unwrap();
@@ -779,6 +774,15 @@ mod tests {
             status,
             json!({ "reachability": "nat", "isPublic": false, "bindAddress": "10.0.0.1:9000", "detail": "nat" })
         );
+        let behind_nat = serde_json::to_value(SfuStatus {
+            reachability: "public".into(),
+            is_public: true,
+            bind_address: "10.0.0.1:40000".into(),
+            advertised_address: Some("198.51.100.7:40000".into()),
+            detail: "public".into(),
+        })
+        .unwrap();
+        assert_eq!(behind_nat["advertisedAddress"], "198.51.100.7:40000");
         let cascade = serde_json::to_value(SfuCascadeStatus {
             established_count: 1,
             pipes: vec![SfuCascadePipe {
@@ -823,27 +827,20 @@ mod tests {
         );
     }
 
-    /// A user token stays that user: when its DID cannot be resolved the
-    /// call is refused rather than run as the main agent.
+    /// A user's session stays that user, and a session that acts as no agent is refused
+    /// rather than run as the main agent.
     #[test]
     fn a_user_token_never_acts_as_the_main_agent() {
-        let user = |did: Option<&str>| RequestContext {
-            capabilities: Ok(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]),
-            auto_permit_cap_requests: false,
-            auth_token: "jwt".into(),
-            is_admin_credential: false,
-            user_email: Some("alice@example.com".into()),
-            user_did: did.map(String::from),
-            cancel_token: None,
-            connection_id: None,
-        };
-        assert_eq!(caller_did(&user(None)).unwrap_err().code, 401);
+        let all = || vec![crate::agent::capabilities::ALL_CAPABILITY.clone()];
+        let anonymous = RequestContext::for_test(crate::agent::session::Principal::Anonymous);
+        assert_eq!(caller_did(&anonymous).unwrap_err().code, 401);
         assert_eq!(
-            member_did(&user(None), "neighbourhood://n")
+            member_did(&anonymous, "neighbourhood://n")
                 .unwrap_err()
                 .code,
             401
         );
-        assert_eq!(caller_did(&user(Some("did:alice"))).unwrap(), "did:alice");
+        let alice = RequestContext::user_for_test("did:alice", all());
+        assert_eq!(caller_did(&alice).unwrap(), "did:alice");
     }
 }

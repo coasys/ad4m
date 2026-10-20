@@ -1188,10 +1188,13 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // A pass with a caller bills the user it acts as; the caller's token named that user. An
+    // executor-owned pass (no caller token) bills no one.
+    let bill_to = auth_token.and(context.managed_did().map(str::to_string));
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
-            auth_token,
+            bill_to,
         ),
     );
 

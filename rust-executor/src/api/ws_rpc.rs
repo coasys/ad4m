@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
+use crate::agent::session::AuthError;
 use crate::types::RequestContext;
 
 use super::auth::AppState;
@@ -58,67 +59,93 @@ pub async fn ws_rpc(
     reach: ListenerReach,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
-
-    // Build RequestContext once for the lifetime of this connection.
-    let is_admin = is_admin_credential_token_on(&token, &state.admin_credential, reach);
-    let (capabilities, user_email, user_did) = super::auth::resolve_user_session(
-        &token,
-        capabilities_on(token.clone(), state.admin_credential.clone(), reach),
-    );
-
-    // Per-connection base context.  The dispatcher clones this and
-    // injects a fresh `cancel_token` for each in-flight request.
-    let ctx = Arc::new(RequestContext {
-        capabilities,
-        auto_permit_cap_requests: state.auto_permit_cap_requests,
-        auth_token: token.clone(),
-        is_admin_credential: is_admin,
-        user_email: user_email.clone(),
-        user_did,
-        cancel_token: None,
-        connection_id: Some(uuid::Uuid::new_v4().to_string()),
-    });
-
-    let token_check = TokenCheck::new(&token, is_admin);
-    ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token, token_check))
+    match connection_context(&token, &state.admin_credential, reach) {
+        Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx)),
+        Err(e) => {
+            let code = e.close_code();
+            ws.on_upgrade(move |socket| close_refused(socket, code, e.to_string()))
+        }
+    }
 }
 
-/// Whether a connection receives the event stream: any authenticated session, meaning the
-/// admin credential or a token whose capabilities loaded. A socket with no valid token (for
-/// example no token on a node that has an admin credential) gets none. The stream's own
-/// filters then decide which events reach the session.
+/// The context a connection keeps for its lifetime. Its session's `check` runs again on
+/// every request and event. The dispatcher clones the context and injects a fresh
+/// `cancel_token` per request.
+///
+/// Fails for a token that opens no session (invalid, expired, revoked, or a user whose DID
+/// does not load): the socket then closes at once with [`CLOSE_TOKEN_ENDED`].
+fn connection_context(
+    token: &str,
+    admin_credential: &Option<String>,
+    reach: ListenerReach,
+) -> Result<Arc<RequestContext>, AuthError> {
+    let mut ctx = RequestContext::open(token, admin_credential, reach)?;
+    // Live queries opened on this connection belong to it and end when it closes.
+    ctx.connection_id = Some(uuid::Uuid::new_v4().to_string());
+    Ok(Arc::new(ctx))
+}
+
+/// Whether a connection receives the event stream: the operator or a grant. An anonymous
+/// socket (no token, for example on an executor that has an admin credential) gets none.
+/// The stream's own filters then decide which events reach the session.
 pub(crate) fn may_receive_events(ctx: &RequestContext) -> bool {
-    ctx.capabilities.is_ok() && (ctx.is_admin_credential || !ctx.auth_token.is_empty())
+    ctx.session.is_authenticated()
 }
 
-/// Close code for a connection whose token stopped working (RFC 6455 "policy violation").
-const CLOSE_TOKEN_ENDED: u16 = 1008;
+/// Close code for a connection whose token opens no session or stopped working (RFC 6455
+/// "policy violation"). Clients read it as "log in again".
+pub(crate) const CLOSE_TOKEN_ENDED: u16 = 1008;
+
+/// Close code for a connection refused because the executor's wallet is locked (RFC 6455 "try
+/// again later"). Clients keep their token and reconnect.
+pub(crate) const CLOSE_TRY_AGAIN_LATER: u16 = 1013;
+
+/// Closes a socket whose token opened no session, before anything else runs on it, with
+/// `code` ([`CLOSE_TOKEN_ENDED`] or [`CLOSE_TRY_AGAIN_LATER`]). `reason` says why: expired,
+/// unauthorized, the identity did not load, or the wallet is locked.
+///
+/// The upgrade succeeds first: a browser cannot read the HTTP status of a refused upgrade,
+/// but it reads the close code and reason.
+pub(crate) async fn close_refused(mut socket: WebSocket, code: u16, reason: String) {
+    let close = CloseFrame {
+        code,
+        reason: close_reason(&reason).into(),
+    };
+    let _ = socket.send(Message::Close(Some(close))).await;
+}
+
+/// `reason`, cut to the 123 bytes a close frame carries.
+fn close_reason(reason: &str) -> String {
+    const MAX: usize = 123;
+    if reason.len() <= MAX {
+        return reason.to_string();
+    }
+    let end = (0..=MAX)
+        .rev()
+        .find(|&i| reason.is_char_boundary(i))
+        .unwrap_or(0);
+    reason[..end].to_string()
+}
 
 // ── Connection handler ──────────────────────────────────────────────────────
 
-async fn handle_ws(
-    socket: WebSocket,
-    handler_map: Arc<HandlerMap>,
-    ctx: Arc<RequestContext>,
-    token: String,
-    token_check: TokenCheck,
-) {
+async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<RequestContext>) {
     // Track last_seen at connect time (also updated on each RPC call below)
-    track_last_seen_from_token(token.clone()).await;
+    if let Some(did) = ctx.user_did() {
+        track_last_seen(did).await;
+    }
 
     let (mut ws_sink, ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // A socket without a valid token gets no events: a stream that never yields.
+    // A socket without a token gets no events: a stream that never yields.
     let events: EventStream = if may_receive_events(&ctx) {
         // Capability requests, app changes and notification install requests go
         // only to sessions that can approve apps.
-        let can_approve_apps =
-            check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
+        let can_approve_apps = ctx.session.may(&AGENT_PERMIT_CAPABILITY);
         super::events_ws::build_event_stream(
-            token_check.clone(),
-            ctx.user_email.clone(),
-            ctx.is_admin_credential,
+            ctx.session.clone(),
+            ctx.is_operator(),
             can_approve_apps,
             super::events_ws::sfu_events_allowed(&ctx),
             ctx.connection_id.clone(),
@@ -127,7 +154,7 @@ async fn handle_ws(
     } else {
         Box::pin(futures::stream::pending())
     };
-    let conn = Connection::new(handler_map, ctx, token, token_check, tx);
+    let conn = Connection::new(handler_map, ctx, tx);
 
     // ── Writer task ─────────────────────────────────────────────────────
     let writer_session_over = conn.session_over.clone();
@@ -187,9 +214,8 @@ type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>
 /// Per-connection state: what the reader needs to answer a message.
 pub(crate) struct Connection {
     handler_map: Arc<HandlerMap>,
+    /// Carries the session that every request checks again.
     ctx: Arc<RequestContext>,
-    token: String,
-    token_check: TokenCheck,
     /// Fires when the token stops working. The connection then closes, so the client
     /// authenticates again instead of waiting on a socket that answers nothing.
     session_over: CancellationToken,
@@ -205,15 +231,11 @@ impl Connection {
     pub(crate) fn new(
         handler_map: Arc<HandlerMap>,
         ctx: Arc<RequestContext>,
-        token: String,
-        token_check: TokenCheck,
         tx: mpsc::UnboundedSender<String>,
     ) -> Self {
         Self {
             handler_map,
             ctx,
-            token,
-            token_check,
             session_over: CancellationToken::new(),
             tx,
             inflight: Default::default(),
@@ -322,17 +344,15 @@ impl Connection {
 
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
-        let token = self.token.clone();
         let inflight = self.inflight.clone();
-        let token_check = self.token_check.clone();
         let session_over = self.session_over.clone();
         let tx = tx.clone();
         let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
         while calls.try_join_next().is_some() {}
         calls.spawn(async move {
-            // Check the token again on every request: expiry and revokeToken() take
+            // Check the session again on every request: expiry and revokeToken() take
             // effect at once for open connections, and end the connection.
-            if let Err(e) = token_check.check() {
+            if let Err(e) = base_ctx.session.check() {
                 // Remove the inflight entry BEFORE sending the terminal
                 // reply — same ordering as the normal-completion path
                 // below, and for the same reason: a `request.cancel`
@@ -342,15 +362,18 @@ impl Connection {
                 let mut guard = inflight.lock().await;
                 guard.remove(&id);
                 drop(guard);
-                let _ =
-                    tx.send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
+                let _ = tx.send(
+                    json!({"id": id, "error": {"code": 401, "message": e.to_string()}}).to_string(),
+                );
                 session_over.cancel();
                 return;
             }
             // Refresh last_seen on every RPC dispatch so long-lived
             // connections don't appear stale. Internally throttled to one
             // DB write per 5 minutes per user.
-            track_last_seen_from_token(token.clone()).await;
+            if let Some(did) = base_ctx.user_did() {
+                track_last_seen(did).await;
+            }
 
             // Build a per-request context that carries the cancel token,
             // so handlers can clone it into long-running operations.
@@ -442,59 +465,150 @@ where
 }
 
 #[cfg(test)]
-mod event_gate_tests {
+mod connection_context_tests {
+    //! The context a connection keeps comes from its session. How each kind of token
+    //! resolves is pinned in `session::resolution_tests`.
     use super::*;
+    use crate::test_utils::{setup_agent, setup_wallet};
 
-    fn ctx(token: &str, capabilities: Result<Vec<Capability>, String>) -> RequestContext {
-        RequestContext {
-            capabilities,
-            auto_permit_cap_requests: false,
-            auth_token: token.to_string(),
-            is_admin_credential: false,
-            user_email: None,
-            user_did: None,
-            cancel_token: None,
-            connection_id: None,
+    const ADMIN: &str = "the-admin-credential";
+
+    fn jwt(capabilities: Option<Vec<Capability>>) -> String {
+        token::generate_jwt(
+            "an app".to_string(),
+            3600,
+            AuthInfo {
+                capabilities,
+                ..AuthInfo::default()
+            },
+        )
+        .unwrap()
+    }
+
+    // These tokens used to get a connection whose every capability check failed.
+    #[test]
+    fn a_token_that_opens_no_session_gets_no_connection() {
+        setup_wallet();
+        setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let revoked = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
+        let request_id = format!("context-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_id.clone(), app, revoked.clone()).unwrap();
+        apps_map::revoke_app(&request_id).unwrap();
+
+        let refused = [
+            crate::test_utils::keyless_user_token("context.nokey@example.org"),
+            crate::test_utils::expired_user_token("context.expired@example.org"),
+            revoked,
+            "not-a-jwt".to_string(),
+        ];
+        for token in &refused {
+            for reach in [ListenerReach::Loopback, ListenerReach::Network] {
+                assert!(
+                    connection_context(token, &Some(ADMIN.to_string()), reach).is_err(),
+                    "token {token:.20}…, {reach:?}"
+                );
+            }
         }
     }
 
-    // On a node with an admin credential, a socket with no token gets only these
-    // capabilities. It used to receive the main agent's event stream all the same.
+    // Live queries belong to the connection that opened them, so each connection needs its
+    // own id; an HTTP request (`RequestContext::open` alone) has none.
     #[test]
-    fn an_unauthenticated_socket_receives_no_events() {
-        let unauthenticated = ctx(
-            "",
-            Ok(vec![
-                AGENT_AUTH_CAPABILITY.clone(),
-                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
-            ]),
-        );
-        assert!(!may_receive_events(&unauthenticated));
+    fn every_connection_gets_its_own_connection_id() {
+        setup_wallet();
+        setup_agent();
+        let admin = Some(ADMIN.to_string());
+        let a = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
+        let b = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
+        assert!(a.connection_id.is_some());
+        assert_ne!(a.connection_id, b.connection_id);
+        let http = RequestContext::open(ADMIN, &admin, ListenerReach::Network).unwrap();
+        assert_eq!(http.connection_id, None);
     }
 
     #[test]
-    fn a_session_whose_token_failed_receives_no_events() {
-        let failed = ctx("expired-jwt", Err("token expired".to_string()));
-        assert!(!may_receive_events(&failed));
+    fn a_session_connection_stops_working_once_its_token_is_revoked() {
+        setup_wallet();
+        setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let token = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
+        let request_id = format!("context-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_id.clone(), app, token.clone()).unwrap();
+
+        let ctx =
+            connection_context(&token, &Some(ADMIN.to_string()), ListenerReach::Network).unwrap();
+        assert!(ctx.session.check().is_ok());
+        apps_map::revoke_app(&request_id).unwrap();
+        assert_eq!(
+            ctx.session.check().unwrap_err().to_string(),
+            "Unauthorized access"
+        );
+    }
+
+    #[test]
+    fn a_session_connection_acts_as_the_agent_its_token_names() {
+        setup_wallet();
+        setup_agent();
+        crate::test_utils::use_test_apps_file();
+        let user = "context.actsas@example.org";
+        let user_did = crate::test_utils::create_test_user(user);
+        let tokens = [
+            ADMIN.to_string(),
+            jwt(None),
+            crate::user_management::generate_user_jwt(user, "test").unwrap(),
+        ];
+
+        let expected = [
+            crate::agent::AgentContext::main_agent(),
+            crate::agent::AgentContext::main_agent(),
+            crate::agent::AgentContext::managed(user_did),
+        ];
+        for (token, expected) in tokens.iter().zip(expected) {
+            let ctx = connection_context(token, &Some(ADMIN.to_string()), ListenerReach::Network)
+                .unwrap_or_else(|e| panic!("token {token:.20}… opens a session: {e}"));
+            assert_eq!(ctx.acts_as(), expected, "token {token:.20}…");
+        }
+    }
+}
+
+#[cfg(test)]
+mod event_gate_tests {
+    use super::*;
+    use crate::agent::session::{Principal, Session};
+
+    // On an executor with an admin credential, a socket with no token gets only these
+    // capabilities. It used to receive the main agent's event stream all the same.
+    #[test]
+    fn an_unauthenticated_socket_receives_no_events() {
+        let unauthenticated =
+            RequestContext::for_session(Session::for_test(Principal::Anonymous).with_caps(vec![
+                AGENT_AUTH_CAPABILITY.clone(),
+                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+            ]));
+        assert!(!may_receive_events(&unauthenticated));
     }
 
     // Apps with narrow capabilities still need their query-subscription and link events.
     #[test]
     fn authenticated_sessions_receive_events_whatever_their_capabilities() {
-        let narrow_app = ctx(
-            "app-jwt",
-            Ok(vec![perspective_query_capability(vec![
-                "some-uuid".to_string()
-            ])]),
-        );
+        let narrow_app = RequestContext::app_for_test(vec![perspective_query_capability(vec![
+            "some-uuid".to_string(),
+        ])]);
         assert!(may_receive_events(&narrow_app));
-        assert!(may_receive_events(&ctx(
-            "user-jwt",
-            Ok(get_user_default_capabilities())
+        assert!(may_receive_events(&RequestContext::user_for_test(
+            "did:key:events-gate",
+            get_user_default_capabilities()
         )));
-        let mut admin = ctx("the-admin-credential", Ok(vec![ALL_CAPABILITY.clone()]));
-        admin.is_admin_credential = true;
-        assert!(may_receive_events(&admin));
+        assert!(may_receive_events(&RequestContext::operator_for_test()));
     }
 }
 
@@ -523,7 +637,6 @@ mod socket_tests {
         let addr = listener.local_addr().unwrap();
         let app = crate::api::api_router(AppState {
             admin_credential: Some(ADMIN.to_string()),
-            auto_permit_cap_requests: false,
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         addr
@@ -607,6 +720,143 @@ mod socket_tests {
         assert_eq!(after["error"]["code"], 401, "{after}");
         assert_eq!(close_code(&mut ws).await, Some(CLOSE_TOKEN_ENDED));
         apps_map::remove_app(&request_key).unwrap();
+    }
+
+    // A dead token used to get a connection whose every call failed a capability check, so
+    // clients kept it open and never logged in again.
+    #[tokio::test]
+    async fn a_dead_token_is_closed_with_1008_right_after_the_upgrade() {
+        let addr = start_server().await;
+        crate::test_utils::use_test_apps_file();
+        let revoked = generate_jwt(
+            "socket-test-revoked".to_string(),
+            3600,
+            AuthInfo {
+                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                ..AuthInfo::default()
+            },
+        )
+        .unwrap();
+        let request_key = format!("key-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_key.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_key.clone(), app, revoked.clone()).unwrap();
+        apps_map::revoke_app(&request_key).unwrap();
+        let expired = crate::test_utils::expired_user_token("socket.expired@example.org");
+
+        for (name, token) in [("revoked", revoked.as_str()), ("expired", expired.as_str())] {
+            // The upgrade succeeds, so a browser can read the close code.
+            let mut ws = connect(addr, token).await;
+            let request = json!({"id": "1", "type": "agent.status", "params": {}}).to_string();
+            // The server may have closed already; the send result does not matter.
+            let _ = ws.send(WsMessage::Text(request.into())).await;
+            let close = loop {
+                match tokio::time::timeout(Duration::from_secs(10), ws.next())
+                    .await
+                    .unwrap_or_else(|_| panic!("{name}: the socket stayed open"))
+                {
+                    Some(Ok(WsMessage::Close(frame))) => break frame,
+                    Some(Ok(WsMessage::Text(text))) => panic!("{name}: got a reply: {text}"),
+                    Some(Ok(_)) => continue,
+                    other => panic!("{name}: no close frame: {other:?}"),
+                }
+            };
+            let close = close.unwrap_or_else(|| panic!("{name}: a close frame without a code"));
+            assert_eq!(u16::from(close.code), CLOSE_TOKEN_ENDED, "{name}");
+            assert!(
+                !close.reason.is_empty(),
+                "{name}: the close names the reason"
+            );
+        }
+        apps_map::remove_app(&request_key).unwrap();
+    }
+
+    // A wallet locked at connect says nothing about the token: before sessions, such a
+    // connection opened and `agent.isLocked` answered. The socket closes with 1013, which
+    // clients read as "try again later" and not as "log in again", so they keep the token.
+    #[tokio::test]
+    async fn a_locked_wallet_closes_with_1013_and_the_token_works_after_the_unlock() {
+        let addr = start_server().await;
+        let token = generate_jwt(
+            "socket-test-locked".to_string(),
+            3600,
+            AuthInfo {
+                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                ..AuthInfo::default()
+            },
+        )
+        .unwrap();
+        let backend = crate::wallet::wallet_backend();
+        backend.lock("socket-locked-test");
+        let mut ws = connect(addr, &token).await;
+        let first = tokio::time::timeout(Duration::from_secs(10), ws.next()).await;
+        let http = reqwest::Client::new()
+            .get(format!("http://{addr}/v1/models"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map(|r| r.status().as_u16());
+        // Unlock before asserting, so a failure cannot leave the shared wallet locked.
+        backend
+            .unlock("socket-locked-test")
+            .expect("restore the shared wallet");
+
+        match first.expect("the socket stayed open") {
+            Some(Ok(WsMessage::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), CLOSE_TRY_AGAIN_LATER);
+                assert!(
+                    frame.reason.starts_with("Executor is locked"),
+                    "{}",
+                    frame.reason
+                );
+            }
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+        assert_eq!(
+            http.unwrap(),
+            503,
+            "HTTP says unavailable, not unauthorized"
+        );
+
+        // After the unlock the same token opens a working connection.
+        let mut ws = connect(addr, &token).await;
+        let request = json!({"id": "1", "type": "agent.status", "params": {}}).to_string();
+        ws.send(WsMessage::Text(request.into())).await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                let reply: Value = serde_json::from_str(&text).unwrap();
+                assert!(reply.get("error").is_none(), "{text}");
+                assert_eq!(reply["result"]["isUnlocked"], true, "{text}");
+            }
+            other => panic!("expected a reply, got {other:?}"),
+        }
+    }
+
+    // The events socket used to answer a dead token with a refused upgrade (the HTTP
+    // extractor's error), and the realtime socket opened and then refused each request. A
+    // browser reads neither as "log in again".
+    #[tokio::test]
+    async fn the_events_and_realtime_sockets_close_a_dead_token_with_1008() {
+        let addr = start_server().await;
+        for path in ["/api/v1/ws/events", "/v1/realtime"] {
+            let url = format!("ws://{addr}{path}?token=not-a-jwt");
+            let mut ws = tokio_tungstenite::connect_async(url)
+                .await
+                .unwrap_or_else(|e| panic!("{path}: the upgrade must succeed: {e}"))
+                .0;
+            assert_eq!(close_code(&mut ws).await, Some(CLOSE_TOKEN_ENDED), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_close_reason_fits_a_close_frame() {
+        assert_eq!(close_reason("Unauthorized access"), "Unauthorized access");
+        let long = "é".repeat(100);
+        let cut = close_reason(&long);
+        assert!(cut.len() <= 123);
+        assert!(long.starts_with(&cut));
     }
 
     // With an admin credential set, a socket with no token used to get the main agent's

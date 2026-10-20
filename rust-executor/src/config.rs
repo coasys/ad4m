@@ -21,8 +21,6 @@ pub fn set_global_config(config: Ad4mConfig) {
     *global_config = Some(config);
 }
 
-/// Get a clone of the global Ad4mConfig.
-/// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 /// The admin credential the executor runs with, if a global config exists. Never panics.
 pub fn configured_admin_credential() -> Option<String> {
     GLOBAL_AD4M_CONFIG
@@ -32,6 +30,19 @@ pub fn configured_admin_credential() -> Option<String> {
         .and_then(|config| config.admin_credential.clone())
 }
 
+/// Whether the executor permits capability requests without the operator (development
+/// only). `false` without a global config. Never panics.
+pub fn auto_permit_cap_requests() -> bool {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|config| config.auto_permit_cap_requests)
+        .unwrap_or(false)
+}
+
+/// Get a clone of the global Ad4mConfig.
+/// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
     let global_config = GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     global_config
@@ -142,11 +153,18 @@ pub struct Ad4mConfig {
     /// interface IP.  When unset, the SFU follows `localhost`: loopback
     /// by default, the machine's outbound IP with `localhost: false`.
     pub sfu_bind_addr: Option<String>,
-    /// STUN server (`host:port`) the SFU asks, once at startup, whether its
-    /// bind address is publicly reachable. Unset: no probe, and a public
-    /// bind address reports reachability "unknown". Only a public bind
-    /// address is ever probed.
+    /// STUN server (`host:port`) the SFU asks once at startup, from its own
+    /// socket, for its public address. Unset: no probe, and reachability is
+    /// "unknown" unless the bind address is private. A loopback bind is
+    /// never probed.
     pub sfu_stun_server: Option<String>,
+    /// UDP port the SFU binds. Unset (or 0): a free port, chosen at each
+    /// start. Fixed, a router can forward it; startup fails when it is taken.
+    pub sfu_udp_port: Option<u16>,
+    /// Public IP the SFU offers callers as a server-reflexive candidate,
+    /// with the bound port. Unset: the STUN probe's reflexive IP, when the
+    /// bind address is private.
+    pub sfu_public_addr: Option<String>,
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
@@ -480,6 +498,8 @@ impl Ad4mConfig {
             sfu_cascade_peers: None,
             sfu_bind_addr: None,
             sfu_stun_server: None,
+            sfu_udp_port: None,
+            sfu_public_addr: None,
             sfu_preferred_node: None,
             wallet_backend: None,
             wallet_backend_url: None,

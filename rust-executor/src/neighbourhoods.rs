@@ -87,13 +87,11 @@ pub async fn install_neighbourhood_with_context(
         if handle.shared_url == Some(url.clone()) {
             // Neighbourhood exists - add this user as owner if it's a user context
             log::info!(
-                "Adding user {:?} to existing neighbourhood {}",
-                context.user_email,
+                "Adding agent {:?} to existing neighbourhood {}",
+                context,
                 url
             );
-            if let Some(user_email) = &context.user_email {
-                let user_did = crate::agent::AgentService::get_user_did_by_email(user_email)?;
-
+            if let Some(user_did) = context.managed_did().map(str::to_string) {
                 // Update database
                 crate::db::Ad4mDb::with_global_instance(|db| {
                     db.add_owner_to_neighbourhood(&url, &user_did)
@@ -106,13 +104,11 @@ pub async fn install_neighbourhood_with_context(
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
 
                 // Update link language with new owners list
-                if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
-                }
+                p.update_local_agents().await;
 
                 log::info!(
-                    "Added user {} to existing neighbourhood {}. Link language has been updated with new owners.",
-                    user_email,
+                    "Added agent {} to existing neighbourhood {}. Link language has been updated with new owners.",
+                    user_did,
                     url
                 );
                 return Ok(handle.clone());
@@ -132,9 +128,7 @@ pub async fn install_neighbourhood_with_context(
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
 
                 // Update link language with new owners list
-                if let Some(owners) = &handle.owners {
-                    p.update_local_agents(owners.clone()).await;
-                }
+                p.update_local_agents().await;
 
                 log::info!(
                     "Added main agent to existing neighbourhood {}. Link language has been updated with new owners.",

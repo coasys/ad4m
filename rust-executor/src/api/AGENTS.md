@@ -24,12 +24,12 @@ Handler shape today (`perspectives_ws.rs::add_link` is representative):
 ```rust
 async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;                       // ParamExt
-    check_capability(&ctx.capabilities, &perspective_update_capability(vec![uuid.clone()]))
+    ctx.require(&perspective_update_capability(vec![uuid.clone()]))
         .map_err(|e| WsRpcError::forbidden(e))?;                  // repeated in every handler
     let body: AddLinkRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_request(&ctx);           // the session's user, or the main agent
+    let agent_context = ctx.acts_as();                              // the grant's agent, or the main agent
     ...
     Ok(serde_json::to_value(result)?)
 }
@@ -38,8 +38,22 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
 Spec item 6 replaces the first block with `register_with(name, CapSpec, typed_handler)`.
 Until then: **every new handler must check a capability** (or be registered with an
 explicit comment saying why not) and take `AgentContext` from the session
-(`AgentContext::from_request(&ctx)`) for anything that signs, bills or writes. Never
+(`ctx.acts_as()`) for anything that signs, bills or writes. Never
 re-derive it from the token: a token that stops decoding must not turn into the main agent.
+
+**An agent is its DID.** A user session is known by its managed agent's DID
+(`ctx.user_did()`); there is no `ctx.user_email()`. Bill, own, filter and log by that DID. A
+parameter that names a user by email (`runtime.computeLog { userEmail }`, the operator's
+`user.*` calls) resolves to the DID at the handler with `AgentService::did_for_email`; a reply
+field that shows an address (`hosting.info`'s `email`, the compute log's `userEmail`) reads it
+back with `AgentService::email_for_did` or a join on `users.did`.
+
+`RequestContext` (`types/domain.rs`) is the caller for one request: `session: Arc<Session>`,
+the per-request `cancel_token`, and `auth_token` (read only by the interpretation pass; Plan 20
+PR 6 removes it). The RPC socket opens one per connection (`RequestContext::open`); REST and the
+OpenAI-compatible API take it as an axum extractor (`auth.rs`), which answers 401 for a token
+that opens no session and 503 while the wallet is locked. `auto_permit_cap_requests` is read
+from the global config where `agent.requestCapability` uses it.
 
 ## Protocol
 
@@ -48,6 +62,12 @@ re-derive it from the token: a token that stops decoding must not turn into the 
 - Events: a socket gets no events until it sends `events.watch { "<type>": null | [perspective
   uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
   inline on both sockets (per-connection state, like `request.cancel`).
+- Every socket (RPC, `/events`, `/v1/realtime`) keeps the caller's `Arc<Session>` and calls
+  `Session::check()` again on each request and each delivered event, so revocation and expiry end
+  an open connection. Tests build sessions with `Session::for_test(principal)` plus
+  `.with_caps(..)`, `.with_did(..)`, `.expiring_at(..)`, and contexts with
+  `RequestContext::{operator,app,user}_for_test` / `for_session` (`.on_connection(id)` for a
+  context on an RPC connection).
 - Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
   (revision 0, or later if a write landed while the first result was computed: the subscription is
   registered first);
@@ -57,9 +77,11 @@ re-derive it from the token: a token that stops decoding must not turn into the 
   `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`. When the
   update topic lags, the socket gets one `{ type: 'query-subscription-update', lagged: true }` and
   the client resyncs every live query.
-- A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`):
-  only that socket gets its updates (they bypass `events.watch`), and `ws_rpc::serve` ends them
-  when the socket closes, and again as each call still in flight ends (a late subscribe). No keepalive; subscribing without a connection (REST) is a 400.
+- A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`, set
+  by `ws_rpc::serve` next to the connection's `Session`): only that socket gets its updates (they
+  bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
+  call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
+  (REST) is a 400.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and
