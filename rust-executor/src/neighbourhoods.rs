@@ -79,23 +79,14 @@ pub async fn _install_neighbourhood(url: String) -> Result<PerspectiveHandle, An
 /// In p-diff-sync that is a Holochain zome call queued behind everything else
 /// the language's runtime is doing, which on a busy executor holds a join RPC
 /// past the client's timeout. The join is already recorded (database and
-/// owners list); `update_local_agents` logs a failure, and the next
-/// registration (another join, or the link language's own attach) sends the
-/// full owners list again.
-///
-/// The owners are read when the registration is sent, not when it is spawned:
-/// a link language that replaces its list (server-link) would otherwise keep
-/// whichever of two concurrent joins' lists arrived last, the older one included.
+/// owners list); `update_local_agents` reads the owners when it sends, logs a
+/// failure, and the next registration (another join, or the link language's
+/// own attach) sends the full owners list again.
 fn register_owners_in_background(
     perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
 ) {
     let perspective = perspective.clone();
-    tokio::spawn(async move {
-        let owners = perspective.persisted.lock().await.owners.clone();
-        if let Some(owners) = owners {
-            perspective.update_local_agents(owners).await;
-        }
-    });
+    tokio::spawn(async move { perspective.update_local_agents().await });
 }
 
 pub async fn install_neighbourhood_with_context(
