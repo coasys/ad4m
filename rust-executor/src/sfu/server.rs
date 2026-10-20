@@ -448,7 +448,7 @@ impl SfuServer {
         local_addr: SocketAddr,
         advertised: Option<SocketAddr>,
     ) -> Result<(Rtc, String), String> {
-        let mut rtc = Rtc::builder().build();
+        let mut rtc = Rtc::builder().build(Instant::now());
 
         let candidate = Candidate::host(local_addr, "udp")
             .map_err(|e| format!("Failed to create host candidate: {}", e))?;
@@ -1100,24 +1100,28 @@ impl SfuServer {
                     continue;
                 }
                 let room_id = target_peer.room_id.clone();
-                let mut api = target_peer.rtc.sdp_api();
-                let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = Vec::new();
-                for (kind, origin_pid, origin_mid) in &additions {
-                    // Skip tracks already forwarded — matches the deferred path's
-                    // tracks_out_rev check to prevent duplicate outbound m-lines.
-                    if target_peer
-                        .tracks_out_rev
-                        .contains_key(&(origin_pid.clone(), *origin_mid))
-                    {
-                        continue;
-                    }
-                    let new_mid =
-                        api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None);
-                    new_outbound.push((new_mid, origin_pid.clone(), *origin_mid, *kind));
-                }
-                let Some((offer, pending)) = api.apply() else {
+                // Skip tracks already forwarded — matches the deferred path's
+                // tracks_out_rev check to prevent duplicate outbound m-lines.
+                let to_add: Vec<(MediaKind, ParticipantId, Mid)> = additions
+                    .into_iter()
+                    .filter(|(_, origin_pid, origin_mid)| {
+                        !target_peer
+                            .tracks_out_rev
+                            .contains_key(&(origin_pid.clone(), *origin_mid))
+                    })
+                    .collect();
+                let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _)| *kind).collect();
+                let Some((offer, pending, mids)) = offer_send_only(&mut target_peer.rtc, &kinds)
+                else {
                     continue;
                 };
+                let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = mids
+                    .into_iter()
+                    .zip(to_add)
+                    .map(|(new_mid, (kind, origin_pid, origin_mid))| {
+                        (new_mid, origin_pid, origin_mid, kind)
+                    })
+                    .collect();
 
                 // Build track attribution from the newly assigned mids.
                 let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
@@ -1149,7 +1153,7 @@ impl SfuServer {
                 info!(
                     "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
                     target_pid,
-                    additions.len()
+                    kinds.len()
                 );
 
                 let sdp_offer_json = match serde_json::to_string(&offer) {
@@ -1289,6 +1293,34 @@ fn clean_stale_track_refs(
     }
 }
 
+/// One SDP change adding a send-only m-line per entry of `kinds`: its offer,
+/// the pending offer, and the new mids in the order of `kinds`. `None` when
+/// `kinds` is empty.
+///
+/// str0m draws each mid at random (three characters) and checks it only
+/// against the m-lines the session already has, not against the others
+/// added in the same change, so a batch can name two m-lines alike. The
+/// client refuses such an offer ("Duplicate a=mid value") and rebuilds its
+/// connection, and `tracks_out_rev` would send both origins to the one mid.
+/// A batch with a repeated mid is dropped unapplied (adding media only
+/// queues a change) and drawn again.
+fn offer_send_only(
+    rtc: &mut Rtc,
+    kinds: &[MediaKind],
+) -> Option<(SdpOffer, str0m::change::SdpPendingOffer, Vec<Mid>)> {
+    loop {
+        let mut api = rtc.sdp_api();
+        let mids: Vec<Mid> = kinds
+            .iter()
+            .map(|kind| api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None))
+            .collect();
+        if mids.iter().collect::<HashSet<_>>().len() == mids.len() {
+            return api.apply().map(|(offer, pending)| (offer, pending, mids));
+        }
+        debug!("SFU: an SDP batch drew a repeated mid; drawing again");
+    }
+}
+
 /// Drain deferred tracks from a peer and produce a renegotiation
 /// offer.  Returns `(sdp_offer_json, track_mapping)` or `None` when
 /// no actionable tracks remain.
@@ -1313,14 +1345,15 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
         return None;
     }
 
-    let mut api = peer.rtc.sdp_api();
-    let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = Vec::new();
-    for (origin_pid, origin_mid, kind, agent_did) in to_add {
-        let new_mid = api.add_media(kind, str0m::media::Direction::SendOnly, None, None, None);
-        new_outbound.push((new_mid, origin_pid, origin_mid, kind, agent_did));
-    }
-
-    let (offer, pending) = api.apply()?;
+    let kinds: Vec<MediaKind> = to_add.iter().map(|(_, _, kind, _)| *kind).collect();
+    let (offer, pending, mids) = offer_send_only(&mut peer.rtc, &kinds)?;
+    let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = mids
+        .into_iter()
+        .zip(to_add)
+        .map(|(new_mid, (origin_pid, origin_mid, kind, agent_did))| {
+            (new_mid, origin_pid, origin_mid, kind, agent_did)
+        })
+        .collect();
 
     let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
         .iter()
@@ -1399,7 +1432,7 @@ mod tests {
 
     /// A browser's offer: one audio section, as a caller sends to join.
     fn caller_offer() -> SdpOffer {
-        let mut caller = Rtc::builder().build();
+        let mut caller = Rtc::builder().build(Instant::now());
         let mut change = caller.sdp_api();
         change.add_media(
             str0m::media::MediaKind::Audio,
@@ -1421,6 +1454,52 @@ mod tests {
             .filter_map(|l| l.strip_prefix("a=candidate:"))
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn a_batch_of_new_tracks_never_repeats_a_mid() {
+        // str0m's mids are three random characters, unchecked within one
+        // change: a 600-line batch repeats one about half the time, so 20
+        // batches all but surely draw a repeat unless the batch is redrawn.
+        let kinds: Vec<MediaKind> = (0..600)
+            .map(|i| {
+                if i % 2 == 0 {
+                    MediaKind::Audio
+                } else {
+                    MediaKind::Video
+                }
+            })
+            .collect();
+        for _ in 0..20 {
+            let mut rtc = Rtc::new(Instant::now());
+            let (offer, _pending, mids) =
+                offer_send_only(&mut rtc, &kinds).expect("an offer for a non-empty batch");
+            assert_eq!(mids.len(), kinds.len());
+            let distinct: HashSet<&Mid> = mids.iter().collect();
+            assert_eq!(distinct.len(), mids.len(), "a mid repeats within the batch");
+            let sdp = offer.to_sdp_string();
+            let offered: Vec<&str> = sdp
+                .lines()
+                .filter_map(|l| l.strip_prefix("a=mid:"))
+                .collect();
+            let offered_distinct: HashSet<&str> = offered.iter().copied().collect();
+            assert_eq!(offered.len(), kinds.len());
+            assert_eq!(
+                offered_distinct.len(),
+                offered.len(),
+                "the offer repeats an a=mid"
+            );
+            // The mids come back in the order of `kinds`, so the caller's
+            // track mapping names the right m-line.
+            for (mid, kind) in mids.iter().zip(&kinds) {
+                let section = sdp
+                    .split("\r\nm=")
+                    .find(|section| section.contains(&format!("a=mid:{}\r\n", mid)))
+                    .expect("the mid's m-line");
+                assert!(section.starts_with(if kind.is_audio() { "audio" } else { "video" }));
+            }
+        }
+        assert!(offer_send_only(&mut Rtc::new(Instant::now()), &[]).is_none());
     }
 
     /// Behind NAT the answer offers the bound socket and the public address
@@ -1455,6 +1534,180 @@ mod tests {
         let lines = candidates(&answer);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("typ host"), "{lines:?}");
+    }
+
+    /// What one side of an in-memory call did, on the simulated clock.
+    #[derive(Default)]
+    struct Seen {
+        ice: Vec<(Duration, IceConnectionState)>,
+        data: Vec<Duration>,
+        channel: Option<ChannelId>,
+    }
+
+    /// Feed `rtc` the clock, then drain it: events go to `seen`, packets
+    /// are returned for the network to route. Returns the next deadline.
+    fn drive(
+        rtc: &mut Rtc,
+        now: Instant,
+        start: Instant,
+        seen: &mut Seen,
+        sent: &mut Vec<(SocketAddr, SocketAddr, Vec<u8>)>,
+    ) -> Instant {
+        rtc.handle_input(Input::Timeout(now)).unwrap();
+        loop {
+            match rtc.poll_output().unwrap() {
+                Output::Timeout(t) => return t,
+                Output::Transmit(t) => sent.push((t.source, t.destination, t.contents.to_vec())),
+                Output::Event(Event::IceConnectionStateChange(s)) => {
+                    seen.ice.push((now - start, s))
+                }
+                Output::Event(Event::ChannelOpen(id, _)) => seen.channel = Some(id),
+                Output::Event(Event::ChannelData(_)) => seen.data.push(now - start),
+                Output::Event(_) => {}
+            }
+        }
+    }
+
+    fn receive(
+        rtc: &mut Rtc,
+        now: Instant,
+        source: SocketAddr,
+        destination: SocketAddr,
+        data: &[u8],
+    ) {
+        rtc.handle_input(Input::Receive(
+            now,
+            Receive {
+                proto: Protocol::Udp,
+                source,
+                destination,
+                contents: data.try_into().unwrap(),
+            },
+        ))
+        .unwrap();
+    }
+
+    /// A STUN Binding request (RFC 5389: message type 0x0001).
+    fn is_binding_request(packet: &[u8]) -> bool {
+        packet.len() >= 20 && packet[0] == 0x00 && packet[1] == 0x01
+    }
+
+    /// The production failure (Chrome/Edge 144+, str0m issue #846): a caller
+    /// whose own checks reach the SFU through the router's port forward, but
+    /// which never answers the SFU's checks. The SFU must keep that caller as
+    /// long as the caller's checks keep arriving. str0m before 0.16.1 prunes
+    /// the pair, nominated or not, once its own checks time out (~18.75 s),
+    /// and goes Disconnected.
+    ///
+    /// The network: the SFU binds 192.168.0.10:40000 behind a router that
+    /// forwards 198.51.100.7:40000 to it; the caller cannot reach the
+    /// private address. Every binding request the SFU sends is lost;
+    /// responses, DTLS, SCTP and media pass.
+    #[test]
+    fn a_caller_whose_network_drops_the_sfus_checks_stays_connected() {
+        let bind: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let public: SocketAddr = "198.51.100.7:40000".parse().unwrap();
+        let caller_addr: SocketAddr = "203.0.113.20:50000".parse().unwrap();
+
+        let mut caller = Rtc::builder().build(Instant::now());
+        caller.add_local_candidate(Candidate::host(caller_addr, "udp").unwrap());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            str0m::media::MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let cid = change.add_channel("sfu-data".into());
+        let (offer, pending) = change.apply().unwrap();
+        let (mut sfu, answer) = SfuServer::create_rtc_for_offer(offer, bind, Some(public)).unwrap();
+        let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer).unwrap();
+        caller.sdp_api().accept_answer(pending, answer).unwrap();
+
+        let start = Instant::now();
+        let mut now = start;
+        let (mut caller_seen, mut sfu_seen) = (Seen::default(), Seen::default());
+        let mut next_write = Duration::ZERO;
+        let mut sfu_checks_dropped = 0;
+        let end = Duration::from_secs(60);
+        while now - start < end {
+            let mut sent = Vec::new();
+            let caller_next = drive(&mut caller, now, start, &mut caller_seen, &mut sent);
+            for (_, destination, data) in sent.drain(..) {
+                // The router forwards the public address to the bind
+                // address; the private address is unreachable.
+                if destination == public {
+                    receive(&mut sfu, now, caller_addr, bind, &data);
+                }
+            }
+            let sfu_next = drive(&mut sfu, now, start, &mut sfu_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                assert_eq!(source, bind, "the SFU sends from its socket");
+                assert_eq!(destination, caller_addr);
+                if is_binding_request(&data) {
+                    sfu_checks_dropped += 1;
+                    continue;
+                }
+                // The router rewrites the source to the public address.
+                receive(&mut caller, now, public, caller_addr, &data);
+            }
+
+            // Both sides talk on the data channel twice a second once open.
+            if now - start >= next_write {
+                if let Some(mut ch) = caller.channel(cid) {
+                    ch.write(true, b"caller").unwrap();
+                }
+                if let Some(mut ch) = sfu_seen.channel.and_then(|id| sfu.channel(id)) {
+                    ch.write(true, b"sfu").unwrap();
+                }
+                next_write += Duration::from_millis(500);
+            }
+
+            let next = caller_next.min(sfu_next).min(start + next_write);
+            now = next.clamp(
+                now + Duration::from_millis(1),
+                now + Duration::from_millis(50),
+            );
+        }
+
+        // What counts is losing the caller once connected.
+        let up = sfu_seen
+            .ice
+            .iter()
+            .position(|(_, s)| {
+                matches!(
+                    s,
+                    IceConnectionState::Connected | IceConnectionState::Completed
+                )
+            })
+            .unwrap_or_else(|| panic!("the SFU never connected: {:?}", sfu_seen.ice));
+        assert!(
+            sfu_seen.ice[up].0 < Duration::from_secs(1),
+            "{:?}",
+            sfu_seen.ice
+        );
+        let disconnected = sfu_seen.ice[up..]
+            .iter()
+            .find(|(_, s)| *s == IceConnectionState::Disconnected);
+        assert!(
+            disconnected.is_none(),
+            "the SFU dropped a caller whose checks keep arriving: {:?} (states {:?}, \
+             {sfu_checks_dropped} SFU binding requests dropped)",
+            disconnected,
+            sfu_seen.ice
+        );
+        let recent = end - Duration::from_secs(5);
+        assert!(
+            sfu_seen.data.last().is_some_and(|t| *t >= recent),
+            "the SFU stopped receiving at {:?}",
+            sfu_seen.data.last()
+        );
+        assert!(
+            caller_seen.data.last().is_some_and(|t| *t >= recent),
+            "the caller stopped receiving at {:?}",
+            caller_seen.data.last()
+        );
     }
 
     /// A fixed port is bound exactly; the STUN probe runs on that socket and
@@ -1625,14 +1878,14 @@ mod tests {
             pid_b.clone(),
             room_id.clone(),
             "did:key:peerB".to_string(),
-            Rtc::builder().build(),
+            Rtc::builder().build(Instant::now()),
             false,
         );
         let mut peer_c = SfuPeer::new(
             pid_c.clone(),
             room_id.clone(),
             "did:key:peerC".to_string(),
-            Rtc::builder().build(),
+            Rtc::builder().build(Instant::now()),
             false,
         );
 
@@ -1653,7 +1906,7 @@ mod tests {
         );
 
         // Use a separate Rtc to allocate an origin Mid
-        let mut scratch_rtc = Rtc::builder().build();
+        let mut scratch_rtc = Rtc::builder().build(Instant::now());
         let origin_mid = scratch_rtc.sdp_api().add_media(
             MediaKind::Audio,
             str0m::media::Direction::RecvOnly,
