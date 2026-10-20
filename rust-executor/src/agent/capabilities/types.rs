@@ -86,8 +86,7 @@ pub struct Claims {
     iat: u64,
     nonce: String,
     // Tokens issued before grants also carry `capabilities` (the app's `AuthInfo`). Serde
-    // skips the unknown field, so they still decode; their grant (migrated from the old app
-    // registry) holds the capabilities now, and nothing reads them from a token.
+    // skips the unknown field, so they decode and are then refused for lack of a grant.
 }
 
 impl Claims {

@@ -635,10 +635,9 @@ mod resolution_tests {
     }
 
     // MCP resolves its tokens without a `Session` until PR 6 (`AgentContext::from_auth_token`,
-    // `capabilities_from_token`), and must refuse every token `Session::open` refuses. Here:
-    // a grant on the main agent whose token names a user, as an app approved with
-    // `userEmail` before grants has (its token's `sub` is the user; the migration puts its
-    // grant on the main agent). Acting on it would turn a user's app into a main-agent app.
+    // `capabilities_from_token`), and must refuse every token `Session::open` refuses. This
+    // pins that guard for a grant on the main agent whose token's `sub` names a user: acting
+    // on it would turn a user's app into a main-agent app.
     #[test]
     fn mcp_refuses_a_token_whose_sub_names_another_agent_than_its_grant() {
         setup_wallet();
