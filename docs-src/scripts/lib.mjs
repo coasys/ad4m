@@ -35,16 +35,42 @@ export function contentPages() {
   });
 }
 
-/** Minimal YAML frontmatter reader: `key: value` lines only. */
+/**
+ * Minimal YAML frontmatter reader: `key: value` lines only.
+ * `errors` lists lines the real YAML parser (gray-matter in the Nextra build,
+ * and every other site generator) would reject or read differently: a plain
+ * scalar that contains `: ` or ` #`, starts with a YAML indicator, or a quoted
+ * scalar that does not close. Every page must be plain enough that both
+ * readers agree, so these are reported as portability problems.
+ */
 export function readFrontmatter(src) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(src);
-  if (!m) return { data: null, body: src };
+  if (!m) return { data: null, body: src, errors: [] };
   const data = {};
-  for (const line of m[1].split(/\r?\n/)) {
+  const errors = [];
+  m[1].split(/\r?\n/).forEach((line, i) => {
+    if (!line.trim()) return;
     const kv = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
-    if (kv) data[kv[1]] = kv[2].replace(/^["']|["']$/g, "");
-  }
-  return { data, body: src.slice(m[0].length) };
+    if (!kv) {
+      errors.push(`frontmatter line ${i + 1} is not a \`key: value\` line: ${line.trim()}`);
+      return;
+    }
+    const [, key, raw] = kv;
+    const v = raw.trim();
+    if (/^"/.test(v)) {
+      if (!/^"(?:[^"\\]|\\.)*"$/.test(v)) errors.push(`frontmatter.${key}: double-quoted value does not close cleanly`);
+      data[key] = v.slice(1, -1).replace(/\\(.)/g, "$1");
+    } else if (/^'/.test(v)) {
+      if (!/^'(?:[^']|'')*'$/.test(v)) errors.push(`frontmatter.${key}: single-quoted value does not close cleanly`);
+      data[key] = v.slice(1, -1).replace(/''/g, "'");
+    } else {
+      if (/^[-?:,\[\]{}#&*!|>%@`]/.test(v) || /:\s/.test(v) || /\s#/.test(v) || /:$/.test(v)) {
+        errors.push(`frontmatter.${key}: value needs double quotes to be valid YAML (contains ": ", " #" or starts with a YAML indicator)`);
+      }
+      data[key] = v;
+    }
+  });
+  return { data, body: src.slice(m[0].length), errors };
 }
 
 /** Remove fenced code blocks and inline code so samples are not scanned. */

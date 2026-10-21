@@ -20,6 +20,11 @@ the rules below and runs in CI (`.github/workflows/docs.yml`) and as part of
    ---
    ```
 
+   One `key: value` per line, plain scalars only. A value that contains
+   `: ` or ` #`, or starts with a YAML indicator (`*`, `&`, `[`, `>`, `|`,
+   `#`, `@`, a backtick…), must be double-quoted, or the build's YAML parser
+   rejects the page. The check reports these before the build does.
+
 2. **Links between pages are file-relative and carry the extension.**
    `[Perspectives](../concepts/perspectives-and-links.mdx)`,
    `[Queries](./queries.mdx#where-operators)`. The shell maps a file path to

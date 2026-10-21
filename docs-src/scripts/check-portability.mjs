@@ -16,11 +16,12 @@ const pages = contentPages();
 for (const file of pages) {
   const rel = path.relative(PAGES_DIR, file).replace(/\\/g, "/");
   const src = fs.readFileSync(file, "utf8");
-  const { data, body } = readFrontmatter(src);
+  const { data, body, errors } = readFrontmatter(src);
 
   if (!data) {
     problems.push(`${rel}: missing frontmatter (title, description)`);
   } else {
+    for (const e of errors) problems.push(`${rel}: ${e}`);
     for (const k of ["title", "description"]) {
       if (!data[k]) problems.push(`${rel}: frontmatter.${k} missing`);
     }
