@@ -78,6 +78,17 @@ const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
  *  round trip away. */
 const CHECK_CONNECTION_DEADLINE_MS = 2_000
 
+/** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
+function utf8Length(text: string): number {
+    let bytes = text.length
+    for (let i = 0; i < text.length; i++) {
+        const unit = text.charCodeAt(i)
+        // A surrogate is half of a 4-byte pair: 2 units, 2 extra bytes.
+        if (unit >= 0x80) bytes += unit < 0x800 || (unit >= 0xd800 && unit <= 0xdfff) ? 1 : 2
+    }
+    return bytes
+}
+
 let _idCounter = 0
 function nextId(): string {
     return String(++_idCounter)
@@ -394,7 +405,7 @@ export class ApiClient {
 
     /** Send on `ws`, counting what the open socket has sent since it was last heard from. */
     private _send(ws: WebSocket, text: string): void {
-        if (this._ws === ws) this._wsUnheardBytes += text.length
+        if (this._ws === ws) this._wsUnheardBytes += utf8Length(text)
         ws.send(text)
     }
 
