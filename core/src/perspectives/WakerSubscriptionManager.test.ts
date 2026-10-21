@@ -1,4 +1,4 @@
-import { WakerSubscriptionManager, hintFor, holdsAWholeWordTerm } from './WakerSubscriptionManager';
+import { MENTION_TEXT_LIMIT, WakerSubscriptionManager, hintFor, holdsAWholeWordTerm } from './WakerSubscriptionManager';
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -462,6 +462,23 @@ describe('WakerSubscriptionManager', () => {
     expect(holds('<style>.Data { color: red }</style><p>hi</p>')).toBe(false);
     expect(holds('<script>let Data = 1</script>hi')).toBe(false);
     expect(holds('hi <!-- Data --> there')).toBe(false);
+  });
+
+  it('reads a bounded prefix, so a long run of unclosed openers cannot stall the waker', () => {
+    const bot = ['Data', 'did:key:zBot'];
+    // Unbounded, each of these took seconds: every unclosed opener scans to the end.
+    for (const opener of ['<script>', '<style>', '<!--']) {
+      const started = Date.now();
+      expect(holdsAWholeWordTerm('the metadata ' + opener.repeat(125_000), bot)).toBe(false);
+      expect(holdsAWholeWordTerm('hey Data ' + opener.repeat(125_000), bot)).toBe(true);
+      expect(Date.now() - started).toBeLessThan(1000);
+    }
+    // Within the limit a long message still wakes, by name and by DID target.
+    const filler = 'lorem ipsum '.repeat(1000);
+    expect(holdsAWholeWordTerm(filler + 'ask Data', bot)).toBe(true);
+    expect(holdsAWholeWordTerm(`${filler}<a href="did:key:zBot">@Bot</a>`, bot)).toBe(true);
+    // Past it, it does not.
+    expect(holdsAWholeWordTerm('x'.repeat(MENTION_TEXT_LIMIT) + ' Data', bot)).toBe(false);
   });
 
   it('refuses a mention subscription without its terms', async () => {

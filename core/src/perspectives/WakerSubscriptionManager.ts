@@ -68,6 +68,15 @@ const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|t
 const ATTRIBUTES = new RegExp(ATTRIBUTE, "g");
 const MENTION_TARGET = /^\s+(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))$/i;
 
+/**
+ * How much of a record's text the word check reads. Dropping markup costs time
+ * quadratic in a run of unclosed `<script>`, `<style>` or `<!--` openers, so a
+ * very long text could hold the event loop for seconds, and a row that holds
+ * no term is checked again on every result while it is in the window. A term
+ * past this many characters does not wake.
+ */
+export const MENTION_TEXT_LIMIT = 16_384;
+
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 function decodeEntities(s: string): string {
@@ -115,9 +124,10 @@ function readableParts(text: string): { visible: string; targets: string[] } {
  *
  * The mention query's `contains` matches substrings (model query has no word
  * match); this is the check that keeps "data" from waking on "metadata".
+ * It reads the first {@link MENTION_TEXT_LIMIT} characters only.
  */
 export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
-  const { visible, targets } = readableParts(text);
+  const { visible, targets } = readableParts(text.slice(0, MENTION_TEXT_LIMIT));
   return terms.some((term) => {
     if (!term) return false;
     if (term.startsWith("did:") && targets.includes(term)) return true;
