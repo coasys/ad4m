@@ -1100,24 +1100,28 @@ impl SfuServer {
                     continue;
                 }
                 let room_id = target_peer.room_id.clone();
-                let mut api = target_peer.rtc.sdp_api();
-                let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = Vec::new();
-                for (kind, origin_pid, origin_mid) in &additions {
-                    // Skip tracks already forwarded — matches the deferred path's
-                    // tracks_out_rev check to prevent duplicate outbound m-lines.
-                    if target_peer
-                        .tracks_out_rev
-                        .contains_key(&(origin_pid.clone(), *origin_mid))
-                    {
-                        continue;
-                    }
-                    let new_mid =
-                        api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None);
-                    new_outbound.push((new_mid, origin_pid.clone(), *origin_mid, *kind));
-                }
-                let Some((offer, pending)) = api.apply() else {
+                // Skip tracks already forwarded — matches the deferred path's
+                // tracks_out_rev check to prevent duplicate outbound m-lines.
+                let to_add: Vec<(MediaKind, ParticipantId, Mid)> = additions
+                    .into_iter()
+                    .filter(|(_, origin_pid, origin_mid)| {
+                        !target_peer
+                            .tracks_out_rev
+                            .contains_key(&(origin_pid.clone(), *origin_mid))
+                    })
+                    .collect();
+                let kinds: Vec<MediaKind> = to_add.iter().map(|(kind, _, _)| *kind).collect();
+                let Some((offer, pending, mids)) = offer_send_only(&mut target_peer.rtc, &kinds)
+                else {
                     continue;
                 };
+                let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = mids
+                    .into_iter()
+                    .zip(to_add)
+                    .map(|(new_mid, (kind, origin_pid, origin_mid))| {
+                        (new_mid, origin_pid, origin_mid, kind)
+                    })
+                    .collect();
 
                 // Build track attribution from the newly assigned mids.
                 let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
@@ -1149,7 +1153,7 @@ impl SfuServer {
                 info!(
                     "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
                     target_pid,
-                    additions.len()
+                    kinds.len()
                 );
 
                 let sdp_offer_json = match serde_json::to_string(&offer) {
@@ -1289,6 +1293,34 @@ fn clean_stale_track_refs(
     }
 }
 
+/// One SDP change adding a send-only m-line per entry of `kinds`: its offer,
+/// the pending offer, and the new mids in the order of `kinds`. `None` when
+/// `kinds` is empty.
+///
+/// str0m draws each mid at random (three characters) and checks it only
+/// against the m-lines the session already has, not against the others
+/// added in the same change, so a batch can name two m-lines alike. The
+/// client refuses such an offer ("Duplicate a=mid value") and rebuilds its
+/// connection, and `tracks_out_rev` would send both origins to the one mid.
+/// A batch with a repeated mid is dropped unapplied (adding media only
+/// queues a change) and drawn again.
+fn offer_send_only(
+    rtc: &mut Rtc,
+    kinds: &[MediaKind],
+) -> Option<(SdpOffer, str0m::change::SdpPendingOffer, Vec<Mid>)> {
+    loop {
+        let mut api = rtc.sdp_api();
+        let mids: Vec<Mid> = kinds
+            .iter()
+            .map(|kind| api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None))
+            .collect();
+        if mids.iter().collect::<HashSet<_>>().len() == mids.len() {
+            return api.apply().map(|(offer, pending)| (offer, pending, mids));
+        }
+        debug!("SFU: an SDP batch drew a repeated mid; drawing again");
+    }
+}
+
 /// Drain deferred tracks from a peer and produce a renegotiation
 /// offer.  Returns `(sdp_offer_json, track_mapping)` or `None` when
 /// no actionable tracks remain.
@@ -1313,14 +1345,15 @@ fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::
         return None;
     }
 
-    let mut api = peer.rtc.sdp_api();
-    let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = Vec::new();
-    for (origin_pid, origin_mid, kind, agent_did) in to_add {
-        let new_mid = api.add_media(kind, str0m::media::Direction::SendOnly, None, None, None);
-        new_outbound.push((new_mid, origin_pid, origin_mid, kind, agent_did));
-    }
-
-    let (offer, pending) = api.apply()?;
+    let kinds: Vec<MediaKind> = to_add.iter().map(|(_, _, kind, _)| *kind).collect();
+    let (offer, pending, mids) = offer_send_only(&mut peer.rtc, &kinds)?;
+    let new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = mids
+        .into_iter()
+        .zip(to_add)
+        .map(|(new_mid, (origin_pid, origin_mid, kind, agent_did))| {
+            (new_mid, origin_pid, origin_mid, kind, agent_did)
+        })
+        .collect();
 
     let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
         .iter()
@@ -1421,6 +1454,52 @@ mod tests {
             .filter_map(|l| l.strip_prefix("a=candidate:"))
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn a_batch_of_new_tracks_never_repeats_a_mid() {
+        // str0m's mids are three random characters, unchecked within one
+        // change: a 600-line batch repeats one about half the time, so 20
+        // batches all but surely draw a repeat unless the batch is redrawn.
+        let kinds: Vec<MediaKind> = (0..600)
+            .map(|i| {
+                if i % 2 == 0 {
+                    MediaKind::Audio
+                } else {
+                    MediaKind::Video
+                }
+            })
+            .collect();
+        for _ in 0..20 {
+            let mut rtc = Rtc::new(Instant::now());
+            let (offer, _pending, mids) =
+                offer_send_only(&mut rtc, &kinds).expect("an offer for a non-empty batch");
+            assert_eq!(mids.len(), kinds.len());
+            let distinct: HashSet<&Mid> = mids.iter().collect();
+            assert_eq!(distinct.len(), mids.len(), "a mid repeats within the batch");
+            let sdp = offer.to_sdp_string();
+            let offered: Vec<&str> = sdp
+                .lines()
+                .filter_map(|l| l.strip_prefix("a=mid:"))
+                .collect();
+            let offered_distinct: HashSet<&str> = offered.iter().copied().collect();
+            assert_eq!(offered.len(), kinds.len());
+            assert_eq!(
+                offered_distinct.len(),
+                offered.len(),
+                "the offer repeats an a=mid"
+            );
+            // The mids come back in the order of `kinds`, so the caller's
+            // track mapping names the right m-line.
+            for (mid, kind) in mids.iter().zip(&kinds) {
+                let section = sdp
+                    .split("\r\nm=")
+                    .find(|section| section.contains(&format!("a=mid:{}\r\n", mid)))
+                    .expect("the mid's m-line");
+                assert!(section.starts_with(if kind.is_audio() { "audio" } else { "video" }));
+            }
+        }
+        assert!(offer_send_only(&mut Rtc::new(Instant::now()), &[]).is_none());
     }
 
     /// Behind NAT the answer offers the bound socket and the public address

@@ -238,6 +238,55 @@ describe('WakerSubscriptionManager', () => {
     expect(warnings).toEqual([]);
   });
 
+  it('deduplicates two result rows for the same source in one mention pass', async () => {
+    let capturedOnResult: ((result: any) => Promise<void>) | null = null;
+    const ProxyClass = function () {
+      return {
+        initialized: Promise.resolve(true),
+        subscribe: () => Promise.resolve(),
+        dispose: () => {},
+        onResult: (cb: (result: any) => Promise<void>) => {
+          capturedOnResult = cb;
+        },
+      };
+    };
+
+    let parentLookupCount = 0;
+    const trackingClient = {
+      querySparql: (_perspId: string, _query: string) => {
+        parentLookupCount++;
+        return Promise.resolve([]);
+      },
+    };
+
+    const wakeCallbacks: Array<{ mentions: any[] }> = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: trackingClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: ProxyClass,
+      debounceMs: 10,
+      onWake: (_s, _r, mentions) => {
+        wakeCallbacks.push({ mentions: mentions ?? [] });
+      },
+    });
+
+    await manager.subscribe(sub);
+    expect(capturedOnResult).not.toBeNull();
+
+    // Two rows for the identical source — only one wake entry should result.
+    await capturedOnResult!([{ source: 'addr://msg-1' }, { source: 'addr://msg-1' }]);
+
+    await waitUntil(() => wakeCallbacks.length > 0);
+
+    expect(wakeCallbacks).toHaveLength(1);
+    expect(wakeCallbacks[0].mentions).toHaveLength(1);
+    expect(wakeCallbacks[0].mentions[0].address).toBe('addr://msg-1');
+    // Parent lookup must run exactly once, not twice.
+    expect(parentLookupCount).toBe(1);
+
+    manager.disposeAll();
+  });
+
   /** Containment as a map of child → parents, answered per query the way querySparql would. */
   const tree = (parents: Record<string, string[]>) => (query: string) => {
     const values = /VALUES \?child \{([^}]+)\}/.exec(query)?.[1];
