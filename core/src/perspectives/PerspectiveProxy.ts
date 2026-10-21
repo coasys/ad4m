@@ -41,7 +41,7 @@ function extractNamespaceFromUri(uri: string): string {
 }
 
 
-/** A live SPARQL query with its latest result.
+/** A live SPARQL or model query with its latest result.
  *
  * `subscribe()` opens the query and resolves once the first result is in;
  * `onResult()` callbacks then get every later result. The executor sends
@@ -61,8 +61,14 @@ export class QuerySubscriptionProxy {
     #initResolve?: (value: boolean) => void;
     #initReject?: (reason?: any) => void;
 
-    constructor(uuid: string, query: string, client: PerspectiveClient) {
-        this.#live = new LiveQuery(client, uuid, () => client.subscribeQuery(uuid, query), result => this.#deliver(result));
+    /** With `className`, `query` is a model query (JSON) over that class or
+     *  union of classes, opened with `modelSubscribe`; results are
+     *  `{ instances, totalCount }`. Without it, `query` is SPARQL. */
+    constructor(uuid: string, query: string, client: PerspectiveClient, className?: string | string[]) {
+        const open = className === undefined
+            ? () => client.subscribeQuery(uuid, query)
+            : () => client.modelSubscribe(uuid, className, query);
+        this.#live = new LiveQuery(client, uuid, open, result => this.#deliver(result));
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             this.#initResolve = resolve;
             this.#initReject = reject;
