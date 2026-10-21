@@ -83,6 +83,10 @@ mod subscription_tests;
 #[path = "perspective_instance_abstract_tests.rs"]
 mod abstract_tests;
 
+#[cfg(test)]
+#[path = "perspective_instance_pending_diffs_tests.rs"]
+mod pending_diffs_tests;
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
@@ -1268,11 +1272,15 @@ impl PerspectiveInstance {
         let uuid = self.uuid.clone();
         let mut interval = time::interval(Duration::from_millis(100));
         let mut last_diff_time = None;
+        // A failed commit waits 100 ms × 2^failures (at most 30 s) before
+        // the next attempt, instead of retrying on every tick.
+        let mut failures: u32 = 0;
+        let mut retry_at = Instant::now();
 
         while !self.is_teardown.load(Ordering::Acquire) {
             interval.tick().await;
 
-            if self.has_link_language().await {
+            if Instant::now() >= retry_at && self.has_link_language().await {
                 let (_, ids) = Ad4mDb::with_global_instance(|db| {
                     db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
                 })
@@ -1289,23 +1297,35 @@ impl PerspectiveInstance {
 
                 // Commit if either:
                 // 1. It's been MAX_PENDING_SECONDS since first diff in burst (don't collect longer than MAX_PENDING_SECONDS)
-                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
-                    if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::debug!("💾 committed diffs after reaching 10s maximum wait time");
-                    }
+                let reason = if last_diff_time.unwrap().elapsed()
+                    >= Duration::from_secs(MAX_PENDING_SECONDS)
+                {
+                    format!("after the {}s maximum wait", MAX_PENDING_SECONDS)
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
-                    if self.commit_pending_diffs().await.is_ok() {
+                    "after 1s of inactivity".to_string()
+                // 3. We have collected MAX_PENDING_DIFFS_COUNT diffs
+                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT {
+                    format!("after collecting {}", MAX_PENDING_DIFFS_COUNT)
+                } else {
+                    continue;
+                };
+
+                match self.commit_pending_diffs().await {
+                    Ok(()) => {
                         last_diff_time = None;
-                        log::debug!("💾 committed diffs after 1s of inactivity");
+                        failures = 0;
+                        log::debug!("💾 committed diffs {}", reason);
                     }
-                // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
-                    && self.commit_pending_diffs().await.is_ok()
-                {
-                    last_diff_time = None;
-                    log::debug!("💾 committed diffs after collecting 100");
+                    Err(e) => {
+                        let wait = Duration::from_millis((100 << failures.min(9)).min(30_000));
+                        failures += 1;
+                        retry_at = Instant::now() + wait;
+                        log::warn!(
+                            "💾 perspective {}: committing pending diffs failed, retrying in {:?}: {:#}",
+                            uuid, wait, e
+                        );
+                    }
                 }
             }
         }
@@ -1358,7 +1378,9 @@ impl PerspectiveInstance {
                         log::debug!("✅ 💾 successfully committed pending diffs");
                         Ok(())
                     }
-                    Err(e) => Err(e),
+                    // The batch this commit sent: the size cap can make it smaller
+                    // than the queue.
+                    Err(e) => Err(e.context(format!("a batch of {} diffs", pending_ids.len()))),
                 }
             } else {
                 Ok(()) // Keep diffs if no link language
