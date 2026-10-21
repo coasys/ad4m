@@ -1322,8 +1322,8 @@ impl PerspectiveInstance {
                         failures += 1;
                         retry_at = Instant::now() + wait;
                         log::warn!(
-                            "💾 perspective {}: committing {} pending diffs failed, retrying in {:?}: {:?}",
-                            uuid, ids.len(), wait, e
+                            "💾 perspective {}: committing pending diffs failed, retrying in {:?}: {:#}",
+                            uuid, wait, e
                         );
                     }
                 }
@@ -1378,7 +1378,9 @@ impl PerspectiveInstance {
                         log::debug!("✅ 💾 successfully committed pending diffs");
                         Ok(())
                     }
-                    Err(e) => Err(e),
+                    // The batch this commit sent: the size cap can make it smaller
+                    // than the queue.
+                    Err(e) => Err(e.context(format!("a batch of {} diffs", pending_ids.len()))),
                 }
             } else {
                 Ok(()) // Keep diffs if no link language
