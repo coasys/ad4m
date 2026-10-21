@@ -619,6 +619,117 @@ describe("sync: commit", () => {
 });
 
 // ---------------------------------------------------------------------------
+// commit: the store follows the server
+// ---------------------------------------------------------------------------
+
+/** A link-server stand-in: an OR-Set keyed by link identity (as the real
+ *  server keys by link hash), one sequence number per accepted POST. */
+class MockLinkServer {
+    links = new Map<string, LinkExpression>();
+    sequence = 0;
+    /** Answers the next N POSTs with a 500 instead of accepting them. */
+    failNext = 0;
+
+    constructor(transport: MockTransport) {
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/commit"),
+            (_url, _method, body) => {
+                if (this.failNext > 0) {
+                    this.failNext--;
+                    return { status: 500, headers: {}, body: "{\"error\":\"down\"}" };
+                }
+                const diff = JSON.parse(body) as PerspectiveDiff;
+                for (const l of diff.additions) this.links.set(identity(l), l);
+                for (const l of diff.removals) this.links.delete(identity(l));
+                this.sequence++;
+                return {
+                    status: 200,
+                    headers: {},
+                    body: JSON.stringify({ sequence: this.sequence, revision: `rev-${this.sequence}` }),
+                };
+            },
+        );
+    }
+}
+
+function identity(l: LinkExpression): string {
+    return JSON.stringify([l.author, l.timestamp, l.data.source, l.data.predicate ?? null, l.data.target]);
+}
+
+function manyLinks(n: number, prefix = "s"): LinkExpression[] {
+    return Array.from({ length: n }, (_, i) => makeLink({ source: `${prefix}-${i}` }));
+}
+
+describe("sync: commit keeps the store in step with the server", () => {
+    it("a commit the server rejects leaves the store unchanged", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const server = new MockLinkServer(transport);
+        server.failNext = 1;
+
+        await assert.rejects(() => syncModule.commit({ additions: manyLinks(3), removals: [] }));
+
+        assert.equal(store.allLinks().links.length, 0, "links the server never got must not be stored");
+        assert.equal(server.links.size, 0);
+    });
+
+    it("a retry after recovery stores each link once, and the server has them all", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const server = new MockLinkServer(transport);
+        const diff = { additions: manyLinks(3), removals: [] };
+        server.failNext = 2;
+
+        await assert.rejects(() => syncModule.commit(diff));
+        await assert.rejects(() => syncModule.commit(diff));
+        await syncModule.commit(diff);
+
+        assert.equal(store.allLinks().links.length, 3);
+        assert.equal(server.links.size, 3);
+    });
+
+    it("an accepted commit is in the store and is not echoed back to the executor", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        new MockLinkServer(transport);
+
+        await syncModule.commit({ additions: manyLinks(2), removals: [] });
+
+        assert.equal(store.allLinks().links.length, 2);
+        assert.equal(emittedDiffs.length, 0, "the executor already holds its own links");
+    });
+
+    it("an accepted removal leaves the store", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        new MockLinkServer(transport);
+        const [a, b] = manyLinks(2);
+        await syncModule.commit({ additions: [a, b], removals: [] });
+
+        await syncModule.commit({ additions: [], removals: [a] });
+
+        assert.deepEqual(store.allLinks().links, [b]);
+    });
+
+    it("advances the sync cursor past its own commit when nothing came in between", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const server = new MockLinkServer(transport);
+
+        await syncModule.commit({ additions: manyLinks(1), removals: [] });
+        assert.equal(store.getSequence(), 1);
+        assert.equal(store.getRevision(), "rev-1");
+
+        // Another agent's diff (sequence 2) has not reached us yet: our
+        // commit lands at 3, so the cursor must stay at 1 or catch-up
+        // would skip sequence 2.
+        server.sequence++;
+        await syncModule.commit({ additions: manyLinks(1, "t"), removals: [] });
+        assert.equal(store.getSequence(), 1);
+    });
+});
+
+// ---------------------------------------------------------------------------
 // bootstrap
 // ---------------------------------------------------------------------------
 

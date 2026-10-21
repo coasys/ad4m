@@ -321,7 +321,14 @@ pub enum Scope {
         /// subscription) rather than one per parent.
         #[serde(deserialize_with = "deserialize_ids_flex")]
         ids: Vec<String>,
-        predicate: String,
+        /// The predicate to follow. `None` follows containment through
+        /// `Container` instead (see [`super::containment`]): every edge of the
+        /// edge set, each with its holder check, so `direction: "in"` from a
+        /// record reaches whatever holds it. A containment walk's
+        /// intermediate nodes are any container, not instances of the queried
+        /// class; only the rows are.
+        #[serde(default)]
+        predicate: Option<String>,
         /// Follow the predicate as far as it goes, rather than one step.
         ///
         /// Note the path reports only its endpoints: SPARQL property paths bind
@@ -372,7 +379,32 @@ pub enum Scope {
         /// wrong answer wearing the shape of a right one.
         #[serde(default)]
         levels: Option<Vec<usize>>,
+        /// With `transitive`, stop the walk after this many hops (`1` is the
+        /// direct neighbours). The walk is made in the executor one depth at
+        /// a time, so the bound holds over a union too. Refused without
+        /// `transitive` and beside `levels`.
+        #[serde(default, alias = "max_depth")]
+        max_depth: Option<usize>,
     },
+    /// `{ id }`: everything contained in `id`, through `Container` (see
+    /// [`super::containment`]): its `has_child` targets, and the targets of
+    /// the `children` predicate of each conforming class `id` is an
+    /// instance of. The caller never names `id`'s class.
+    ///
+    /// **Last**, and its struct refuses unknown fields: an untagged enum
+    /// takes the first variant that deserializes, and `{ id }` is a subset
+    /// of the variants above. Placed earlier it would read `{ id, predicate }`
+    /// as containment; without `deny_unknown_fields` a typo such as
+    /// `{ id, predicat }` would silently become a containment read instead of
+    /// an error.
+    Contained(ContainedScope),
+}
+
+/// The fields of [`Scope::Contained`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainedScope {
+    pub id: String,
 }
 
 /// Which way a traversal follows its predicate.
@@ -581,6 +613,13 @@ pub struct ModelQueryInput {
     /// Never on the wire.
     #[serde(skip)]
     pub(super) walked: Option<Vec<(String, String)>>,
+    /// The containment edge set a containment scope reads (`{ id }`, or a
+    /// `Traverse` naming no predicate), resolved by the perspective from the
+    /// installed classes and set before the query runs, on this query and on
+    /// every `include` sub-query (see [`super::containment::set_containment`]).
+    /// Unset, a containment scope reads `has_child` alone. Never on the wire.
+    #[serde(skip)]
+    pub(crate) containment: Option<super::containment::ContainmentEdges>,
 }
 
 /// Result returned by the model query endpoint.

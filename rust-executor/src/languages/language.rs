@@ -37,7 +37,14 @@ use std::sync::Arc;
 pub struct Language {
     address: String,
     capabilities: Arc<HashSet<Capability>>,
+    /// Test-only: answers [`Self::commit`] in place of the language runtime.
+    #[cfg(test)]
+    test_commit: Option<TestCommit>,
 }
+
+#[cfg(test)]
+pub(crate) type TestCommit =
+    Arc<dyn Fn(PerspectiveDiff) -> Result<Option<String>, AnyError> + Send + Sync>;
 
 fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
@@ -59,6 +66,17 @@ impl Language {
         Self {
             address,
             capabilities,
+            #[cfg(test)]
+            test_commit: None,
+        }
+    }
+
+    /// Test seam: a language whose `commit` is `commit`, with no runtime.
+    #[cfg(test)]
+    pub(crate) fn with_test_commit(address: String, commit: TestCommit) -> Self {
+        Self {
+            test_commit: Some(commit),
+            ..Self::new(address)
         }
     }
 
@@ -84,6 +102,10 @@ impl Language {
 // ---------------------------------------------------------------------------
 impl Language {
     pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
+        #[cfg(test)]
+        if let Some(commit) = &self.test_commit {
+            return commit(diff);
+        }
         if !self.has(Capability::PerspectiveCommit) {
             return Ok(None);
         }

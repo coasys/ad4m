@@ -190,9 +190,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 3. **String id + model class** — same metadata scan (or field lookup if
    *    options include `field`).
    * 4. **String id + string predicate** — raw escape hatch, no metadata lookup.
-   *
-   * Passing a plain string id with no second argument throws because the
-   * predicate cannot be resolved without a model class.
+   * 5. **String id alone** — containment through the built-in `Container`:
+   *    the id's `ad4m://has_child` targets, and the targets of the `children`
+   *    relation of every class the id is an instance of. The executor
+   *    resolves the predicates; nothing is looked up here.
    *
    * @param idOrInstance - The parent's expression URI **or** an Ad4mModel instance
    * @param modelOrPredicate - A model class (predicate auto-resolved) **or** a raw predicate string
@@ -215,6 +216,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    *
    * // String id + raw predicate (escape hatch)
    * Recipe.query(perspective).parent(cookbookId, "cookbook://recipe").get();
+   *
+   * // String id alone: whatever cookbookId contains
+   * Recipe.query(perspective).parent(cookbookId).get();
    * ```
    */
   parent(idOrInstance: string | Ad4mModel, modelOrPredicate?: typeof Ad4mModel | string | { field: string }, options?: { field?: string }): ModelQueryBuilder<T> {
@@ -244,9 +248,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       // Ad4mModel instance — derive model class from constructor
       this.queryParams.parent = { id, model: idOrInstance.constructor as typeof Ad4mModel, ...(field && { field }) };
     } else {
-      throw new Error(
-        'parent() called with a string id requires a second argument: either a model class or a predicate string',
-      );
+      // String id alone → containment form of Scope
+      this.queryParams.parent = { id };
     }
     return this;
   }
