@@ -60,15 +60,22 @@ const WATCH_RETRY_DELAY_MS = 1_000
 const MAX_WATCH_RETRIES = 5
 
 /** An open socket sends a ping this often, and must deliver some message
- *  (the pong will do) before the next one goes out. After a network switch a
- *  socket can stay OPEN for minutes with no close event, since no FIN or RST
- *  ever arrives; this notices it within two intervals. */
+ *  (the pong will do) within an interval of the first ping it left
+ *  unanswered. After a network switch a socket can stay OPEN for minutes with
+ *  no close event, since no FIN or RST ever arrives; this notices it within
+ *  two intervals. */
 const PING_INTERVAL_MS = 10_000
 
+/** The slowest link a socket is given time for. The executor reads a ping
+ *  only after the frames sent before it, so a ping left unanswered counts as
+ *  silence only once what the socket sent since it was last heard from could
+ *  have crossed this link, if that takes longer than PING_INTERVAL_MS. */
+const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
+
 /** How long `checkConnection` waits for the open socket to say anything
- *  after its ping. The executor answers a ping from its socket task, without
- *  waiting for any running call, so on a working path the pong is one round
- *  trip away. */
+ *  after its ping (longer if a large write sent before it may still be on
+ *  the way, as for the periodic ping). On a working path the pong is one
+ *  round trip away. */
 const CHECK_CONNECTION_DEADLINE_MS = 2_000
 
 let _idCounter = 0
@@ -145,8 +152,10 @@ export class ApiClient {
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
-    /** True once the open socket delivered a message since the last ping. */
-    private _wsHeard = true
+    /** When the open socket was first pinged since it last delivered a message; null while none is unanswered. */
+    private _wsPingedAt: number | null = null
+    /** What the open socket sent since it last delivered a message, in characters. */
+    private _wsUnheardBytes = 0
     /** A `checkConnection` probe waiting for the open socket to say anything; null when none. */
     private _wsProbeTimer: ReturnType<typeof setTimeout> | null = null
     // The executor sends a socket only the events it asked for (`events.watch`).
@@ -203,7 +212,8 @@ export class ApiClient {
 
         ws.onmessage = (event) => {
             if (this._ws === ws) {
-                this._wsHeard = true
+                this._wsPingedAt = null
+                this._wsUnheardBytes = 0
                 this._endProbe()
             }
             let parsed: Record<string, unknown>
@@ -226,7 +236,8 @@ export class ApiClient {
                 if (rpcError.status === 401) this._failAuth(rpcError.body)
                 return
             }
-            if (parsed.type === 'pong') return
+            // A dropped socket's events are not this client's any more: its successor watches again.
+            if (parsed.type === 'pong' || this._ws !== ws) return
             const perspective = parsed.perspectiveUuid
             const regs = this._handlers.get(parsed.type as string)
             // Like DOM events: a handler added during dispatch waits for the
@@ -254,7 +265,7 @@ export class ApiClient {
         this._flushWatch()
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent) {
-                ws.send(pending.message)
+                this._send(ws, pending.message)
                 pending.sent = true
             }
         }
@@ -361,25 +372,33 @@ export class ApiClient {
 
     private _startPing(ws: WebSocket): void {
         this._stopPing()
-        this._wsHeard = true
+        this._wsPingedAt = null
+        this._wsUnheardBytes = 0
         this._wsPingTimer = setInterval(() => {
             if (this._ws !== ws) return
             // A probe has its own, shorter deadline and decides for this ping.
             if (this._wsProbeTimer) return
-            if (!this._wsHeard) {
+            if (this._wsPingedAt === null) {
+                this._wsPingedAt = Date.now()
+            } else if (Date.now() - this._wsPingedAt >= Math.max(PING_INTERVAL_MS, this._wsUnheardBytes / SLOWEST_LINK_BYTES_PER_MS)) {
                 this._dropSilentSocket(ws)
                 return
             }
-            this._wsHeard = false
-            ws.send(JSON.stringify({ type: 'ping' }))
+            this._send(ws, JSON.stringify({ type: 'ping' }))
         }, PING_INTERVAL_MS)
+    }
+
+    /** Send on `ws`, counting what the open socket has sent since it was last heard from. */
+    private _send(ws: WebSocket, text: string): void {
+        if (this._ws === ws) this._wsUnheardBytes += text.length
+        ws.send(text)
     }
 
     /** The socket answered nothing for a whole ping interval: treat it as
      *  closed now. Its close event can take minutes on a dead connection,
      *  since the close frame gets no answer either; `_onClose` ignores it then. */
     private _dropSilentSocket(ws: WebSocket): void {
-        console.warn(`WebSocket silent for ${PING_INTERVAL_MS} ms after a ping; reconnecting`)
+        console.warn(`WebSocket silent for ${Date.now() - (this._wsPingedAt ?? Date.now())} ms after a ping; reconnecting`)
         this._onClose(ws)
         ws.close()
     }
@@ -454,7 +473,7 @@ export class ApiClient {
             }, timeoutMs)
             const onAbort = () => {
                 if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
-                    this._ws.send(JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
+                    this._send(this._ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
                 }
                 settle(() => reject(new DOMException('Aborted', 'AbortError')))
             }
@@ -477,7 +496,7 @@ export class ApiClient {
                 return
             }
             if (this._ws!.readyState === 1 /* OPEN */) {
-                this._ws!.send(message)
+                this._send(this._ws!, message)
                 pending.sent = true
             }
         })
@@ -632,14 +651,16 @@ export class ApiClient {
     checkConnection(deadlineMs = CHECK_CONNECTION_DEADLINE_MS): void {
         const ws = this._ws
         if (!ws || ws.readyState !== 1 /* OPEN */ || this._wsProbeTimer) return
-        this._wsHeard = false
+        this._wsPingedAt ??= Date.now()
+        this._send(ws, JSON.stringify({ type: 'ping' }))
+        // Any message from the socket ends the probe (`onmessage` → `_endProbe`).
+        const wait = Math.max(deadlineMs, this._wsUnheardBytes / SLOWEST_LINK_BYTES_PER_MS)
         this._wsProbeTimer = setTimeout(() => {
             this._wsProbeTimer = null
-            if (this._ws !== ws || this._wsHeard) return
-            console.warn(`WebSocket silent for ${deadlineMs} ms after a check; reconnecting`)
+            if (this._ws !== ws) return
+            console.warn(`WebSocket silent for ${wait} ms after a check; reconnecting`)
             this._onNetworkChange()
-        }, deadlineMs)
-        ws.send(JSON.stringify({ type: 'ping' }))
+        }, wait)
     }
 
     /** Register a callback that fires once when the executor refuses this

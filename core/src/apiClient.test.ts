@@ -364,6 +364,49 @@ describe('ApiClient notices a socket that went silent', () => {
         expect(socket(1).readyState).toBe(1)
     })
 
+    it('keeps a socket while a large write it sent may still be crossing a slow link', async () => {
+        // The executor reads a ping only after the frame sent before it, so a
+        // 600 kB write on a slow link holds the pong back for as long as the
+        // write takes. That silence is not a dead socket.
+        open()
+        socket(0).open()
+        const write = call<string>('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'perspective.addLink')!.id, result: 'done' })
+        await expect(write).resolves.toBe('done')
+        // Once heard from, the socket is held to the usual deadline again.
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
+        // A socket with no traffic hears nothing until its first ping is answered.
+        // Silence is counted from that ping, not from the last message.
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(9_990)
+        jest.setSystemTime(Date.now() + 50) // the interval fires 40 ms late
+        await jest.advanceTimersByTimeAsync(10)
+        expect(socket(0).sent.some(m => m.type === 'ping')).toBe(true)
+        expect(socket(0).readyState).toBe(1)
+        // Unanswered for a whole interval after that ping: dropped.
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('ignores events that reach a socket after it was dropped', async () => {
+        const seen = jest.fn()
+        client.on('agent-updated', seen)
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(socket(0).readyState).toBe(2)
+        socket(0).reply({ type: 'agent-updated' })
+        expect(seen).not.toHaveBeenCalled()
+    })
+
     it('keeps a socket that answers its pings or sends anything else', async () => {
         open()
         socket(0).open()
@@ -1108,7 +1151,8 @@ describe('PerspectiveProxy.on', () => {
         proxy.dispose()
         await flush()
 
-        socket(0).reply(linkAdded('p1'))
+        // off() left no handler, so the client closed its socket; the new registration opened another.
+        TestSocket.instances.at(-1)!.reply(linkAdded('p1'))
         expect(handler).toHaveBeenCalledTimes(1)
     })
 })
