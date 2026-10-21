@@ -4,18 +4,18 @@ import { version } from "../core/package.json";
 
 export default {
   project: {
-    link: "https://github.com/perspect3vism/ad4m",
+    link: "https://github.com/coasys/ad4m",
   },
   logo: (
     <>
       <img src="/images/logo.svg" style={{ marginRight: "10px" }} />
-      AD4M Docs {version}
+      AD4M Docs {version} (dev, unreleased)
     </>
   ),
   darkMode: true,
-  docsRepositoryBase: "https://github.com/perspect3vism/ad4m/blob/dev/docs/",
+  docsRepositoryBase: "https://github.com/coasys/ad4m/blob/dev/docs-src/",
   footer: {
-    text: "AD4M - The first social network",
+    text: "AD4M - the spanning layer for apps, agents and protocols",
   },
   search: {
     loading: "Loading...",

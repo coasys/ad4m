@@ -1,27 +1,176 @@
 {
-  "$comment": "Every route that existed on docs.ad4m.dev before 2026-10-21, mapped to the file that now holds the content. `anchors` maps old section anchors to a new file (same anchor) or file#anchor. scripts/write-redirects.mjs turns this into redirect pages; the same file feeds the domain move to docs.coasys.org/ad4m.",
+  "$comment": "Every route that existed on docs.ad4m.dev before 2026-10-21, mapped to the file that now holds the content. `anchors` maps an old section anchor to a new file (top of page) or file#anchor; anchors not listed are kept as-is on the new page. scripts/write-redirects.mjs turns this into redirect pages; the same file feeds the domain move to docs.coasys.org/ad4m.",
   "redirects": {
     "/installation": { "to": "start/build-an-app.mdx" },
     "/spanning-layer": { "to": "concepts/what-ad4m-is.mdx" },
     "/auth": { "to": "concepts/agent-executor-capabilities.mdx" },
     "/agents": { "to": "concepts/agent-executor-capabilities.mdx" },
-    "/languages": { "to": "concepts/language-protocols.mdx" },
+    "/languages": {
+      "to": "concepts/language-protocols.mdx",
+      "anchors": {
+        "authoring-a-language": "how-to/write-a-language.mdx",
+        "typescript-with-definelanguage": "how-to/write-a-language.mdx",
+        "rust-with-ad4mlanguage": "how-to/write-a-language.mdx",
+        "publishing-installing-using": "how-to/publish-a-language.mdx",
+        "the-interface": "reference/language-interface-spec.md",
+        "exports-what-the-runtime-calls-on-the-language": "reference/language-interface-spec.md",
+        "imports-what-the-language-calls-on-the-runtime": "reference/host-contract.md"
+      }
+    },
     "/expressions": { "to": "concepts/types-and-values.mdx" },
-    "/perspectives": { "to": "concepts/perspectives-and-links.mdx" },
-    "/neighbourhoods": { "to": "concepts/neighbourhoods.mdx" },
-    "/social-dna": { "to": "concepts/social-dna-and-flows.mdx" },
+    "/perspectives": {
+      "to": "concepts/perspectives-and-links.mdx",
+      "anchors": {
+        "sparql-query-engine": "how-to/sparql.mdx",
+        "prolog-integration-legacy": "how-to/sparql.mdx",
+        "live-queries": "concepts/queries.mdx",
+        "advanced-data-modeling": "concepts/models-and-identity.mdx"
+      }
+    },
+    "/neighbourhoods": {
+      "to": "concepts/neighbourhoods.mdx",
+      "anchors": {
+        "setting-up-a-neighbourhood": "how-to/publish-neighbourhood.mdx",
+        "joining-a-neighbourhood": "how-to/join-neighbourhood.mdx"
+      }
+    },
+    "/social-dna": {
+      "to": "concepts/social-dna-and-flows.mdx",
+      "anchors": {
+        "subject-classes-defining-things": "concepts/models-and-identity.mdx",
+        "understanding-subject-classes": "concepts/models-and-identity.mdx",
+        "how-subject-classes-are-defined-shacl": "reference/shacl-vocabulary.mdx",
+        "using-subject-classes-in-code": "how-to/define-a-model.mdx",
+        "flows-defining-actions": "concepts/flows.mdx",
+        "using-flows-in-code": "how-to/writing-a-flow.mdx",
+        "adding-flows-to-a-perspective": "how-to/writing-a-flow.mdx",
+        "query-engine-sparql": "how-to/sparql.mdx",
+        "sparql-fast-graph-queries": "how-to/sparql.mdx",
+        "the-prolog-engine-backward-compatibility": "how-to/sparql.mdx"
+      }
+    },
     "/flows": { "to": "concepts/flows.mdx" },
-    "/multi-user": { "to": "concepts/hosted-deployment.mdx" },
+    "/multi-user": {
+      "to": "concepts/hosted-deployment.mdx",
+      "anchors": {
+        "setting-up-a-multi-user-host": "how-to/multi-user-host.mdx",
+        "1-enable-multi-user-mode": "how-to/multi-user-host.mdx",
+        "2-make-the-node-publicly-reachable": "how-to/multi-user-host.mdx",
+        "practical-host-setup-guide": "how-to/multi-user-host.mdx",
+        "dns-setup": "how-to/multi-user-host.mdx",
+        "obtaining-a-tls-certificate": "how-to/multi-user-host.mdx",
+        "certificate-renewal-hook": "how-to/multi-user-host.mdx",
+        "firewall-port-forwarding": "how-to/multi-user-host.mdx",
+        "paid-hosting-via-whot": "how-to/multi-user-host.mdx",
+        "3-configure-email-verification-recommended": "how-to/multi-user-host.mdx",
+        "administration": "how-to/multi-user-host.mdx"
+      }
+    },
     "/developer-guides/model-classes": {
       "to": "concepts/models-and-identity.mdx",
-      "anchors": {}
+      "anchors": {
+        "quick-start": "how-to/define-a-model.mdx",
+        "option-1-using-decorators-recommended": "how-to/define-a-model.mdx",
+        "option-2-from-a-shacl-shape-dynamic": "how-to/define-a-model.mdx",
+        "the-wire-format-json-and-turtle": "reference/shacl-vocabulary.mdx",
+        "installing-a-shape-from-json-no-decorated-class": "how-to/define-a-model.mdx",
+        "option-3-from-json-schema-dynamic": "how-to/define-a-model.mdx",
+        "basic-concepts": "concepts/types-and-values.mdx",
+        "properties": "concepts/types-and-values.mdx",
+        "all-property-options": "reference/decorators.mdx",
+        "the-getter-option-in-detail": "reference/decorators.mdx",
+        "the-transform-option": "reference/decorators.mdx",
+        "builder-reference": "reference/decorators.mdx",
+        "when-to-use-transforms": "reference/decorators.mdx",
+        "relations": "concepts/types-and-values.mdx",
+        "relation-types-at-a-glance": "concepts/types-and-values.mdx",
+        "using-relation-methods": "concepts/types-and-values.mdx",
+        "ordered-relations": "concepts/types-and-values.mdx",
+        "flags": "concepts/types-and-values.mdx",
+        "how-it-works-under-the-hood": "concepts/models-and-identity.mdx",
+        "graph-based-storage": "concepts/models-and-identity.mdx",
+        "instance-identity": "concepts/models-and-identity.mdx",
+        "literals-for-simple-values": "concepts/types-and-values.mdx",
+        "social-dna-and-shacl": "concepts/models-and-identity.mdx",
+        "how-shacl-maps-to-ad4m": "reference/shacl-vocabulary.mdx",
+        "working-with-models": "concepts/models-and-identity.mdx",
+        "creating": "concepts/models-and-identity.mdx",
+        "reading": "concepts/models-and-identity.mdx",
+        "updating": "concepts/models-and-identity.mdx",
+        "deleting": "concepts/models-and-identity.mdx",
+        "dirty-tracking": "concepts/models-and-identity.mdx",
+        "instance-identity-1": "concepts/models-and-identity.mdx",
+        "built-in-instance-properties": "concepts/models-and-identity.mdx",
+        "querying": "concepts/queries.mdx",
+        "basic-queries": "concepts/queries.mdx",
+        "query-builder": "concepts/queries.mdx",
+        "where-operators": "concepts/queries.mdx",
+        "filtering-by-author": "how-to/filter-by-author.mdx",
+        "eager-loading-with-include": "how-to/include-relations.mdx",
+        "filtering-and-sorting-eager-loaded-relations": "how-to/include-relations.mdx",
+        "sparse-fieldsets-with-properties": "how-to/sparse-fields.mdx",
+        "per-link-rows-with-links": "reference/model-query.mdx",
+        "parent-scoped-queries": "concepts/containment.mdx",
+        "querying-several-classes-at-once": "reference/model-query.mdx",
+        "abstract-classes": "concepts/abstract-classes-and-aliases.mdx",
+        "writing-through-an-abstract-class": "how-to/write-through-abstract-class.mdx",
+        "unverified-links": "concepts/queries.mdx",
+        "reading-by-link-status": "concepts/queries.mdx",
+        "query-engine": "concepts/queries.mdx",
+        "perspectiveproxy-introspection-apis": "reference/decorators.mdx",
+        "real-time-subscriptions": "how-to/subscribe.mdx",
+        "what-re-runs-a-subscription": "how-to/subscribe.mdx",
+        "subscriptions-and-dispose": "how-to/subscribe.mdx",
+        "transactions": "how-to/batch-writes.mdx",
+        "static-convenience-methods": "reference/decorators.mdx",
+        "introspection": "reference/decorators.mdx",
+        "relation-filtering": "reference/model-query.mdx",
+        "where-on-relations": "reference/model-query.mdx",
+        "filtering-options": "reference/model-query.mdx",
+        "model-inheritance": "concepts/models-and-identity.mdx",
+        "dynamic-models-from-json-schema": "reference/decorators.mdx",
+        "basic-usage": "reference/decorators.mdx",
+        "configuration-options": "reference/decorators.mdx",
+        "resolution-cascades": "reference/decorators.mdx",
+        "x-ad4m-schema-extensions": "reference/decorators.mdx",
+        "schema-type-mapping": "reference/decorators.mdx",
+        "type-safety": "reference/decorators.mdx",
+        "limitations": "reference/decorators.mdx",
+        "best-practices": "how-to/define-a-model.mdx",
+        "error-handling": "how-to/troubleshooting.mdx"
+      }
     },
     "/developer-guides/writing-a-flow": { "to": "how-to/writing-a-flow.mdx" },
     "/developer-guides/sparql-queries": { "to": "how-to/sparql.mdx" },
     "/developer-guides/hooks": { "to": "how-to/hooks.mdx" },
     "/developer-guides/batch-operations": { "to": "how-to/batch-writes.mdx" },
-    "/developer-guides/ai": { "to": "how-to/ai-models.mdx" },
-    "/developer-guides/mcp": { "to": "how-to/mcp-server.mdx" },
+    "/developer-guides/ai": {
+      "to": "how-to/ai-models.mdx",
+      "anchors": {
+        "real-time-transcription": "how-to/transcription.mdx",
+        "multiple-transcription-streams": "how-to/transcription.mdx",
+        "automatic-stream-cleanup": "how-to/transcription.mdx",
+        "pending-interpretation-overlays": "concepts/agents.mdx"
+      }
+    },
+    "/developer-guides/mcp": {
+      "to": "how-to/mcp-server.mdx",
+      "anchors": {
+        "why-mcp": "concepts/agents.mdx",
+        "available-tools": "reference/mcp-tools.mdx",
+        "perspective-link-tools": "reference/mcp-tools.mdx",
+        "instance-tools-static-model-agnostic": "reference/mcp-tools.mdx",
+        "dynamic-shacl-tools-opt-in": "reference/mcp-tools.mdx",
+        "neighbourhood-tools": "reference/mcp-tools.mdx",
+        "agent-profile-tools": "reference/mcp-tools.mdx",
+        "waker-subscription-tools": "reference/mcp-tools.mdx",
+        "example-workflow": "start/connect-an-agent.mdx",
+        "joining-a-neighbourhood": "start/connect-an-agent.mdx",
+        "understanding-the-spanning-layer-through-mcp": "concepts/agents.mdx",
+        "openclaw": "how-to/connect-an-agent-framework.mdx",
+        "other-mcp-clients": "how-to/connect-an-agent-framework.mdx"
+      }
+    },
     "/developer-guides/cli": { "to": "reference/cli.mdx" },
     "/developer-guides/executor-config": { "to": "reference/executor-config.mdx" }
   }

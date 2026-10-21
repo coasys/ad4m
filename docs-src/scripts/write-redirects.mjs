@@ -3,7 +3,7 @@
 // with a canonical link; a small script preserves and remaps the URL hash.
 import fs from "node:fs";
 import path from "node:path";
-import { DOCS_SRC, PAGES_DIR, OUT_DIR, fileForRoute, routeFor, fail } from "./lib.mjs";
+import { DOCS_SRC, PAGES_DIR, OUT_DIR, fileForRoute, routeFor, slug, fail } from "./lib.mjs";
 
 const registry = JSON.parse(fs.readFileSync(path.join(DOCS_SRC, "redirects.json"), "utf8"));
 const problems = [];
@@ -16,7 +16,25 @@ function routeOfTarget(target, where) {
     problems.push(`${where}: target file does not exist: ${file}`);
     return null;
   }
+  if (anchor && !headingSlugs(abs).has(anchor)) {
+    problems.push(`${where}: anchor #${anchor} not found in ${file}`);
+    return null;
+  }
   return routeFor(abs) + (anchor ? "#" + anchor : "");
+}
+
+const slugCache = new Map();
+function headingSlugs(file) {
+  if (!slugCache.has(file)) {
+    const text = fs.readFileSync(file, "utf8").replace(/```[\s\S]*?```/g, "");
+    const set = new Set();
+    for (const h of text.matchAll(/^#{1,6}\s+(.+?)\s*$/gm)) {
+      const custom = /\[#([\w-]+)\]\s*$/.exec(h[1]);
+      set.add(custom ? custom[1] : slug(h[1]));
+    }
+    slugCache.set(file, set);
+  }
+  return slugCache.get(file);
 }
 
 for (const [oldRoute, spec] of Object.entries(registry.redirects)) {
@@ -28,7 +46,8 @@ for (const [oldRoute, spec] of Object.entries(registry.redirects)) {
   if (!to) continue;
   const anchors = {};
   for (const [oldAnchor, target] of Object.entries(spec.anchors || {})) {
-    const r = routeOfTarget(target.includes("#") ? target : `${target}#${oldAnchor}`, `${oldRoute}#${oldAnchor}`);
+    // "file.mdx" sends the old anchor to the top of that file; "file.mdx#x" to a section.
+    const r = routeOfTarget(target, `${oldRoute}#${oldAnchor}`);
     if (r) anchors[oldAnchor] = r;
   }
   const html = `<!DOCTYPE html>
