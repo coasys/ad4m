@@ -137,6 +137,9 @@ const MESSAGE_SHACL = JSON.stringify({
             max_count: 1,
             writable: true,
             resolve_language: "literal",
+            // Flux's Message conforms to TextContent by naming `body` its `text`;
+            // the mention waker reads messages through TextContent.
+            alias: { TextContent: "text" },
             setter: [
                 { action: "setSingleTarget", source: "this", predicate: "flux://body", target: "value", local: false }
             ]
@@ -1518,7 +1521,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Waker test channel:", wakerChannelAddr);
         });
 
-        it("should get mention waker config with SPARQL query", async function() {
+        it("should get mention waker config as a TextContent model query", async function() {
             var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
                 perspective_id: wakerPerspectiveUuid,
             }, mcpSessionId);
@@ -1529,13 +1532,15 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(config.names).to.include("wakerbot");
             expect(config.names).to.include("WakerTest");
             expect(config.query).to.be.a('string');
-            // Whole-word, case-insensitive match, never on the agent's own links
-            expect(config.query).to.include("REGEX");
-            expect(config.query).to.include('"i")');
-            expect(config.query).to.include("<ad4m://ontology/author> \"" + agentDid + "\"");
-            // Query uses SPARQL with FILTER for mention matching
-            expect(config.query).to.include("SELECT ?source ?predicate ?target WHERE");
-            console.log("SPARQL query:", config.query);
+            // A model query over the built-in TextContent: substring candidates,
+            // never on the agent's own links. The waker keeps whole words only.
+            expect(config.class).to.equal("ad4m://TextContent");
+            expect(config.terms).to.include.members(["wakerbot", "WakerTest", agentDid]);
+            var query = JSON.parse(config.query);
+            expect(query.where.OR).to.be.an('array').that.is.not.empty;
+            expect(config.query).to.include('"contains":"wakerbot"');
+            expect(config.query).to.include('"author":{"not":"' + agentDid + '"}');
+            console.log("Mention model query:", config.query);
         });
 
         it("should create WakerSubscriptionManager and receive initial (empty) result via onWake", async function() {
@@ -1560,6 +1565,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: wakerPerspectiveUuid,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
             });
 
             // Wait for subscription to initialize — should NOT fire onWake for empty result
@@ -1598,6 +1605,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: wakerPerspectiveUuid,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
                 }).catch(reject);
             });
 
@@ -1670,6 +1679,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: freshPerspId,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
             });
 
             await sleep(1000);
@@ -1730,6 +1741,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective: ownPerspId,
                 channel: "",
                 query: config.query,
+                className: config.class,
+                terms: config.terms,
             });
             await sleep(1000);
 
@@ -1799,6 +1812,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: didPerspId,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
                 }).catch(reject);
             });
 
@@ -1876,6 +1891,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     perspective: wakerPerspectiveUuid,
                     channel: "",
                     query: config.query,
+                    className: config.class,
+                    terms: config.terms,
                 }).then(async function() {
                     await sleep(1000);
                     // The block files the message through its own relation, then a peer writes it.
