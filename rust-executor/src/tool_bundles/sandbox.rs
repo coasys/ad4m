@@ -1,0 +1,364 @@
+//! A sandbox for a tool bundle: one V8 isolate on its own thread, with nothing to reach but its
+//! own code.
+//!
+//! A Language runs in a full `MainWorker` with network, a storage directory and the executor's
+//! extensions, because it has to talk to peers and sign. A tool bundle only computes: it is given
+//! JSON and answers with JSON. So it gets a bare `JsRuntime` with one extension of two ops —
+//! random bytes and a log line — and the globals `bootstrap.js` builds on them. There is no
+//! filesystem, network, timer, agent or service op registered in the isolate, so there is nothing
+//! a bundle could reach by finding a way round the globals.
+//!
+//! Every call has a time limit and the isolate a heap cap. Either one being hit terminates the
+//! isolate; the call that hit it fails, and the next call starts a fresh one from the same source.
+//! A bundle holds no state a caller may rely on between calls, so nothing is lost but warm-up.
+
+use deno_core::{op2, v8, JsRuntime, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions};
+use log::{debug, error, info, warn};
+use rand::RngCore;
+use serde_json::Value;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, Mutex};
+
+const BOOTSTRAP: &str = include_str!("bootstrap.js");
+
+/// How much a bundle may use before it is stopped.
+#[derive(Debug, Clone, Copy)]
+pub struct SandboxLimits {
+    /// How long one call may run, from being sent to being answered.
+    pub call_timeout: Duration,
+    /// The most V8 heap the isolate may hold.
+    pub max_heap_bytes: usize,
+}
+
+impl Default for SandboxLimits {
+    /// Generous for the bundles in use: the heaviest call measured so far, an edit to a 3,600-node
+    /// record, peaks at a few hundred megabytes and under a second.
+    fn default() -> Self {
+        Self {
+            call_timeout: Duration::from_secs(30),
+            max_heap_bytes: 1024 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SandboxError {
+    /// The source did not load: a syntax error, an import, or a throw while it was evaluated.
+    #[error("the bundle could not be loaded: {0}")]
+    Load(String),
+    /// The bundle threw, rejected, or has nothing callable at the path asked for.
+    #[error("{0}")]
+    Js(String),
+    #[error("the call took longer than {0:?} and was stopped")]
+    Timeout(Duration),
+    #[error("the bundle used more than {0} bytes of memory and was stopped")]
+    OutOfMemory(usize),
+    /// The isolate's thread is gone, or could not be started.
+    #[error("the bundle's sandbox is not running: {0}")]
+    Closed(String),
+}
+
+/// One request to the isolate: read what is at an export path (`args` absent), or call it.
+struct Request {
+    path: Vec<String>,
+    args: Option<String>,
+    reply: oneshot::Sender<Result<String, SandboxError>>,
+}
+
+/// A running isolate, as the handle holds it.
+struct Live {
+    tx: mpsc::UnboundedSender<Request>,
+    /// What stops the isolate from outside its thread.
+    isolate: v8::IsolateHandle,
+}
+
+/// A bundle in a sandbox: cheap to clone, safe to share, and the only way to reach the isolate.
+#[derive(Clone)]
+pub struct BundleSandbox {
+    name: String,
+    source: Arc<str>,
+    limits: SandboxLimits,
+    live: Arc<Mutex<Option<Live>>>,
+}
+
+impl BundleSandbox {
+    /// Start a sandbox and load `source`, an ES module, into it. Fails if the module does not
+    /// load. `name` is for logs and the module's URL, not an identity.
+    pub async fn start(
+        name: impl Into<String>,
+        source: impl Into<Arc<str>>,
+        limits: SandboxLimits,
+    ) -> Result<Self, SandboxError> {
+        let sandbox = Self {
+            name: name.into(),
+            source: source.into(),
+            limits,
+            live: Arc::new(Mutex::new(None)),
+        };
+        let live = spawn_isolate(&sandbox.name, sandbox.source.clone(), limits).await?;
+        *sandbox.live.lock().await = Some(live);
+        Ok(sandbox)
+    }
+
+    /// Call the function the bundle exports at `path` (`["toolsets", "template", "call"]`) with
+    /// `args`, as the object it was found on, and await what it returns. Answers with the result
+    /// as JSON; `undefined` comes back as null.
+    pub async fn call(&self, path: &[&str], args: Vec<Value>) -> Result<Value, SandboxError> {
+        let args = serde_json::to_string(&args).map_err(|e| SandboxError::Js(e.to_string()))?;
+        self.send(path, Some(args)).await
+    }
+
+    /// The value the bundle exports at `path`, as JSON. Functions inside it are left out, as
+    /// `JSON.stringify` leaves them.
+    pub async fn read(&self, path: &[&str]) -> Result<Value, SandboxError> {
+        self.send(path, None).await
+    }
+
+    async fn send(&self, path: &[&str], args: Option<String>) -> Result<Value, SandboxError> {
+        // Held for the whole call: the isolate runs one call at a time anyway, and a call that is
+        // terminated must not let the next one reach the dying isolate.
+        let mut live = self.live.lock().await;
+        if live.is_none() {
+            info!("[tool-bundle:{}] starting a fresh isolate", self.name);
+            *live = Some(spawn_isolate(&self.name, self.source.clone(), self.limits).await?);
+        }
+        let current = live.as_ref().expect("set above");
+
+        let (reply, answer) = oneshot::channel();
+        let request = Request {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            args,
+            reply,
+        };
+        if current.tx.send(request).is_err() {
+            *live = None;
+            return Err(SandboxError::Closed("the isolate stopped".into()));
+        }
+
+        let outcome = match tokio::time::timeout(self.limits.call_timeout, answer).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => Err(SandboxError::Closed("the isolate stopped mid-call".into())),
+            Err(_) => {
+                warn!(
+                    "[tool-bundle:{}] call to {} ran past {:?}; terminating",
+                    self.name,
+                    path.join("."),
+                    self.limits.call_timeout
+                );
+                current.isolate.terminate_execution();
+                Err(SandboxError::Timeout(self.limits.call_timeout))
+            }
+        };
+
+        // An isolate that was terminated, ran out of memory or lost its thread is not used again.
+        if matches!(
+            outcome,
+            Err(SandboxError::Timeout(_) | SandboxError::OutOfMemory(_) | SandboxError::Closed(_))
+        ) {
+            *live = None;
+        }
+        let text = outcome?;
+        serde_json::from_str(&text).map_err(|e| SandboxError::Js(format!("unreadable answer: {e}")))
+    }
+}
+
+/// Start an isolate on a thread of its own and load the bundle into it. Answers once the bundle
+/// has loaded, or why it did not.
+async fn spawn_isolate(
+    name: &str,
+    source: Arc<str>,
+    limits: SandboxLimits,
+) -> Result<Live, SandboxError> {
+    let (tx, rx) = mpsc::unbounded_channel::<Request>();
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<v8::IsolateHandle, SandboxError>>();
+    let thread_name = format!("bundle-{}", name.chars().take(12).collect::<String>());
+    let name = name.to_string();
+
+    std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(SandboxError::Closed(e.to_string())));
+                    return;
+                }
+            };
+            rt.block_on(run_isolate(name, source, limits, ready_tx, rx));
+        })
+        .map_err(|e| SandboxError::Closed(format!("could not start a thread: {e}")))?;
+
+    let isolate = ready_rx
+        .await
+        .map_err(|_| SandboxError::Closed("the isolate's thread ended while loading".into()))??;
+    Ok(Live { tx, isolate })
+}
+
+async fn run_isolate(
+    name: String,
+    source: Arc<str>,
+    limits: SandboxLimits,
+    ready: oneshot::Sender<Result<v8::IsolateHandle, SandboxError>>,
+    mut rx: mpsc::UnboundedReceiver<Request>,
+) {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+        extensions: vec![tool_bundle_host::init()],
+        create_params: Some(v8::Isolate::create_params().heap_limits(0, limits.max_heap_bytes)),
+        ..Default::default()
+    });
+
+    // Out of memory is a termination too, but reported as itself. The headroom granted is what
+    // lets V8 unwind the terminated script instead of aborting the process.
+    let out_of_memory = Rc::new(Cell::new(false));
+    {
+        let handle = runtime.v8_isolate().thread_safe_handle();
+        let flag = out_of_memory.clone();
+        runtime.add_near_heap_limit_callback(move |current, _initial| {
+            flag.set(true);
+            handle.terminate_execution();
+            current * 2
+        });
+    }
+
+    let (invoker, namespace) = match load(&mut runtime, &name, &source).await {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            let e = if out_of_memory.get() {
+                SandboxError::OutOfMemory(limits.max_heap_bytes)
+            } else {
+                e
+            };
+            error!("[tool-bundle:{}] {}", name, e);
+            let _ = ready.send(Err(e));
+            return;
+        }
+    };
+    if ready
+        .send(Ok(runtime.v8_isolate().thread_safe_handle()))
+        .is_err()
+    {
+        return;
+    }
+    debug!("[tool-bundle:{}] loaded", name);
+
+    while let Some(request) = rx.recv().await {
+        let outcome = invoke(&mut runtime, &invoker, &namespace, &request).await;
+        let terminated = runtime.v8_isolate().is_execution_terminating() || out_of_memory.get();
+        let outcome = match outcome {
+            Err(_) if out_of_memory.get() => Err(SandboxError::OutOfMemory(limits.max_heap_bytes)),
+            other => other,
+        };
+        let _ = request.reply.send(outcome);
+        if terminated {
+            // A terminated isolate is not trusted with another call; the handle starts a new one.
+            debug!("[tool-bundle:{}] isolate terminated; thread ending", name);
+            return;
+        }
+    }
+}
+
+/// Run the bootstrap, then load and evaluate the bundle. Answers with the invoker `bootstrap.js`
+/// evaluates to, and the bundle's module namespace.
+async fn load(
+    runtime: &mut JsRuntime,
+    name: &str,
+    source: &str,
+) -> Result<(v8::Global<v8::Function>, v8::Global<v8::Value>), SandboxError> {
+    let invoker = runtime
+        .execute_script("tool-bundle:bootstrap", BOOTSTRAP.to_string())
+        .map_err(|e| SandboxError::Load(format!("bootstrap: {e}")))?;
+    let invoker = {
+        deno_core::scope!(scope, runtime);
+        let local = v8::Local::new(scope, invoker);
+        let function = v8::Local::<v8::Function>::try_from(local)
+            .map_err(|_| SandboxError::Load("bootstrap did not evaluate to a function".into()))?;
+        v8::Global::new(scope, function)
+    };
+
+    let specifier = ModuleSpecifier::parse(&format!("tool-bundle:///{name}.js"))
+        .map_err(|e| SandboxError::Load(e.to_string()))?;
+    let module = runtime
+        .load_main_es_module_from_code(&specifier, source.to_string())
+        .await
+        .map_err(|e| SandboxError::Load(e.to_string()))?;
+    let evaluated = runtime.mod_evaluate(module);
+    runtime
+        .run_event_loop(PollEventLoopOptions::default())
+        .await
+        .map_err(|e| SandboxError::Load(e.to_string()))?;
+    evaluated
+        .await
+        .map_err(|e| SandboxError::Load(e.to_string()))?;
+
+    let namespace = runtime
+        .get_module_namespace(module)
+        .map_err(|e| SandboxError::Load(e.to_string()))?;
+    let namespace = {
+        deno_core::scope!(scope, runtime);
+        let local: v8::Local<v8::Value> = v8::Local::new(scope, namespace).into();
+        v8::Global::new(scope, local)
+    };
+    Ok((invoker, namespace))
+}
+
+/// Pass one request through the invoker and run the event loop until it settles.
+async fn invoke(
+    runtime: &mut JsRuntime,
+    invoker: &v8::Global<v8::Function>,
+    namespace: &v8::Global<v8::Value>,
+    request: &Request,
+) -> Result<String, SandboxError> {
+    let args = {
+        deno_core::scope!(scope, runtime);
+        let keys: Vec<v8::Local<v8::Value>> = request
+            .path
+            .iter()
+            .map(|key| v8::String::new(scope, key).expect("path key").into())
+            .collect();
+        let path: v8::Local<v8::Value> = v8::Array::new_with_elements(scope, &keys).into();
+        let mut args = vec![namespace.clone(), v8::Global::new(scope, path)];
+        if let Some(json) = &request.args {
+            let json: v8::Local<v8::Value> = v8::String::new(scope, json)
+                .ok_or_else(|| SandboxError::Js("arguments too large".into()))?
+                .into();
+            args.push(v8::Global::new(scope, json));
+        }
+        args
+    };
+
+    let call = runtime.call_with_args(invoker, &args);
+    let value = runtime
+        .with_event_loop_promise(call, PollEventLoopOptions::default())
+        .await
+        .map_err(|e| SandboxError::Js(e.to_string()))?;
+
+    deno_core::scope!(scope, runtime);
+    let local = v8::Local::new(scope, value);
+    Ok(local.to_rust_string_lossy(scope))
+}
+
+#[op2(fast)]
+fn op_tool_bundle_random_values(#[buffer] buffer: &mut [u8]) {
+    rand::thread_rng().fill_bytes(buffer);
+}
+
+#[op2(fast)]
+fn op_tool_bundle_log(#[smi] level: u8, #[string] message: &str) {
+    match level {
+        0 => debug!("[tool-bundle] {}", message),
+        1 => info!("[tool-bundle] {}", message),
+        2 => warn!("[tool-bundle] {}", message),
+        _ => error!("[tool-bundle] {}", message),
+    }
+}
+
+deno_core::extension!(
+    tool_bundle_host,
+    ops = [op_tool_bundle_random_values, op_tool_bundle_log],
+);

@@ -1828,14 +1828,21 @@ describe("ad4mPlugin", () => {
     }
 
     // Parameter schemas come from the captured defs with $schema stripped;
-    // everything else (including get_documentation's $defs/$ref enum) is
-    // passed through as the executor emits it.
+    // everything else is passed through as the executor emits it.
+    // get_documentation's topic is a string: the executor's own topics, or
+    // one an installed app's toolset serves.
     const getDoc = registeredTools.find((t) => t.name === "ad4m_get_documentation");
     expect(getDoc!.parameters.$schema).toBeUndefined();
     expect(getDoc!.parameters.required).toEqual(["topic"]);
-    expect(getDoc!.parameters.properties.topic.$ref).toBe("#/$defs/DocTopic");
-    expect(getDoc!.parameters.$defs.DocTopic.oneOf.map((o: any) => o.const))
-      .toEqual(["overview", "architecture", "usage", "flux", "models"]);
+    expect(getDoc!.parameters.properties.topic.type).toBe("string");
+    for (const topic of ["overview", "architecture", "usage", "flux", "models"]) {
+      expect(getDoc!.parameters.properties.topic.description).toContain(`"${topic}"`);
+    }
+    // An app's installed tools are reached through two fixed tools, so the
+    // snapshot holds whatever is installed.
+    const callTool = registeredTools.find((t) => t.name === "ad4m_call_record_tool");
+    expect(callTool!.parameters.required).toEqual(["perspective_id", "base_uri", "tool"]);
+    expect(registeredTools.map((t) => t.name)).toContain("ad4m_list_record_tools");
     const transcript = registeredTools.find((t) => t.name === "ad4m_instance_transcript");
     // The transcript reads through the built-in TextContent (#1446): no
     // class, no text property to pick.

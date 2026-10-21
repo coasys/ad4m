@@ -32,6 +32,7 @@ pub mod languages;
 pub mod logging;
 mod neighbourhoods;
 mod pubsub;
+pub mod tool_bundles;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
 mod test_utils;
@@ -627,6 +628,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     crate::utils::set_languages_directory(config.app_data_path.as_ref().unwrap());
 
     LanguageController::init_global_instance();
+
+    // The tool bundles apps installed, each in a sandbox of its own. In the background: a bundle
+    // that fails to load is logged and left out, and nothing at boot waits for them.
+    tokio::spawn(crate::tool_bundles::ToolBundleRegistry::global().load_stored());
 
     // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:
     // the core ones inline, the conductor-dependent ones in `agent::conductor_startup`.

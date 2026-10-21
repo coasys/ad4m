@@ -51,6 +51,7 @@ pub mod commands;
 pub mod create;
 pub mod describe;
 pub mod query;
+pub mod record_tools;
 pub mod transcript;
 pub mod update;
 pub(crate) mod validate;
