@@ -18,13 +18,13 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  Scope, IncludeMap, Query,
+  Scope, TraverseScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
-import { isTraverseScope } from "./types";
+import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./types";
 
 
 
@@ -377,6 +377,36 @@ function jsonToModelInstance<T extends Ad4mModel>(
 interface FieldWrite {
   commands: any[];
   parameters: { name: string; value: any }[];
+}
+
+/**
+ * Put `childId` under `parent`. A containment scope `{ id }` writes through the
+ * built-in `Container` (#1446): the executor runs the adder of the parent's own
+ * `children` relation when its class has one (a block's `we://child`), else
+ * writes `ad4m://has_child`. The other forms write their one predicate.
+ */
+async function linkToParent(
+  perspective: PerspectiveProxy,
+  parent: Exclude<Scope, TraverseScope>,
+  childCtor: Function,
+  childId: string,
+  batchId?: string,
+): Promise<void> {
+  if (isContainedScope(parent)) {
+    await perspective.updateSubject(
+      "ad4m://Container",
+      parent.id,
+      { children: { action: "adder", value: [childId] } },
+      batchId,
+    );
+    return;
+  }
+  const link = new Link({
+    source: parent.id,
+    predicate: resolveParentPredicate(parent, childCtor),
+    target: childId,
+  });
+  await perspective.add(link, 'shared', batchId);
 }
 
 /**
@@ -1111,7 +1141,21 @@ export class Ad4mModel {
     }
 
     const queryInput: any = {};
-    if (query.parent) {
+    if (query.parent && isContainedScope(query.parent)) {
+      // Containment: the executor resolves the predicates from the installed
+      // classes, so only the id travels.
+      queryInput.parent = { id: query.parent.id };
+    } else if (query.parent && isContainmentTraversal(query.parent)) {
+      // A traversal over containment: no predicate travels either.
+      const t = query.parent;
+      const traverse: Record<string, unknown> = { ids: t.ids };
+      if (t.transitive !== undefined) traverse.transitive = t.transitive;
+      if (t.direction !== undefined) traverse.direction = t.direction;
+      if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+      if (t.levels !== undefined) traverse.levels = t.levels;
+      if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
+      queryInput.parent = traverse;
+    } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
       // A traversal keeps its own shape on the wire: the executor reads `ids`,
       // and flattening it to one `id` here is how a request for a whole level
@@ -1131,6 +1175,7 @@ export class Ad4mModel {
         if (t.direction !== undefined) traverse.direction = t.direction;
         if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
         if (t.levels !== undefined) traverse.levels = t.levels;
+        if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
         queryInput.parent = traverse;
       } else {
         queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
@@ -2265,14 +2310,7 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, batchId);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -2284,14 +2322,7 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const parent = requireSingleParent(options.parent);
-      const predicate = resolveParentPredicate(parent, this);
-      const link = new Link({
-        source: parent.id,
-        predicate,
-        target: instance.id,
-      });
-      await perspective.add(link, 'shared', options?.batchId);
+      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options?.batchId);
     }
 
     return instance;

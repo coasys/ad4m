@@ -185,7 +185,7 @@ pub(crate) async fn describe_perspective_value(
                   built-in TextContent. `properties` entries are single JSON values typed as shown; `collections` \
                   are written with instance_add_to_collection / instance_remove_from_collection \
                   using item URIs. Properties are validated against this schema on every \
-                  write. For the raw ad4m://has_child tree (e.g. children of ad4m://self) use \
+                  write. For the containment tree of any node (e.g. children of ad4m://self) use \
                   add_child / get_children.",
     })
 }
