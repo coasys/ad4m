@@ -15,6 +15,10 @@ import axiod from "https://deno.land/x/axiod/mod.ts";
 
 const PROXY_URL = "https://bootstrap-store-gateway.perspect3vism.workers.dev";
 
+// A language's address is the hash of its bundle and its meta is published once,
+// so the meta under an address never changes: each is fetched at most once.
+const metaCache = new Map<string, any>();
+
 // =============================================================================
 // Language definition
 // =============================================================================
@@ -78,6 +82,7 @@ const lang = defineLanguage({
                 console.error("LanguageLanguage.get(): The address is not a valid hash");
                 return null;
             }
+            if (metaCache.has(address)) return metaCache.get(address);
             const metaDataKey = `meta-${address}`;
 
             let presignedUrl;
@@ -98,6 +103,8 @@ const lang = defineLanguage({
                 return null;
             }
 
+            // Not published (or not propagated) yet: not cached, so the next read asks again.
+            if (metaObject) metaCache.set(address, metaObject);
             return metaObject;
         },
     },

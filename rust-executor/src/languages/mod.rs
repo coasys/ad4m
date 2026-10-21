@@ -2,9 +2,9 @@ mod byte_array;
 pub mod capability;
 mod conductor_languages;
 pub mod error;
+mod fetch_backoff;
 pub mod language;
 pub mod language_context;
-mod language_meta;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
@@ -110,9 +110,6 @@ pub struct LanguageController {
 
     // Cached language names (address -> name)
     language_names: Arc<TokioMutex<HashMap<String, String>>>,
-
-    // Language metas known without asking the language language (see language_meta.rs)
-    language_metas: Arc<Mutex<HashMap<String, LanguageMeta>>>,
 }
 
 impl LanguageController {
@@ -138,7 +135,6 @@ impl LanguageController {
             system_addresses: Arc::new(TokioMutex::new(SystemLanguageAddresses::default())),
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
-            language_metas: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -878,9 +874,9 @@ impl LanguageController {
                 language_lit
             );
             let (controller, ll_addr, source_script) = (&controller, ll_addr, &source_script);
-            language_meta::fetch_with_backoff(
+            fetch_backoff::fetch_with_backoff(
                 &format!("the source of language {}", language),
-                language_meta::SOURCE_FETCH_DEADLINE,
+                fetch_backoff::SOURCE_FETCH_DEADLINE,
                 move || async move {
                     let source = controller
                         .execute_on_language(ll_addr, source_script)
@@ -927,13 +923,10 @@ impl LanguageController {
             }
 
             // Meta is optional: it is only stored beside the bundle. Asked of
-            // the language language only for a bundle that came from it, and
-            // only when this node does not know it already.
+            // the language language only for a bundle that came from it.
             let meta: Option<JsonValue> = if meta_path.exists() {
                 let content = fs::read_to_string(&meta_path)?;
                 Some(serde_json::from_str(&content)?)
-            } else if let Some(known) = controller.known_language_meta(&language) {
-                Some(serde_json::to_value(known)?)
             } else if let (true, Some(ll_addr)) = (
                 source_from_language_language,
                 language_language_address.as_ref(),
@@ -945,9 +938,9 @@ impl LanguageController {
                     language_lit
                 );
                 let (controller, ll_addr, meta_script) = (&controller, ll_addr, &meta_script);
-                let expression = language_meta::fetch_with_backoff(
+                let expression = fetch_backoff::fetch_with_backoff(
                     &format!("the meta of language {}", language),
-                    language_meta::META_FETCH_DEADLINE,
+                    fetch_backoff::META_FETCH_DEADLINE,
                     move || async move {
                         let result = controller.execute_on_language(ll_addr, meta_script).await?;
                         let expression = serde_json::from_str::<JsonValue>(&result)
@@ -957,20 +950,7 @@ impl LanguageController {
                     },
                 )
                 .await;
-                expression.and_then(|expression| {
-                    let author = expression
-                        .get("author")
-                        .and_then(|a| a.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let data = expression.get("data").cloned()?;
-                    controller.cache_language_meta(&language_meta::language_meta_from_data(
-                        &language,
-                        data.clone(),
-                        author.clone(),
-                    ));
-                    Some(language_meta::meta_file_content(data, &author))
-                })
+                expression.and_then(|expression| expression.get("data").cloned())
             } else {
                 None
             };
@@ -2067,16 +2047,11 @@ impl LanguageController {
         result
     }
 
-    /// Get language expression (meta): what this node already knows (see
-    /// `language_meta.rs`), else from the language language, then cached.
+    /// Get language expression (meta) from the language language.
     pub async fn get_language_expression(
         &self,
         address: &str,
     ) -> Result<LanguageMeta, LanguageError> {
-        if let Some(meta) = self.known_language_meta(address) {
-            return Ok(meta);
-        }
-
         let language_language_address = {
             let sys = self.system_addresses.lock().await;
             sys.language_language
@@ -2102,27 +2077,40 @@ impl LanguageController {
                 message: format!("Failed to parse language expression: {}", e),
             })?;
 
-        // Not published (or not propagated) yet: not cached, so the next read
-        // asks again.
         if meta_expression.is_null() {
             return Err(LanguageError::NotFound {
                 address: address.to_string(),
             });
         }
 
-        // The author comes from the expression envelope, not from data
+        // Extract author from the expression envelope (not from data)
         let author = meta_expression
             .get("author")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
         let data = meta_expression
             .get("data")
             .cloned()
             .unwrap_or(JsonValue::Object(serde_json::Map::new()));
 
-        let meta = language_meta::language_meta_from_data(address, data, author);
-        self.cache_language_meta(&meta);
+        // If data is a string, parse it as JSON first
+        let data = if let JsonValue::String(s) = &data {
+            serde_json::from_str::<JsonValue>(s).unwrap_or(data)
+        } else {
+            data
+        };
+
+        let mut meta: LanguageMeta = serde_json::from_value(data).unwrap_or_default();
+        // Override author from the expression envelope
+        meta.author = author;
+        // Set the address from the query parameter
+        meta.address = address.to_string();
+        // Default templated to false if not present in the data
+        if meta.templated.is_none() {
+            meta.templated = Some(false);
+        }
         Ok(meta)
     }
 

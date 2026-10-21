@@ -180,9 +180,6 @@ async fn publish_language(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .expression_create(&language_language_address, content, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
-    // No meta is recorded here, unlike applyTemplate: this bundle's hash may
-    // already be published by someone else (the language language answers
-    // "Key already exists" with the hash), and that publisher is its author.
 
     let bundle_on_disk = crate::utils::languages_directory()
         .join(&hash)
@@ -251,12 +248,10 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     // Users template link languages to create neighbourhoods, so this call stays open to
     // them. A user session publishes as the user, never as the main agent.
-    let publisher = ctx.acts_as();
     controller
-        .expression_create(&language_language_address, content, &publisher)
+        .expression_create(&language_language_address, content, &ctx.acts_as())
         .await
         .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
-    remember_published_meta(&controller, &input.meta, &publisher);
 
     let bundle_on_disk = crate::utils::languages_directory()
         .join(&hash)
@@ -273,23 +268,6 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         address: hash,
         name: input_name,
     })?)
-}
-
-/// Record the meta just published, signed by `publisher`, so `language.meta` never asks
-/// the language language for it (`LanguageController::remember_published_meta`).
-fn remember_published_meta(
-    controller: &LanguageController,
-    meta: &LanguageMeta,
-    publisher: &crate::agent::AgentContext,
-) {
-    match crate::agent::did_for_context(publisher) {
-        Ok(author) => controller.remember_published_meta(meta, &author),
-        Err(e) => log::warn!(
-            "Not recording the meta of {}: no DID for its publisher: {}",
-            meta.address,
-            e
-        ),
-    }
 }
 
 async fn remove_language(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

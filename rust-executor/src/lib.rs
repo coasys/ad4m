@@ -31,8 +31,6 @@ pub mod init;
 pub mod languages;
 pub mod logging;
 mod neighbourhoods;
-#[cfg(unix)]
-mod open_files;
 mod pubsub;
 use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
@@ -335,9 +333,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
     crate::logging::init_cli_logging(config.log_config.as_ref());
-    // Before anything opens files: Holochain, the language runtimes, sockets.
-    #[cfg(unix)]
-    open_files::raise_open_file_limit();
     config.prepare();
 
     if let Err(message) = config.check_admin_credential() {
