@@ -61,7 +61,7 @@
       "exceptionDomain": "",
       "signingIdentity": null,
       "providerShortName": null,
-      "entitlements": null
+      "entitlements": "entitlements.plist"
     },
     "linux": {
       "deb": {
@@ -72,5 +72,5 @@
       }
     }
   },
-  "version": "0.13.0-test-interpretation-2"
+  "version": "0.13.1-staging.2"
 }

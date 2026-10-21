@@ -19,11 +19,12 @@
 //!
 //! A local write is refused, not rewritten into a tombstone: callers and
 //! subscribers would otherwise see a removal event for a link that still
-//! exists. Local links (the engine's `ad4m://flow/current_state` cache, the
-//! `resolved_as` marks) are private to this replica and are not affected.
-//! The stored link's status decides, not the caller's label (see
-//! [`PerspectiveInstance::removal_status`]), and a removal of a Local flow
-//! link is never committed ([`committable`]).
+//! exists. Local links (such as the `ad4m://flow/current_state` cache and
+//! `resolved_as` marks older executors wrote, before both moved to
+//! `replica_state`) are private to this replica and are not affected.
+//! The stored link's status decides, not the caller's label (a removal of a
+//! link the store does not hold keeps the caller's, so Shared is refused),
+//! and a removal of a Local flow link is never committed ([`committable`]).
 //!
 //! # Retraction
 //!
@@ -279,32 +280,6 @@ impl PerspectiveInstance {
             let tombstone = LinkExpression::from(t);
             retracted_signature(&tombstone).is_some_and(|sig| ends(&tombstone, &sig, link))
         }))
-    }
-
-    /// The status a removal of `link` would take from this store: the stored
-    /// link's own, else `requested`. `link_mutations` carries its caller's
-    /// status rather than the stored one, so under a monotonic predicate the
-    /// store decides in both directions: a Local-labelled removal of a Shared
-    /// link is refused, a Shared-labelled removal of a Local link goes. A link
-    /// this store does not hold keeps `requested`, so Shared stays refused.
-    pub(crate) fn removal_status(
-        &self,
-        link: &LinkExpression,
-        requested: &LinkStatus,
-    ) -> Result<LinkStatus, AnyError> {
-        if !is_monotonic(link.data.predicate.as_deref()) {
-            return Ok(requested.clone());
-        }
-        let stored = self.sparql_store.get_link(
-            &link.data.source,
-            link.data.predicate.as_deref(),
-            &link.data.target,
-            &link.author,
-            &link.timestamp,
-        )?;
-        Ok(stored
-            .and_then(|l| l.status)
-            .unwrap_or_else(|| requested.clone()))
     }
 }
 

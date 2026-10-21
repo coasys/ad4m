@@ -7,9 +7,9 @@
 //! transition proposal, keep only the facts each agent signed for themselves,
 //! pool the votes per declared edge, and walk from the flow's starting state
 //! taking whichever edge reached quorum first. That walk's endpoint is the
-//! state. Nothing else moves it — not the `currentState` link (a cache this
-//! engine writes and never reads), not a `resolved_as → "fired"` mark (an
-//! index for UIs), not anyone's unsigned claim. And because state is a
+//! state. Nothing else moves it — not the recorded state (a cache this
+//! engine writes and never folds), not a fired mark (an index for UIs; both
+//! live in [`replica_state`], outside the graph), not anyone's unsigned claim. And because state is a
 //! function of the links present *now*, a link that ends recomputes the state
 //! without it: when its author retracts a settled vote the flow stands where
 //! it stood before that vote. That is the semantics, not a failure mode. Only
@@ -68,11 +68,11 @@
 //!
 //! Everything else is plumbing whose contract is stated on its module doc,
 //! and none of it makes a decision: [`roles`] resolves who may vote,
-//! [`pass`] writes the cache and the marks, [`accept`] casts this replica's
+//! [`pass`] records the state and the marks ([`replica_state`]), [`accept`] casts this replica's
 //! own vote — re-verifying the proposal's evidence seal against our own graph
 //! before signing, and sweeping the instance afterwards so the new vote is
 //! folded — and [`trigger`] runs that same sweep when a peer's flow links
-//! sync in, since the cache and the marks are this replica's own and nobody
+//! sync in, since the state and the marks are this replica's own and nobody
 //! else can update them. Nothing in them can move a state the fold did not
 //! derive.
 //!
@@ -100,6 +100,7 @@ pub mod produced;
 pub mod propose;
 pub mod read_set;
 pub mod receipt;
+pub mod replica_state;
 pub mod roles;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -107,7 +108,6 @@ pub mod time;
 pub mod trigger;
 pub mod verify;
 
-pub(crate) use pass::local_cached_state;
 pub use read_set::{fold_read_set, ProposalLinks, ReadSet};
 
 use crate::perspectives::flow_context::FlowInstanceRecord;
@@ -265,8 +265,8 @@ pub struct DerivedFlow {
 }
 
 /// Derive the current state of every record in one pass, replacing each
-/// `currentState` cache with the fold's answer so downstream readers act on
-/// the live derived state.
+/// record's `current_state` with the fold's answer so downstream readers act
+/// on the live derived state.
 ///
 /// Records are dropped — never acted on — when their flow is absent from the
 /// catalogue or when `derive_state` returns `Err` (store error, undeterminable

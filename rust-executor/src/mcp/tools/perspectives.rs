@@ -183,7 +183,7 @@ impl Ad4mMcpHandler {
     pub async fn add_perspective(&self, params: Parameters<AddPerspectiveParams>) -> String {
         let p = &params.0;
 
-        let _agent_context = match self.get_agent_context().await {
+        let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
         };
@@ -197,12 +197,7 @@ impl Ad4mMcpHandler {
         }
 
         // In multi-user mode, set the creating user as owner (reuses REST pattern)
-        let user_email = self.get_user_email().await;
-        let owner_did = if let Some(email) = &user_email {
-            crate::agent::AgentService::get_user_did_by_email(email).ok()
-        } else {
-            None
-        };
+        let owner_did = agent_context.managed_did().map(str::to_string);
 
         let handle = if let Some(owner) = &owner_did {
             PerspectiveHandle::new_with_owner(p.name.clone(), owner.clone())

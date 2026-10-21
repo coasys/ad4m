@@ -40,6 +40,7 @@
 #   AD4M_STAGING_UNIT           executor unit [ad4m-staging.service]
 #   AD4M_STAGING_URL            executor URL [http://127.0.0.1:12400]
 #   AD4M_STAGING_BUILD_TIMEOUT  build time limit, timeout(1) syntax [3h]
+#   AD4M_STAGING_CUDA_ROOT      CUDA toolkit for the staging build [/usr/local/cuda]
 #   AD4M_STAGING_GATE_SECONDS   time the new build has to become healthy [180]
 #   AD4M_STAGING_RETRY=1        build the last failed SHA again
 #   AD4M_STAGING_KEEP_DATA=1    rollback: go back without a snapshot, on the current data
@@ -372,7 +373,10 @@ fi
 log "building $sha: $subject"
 set_status staging_sha "$sha" last_result "building $sha"
 build_log=$STATE/logs/build-$sha.log
-# The same steps as the CircleCI build job, in the source worktree ($1) at $2.
+# The same steps as the CircleCI build job, in the source worktree ($1) at $2,
+# plus `--features cuda`. Staging's in-process candle models need that feature.
+# CircleCI does not pass it. cudarc links libcudart and does not set an rpath,
+# so the link adds one for $CUDA_ROOT/lib64.
 # shellcheck disable=SC2016 # expanded by the inner bash
 if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   cd "$1"
@@ -383,7 +387,9 @@ if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   pnpm build-dapp
   (cd core && pnpm install --no-frozen-lockfile)
   pnpm run build-deno-snapshot
-  (cd cli && cargo build --release)
+  export CUDA_ROOT="${AD4M_STAGING_CUDA_ROOT:-/usr/local/cuda}"
+  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-rpath,${CUDA_ROOT}/lib64"
+  (cd cli && cargo build --release --features cuda)
 ' build "$SRC" "$sha" >"$build_log" 2>&1; then
   set_status last_failed_sha "$sha"
   fail "build failed for $sha (logs/build-$sha.log in the state directory)"

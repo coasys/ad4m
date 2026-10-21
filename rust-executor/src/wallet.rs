@@ -15,6 +15,18 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 use zeroize::Zeroizing;
 
+/// How every DID document the wallet hands out is serialized: public keys only.
+///
+/// `did_key::Config::default()` is `CONFIG_LD_PRIVATE` in did-key 0.2.1, which
+/// writes `privateKeyBase58` for the Ed25519 signing key and the X25519
+/// key-agreement key into the document. Wallet documents leave the process —
+/// `agent.status`/`generate`/`unlock`/`lock`, the `agent-status-changed` event,
+/// multi-user status replies, `agent.json` on disk, and language code through
+/// `agent.didDocument()` — so they must never carry secrets (#1229). Nothing
+/// reads a secret back out of a document: signing goes through
+/// [`WalletBackend::sign`], which uses the stored key material.
+pub const DID_DOCUMENT_CONFIG: did_key::Config = did_key::CONFIG_LD_PUBLIC;
+
 /// On-disk keystore format, version 2.
 ///
 /// Argon2id derives the key from the whole passphrase and a random salt, and every write
@@ -294,7 +306,7 @@ impl Wallet {
                 .by_name
                 .insert(name.clone(), Key::from(key));
             let key = did_key::resolve(did.as_str()).expect("Failed to get key pair");
-            let did_document = key.get_did_document(did_key::Config::default());
+            let did_document = key.get_did_document(DID_DOCUMENT_CONFIG);
             Some(did_document)
         } else {
             None
@@ -323,7 +335,7 @@ impl Wallet {
                 &key.public.clone(),
                 Some(&key.secret.clone()),
             );
-            key.get_did_document(did_key::Config::default())
+            key.get_did_document(DID_DOCUMENT_CONFIG)
         })
     }
 
@@ -380,6 +392,21 @@ impl Wallet {
             .as_ref()
             .map(|keys| keys.by_name.keys().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Generate a new keypair, store it under its own DID and return the DID.
+    pub fn generate_keypair_named_by_did(&mut self) -> Result<String, AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        let key = did_key::generate::<Ed25519KeyPair>(None);
+        let did = key.get_did_document(DID_DOCUMENT_CONFIG).id;
+        if keys.by_name.contains_key(&did) {
+            return Err(anyhow!("a key named {} already exists", did));
+        }
+        keys.by_name.insert(did.clone(), Key::from(key));
+        Ok(did)
     }
 }
 
@@ -467,6 +494,20 @@ pub trait WalletBackend: Send + Sync {
     /// LocalWallet overrides this to resolve the DID and import its keys.
     fn initialize_keys(&self, _name: &str, _did: &str) -> Option<did_key::Document> {
         None
+    }
+
+    // ── Key naming: a managed agent's key is named by its DID ────────
+
+    /// Whether this backend can store a key under a name of its choosing, so that
+    /// `generate_keypair_named_by_did` works. Shared mode: false (the service creates keys
+    /// under a name it is given).
+    fn can_rename_keys(&self) -> bool {
+        false
+    }
+
+    /// Generate a new Ed25519 keypair, store it under its own DID, and return the DID.
+    fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
+        Err(anyhow!("this wallet backend cannot name keys by DID"))
     }
 }
 
@@ -633,6 +674,15 @@ impl WalletBackend for LocalWallet {
         let mut wallet = self.inner.lock().expect("wallet lock");
         wallet.initialize_keys(name.to_string(), did.to_string())
     }
+
+    fn can_rename_keys(&self) -> bool {
+        true
+    }
+
+    fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.generate_keypair_named_by_did()
+    }
 }
 
 // ── SharedWallet ────────────────────────────────────────────────────────────
@@ -769,7 +819,7 @@ impl WalletBackend for SharedWallet {
     fn get_did_document(&self, name: &str) -> Option<did_key::Document> {
         let (secret, public) = self.get_key_material(name)?;
         let key_pair = did_key::from_existing_key::<Ed25519KeyPair>(&public, Some(&secret));
-        Some(key_pair.get_did_document(did_key::Config::default()))
+        Some(key_pair.get_did_document(DID_DOCUMENT_CONFIG))
     }
 
     fn sign(&self, name: &str, message: &[u8]) -> Option<Vec<u8>> {
@@ -1488,5 +1538,73 @@ mod tests {
         let wallet = SharedWallet::new(url, "tok".to_string());
         assert!(!wallet.key_exists("missing"));
         mock.assert();
+    }
+
+    /// #1229: no DID document a wallet hands out may contain a private key,
+    /// and it must still describe the agent — the DID and both public keys.
+    fn assert_public_only(document: did_key::Document, public: &[u8], secret: &[u8], what: &str) {
+        let serialized = serde_json::to_string(&document).unwrap();
+        crate::test_utils::assert_no_private_keys(
+            &serialized,
+            &crate::test_utils::private_key_values(public, secret),
+            what,
+        );
+        let expected = did_key::from_existing_key::<Ed25519KeyPair>(public, None)
+            .get_did_document(did_key::CONFIG_LD_PUBLIC);
+        assert_eq!(
+            document, expected,
+            "{what} must still be the agent's public document"
+        );
+        assert_eq!(document.verification_method.len(), 2);
+    }
+
+    #[test]
+    fn wallet_did_documents_carry_no_private_keys() {
+        let mut wallet = Wallet::new();
+        wallet.generate_keypair("k".to_string());
+        let (public, secret) = (
+            wallet.get_public_key(&"k".to_string()).unwrap(),
+            wallet.get_secret_key(&"k".to_string()).unwrap(),
+        );
+        assert_public_only(
+            wallet.get_did_document(&"k".to_string()).unwrap(),
+            &public,
+            &secret,
+            "Wallet::get_did_document",
+        );
+
+        let local = LocalWallet::new();
+        local.generate_keypair("k").unwrap();
+        assert_public_only(
+            local.get_did_document("k").unwrap(),
+            &local.get_public_key("k").unwrap(),
+            &local.get_secret_key("k").unwrap(),
+            "LocalWallet::get_did_document",
+        );
+    }
+
+    #[test]
+    fn shared_wallet_did_document_carries_no_private_keys() {
+        let mut server = mockito::Server::new();
+        let kp = did_key::generate::<Ed25519KeyPair>(None);
+        let (public, secret) = (kp.public_key_bytes(), kp.private_key_bytes());
+        let _mock = server
+            .mock("GET", "/keys/shared_doc")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"secret":"{}","public":"{}"}}"#,
+                base64::engine::general_purpose::STANDARD.encode(&secret),
+                base64::engine::general_purpose::STANDARD.encode(&public)
+            ))
+            .create();
+
+        let wallet = SharedWallet::new(server.url(), "tok".to_string());
+        assert_public_only(
+            wallet.get_did_document("shared_doc").unwrap(),
+            &public,
+            &secret,
+            "SharedWallet::get_did_document",
+        );
     }
 }
