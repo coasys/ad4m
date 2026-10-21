@@ -9,6 +9,7 @@ import chaiAsPromised from "chai-as-promised";
 import { sleep, startExecutor, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
+import { createHash, generateKeyPairSync, sign as signBytes } from "node:crypto";
 import { EventSource } from 'eventsource';
 import { McpResponse, mcpHttpRequest, callMcpTool, listMcpTools, initializeMcp } from './mcp-utils';
 
@@ -1465,20 +1466,40 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         // A peer in the neighbourhood. The mention query skips links the agent
         // authored itself, so a mention has to come from someone else.
         // addLinkExpression stores a link under the author it claims, the same
-        // way a synced link arrives from a neighbourhood.
-        const peerDid = "did:key:z6MkWakerTestPeer";
+        // way a synced link arrives from a neighbourhood. The peer holds a real
+        // did:key and signs like the executor (sha256 over the link's JSON and
+        // the timestamp, Ed25519): the mention query is a model query, which
+        // reads verified links only, as it reads a real peer's synced links.
+        const peer = (function() {
+            const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+            const base58btc = function(bytes: Buffer) {
+                let n = BigInt("0x" + bytes.toString("hex"));
+                let out = "";
+                while (n > 0n) { out = B58[Number(n % 58n)] + out; n = n / 58n; }
+                for (const byte of bytes) { if (byte !== 0) break; out = "1" + out; }
+                return out;
+            };
+            const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+            const raw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
+            const did = "did:key:z" + base58btc(Buffer.concat([Buffer.from([0xed, 0x01]), raw]));
+            return {
+                did,
+                link(data: { source: string, predicate: string, target: string }) {
+                    const timestamp = new Date().toISOString();
+                    // Field order of the executor's `Link`: predicate, source, target.
+                    const signed = { predicate: data.predicate, source: data.source, target: data.target };
+                    const hash = createHash("sha256").update(JSON.stringify(signed)).update(timestamp).digest();
+                    const signature = signBytes(null, hash, privateKey).toString("hex");
+                    return { author: did, timestamp, data: signed, proof: { key: did + "#" + did.slice(8), signature } };
+                },
+            };
+        })();
         async function peerSays(perspectiveId: string, channel: string, text: string) {
             const message = "flux://peer-message-" + Date.now() + "-" + Math.random();
-            const timestamp = new Date().toISOString();
-            const proof = { key: peerDid + "#key", signature: "not-a-real-signature" };
-            await wakerClient.perspective.addLinkExpression(perspectiveId, {
-                author: peerDid, timestamp, proof,
-                data: { source: channel, predicate: "ad4m://has_child", target: message },
-            } as any);
-            await wakerClient.perspective.addLinkExpression(perspectiveId, {
-                author: peerDid, timestamp, proof,
-                data: { source: message, predicate: "flux://body", target: Literal.from(text).toUrl() },
-            } as any);
+            await wakerClient.perspective.addLinkExpression(perspectiveId,
+                peer.link({ source: channel, predicate: "ad4m://has_child", target: message }) as any);
+            await wakerClient.perspective.addLinkExpression(perspectiveId,
+                peer.link({ source: message, predicate: "flux://body", target: Literal.from(text).toUrl() }) as any);
             return message;
         }
 
@@ -1903,12 +1924,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                         child: message,
                     }, mcpSessionId);
                     expect(added.success).to.be.true;
-                    await wakerClient.perspective.addLinkExpression(wakerPerspectiveUuid, {
-                        author: peerDid,
-                        timestamp: new Date().toISOString(),
-                        proof: { key: peerDid + "#key", signature: "not-a-real-signature" },
-                        data: { source: message, predicate: "flux://body", target: Literal.from("Hey @wakerbot, in the block").toUrl() },
-                    } as any);
+                    await wakerClient.perspective.addLinkExpression(wakerPerspectiveUuid,
+                        peer.link({ source: message, predicate: "flux://body", target: Literal.from("Hey @wakerbot, in the block").toUrl() }) as any);
                 }).catch(reject);
             });
             manager.disposeAll();
