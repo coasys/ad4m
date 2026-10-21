@@ -142,7 +142,24 @@
     },
     "/developer-guides/writing-a-flow": { "to": "how-to/writing-a-flow.mdx" },
     "/developer-guides/sparql-queries": { "to": "how-to/sparql.mdx" },
-    "/developer-guides/hooks": { "to": "how-to/hooks.mdx" },
+    "/developer-guides/hooks": {
+      "to": "how-to/hooks.mdx",
+      "anchors": {
+        "useclient": "how-to/hooks.mdx",
+        "useagent": "how-to/hooks.mdx#5-another-agent-useagent",
+        "useme": "how-to/hooks.mdx#4-the-current-agent-useme",
+        "useperspective": "how-to/hooks.mdx#6-perspectives-useperspectives-and-useperspective",
+        "useperspectives": "how-to/hooks.mdx#6-perspectives-useperspectives-and-useperspective",
+        "uselivequery": "how-to/hooks.mdx#3-read-a-live-query-uselivequery",
+        "collection-mode-default": "how-to/hooks.mdx#3-read-a-live-query-uselivequery",
+        "single-instance-mode": "how-to/hooks.mdx#3-read-a-live-query-uselivequery",
+        "parent-scoped-queries": "how-to/hooks.mdx#3-read-a-live-query-uselivequery",
+        "return-types": "how-to/hooks.mdx#3-read-a-live-query-uselivequery",
+        "important-notes": "how-to/hooks.mdx#3-read-a-live-query-uselivequery",
+        "vue-usage": "how-to/hooks.mdx#7-vue",
+        "best-practices": "how-to/hooks.mdx"
+      }
+    },
     "/developer-guides/batch-operations": { "to": "how-to/batch-writes.mdx" },
     "/developer-guides/ai": {
       "to": "how-to/ai-models.mdx",
@@ -172,6 +189,15 @@
       }
     },
     "/developer-guides/cli": { "to": "reference/cli.mdx" },
-    "/developer-guides/executor-config": { "to": "reference/executor-config.mdx" }
+    "/developer-guides/executor-config": {
+      "to": "reference/executor-config.mdx",
+      "anchors": {
+        "precedence": "reference/executor-config.mdx",
+        "keys": "reference/executor-config.mdx#the-config-file",
+        "secrets": "reference/executor-config.mdx#environment-variables",
+        "unlocking-at-startup": "reference/executor-config.mdx#environment-variables",
+        "example": "reference/executor-config.mdx#the-config-file"
+      }
+    }
   }
 }

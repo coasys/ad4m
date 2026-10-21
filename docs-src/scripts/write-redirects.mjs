@@ -50,6 +50,9 @@ for (const [oldRoute, spec] of Object.entries(registry.redirects)) {
     const r = routeOfTarget(target, `${oldRoute}#${oldAnchor}`);
     if (r) anchors[oldAnchor] = r;
   }
+  // An unmapped old anchor is kept only if the destination has that heading;
+  // otherwise the redirect lands on `to` instead of a dead hash.
+  const known = [...headingSlugs(path.join(PAGES_DIR, spec.to.split("#")[0]))];
   const html = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Moved: ${oldRoute}</title>
@@ -57,8 +60,8 @@ for (const [oldRoute, spec] of Object.entries(registry.redirects)) {
 <meta name="robots" content="noindex">
 <meta http-equiv="refresh" content="0; url=${to}">
 <script>
-(function(){var m=${JSON.stringify(anchors)};var h=location.hash.slice(1);var t=${JSON.stringify(to)};
-if(h){t=m[h]||(t.split('#')[0]+'#'+h);}location.replace(t);})();
+(function(){var m=${JSON.stringify(anchors)};var k=${JSON.stringify(known)};var h=location.hash.slice(1);var t=${JSON.stringify(to)};
+if(h){t=m[h]||(k.indexOf(h)>=0?t.split('#')[0]+'#'+h:t);}location.replace(t);})();
 </script>
 </head><body><p>This page moved to <a href="${to}">${to}</a>.</p></body></html>
 `;
