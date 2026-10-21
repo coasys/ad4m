@@ -28,6 +28,7 @@
 //! [`config_from_instance`].
 
 use crate::agent::AgentContext;
+use crate::perspectives::interpretation::MintScopes;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
@@ -205,15 +206,16 @@ pub struct AutoProcessorConfig {
     /// subtree rooted at [`Scope::id`] linked via [`Scope::predicate`] — the
     /// SoA-tree pattern of "existing items live under THIS project node."
     pub existing_scope: Option<Scope>,
-    /// Optional parent-scope target for newly minted instances. When set, every
-    /// new base URI returned by an interpretation pass gets an additional
-    /// `Scope::id --predicate--> new-uri` link written into the perspective,
-    /// so the minted instance becomes a first-class child of the target scope
-    /// (not just a URI-prefix convention). `None` skips the child-link write
-    /// and preserves the pre-scope behaviour where mint sites are unlinked.
-    /// May differ from [`Self::existing_scope`] — a watcher can read from a
-    /// broader subtree than it writes into, or vice-versa.
-    pub mint_scope: Option<Scope>,
+    /// Parent scopes for newly minted instances. Every base an interpretation
+    /// pass creates gets a `Scope::id --predicate--> new-uri` link for each
+    /// scope, written in the same batch as the instance, so the minted
+    /// instance is a first-class child of each target (not just a URI-prefix
+    /// convention). Empty leaves mint sites unlinked. Stored on the
+    /// processor's node as `mintScope`, so any peer that runs the pass, after
+    /// any restart, links the same way. May differ from
+    /// [`Self::existing_scope`] — a watcher can read from a broader subtree
+    /// than it writes into, or vice-versa.
+    pub mint_scopes: MintScopes,
     /// Interpretation-pass tool-call budget. `None` or `Some(0)` = the
     /// original single-shot LLM path (no tools). `Some(N)` with `N > 0` =
     /// engage the tool-calling harness (see [`crate::ai_service::harness`])
@@ -318,9 +320,9 @@ pub async fn write_processor(
             .map_err(|e| anyhow::anyhow!("write_processor: serialize existing_scope: {e:#}"))?;
         values["existingScope"] = json.into();
     }
-    if let Some(mint_scope) = &cfg.mint_scope {
-        let json = serde_json::to_string(mint_scope)
-            .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
+    if !cfg.mint_scopes.is_empty() {
+        let json = serde_json::to_string(&cfg.mint_scopes)
+            .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scopes: {e:#}"))?;
         values["mintScope"] = json.into();
     }
     if let Some(max_tool_calls) = cfg.max_tool_calls {
@@ -673,15 +675,20 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         },
         None => None,
     };
-    let mint_scope = match scalar("mintScope") {
-        Some(json) => match serde_json::from_str::<Scope>(&json) {
-            Ok(scope) => Some(scope),
+    // One scope or a list of them. A scope that is not `Raw` is skipped like
+    // a parse failure: every pass would refuse it.
+    let mint_scopes = match scalar("mintScope") {
+        Some(json) => match serde_json::from_str::<MintScopes>(&json)
+            .map_err(anyhow::Error::from)
+            .and_then(|scopes| scopes.validate().map(|_| scopes))
+        {
+            Ok(scopes) => scopes,
             Err(e) => {
-                log::warn!("config_from_instance: mintScope parse failed: {e:#}");
+                log::warn!("config_from_instance: mintScope rejected: {e:#}");
                 return None;
             }
         },
-        None => None,
+        None => MintScopes::default(),
     };
 
     // `maxToolCalls`: absent → `None` (single-shot, no harness). Present but
@@ -719,7 +726,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         dedup_strategy_json: scalar("dedupStrategy"),
         source_window_ms,
         existing_scope,
-        mint_scope,
+        mint_scopes,
         max_tool_calls,
         emit_debug_events,
     })
@@ -884,10 +891,11 @@ mod tests {
             id: "soa://project/42".into(),
             predicate: "soa://contains".into(),
         });
-        raw.mint_scope = Some(Scope::Raw {
+        raw.mint_scopes = Scope::Raw {
             id: "soa://project/42/backlog".into(),
             predicate: "ad4m://has_child".into(),
-        });
+        }
+        .into();
         write_processor(&mut p, &raw, Some(false), &ctx)
             .await
             .expect("write");
@@ -901,7 +909,7 @@ mod tests {
             id: "soa://project/42".into(),
             field: Some("tasks".into()),
         });
-        model.mint_scope = None;
+        model.mint_scopes = MintScopes::default();
         write_processor(&mut p, &model, Some(false), &ctx)
             .await
             .expect("write");
@@ -912,6 +920,75 @@ mod tests {
         assert_eq!(loaded[0], bare);
         assert_eq!(loaded[1], model);
         assert_eq!(loaded[2], raw);
+    }
+
+    /// Two mint scopes round-trip as a list, and a stored single scope (the
+    /// shape every config had before lists) still reads as one.
+    #[tokio::test]
+    async fn mint_scopes_roundtrip_one_and_many() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let mut two = sample_config("two-parents");
+        two.mint_scopes = MintScopes(vec![
+            Scope::Raw {
+                id: "app://collection/1".into(),
+                predicate: "app://child".into(),
+            },
+            Scope::Raw {
+                id: "app://conversation/7".into(),
+                predicate: "app://source_of".into(),
+            },
+        ]);
+        write_processor(&mut p, &two, Some(false), &ctx)
+            .await
+            .expect("write");
+
+        write_processor(&mut p, &sample_config("one-parent"), Some(false), &ctx)
+            .await
+            .expect("write");
+        p.update_subject(
+            class_option(),
+            processor_node("one-parent"),
+            serde_json::json!({
+                "mintScope": r#"{"id":"app://collection/1","predicate":"app://child"}"#
+            }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed a single-object scope");
+
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded[0].mint_scopes,
+            MintScopes(vec![Scope::Raw {
+                id: "app://collection/1".into(),
+                predicate: "app://child".into(),
+            }])
+        );
+        assert_eq!(loaded[1], two);
+    }
+
+    /// A stored mint scope that no pass could link under is a config error,
+    /// like a garbled one.
+    #[tokio::test]
+    async fn load_skips_node_with_non_raw_mint_scope() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("modelled"), Some(false), &ctx)
+            .await
+            .expect("write");
+        p.update_subject(
+            class_option(),
+            processor_node("modelled"),
+            serde_json::json!({
+                "mintScope": r#"{"model":"Project","id":"app://p","field":null}"#
+            }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed a model scope");
+        assert!(load_processors(&p).await.expect("load").is_empty());
     }
 
     /// A `mint_scope` value that fails to parse as JSON is a config error, so

@@ -23,9 +23,7 @@ use crate::perspectives::interpretation::{
     DedupStrategy, InterpretationRunCursor, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
-use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkStatus};
 
 use super::claim::{batch_key, renew_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
@@ -35,7 +33,7 @@ use super::events::{
 };
 
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -918,31 +916,6 @@ pub async fn run_one_pass(
         .clone()
         .unwrap_or_else(|| format!("ad4m://autoprocessor/{}/instance/", cfg.processor_id));
 
-    // Pre-pass snapshot of every instance URI the interpretation classes
-    // already know about — the whole perspective, NOT filtered by
-    // `existing_scope`, because we need to know whether a returned base
-    // pre-existed anywhere (not just within our dedup scope). Used below to
-    // distinguish freshly-created bases from upserts of already-existing
-    // instances for mint-scope linking (CodeRabbit #902 review): linking an
-    // upserted pre-existing instance would multi-parent unrelated graph state
-    // into our scope. Skipped entirely when mint_scope is absent — nothing
-    // consumes the snapshot in that path.
-    let pre_existing_uris: HashSet<String> = if cfg.mint_scope.is_some() {
-        abandon_on_err!(
-            crate::perspectives::interpretation::existing_instance_context(
-                perspective,
-                &shapes,
-                None,
-            )
-            .await
-        )
-        .into_values()
-        .flat_map(|instances| instances.into_iter().map(|i| i.id))
-        .collect()
-    } else {
-        HashSet::new()
-    };
-
     let cursor = InterpretationRunCursor {
         processor: super::config::processor_node(&cfg.processor_id),
         sources: item_ids.clone(),
@@ -1006,6 +979,9 @@ pub async fn run_one_pass(
                     // only on the flows this processor selected. An empty
                     // selection = flow-blind pass.
                     Some(&cfg.flows),
+                    // Parent links for the fresh bases, written in the same
+                    // batch as the bases themselves.
+                    &cfg.mint_scopes,
                 )
                 .await
             );
@@ -1032,6 +1008,7 @@ pub async fn run_one_pass(
                     emit_ctx.as_ref(),
                     // Same flow targeting as the harness branch above.
                     Some(&cfg.flows),
+                    &cfg.mint_scopes,
                 )
                 .await
             );
@@ -1046,9 +1023,9 @@ pub async fn run_one_pass(
     //
     // KNOWN GAP, stated rather than papered over: by the time control reaches
     // here the interpretation has already written its bases — that write
-    // happens inside `run_interpretation_*`, not out here. So this cannot
-    // prevent the duplicate, only refuse to compound it (no mint-scope
-    // re-parenting, no `Processed` event asserting a clean pass) and leave a
+    // happens inside `run_interpretation_*`, not out here, together with the
+    // mint-scope parent links. So this cannot prevent the duplicate, only
+    // refuse to compound it (no `Processed` event asserting a clean pass) and leave a
     // findable line in the log. Refusing the write itself needs a cancellation
     // check threaded into the interpretation engine; that is a larger change,
     // tracked on #1009 rather than bolted on here.
@@ -1067,30 +1044,6 @@ pub async fn run_one_pass(
         return Ok(PassOutcome::BackedOff { holder });
     }
 
-    // Mint-scope child links: if the processor declares a `mint_scope`, wire
-    // every **freshly created** base as a child under the target node via the
-    // configured predicate — turning the SoA-tree "children live under this
-    // node" from a URI-prefix convention into an actual graph edge. We filter
-    // to freshly-created bases (not present in `pre_existing_uris`) so that
-    // upserts of pre-existing instances don't get re-parented into our scope
-    // (CodeRabbit #902 review). Written outside the interpretation batch: if
-    // the executor crashes between the mint and the link write, the base is
-    // orphaned but the next pass will upsert by identity + re-attempt the
-    // link write (idempotent). The `Processed` signal fires only after the
-    // mint-scope write succeeds, so observers never see a false "done" state.
-    if let Some(mint_scope) = &cfg.mint_scope {
-        let created = partition_created(&bases, &pre_existing_uris);
-        abandon_on_err!(
-            write_mint_scope_links(
-                perspective,
-                mint_scope,
-                &created,
-                context,
-                &cfg.processor_id,
-            )
-            .await
-        );
-    }
     // Emit the `Processed` event. Carries the final `bases` list — the
     // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
     // and `LlmResponseReceived` events (Nico 2026-08-20), so a subscribing
@@ -1125,75 +1078,6 @@ pub async fn run_one_pass(
         pass_started.elapsed().as_millis()
     );
     Ok(PassOutcome::Won { bases })
-}
-
-/// Add a `mint_scope.id --predicate--> new_base_uri` link for every URI in
-/// `bases`. Only [`Scope::Raw`] carries an explicit predicate, so
-/// [`Scope::Model`] is treated as configuration error rather than a silent
-/// no-op — the caller should have constructed a `Raw` variant when it needs
-/// mint-time child linking.
-///
-/// Return every URI in `bases` that is NOT in `pre_existing`, preserving
-/// original order. Used by mint-scope linking (CodeRabbit #902 review) to
-/// exclude upserts of pre-existing instances — writing a mint-scope link
-/// for those would multi-parent unrelated graph state into our scope.
-pub(crate) fn partition_created<'a>(
-    bases: &'a [String],
-    pre_existing: &HashSet<String>,
-) -> Vec<String> {
-    bases
-        .iter()
-        .filter(|b| !pre_existing.contains(*b))
-        .cloned()
-        .collect()
-}
-
-pub(crate) async fn write_mint_scope_links(
-    perspective: &mut PerspectiveInstance,
-    mint_scope: &Scope,
-    bases: &[String],
-    context: &AgentContext,
-    processor_id: &str,
-) -> anyhow::Result<()> {
-    let (parent_id, predicate) = match mint_scope {
-        Scope::Raw { id, predicate } => (id.clone(), predicate.clone()),
-        Scope::Model { .. } => {
-            anyhow::bail!(
-                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
-                 (id + predicate); `Model` scopes carry no linking predicate"
-            );
-        }
-        Scope::Traverse { .. } => {
-            // A traversal describes how to *read* outward from anchors. Minting
-            // against it would have to pick one of them to hang the new link
-            // under, and nothing in the scope says which.
-            anyhow::bail!(
-                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
-                 (id + predicate); `Traverse` scopes describe a read and name no single parent"
-            );
-        }
-    };
-    for base in bases {
-        perspective
-            .add_link(
-                Link {
-                    source: parent_id.clone(),
-                    predicate: Some(predicate.clone()),
-                    target: base.clone(),
-                },
-                LinkStatus::Shared,
-                None,
-                context,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "auto_processor `{processor_id}`: mint_scope add_link({parent_id} -> {base}) \
-                     failed: {e:#}"
-                )
-            })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1785,115 +1669,6 @@ mod tests {
         }
     }
 
-    // ---- write_mint_scope_links -------------------------------------------
-
-    /// `Raw` mint_scope + N minted bases → N shared `parent --predicate--> base`
-    /// links land on the perspective. Verifies the SoA-tree child-link write is
-    /// atomic in intent (one call, N links) and uses the configured predicate.
-    #[tokio::test]
-    async fn write_mint_scope_links_writes_one_shared_link_per_base() {
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        let scope = Scope::Raw {
-            id: "soa://project/42".into(),
-            predicate: "soa://contains".into(),
-        };
-        let bases = vec![
-            "soa://project/42/task/a".to_string(),
-            "soa://project/42/task/b".to_string(),
-        ];
-        write_mint_scope_links(&mut p, &scope, &bases, &ctx, "test-proc")
-            .await
-            .expect("write_mint_scope_links");
-        let links = p
-            .get_links(&crate::types::LinkQuery {
-                source: Some("soa://project/42".into()),
-                predicate: Some("soa://contains".into()),
-                ..Default::default()
-            })
-            .await
-            .expect("get_links");
-        let targets: std::collections::BTreeSet<String> =
-            links.iter().map(|l| l.data.target.clone()).collect();
-        assert_eq!(
-            targets,
-            bases
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>(),
-            "every minted base linked as child under the mint_scope parent"
-        );
-        for l in &links {
-            assert_eq!(l.status, Some(LinkStatus::Shared), "child link must sync");
-        }
-    }
-
-    /// Empty base list → no writes; a no-op is still success.
-    #[tokio::test]
-    async fn write_mint_scope_links_handles_empty_bases() {
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        let scope = Scope::Raw {
-            id: "soa://p".into(),
-            predicate: "soa://c".into(),
-        };
-        write_mint_scope_links(&mut p, &scope, &[], &ctx, "empty")
-            .await
-            .expect("write_mint_scope_links");
-        let links = p
-            .get_links(&crate::types::LinkQuery {
-                source: Some("soa://p".into()),
-                ..Default::default()
-            })
-            .await
-            .expect("get_links");
-        assert!(links.is_empty(), "no bases → no links");
-    }
-
-    // ---- partition_created (CodeRabbit #902 fix) ---------------------------
-
-    /// Every base that was NOT in the pre-pass snapshot is created; every base
-    /// that WAS in the snapshot is an upsert and must not be linked into the
-    /// mint scope (would multi-parent unrelated graph state).
-    #[test]
-    fn partition_created_filters_upserts_out() {
-        let bases = vec![
-            "soa://new/task-a".to_string(),
-            "soa://existing/task-b".to_string(),
-            "soa://new/task-c".to_string(),
-        ];
-        let mut pre: HashSet<String> = HashSet::new();
-        pre.insert("soa://existing/task-b".into());
-        pre.insert("soa://existing/task-z-untouched".into()); // extra pre-existing not in bases
-        let created = partition_created(&bases, &pre);
-        assert_eq!(
-            created,
-            vec!["soa://new/task-a", "soa://new/task-c"],
-            "pre-existing bases are excluded, order preserved for the rest"
-        );
-    }
-
-    /// Empty pre-existing set → every returned base is "created."
-    #[test]
-    fn partition_created_all_new_when_snapshot_empty() {
-        let bases = vec!["a".to_string(), "b".to_string()];
-        let created = partition_created(&bases, &HashSet::new());
-        assert_eq!(created, bases);
-    }
-
-    /// Every base pre-existed → the created set is empty (no mint-scope
-    /// linking should happen this pass).
-    #[test]
-    fn partition_created_all_upserts_returns_empty() {
-        let bases = vec!["a".to_string(), "b".to_string()];
-        let mut pre: HashSet<String> = HashSet::new();
-        pre.insert("a".into());
-        pre.insert("b".into());
-        let created = partition_created(&bases, &pre);
-        assert!(
-            created.is_empty(),
-            "when every base pre-existed, no new links are written"
-        );
-    }
-
     // ---- liveness-touch: idle reap is preserved, active pass is kept --------
 
     /// The LeaseGuard heartbeat refreshes `last_seen` during a long pass, which
@@ -1920,27 +1695,6 @@ mod tests {
             online,
             vec!["active@x"],
             "idle user must be reaped; active must remain"
-        );
-    }
-
-    /// `Model` scope has no predicate, so mint-time child linking is a config
-    /// error rather than a silent no-op: the config declared a mint target,
-    /// dropping it would create unlinked bases under a UI expecting children.
-    #[tokio::test]
-    async fn write_mint_scope_links_errors_on_model_scope() {
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        let scope = Scope::Model {
-            model: "Project".into(),
-            id: "soa://project/42".into(),
-            field: None,
-        };
-        let err = write_mint_scope_links(&mut p, &scope, &["x".into()], &ctx, "modelled")
-            .await
-            .expect_err("model scope must fail");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("must be a `Raw` scope"),
-            "error mentions the shape mismatch: {msg}"
         );
     }
 }

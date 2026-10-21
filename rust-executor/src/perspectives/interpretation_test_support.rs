@@ -484,6 +484,7 @@ pub(crate) async fn run_interpretation_harness_e2e(
         None,
         // All flows visible — flow-targeting is exercised by its own tests.
         None,
+        &crate::perspectives::interpretation::MintScopes::default(),
     )
     .await
     .expect("run_interpretation_with_harness against real LLM to succeed")
