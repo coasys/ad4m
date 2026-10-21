@@ -1,5 +1,5 @@
-//! `instance_transcript` — a compact, chronological reading of the
-//! `ad4m://has_child` children under a node that carry text: the most recent
+//! `instance_transcript` — a compact, chronological reading of the children
+//! under a node (through `Container`, #1446) that carry text: the most recent
 //! N instances with their text, author display name and timestamp, formatted
 //! as plain text an LLM can read in one go instead of N+1 tool calls.
 //!
@@ -12,7 +12,7 @@
 //! `model_query`, so signed literal envelopes and custom-language
 //! expressions resolve the same way `instance_query` resolves them.
 
-use super::{error_json, link_target, run_model_query, Ad4mMcpHandler, HAS_CHILD, MAX_QUERY_LIMIT};
+use super::{error_json, link_target, run_model_query, Ad4mMcpHandler, MAX_QUERY_LIMIT};
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
 use crate::types::Agent;
@@ -31,8 +31,9 @@ pub(super) const DEFAULT_TRANSCRIPT_LIMIT: usize = 50;
 pub struct InstanceTranscriptParams {
     /// Perspective UUID
     pub perspective_id: String,
-    /// Parent node URI whose ad4m://has_child children are read (e.g. a
-    /// Channel's id). A bare string is wrapped as a literal URI.
+    /// Parent node URI whose children are read (e.g. a Channel's id): its
+    /// `ad4m://has_child` children, and those of its class's own `children`
+    /// relation. A bare string is wrapped as a literal URI.
     pub parent: String,
     /// How many of the most recent instances to include (default 50, max 500)
     pub limit: Option<usize>,
@@ -85,7 +86,7 @@ impl Ad4mMcpHandler {
     /// Read the most recent children under a node that carry text, through
     /// TextContent, as a transcript.
     #[tool(
-        description = "Read the most recent ad4m://has_child children of a node that carry text, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for one specific class, for the full property maps, or for filters."
+        description = "Read the most recent children of a node that carry text (its ad4m://has_child children, plus those of its class's own children relation, e.g. a block's we://child), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text as stored (HTML or Markdown). It is one query on the built-in abstract class TextContent: it reads every child whose class has a `text` property or a property aliased to `text`, whatever the app calls the class; children of other classes are not shown. Ideal for reading a conversation-shaped container in one call (parent=<channel id>). limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for one specific class, for the full property maps, or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -106,7 +107,7 @@ impl Ad4mMcpHandler {
             .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
             .clamp(1, MAX_QUERY_LIMIT);
         let query = json!({
-            "parent": { "id": link_target(parent), "predicate": HAS_CHILD },
+            "parent": { "id": link_target(parent) },
             "order": [["timestamp", "desc"]],
             "limit": limit,
         });

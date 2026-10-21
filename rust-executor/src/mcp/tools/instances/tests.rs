@@ -1516,9 +1516,8 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .await,
     );
     assert_eq!(first["success"], true, "{first}");
-    assert_eq!(first["link"]["predicate"], "ad4m://has_child");
-    assert_eq!(first["link"]["target"], "ad4m://obj/one");
-    let wrapped_parent = first["link"]["source"].as_str().unwrap().to_string();
+    assert_eq!(first["child"], "ad4m://obj/one");
+    let wrapped_parent = first["parent"].as_str().unwrap().to_string();
     assert!(
         wrapped_parent.starts_with("literal:"),
         "bare parent must be literal-wrapped, got {wrapped_parent}"
@@ -1536,7 +1535,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .await,
     );
     assert_eq!(second["success"], true, "{second}");
-    let second_child = second["link"]["target"].as_str().unwrap().to_string();
+    let second_child = second["child"].as_str().unwrap().to_string();
     assert!(second_child.starts_with("literal:"), "{second_child}");
 
     let listed = parse(
@@ -2552,4 +2551,232 @@ async fn instance_update_returns_the_store_error_of_the_abstract_check() {
             .await,
     );
     assert_eq!(got["body"], "hello", "{got}");
+}
+
+// ── Containers (#1446): We's shapes as We writes them ───────────────────────
+
+/// We's `CollectionBlock` and `TextBlock` as the SDK writes them.
+/// `CollectionBlock.children` is a relation over `we://child`, so it conforms
+/// to the built-in Container by name, and its `we://child` links are
+/// containment on CollectionBlocks only.
+const WE_COLLECTION_BLOCK_SDNA: &str = include_str!("we_shapes/collection_block.json");
+const WE_TEXT_BLOCK_SDNA: &str = include_str!("we_shapes/text_block.json");
+
+async fn we_setup() -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+    setup_with(
+        &[
+            ("CollectionBlock", WE_COLLECTION_BLOCK_SDNA),
+            ("TextBlock", WE_TEXT_BLOCK_SDNA),
+        ],
+        false,
+    )
+    .await
+}
+
+/// Create one instance with no parent; its id.
+async fn create_plain(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class_name: &str,
+    properties: Map<String, Value>,
+) -> String {
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: class_name.into(),
+                properties: Some(properties),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    created["base_uri"].as_str().unwrap().to_string()
+}
+
+/// The targets of `source`'s links on `predicate`.
+async fn targets_of(uuid: &str, source: &str, predicate: &str) -> Vec<String> {
+    let perspective = crate::perspectives::get_perspective(uuid).unwrap();
+    perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(source.into()),
+            predicate: Some(predicate.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect()
+}
+
+/// Test 10: a We call (`CollectionBlock`) holds a `TextBlock` through
+/// `we://child`, the link We writes. `get_children`, `instance_transcript`
+/// and `instance_query(parent)` read it beside a `has_child` child, and
+/// writes under the call go through its own `children` relation (open
+/// question 5): `instance_create(parent)` and `add_child` write
+/// `we://child`, not `has_child`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_we_calls_blocks_are_its_children() {
+    let (handler, uuid, _guard) = we_setup().await;
+    let call = create_plain(
+        &handler,
+        &uuid,
+        "CollectionBlock",
+        props(&[("kind", json!("call"))]),
+    )
+    .await;
+    let by_we = create_plain(
+        &handler,
+        &uuid,
+        "TextBlock",
+        props(&[("text", json!("Hey @data, can you summarise?"))]),
+    )
+    .await;
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: call.clone(),
+                predicate: "we://child".into(),
+                target: by_we.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let by_has_child = create_plain(
+        &handler,
+        &uuid,
+        "TextBlock",
+        props(&[("text", json!("filed with has_child"))]),
+    )
+    .await;
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: call.clone(),
+                predicate: "ad4m://has_child".into(),
+                target: by_has_child.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let listed = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: call.clone(),
+                limit: None,
+            }))
+            .await,
+    );
+    let ids: Vec<&str> = listed["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![by_we.as_str(), by_has_child.as_str()], "{listed}");
+    assert!(listed["children"][0]["author"]
+        .as_str()
+        .unwrap()
+        .starts_with("did:"));
+
+    let transcript = handler
+        .instance_transcript(Parameters(transcript(&uuid, &call)))
+        .await;
+    assert!(
+        transcript.contains("Hey @data, can you summarise?")
+            && transcript.contains("filed with has_child"),
+        "{transcript}"
+    );
+
+    let queried = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "TextBlock".into(),
+                filter: None,
+                parent: Some(call.clone()),
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    );
+    assert_eq!(queried["total_count"], 2, "{queried}");
+
+    // Writes under the call use its own relation.
+    let created = create_under(
+        &handler,
+        &uuid,
+        "TextBlock",
+        props(&[("text", json!("created under the call"))]),
+        &call,
+    )
+    .await;
+    let added = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: call.clone(),
+                child: "ad4m://re/parented".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+    let we_children = targets_of(&uuid, &call, "we://child").await;
+    assert!(
+        we_children.contains(&created) && we_children.contains(&"ad4m://re/parented".to_string()),
+        "{we_children:?}"
+    );
+    assert_eq!(
+        targets_of(&uuid, &call, "ad4m://has_child").await,
+        vec![by_has_child.clone()]
+    );
+
+    // A node no class describes is held by has_child, and a we://child link
+    // on it holds nothing.
+    let plain = "ad4m://plain/node";
+    let added = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: plain.into(),
+                child: by_we.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+    assert_eq!(
+        targets_of(&uuid, plain, "ad4m://has_child").await,
+        vec![by_we.clone()]
+    );
+    let linked = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: plain.into(),
+                predicate: "we://child".into(),
+                target: by_has_child.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(linked["success"], true, "{linked}");
+    let listed = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: plain.into(),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(listed["total_count"], 1, "{listed}");
+    assert_eq!(listed["children"][0]["id"], by_we.as_str());
 }

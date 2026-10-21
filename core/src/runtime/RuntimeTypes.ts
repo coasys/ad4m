@@ -8,6 +8,8 @@ export class SentMessage {
 
 export class RuntimeInfo {
     ad4mExecutorVersion: string;
+    /** The commit the executor was built from, or null when the build could not tell. */
+    ad4mExecutorCommit: string | null;
     isInitialized: Boolean;
     isUnlocked: Boolean;
 }
