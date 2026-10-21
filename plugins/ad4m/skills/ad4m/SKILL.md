@@ -23,7 +23,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `describe_perspective` — the schema of every registered class, as data
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
 - `instance_transcript` — the newest N children under a parent that carry text (any class with a `text` property or one aliased to `text`, read through the built-in TextContent; no `class_name`) as a readable transcript (the way to read a channel, see Rule 6)
-- `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (`get_children` takes `parent`, not `id` — see `ad4m_get_documentation(topic="usage")`)
+- `add_child` / `get_children` — the containment tree, class-agnostic: a node's children are its `ad4m://has_child` targets plus those of its class's own `children` relation (the built-in Container) (`get_children` takes `parent`, not `id` — see `ad4m_get_documentation(topic="usage")`)
 - `add_link` / `query_links` — raw link access (rarely needed, see Rule 4)
 - `neighbourhood_join_from_url` / `neighbourhood_publish_from_perspective`
 - `add_perspective` / `list_perspectives`
@@ -228,7 +228,7 @@ ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-
 
 ## The data model and the tree
 
-Model instance ids and the `ad4m://has_child` tree (`add_child` / `get_children`) — `ad4m_get_documentation(topic="usage")`. Authoring your own classes — `topic="models"`. App-level conventions for a space an app created — that app's topic, currently `topic="flux"`. All of it is served by the executor itself, so none of it is repeated here.
+Model instance ids and the containment tree (`add_child` / `get_children`) — `ad4m_get_documentation(topic="usage")`. Authoring your own classes — `topic="models"`. App-level conventions for a space an app created — that app's topic, currently `topic="flux"`. All of it is served by the executor itself, so none of it is repeated here.
 
 ---
 
