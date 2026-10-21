@@ -394,7 +394,9 @@ async fn holders_of(
 /// every reading alike. What has no meaning over untyped children (a clause
 /// on their properties, a per-link author, a comparison, a dotted key) is
 /// refused rather than handed to one reading, and so are a projection and an
-/// `include` over `children`, which would count or hydrate one reading's.
+/// `include` over `children`, which would count or hydrate one reading's, and
+/// an `order` on it, which would sort and page on one reading's (#1461
+/// review).
 pub async fn resolve_children_where(
     store: &SparqlStore,
     query: &mut ModelQueryInput,
@@ -417,6 +419,19 @@ pub async fn resolve_children_where(
         return Err(anyhow!(
             "Container: `include` on `children` is not supported: children have no class to \
              hydrate them as. Query them with `parent: {{ id }}` on their class."
+        ));
+    }
+    if query
+        .order
+        .iter()
+        .flatten()
+        .any(|(key, _)| key == "children")
+    {
+        return Err(anyhow!(
+            "Container: `order` on `children` is not supported: rows would be sorted and paged \
+             on the children of one of a row's readings, before everything the row holds is \
+             merged. Order by `id` or leave `order` out, and sort the returned `children` \
+             yourself."
         ));
     }
     let Some(clause) = query.where_clause.as_mut() else {

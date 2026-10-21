@@ -805,6 +805,49 @@ async fn a_container_children_projection_is_refused() {
     }
 }
 
+/// Each of `queries` over `Container`, on a Block holding `a` through
+/// `has_child` and `z` through `we://child`, is refused for its `order`.
+async fn assert_order_refused(queries: &[Value]) {
+    let (mut p, ctx) = setup().await;
+    let h = "ad4m://block/o";
+    create(&mut p, &ctx, "Block", h).await;
+    link(&mut p, &ctx, h, HAS_CHILD, "ad4m://a/o").await;
+    link(&mut p, &ctx, h, "we://child", "ad4m://z/o").await;
+    for q in queries {
+        let err = p
+            .model_query_classes(&QueryClasses::One(CONTAINER_URI.into()), &q.to_string())
+            .await
+            .expect_err(&q.to_string());
+        assert!(
+            err.to_string().contains("`order` on `children`"),
+            "{q}: {err}"
+        );
+    }
+}
+
+/// An `order` on `children` would sort and page each row on one reading's
+/// children, before the edges are merged (Lal's #1461 review), and is
+/// refused. Red on e894cdd8b: it answered, `children` merged after the sort.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_children_order_is_refused() {
+    assert_order_refused(&[
+        json!({"order": [["children", "ASC"]]}),
+        json!({"order": [["children", "DESC"]], "limit": 1}),
+    ])
+    .await;
+}
+
+/// The same with a `where`, with and without a `children` condition in it.
+/// Red on e894cdd8b.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_children_order_is_refused_with_a_where() {
+    assert_order_refused(&[
+        json!({"where": {"id": "ad4m://block/o"}, "order": [["children", "ASC"]]}),
+        json!({"where": {"children": {"some": {}}}, "order": [["id", "ASC"], ["children", "ASC"]]}),
+    ])
+    .await;
+}
+
 /// The `children` conditions a Container `where` does not answer are refused,
 /// not passed to one reading: a nested clause (children are untyped), a
 /// per-link author, comparisons, a dotted key.
