@@ -196,6 +196,42 @@ async fn a_container_row_holds_every_edge_of_every_reading() {
     );
 }
 
+/// A Block whose children are all `has_child` links: its own `we://child`
+/// reading is empty, and hydration leaves an empty relation out of the row.
+/// The Container row still holds the child, as `parent: { id }` says (rule
+/// 9). Red on 4106e7e65: `children` and `__links.children` were missing, so
+/// the row read as holding nothing. A `properties` selection without
+/// `children` still leaves it out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_row_holds_has_child_children_of_an_empty_reading() {
+    let (mut p, ctx) = setup().await;
+    let block = "ad4m://block/e";
+    create(&mut p, &ctx, "Block", block).await;
+    link(&mut p, &ctx, block, HAS_CHILD, "ad4m://c/e").await;
+
+    let rows = query(
+        &p,
+        CONTAINER_URI,
+        json!({"where": {"id": block}, "links": ["children"]}),
+    )
+    .await;
+    let row = &rows[0];
+    assert_eq!(row["children"], json!(["ad4m://c/e"]), "{row}");
+    let links = row["__links"]["children"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{row}"));
+    assert_eq!(links.len(), 1, "{row}");
+    assert_eq!(links[0]["data"]["predicate"], HAS_CHILD, "{row}");
+
+    let rows = query(
+        &p,
+        CONTAINER_URI,
+        json!({"where": {"id": block}, "properties": ["type"]}),
+    )
+    .await;
+    assert!(rows[0].get("children").is_none(), "{}", rows[0]);
+}
+
 /// Rule 1 and open question 3: a node that holds something by `has_child`
 /// and has no class (`ad4m://self`) is a Container row of its own, read as
 /// `ad4m://Container`. A node that holds nothing is no row; a `we://child`

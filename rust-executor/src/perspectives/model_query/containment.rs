@@ -474,18 +474,23 @@ pub async fn resolve_children_where(
 /// a `Block` that also holds through `has_child` holds both, so `children`,
 /// `links: ["children"]` and `parent: { id }` agree (rule 9).
 ///
-/// Rows without a `children` key (a `properties` selection left it out) keep
-/// that; `__links` is replaced only where it has a `children` entry.
+/// `selected` says whether the query returns `children` at all (no
+/// `properties` selection, or one naming it). A row without the key gets it
+/// when it holds something: hydration leaves an empty relation out, and a
+/// Block holding only through `has_child` has an empty reading (#1461
+/// review). `__links` is replaced only where it has a `children` entry.
 /// `children` is ordered by each child's first link, then by id.
 pub async fn fill_container_rows(
     store: &SparqlStore,
     rows: &mut [Value],
     edges: &[ContainmentEdge],
+    selected: bool,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
 ) -> Result<(), Error> {
-    let wants =
-        |row: &Value| row.get("children").is_some() || row[LINKS_KEY].get("children").is_some();
+    let wants = |row: &Value| {
+        selected || row.get("children").is_some() || row[LINKS_KEY].get("children").is_some()
+    };
     let ids: Vec<String> = rows
         .iter()
         .filter(|r| wants(r))
@@ -559,7 +564,7 @@ pub async fn fill_container_rows(
         let Value::Object(obj) = row else {
             continue;
         };
-        if obj.contains_key("children") {
+        if obj.contains_key("children") || (selected && !children.is_empty()) {
             obj.insert(
                 "children".to_string(),
                 Value::Array(

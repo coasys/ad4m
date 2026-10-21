@@ -43,8 +43,9 @@ impl PerspectiveInstance {
     }
 
     /// A query over `Container` reads each row through one of its classes,
-    /// so a row's `children` would be that class's only. Replace it, and
-    /// `__links.children`, with everything the edge set says the row holds.
+    /// so a row's `children` would be that class's only, or missing when that
+    /// reading is empty. Replace it, and `__links.children`, with everything
+    /// the edge set says the row holds.
     pub(super) async fn finish_container_rows(
         &self,
         classes: &QueryClasses,
@@ -55,10 +56,15 @@ impl PerspectiveInstance {
             return Ok(());
         }
         let edges = self.containment_edges()?;
+        let selected = query
+            .properties
+            .as_ref()
+            .is_none_or(|p| p.iter().any(|k| k == "children"));
         containment::fill_container_rows(
             &self.sparql_store,
             &mut result.instances,
             &edges,
+            selected,
             query.link_status.as_ref(),
             query.include_unverified,
         )
