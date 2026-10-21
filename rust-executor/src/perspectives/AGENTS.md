@@ -46,12 +46,14 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   when the last clone of the removed instance drops, i.e. once its background loops have seen
   `is_teardown`. A store holds 17 fixed descriptors (LOCK, LOG, MANIFEST, WAL, one directory
   handle per column family) plus the SSTs in its table cache. `SparqlStore::new` opens with
-  `SPARQL_STORE_MAX_OPEN_FILES` (74): oxigraph's default is the process fd limit minus 48 *per
-  store*. RocksDB splits the table cache over 64 shards that each keep one SST, so 74 means at
-  most 64 SSTs and lower values change nothing (oxigraph exposes `max_open_files` and
-  `fd_reserve`, not the shard bits). Budget: `SPARQL_STORE_FD_BUDGET` = 88 per store; a small
-  store settles near 20-30. `sparql_store_fd_tests.rs` (Linux, `/proc/self/fd`) pins the
-  option, the budget and the release on drop. Never open a second `SparqlStore` on a path that
+  `SPARQL_STORE_MAX_OPEN_FILES` (266): oxigraph's default is the process fd limit minus 48 *per
+  store*. RocksDB splits the table cache over 64 shards (oxigraph exposes `max_open_files` and
+  `fd_reserve`, not the shard bits); 266 keeps four SSTs per shard. One per shard (74) made
+  SSTs in the same shard evict each other, and lookups ran up to 8× slower. Budget:
+  `SPARQL_STORE_FD_BUDGET` = 274 per store (a full cache); a typical store holds about 70 and
+  a small one 20-30, so the soft fd limit must be raised at startup (`fd_limit`, #1462).
+  `sparql_store_fd_tests.rs` (Linux, `/proc/self/fd`) pins the option through the OPTIONS
+  file, measures a typical store against the budget, and checks the release on drop. Never open a second `SparqlStore` on a path that
   is already open: RocksDB's LOCK refuses it, and `PerspectiveInstance::new` panics.
 
 ## Do / don't

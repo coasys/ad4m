@@ -428,15 +428,21 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 ///
 /// RocksDB gives `max_open_files - 10` to its table cache (open SSTs), split
 /// into 64 shards (`table_cache_numshardbits = 6`, which oxigraph does not
-/// expose) that each keep at least one SST. So 74 keeps at most 64 SSTs open,
-/// and any lower value keeps the same 64.
-pub const SPARQL_STORE_MAX_OPEN_FILES: u32 = 74;
+/// expose). 266 gives 256 entries, four per shard. With one per shard (74),
+/// two SSTs in one shard evict each other and every eviction reopens a file
+/// and rereads its index: lookups ran up to 8× slower well below 64 SSTs.
+pub const SPARQL_STORE_MAX_OPEN_FILES: u32 = 266;
 
-/// Most descriptors one persistent store holds: the 64 SSTs of its table
+/// Most descriptors one persistent store holds: the 256 SSTs of a full table
 /// cache plus its fixed files (LOCK, LOG, MANIFEST, the WAL, and one directory
 /// handle per column family: 17 on a fresh store), with room for an SST being
-/// written by a flush or compaction.
-pub const SPARQL_STORE_FD_BUDGET: usize = 88;
+/// written by a flush or compaction. RocksDB compacts L0 long before a store
+/// fills its cache, so a typical store holds about 70.
+///
+/// N perspectives may need N × this, so the executor's soft `RLIMIT_NOFILE`
+/// must sit well above the 1024 default: `fd_limit::raise_fd_limit_at_startup`
+/// (#1462) raises it.
+pub const SPARQL_STORE_FD_BUDGET: usize = 274;
 
 /// Oxigraph-backed SPARQL store for AD4M link data.
 /// Uses RDF 1.2 reifiers: direct triples in default graph with metadata

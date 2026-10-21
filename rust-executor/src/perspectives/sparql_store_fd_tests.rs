@@ -116,11 +116,11 @@ fn store_opens_rocksdb_with_the_capped_max_open_files() {
     drop(store);
 }
 
-/// A store holds its fixed files (LOCK, LOG, MANIFEST, WAL, one directory
-/// handle per column family) plus the SSTs its table cache keeps open. RocksDB
-/// sizes the table cache from `max_open_files`; with oxigraph's default
-/// (process fd limit minus 48) it grows with the data, once the soft limit is
-/// raised without bound in practice.
+/// A typical store (fixed files plus the SSTs its table cache keeps open) stays
+/// within the per-store budget. This measures a store; it does not pin the cap:
+/// RocksDB compacts L0 before the SST count grows, so this workload stays under
+/// the budget with or without `SPARQL_STORE_MAX_OPEN_FILES`. The OPTIONS-file
+/// test above pins the cap.
 #[test]
 fn store_descriptors_stay_within_the_per_store_budget() {
     let dir = tempfile::tempdir().unwrap();
