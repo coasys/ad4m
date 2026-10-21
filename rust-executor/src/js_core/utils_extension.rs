@@ -1,23 +1,11 @@
-use cid::Cid;
 use deno_core::op2;
 use log::{debug, error, warn};
-use multibase::Base;
-use multihash_codetable::{Code, MultihashDigest};
 
 use crate::js_core::error::AnyhowWrapperError;
 #[op2]
 #[string]
 fn hash(#[string] data: String) -> Result<String, AnyhowWrapperError> {
-    // Compute the SHA-256 multihash
-    let multihash = Code::Sha2_256.digest(data.as_bytes());
-
-    // Create a CID with default settings (version 1, DAG-Protobuf)
-    let cid = Cid::new_v1(0, multihash);
-
-    // Encode the CID in base58btc (IPFS default)
-    let encoded_cid = multibase::encode(Base::Base58Btc, cid.to_bytes());
-
-    Ok(format!("Qm{}", encoded_cid))
+    Ok(crate::js_core::utils::content_address(&data))
 }
 
 #[op2]
