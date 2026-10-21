@@ -1,0 +1,28 @@
+{
+  "$comment": "Every route that existed on docs.ad4m.dev before 2026-10-21, mapped to the file that now holds the content. `anchors` maps old section anchors to a new file (same anchor) or file#anchor. scripts/write-redirects.mjs turns this into redirect pages; the same file feeds the domain move to docs.coasys.org/ad4m.",
+  "redirects": {
+    "/installation": { "to": "start/build-an-app.mdx" },
+    "/spanning-layer": { "to": "concepts/what-ad4m-is.mdx" },
+    "/auth": { "to": "concepts/agent-executor-capabilities.mdx" },
+    "/agents": { "to": "concepts/agent-executor-capabilities.mdx" },
+    "/languages": { "to": "concepts/language-protocols.mdx" },
+    "/expressions": { "to": "concepts/types-and-values.mdx" },
+    "/perspectives": { "to": "concepts/perspectives-and-links.mdx" },
+    "/neighbourhoods": { "to": "concepts/neighbourhoods.mdx" },
+    "/social-dna": { "to": "concepts/social-dna-and-flows.mdx" },
+    "/flows": { "to": "concepts/flows.mdx" },
+    "/multi-user": { "to": "concepts/hosted-deployment.mdx" },
+    "/developer-guides/model-classes": {
+      "to": "concepts/models-and-identity.mdx",
+      "anchors": {}
+    },
+    "/developer-guides/writing-a-flow": { "to": "how-to/writing-a-flow.mdx" },
+    "/developer-guides/sparql-queries": { "to": "how-to/sparql.mdx" },
+    "/developer-guides/hooks": { "to": "how-to/hooks.mdx" },
+    "/developer-guides/batch-operations": { "to": "how-to/batch-writes.mdx" },
+    "/developer-guides/ai": { "to": "how-to/ai-models.mdx" },
+    "/developer-guides/mcp": { "to": "how-to/mcp-server.mdx" },
+    "/developer-guides/cli": { "to": "reference/cli.mdx" },
+    "/developer-guides/executor-config": { "to": "reference/executor-config.mdx" }
+  }
+}
