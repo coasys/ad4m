@@ -381,6 +381,15 @@ describe('ApiClient notices a socket that went silent', () => {
         expect(socket(0).readyState).toBe(2)
     })
 
+    it('counts a write in the UTF-8 bytes it is sent as, not in characters', async () => {
+        // 300 000 two-byte characters go out as 600 kB.
+        open()
+        socket(0).open()
+        void call('perspective.addLink', { uuid: 'u', blob: 'é'.repeat(300_000) }, { timeoutMs: 120_000 }).catch(() => {})
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(socket(0).readyState).toBe(1)
+    })
+
     it('pings a quiet socket before it counts as silent, even when the timer fires late', async () => {
         // A socket with no traffic hears nothing until its first ping is answered.
         // Silence is counted from that ping, not from the last message.
