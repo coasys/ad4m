@@ -59,7 +59,7 @@ A capability says what a caller may do, in which domain, on which objects:
 An app does not hold capabilities; it holds a JWT that encodes the capabilities the agent granted. The flow, which `@coasys/ad4m-connect` runs for you in the browser:
 
 1. **Request.** `agent.requestCapability({ appName, appDesc, appDomain, appUrl?, appIconPath?, capabilities })` returns a `requestId`. The executor raises a capability-request event the Launcher listens for.
-2. **Permit.** The agent approves the request in the Launcher, which calls `agent.permitCapability(...)` and shows a six-digit code. With `--auto-permit-cap-requests` (the default when `ad4m-executor run` has no `--config`; `false` with one) the executor permits every request itself; it prints the code to stdout only when started with `AD4M_LOG_SECRETS=1`, otherwise it logs where to find it.
+2. **Permit.** The agent approves the request in the Launcher, which calls `agent.permitCapability(...)` and shows a six-digit code. With `--auto-permit-cap-requests` (the default when `ad4m-executor run` has no `--config`; `false` with one) the executor permits every request itself; it prints the code to stdout only when started with `AD4M_LOG_SECRETS=1`, otherwise a debug log line says to set that variable (`rust-executor/src/api/agent_ws.rs`).
 3. **Token.** The app sends the code back: `agent.generateJwt(requestId, code)` returns the JWT. Every later call carries it (`new Ad4mClient(baseUrl, token)` puts it on the WebSocket URL).
 
 The agent can list and revoke what was granted: `agent.getApps()` returns `Apps[]` (`requestId`, `token`, `revoked`, `auth` with the app info and capabilities), `agent.revokeToken(requestId)` invalidates one token, `agent.removeApp(requestId)` forgets the app.
@@ -108,4 +108,4 @@ Domain names and verbs as defined in `defs.rs`. Which RPC method requires which 
 | `runtime.hosting` | `READ`, `UPDATE` |
 | `artificial intelligence` | `READ`, `CREATE`, `UPDATE`, `DELETE`, `PROMPT`, `TRANSCRIBE` |
 
-A multi-user host grants each user a default set (`get_user_default_capabilities`): everything above except `agent` `LOCK`/`UNLOCK`/`PERMIT`, `runtime` `QUIT`, AI `UPDATE`/`DELETE`, and `runtime.user_management` `READ` on `*`.
+A multi-user host grants each user a default set (`get_user_default_capabilities`): everything above except `agent` `LOCK`/`UNLOCK`/`PERMIT`, `runtime` `QUIT`, AI `UPDATE`/`DELETE`, and the whole `runtime.user_management` domain. A caller without a token gets `agent` `AUTHENTICATE` and `runtime.user_management` `READ` on `enabled`, plus `CREATE`, `LOGIN` and `VERIFY` there when multi-user mode is on (`anonymous_capabilities` in `capabilities/mod.rs`).

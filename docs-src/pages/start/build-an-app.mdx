@@ -70,7 +70,7 @@ If the user approves, the Launcher shows a six-digit code; the user types it int
 
 ![Launcher: verification code](./images/authorize2.jpg)
 
-**Hosted executors and guests.** When the executor is a multi-user host rather than the user's own machine, the dialog offers "Remote node" and an email-and-password sign-up instead of the code exchange; `connectAsGuest(options, "https://host.example")` skips the dialog and creates a throwaway account on that host. How a hosted executor differs is on [Hosted deployment](../concepts/hosted-deployment.mdx).
+**Hosted executors and guests.** When the executor is a multi-user host rather than the user's own machine, the dialog offers "Remote Node" and an email-and-password sign-up instead of the code exchange; `connectAsGuest(options, "https://host.example")` skips the dialog and creates a throwaway account on that host. How a hosted executor differs is on [Hosted deployment](../concepts/hosted-deployment.mdx).
 
 <Callout type="info">
 Without connect, in Node or in a test, construct the client yourself: `new Ad4mClient("http://localhost:12000", token)`. The token is a capability JWT or the executor's admin credential.
@@ -89,7 +89,7 @@ class Task extends Ad4mModel {
   title: string = "";
 
   @Property({ through: "task://status", initial: "task://open" })
-  status: string = "";
+  status!: string;
 }
 
 const perspective = await client.perspective.add("Tasks");
@@ -97,7 +97,7 @@ await Task.register(perspective);
 const task = await Task.create(perspective, { title: "Write the docs" });
 ```
 
-`@Property({ through })` names the predicate the value is stored under; `initial` is the value a new record starts with. `register` writes the class into the perspective once; `create` saves a record and returns the hydrated instance, with `task.id` set to `ad4m://obj/<id>`.
+`@Property({ through })` names the predicate the value is stored under; `initial` is the value a new record starts with; leave that field without a class default, because `create` saves every field that is not `undefined`. `register` writes the class into the perspective once; `create` saves a record and returns the hydrated instance, with `task.id` set to `ad4m://obj/<id>`.
 
 ## 5. A first query
 

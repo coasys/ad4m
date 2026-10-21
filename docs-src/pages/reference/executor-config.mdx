@@ -55,7 +55,7 @@ There is no default path: without `--config` or `AD4M_CONFIG` no file is read. T
 | `multi_user_config.tls_config.tls_port` | u16 | `port + 1` | `--tls-port` | HTTPS/WSS port. |
 | `multi_user_config.smtp_config.enabled` | bool, required in the object | | none | Send verification emails. |
 | `multi_user_config.smtp_config.host`, `.port`, `.username`, `.from_address` | string, u16, string, string; required in the object | | none | Mail account. |
-| `multi_user_config.smtp_config.password_file` | string | | none | Password file (mode `0600` or `0400`). `AD4M_SMTP_PASSWORD` or `AD4M_SMTP_PASSWORD_FILE` override it. An enabled SMTP config without a password is an error. |
+| `multi_user_config.smtp_config.password_file` | string | | none | Password file, with no permission bits for group or others (`0600`, `0400`). `AD4M_SMTP_PASSWORD` or `AD4M_SMTP_PASSWORD_FILE` override it. An enabled SMTP config without a password is an error. |
 | `log_config` | map of crate name to level | `holochain`, `wasmer_compiler_cranelift`: `warn`; `rust_executor`, `warp::server`: `info` | none | Log levels (`trace`, `debug`, `info`, `warn`, `error`). Ignored entirely when `RUST_LOG` is set. |
 | `sfu_bind_addr` | string (IP) | `127.0.0.1`; outbound interface with `localhost: false` | `--sfu-bind-addr` | SFU UDP bind address. |
 | `sfu_udp_port` | u16 | a free port at each start | `--sfu-udp-port` | Fixed SFU UDP port; startup fails when it is taken. |
@@ -69,7 +69,7 @@ What the parser refuses (`ExecutorConfigFile::parse`):
 - **Empty or whitespace-only strings**, anywhere; the error names the key. Because the TLS paths are required in a `tls_config` object, a disabled one still needs non-empty paths.
 - TLS enabled without both a certificate and a key.
 
-Settings with no config key are flag or variable only: `--dynamic-class-tools`, `--run-holochain` and the other `--hc-*` network flags, `--network-bootstrap-seed`, `--language-language-only`, `--pid-file`, `--insecure-no-admin-credential`, `--admin-credential`, and the SFU cascade flags (`--sfu-local-did`, `--sfu-cascade-listen`, `--sfu-cascade-peers`, `--sfu-max-participants-per-node`, `--sfu-preferred-node`).
+Settings with no config key are flag or variable only: `--dynamic-class-tools`, `--run-holochain`, `--connect-holochain`, `--log-holochain-metrics` and the `--hc-*` network flags, `--network-bootstrap-seed`, `--language-language-only`, `--pid-file`, `--insecure-no-admin-credential`, `--admin-credential`, and the SFU cascade flags (`--sfu-local-did`, `--sfu-cascade-listen`, `--sfu-cascade-peers`, `--sfu-max-participants-per-node`, `--sfu-preferred-node`).
 
 ## Environment variables
 
@@ -79,7 +79,7 @@ Settings with no config key are flag or variable only: `--dynamic-class-tools`, 
 
 | Variable | Meaning |
 |---|---|
-| `AD4M_ADMIN_CREDENTIAL_FILE` | File holding the admin credential. Mode `0600` or `0400`; one trailing newline is dropped; must not be empty. |
+| `AD4M_ADMIN_CREDENTIAL_FILE` | File holding the admin credential, with no permission bits for group or others (`0600`, `0400`); one trailing newline is dropped; must not be empty. |
 | `AD4M_ADMIN_CREDENTIAL` | The admin credential as a value. Setting both this and `_FILE` is an error. `--admin-credential` beats both. |
 | `AD4M_UNLOCK_PASSPHRASE_FILE` | File holding the agent passphrase; `run` unlocks the agent with it after startup. No agent yet: a warning. A wrong passphrase: the executor stays up, locked. There is no value variant. |
 | `AD4M_SMTP_PASSWORD_FILE`, `AD4M_SMTP_PASSWORD` | SMTP password; beat `smtp_config.password_file`. |
@@ -95,7 +95,7 @@ Settings with no config key are flag or variable only: `--dynamic-class-tools`, 
 | `WALLET_BACKEND`, `WALLET_BACKEND_URL`, `WALLET_SIGNING_KEY_NAME` | Key storage: `local` (default) or `shared`, an external wallet service at the URL (required for `shared`). | local |
 | `DB_BACKEND`, `DB_BACKEND_URL` | Database backend for a shared deployment. | local |
 | `SNAPSHOT_INTERVAL_SECS` | Perspective snapshot interval in shared mode; `0` disables. | `300` |
-| `INTERNAL_API_TOKEN` | Token for a hosting platform's internal calls; with `WALLET_BACKEND=shared` it must differ from the admin credential, or startup fails. Redacted by `config print`. | unset |
+| `INTERNAL_API_TOKEN` | Token for a hosting platform's internal calls, required with a shared wallet or database backend; with `WALLET_BACKEND=shared` it must differ from the admin credential, or startup fails. Redacted by `config print`. | unset |
 
 ## What `config print` shows
 

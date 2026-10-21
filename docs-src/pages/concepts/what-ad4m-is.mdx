@@ -32,7 +32,7 @@ Every piece of data is a claim made by an agent. An **agent** is a person (or a 
 
 ## Languages: protocols with one address scheme
 
-A **language** wraps a protocol or storage system and defines how to create and fetch **expressions**, data objects with cryptographic provenance. Every language is identified by the hash of its code, and that hash is the scheme of an address: `<language_hash>://<address>`. An HTTP document, an IPFS object, a Holochain entry and a literal string all get an address in one scheme, so one graph can point at any of them. Languages run in the executor's embedded JavaScript runtime (Deno). A few are bundled as system languages: identity (`did:key:...`), perspectives, neighbourhoods and the language that publishes languages. Protocol authoring is a topic of its own: [Language protocols](./language-protocols.mdx).
+A **language** wraps a protocol or storage system and defines how to create and fetch **expressions**, data objects with cryptographic provenance. Every language is identified by the hash of its code, and that hash is the scheme of an address: `<language_hash>://<address>`. An HTTP document, an IPFS object, a Holochain entry and a literal string all get an address in one scheme, so one graph can point at any of them. Languages run in the executor's embedded JavaScript runtime (Deno). A few are bundled as system languages (`rust-executor/src/mainnet_seed.json`): the agent language that serves profiles under `did:key:...`, the perspective and neighbourhood languages, the language that publishes languages, and the default link languages. Protocol authoring is a topic of its own: [Language protocols](./language-protocols.mdx).
 
 ## Perspectives: signed graphs
 
@@ -62,7 +62,7 @@ A perspective becomes a **neighbourhood** when it is published with a link langu
 
 ## Social DNA: what classes and flows actually do
 
-A neighbourhood's classes and flows are its **social DNA**. Two things need to be said precisely. Classes **recognize**: a record is an instance of `Task` when its links match the shape, and only recognized records show up in a `Task` query or in the agent's `instance_query`; a write through a model or an `instance_*` tool is validated against the shape before it is stored. Flows **gate**: a flow is a state machine whose transitions a group agrees on, and an action outside the flow's rules does not fire. What social DNA does not do is reject incoming links: a member can write any link into a shared perspective, and the executor stores it; a link that no class recognizes is simply not a record. See [Social DNA and flows](./social-dna-and-flows.mdx).
+A neighbourhood's classes and flows are its **social DNA**. Two things need to be said precisely. Classes **recognize**: a record is an instance of `Task` when its links match the shape, and only recognized records show up in a `Task` query or in the agent's `instance_query`; a write through an `instance_*` tool is validated against the shape before it is stored, and a model writes the links its class declares. Flows **gate**: a flow is a state machine whose transitions a group agrees on, and an action outside the flow's rules does not fire. What social DNA does not do is reject incoming links: a member can write any link into a shared perspective, and the executor stores it; a link that no class recognizes is simply not a record. See [Social DNA and flows](./social-dna-and-flows.mdx).
 
 ## Why build on it
 

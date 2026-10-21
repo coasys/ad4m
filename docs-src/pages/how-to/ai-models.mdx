@@ -38,6 +38,7 @@ const modelId = await client.ai.addModel({
 | `Qwen2.5.1-Coder-7B-Instruct` | LLM |
 | `deephermes-3-llama-3-8b-Q4`, `-Q6`, `-Q8` | LLM (quantizations of one model) |
 | `deepseek_r1_distill_qwen_1_5b`, `_7b`, `_14b`, `deepseek_r1_distill_llama_8b` | LLM |
+| `llama_tiny`, `llama_7b_chat`, `llama_3_1_8b_chat`, `mistral_7b_instruct`, `solar_10_7b_instruct` and the other kalosm presets listed in `build_local_llama` | LLM |
 | `bert` | EMBEDDING |
 | `whisper_tiny`, `whisper_small`, … (full list on [Transcription](./transcription.mdx)) | TRANSCRIPTION |
 
@@ -68,7 +69,7 @@ Hardware acceleration is picked at build time: CUDA (`cuda` feature), Metal on m
 
 ### A remote API
 
-`api.apiType` is one of `"OPEN_AI"`, `"ANTHROPIC"` or `"OLLAMA"`; `baseUrl`, `apiKey` and `model` name the endpoint. `maxNumCtx` caps the context window.
+`api.apiType` is one of `"OPEN_AI"`, `"ANTHROPIC"` or `"OLLAMA"`; `baseUrl`, `apiKey` and `model` name the endpoint. `maxNumCtx` caps the context window Ollama allocates (the other two ignore it). A non-empty `apiKey` is sent only over `https` or to a loopback `http` address; anything else fails with `Refusing to send an API key over plain HTTP. Use https, or omit the key.` (`rust-executor/src/ai_service/providers/http.rs`).
 
 ```typescript
 await client.ai.addModel({
@@ -125,7 +126,7 @@ const answer = await client.ai.prompt(task.taskId, "…text to summarize…");
 
 ## Manage
 
-`client.ai.getModels()`, `updateModel(modelId, model)`, `removeModel(modelId)`. Capabilities on the `artificial intelligence` domain: `READ` to list models, tasks and loading status; `CREATE` to add, change or remove models and tasks and to set defaults; `PROMPT` for `prompt` and `embed`; `TRANSCRIBE` for streams. A hosted user's default set has `READ`, `CREATE`, `PROMPT` and `TRANSCRIBE`, but `addModel`, `updateModel`, `removeModel` and `setDefaultModel` refuse a hosted user's session: models are node-wide and the operator's.
+`client.ai.getModels()`, `updateModel(modelId, model)`, `removeModel(modelId)`. Capabilities on the `artificial intelligence` domain: `READ` to list models, tasks and loading status; `CREATE` to add, change or remove models and tasks and to set defaults; `PROMPT` for `prompt` and `embed`; `TRANSCRIBE` for streams. A hosted user's default set has `READ`, `CREATE`, `PROMPT` and `TRANSCRIBE`, but `addModel`, `updateModel`, `removeModel`, `setDefaultModel` and `discoverModels` (which needs `CREATE`) refuse a hosted user's session: models are node-wide and the operator's (`rust-executor/src/api/ai_ws.rs`).
 
 ## Next
 

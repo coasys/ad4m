@@ -36,7 +36,7 @@ ad4m-executor run --port 12000 --app-data-path ~/.ad4m
 
 `run` refuses to start without an admin credential. Pass it as a file (`AD4M_ADMIN_CREDENTIAL_FILE`) or a variable (`AD4M_ADMIN_CREDENTIAL`); `--admin-credential <value>` works but is visible in `ps`. For tests only, `--insecure-no-admin-credential` starts without one; an empty token then has full admin access on the loopback port.
 
-Every flag of `run` also reads an `AD4M_<FLAG>` variable (`--mcp-port` reads `AD4M_MCP_PORT`), and `--config <file>` (or `AD4M_CONFIG`) reads a JSON file with the Launcher's key names. Precedence: file, then variable, then flag. `ad4m-executor config print` shows the merged result with secrets redacted. The flags that matter most:
+Every flag of `run` also reads an `AD4M_<FLAG>` variable (`--mcp-port` reads `AD4M_MCP_PORT`), and `--config <file>` (or `AD4M_CONFIG`) reads a JSON file with the Launcher's key names. A flag beats its variable, and a variable beats the file. `ad4m-executor config print` shows the merged result with secrets redacted. The flags that matter most:
 
 | Flag | Default | What it does |
 |---|---|---|

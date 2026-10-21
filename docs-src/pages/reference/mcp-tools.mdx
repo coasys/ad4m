@@ -9,7 +9,7 @@ import { Callout } from "nextra/components";
 
 The executor's MCP server registers 44 static tools (`Ad4mMcpHandler::tool_router` in `rust-executor/src/mcp/tools/mod.rs`). The list does not change with the classes a perspective carries. Paths below are relative to `rust-executor/src/mcp/tools/`. A `?` marks an optional parameter. How to enable the server and authenticate: [Run the MCP server](../how-to/mcp-server.mdx).
 
-**Auth** column: "none" means the tool runs without a credential (`AUTH_TOOLS` in `mod.rs`); every other tool answers `Authentication required. ...` until the session is authenticated. **OpenClaw** column: whether the OpenClaw AD4M plugin bridges the tool as `ad4m_<name>` (the plugin surfaces only the names in `plugins/ad4m/staticToolDefs.ts`).
+**Auth** column: "none" means the tool runs without a credential (`AUTH_TOOLS` in `mod.rs`); every other tool answers `Authentication required. ...` until the session is authenticated. On an executor started without an admin credential, a caller that presents no credential passes this check (`check_auth_with_header` in `mod.rs`), which is why such a server binds loopback only. **OpenClaw** column: whether the OpenClaw AD4M plugin bridges the tool as `ad4m_<name>` (the plugin surfaces only the names in `plugins/ad4m/staticToolDefs.ts`).
 
 ## Documentation
 
@@ -107,7 +107,7 @@ These build a query; they do not subscribe. A host registers the query as a live
 
 The executor can also generate tools per registered class. They are exposed over MCP only when the executor runs with `--dynamic-class-tools true` (or `AD4M_DYNAMIC_CLASS_TOOLS=true`); there is no config-file key. Off, a call to one by name returns `Unknown tool: <name>. Dynamic per-class tools are not exposed on this MCP server ...` with the `instance_*` equivalents (`mod.rs`). The in-executor interpretation harness always sees them.
 
-Names are built from the class name in lowercase (`dynamic.rs`):
+Names are built from the class, property and collection names in lowercase (`dynamic.rs`). An abstract class gets only the read tools (`_query`, `_list`, `_get`, `_get_<collection>`):
 
 | Name | Does | Same as |
 |---|---|---|

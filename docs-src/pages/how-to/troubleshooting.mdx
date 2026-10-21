@@ -114,7 +114,7 @@ A language that runs on Holochain was used before the conductor was running. The
 
 | Message | Source (`rust-executor/src/user_management.rs`) | Fix |
 |---|---|---|
-| `Multi-user mode is not enabled` | `login_user`, `verify_and_login` | Start the executor with `--enable-multi-user true` (`AD4M_ENABLE_MULTI_USER`). See [Multi-user host](./multi-user-host.mdx). |
+| `Multi-user mode is not enabled` | `login_user`, `signup_user`, `request_login_code`, `verify_and_login` | Start the executor with `--enable-multi-user true` (`AD4M_ENABLE_MULTI_USER`). See [Multi-user host](./multi-user-host.mdx). |
 | `Invalid credentials` | `verify_credentials` | Wrong email or password. |
 | `User already exists` | `create_user` | Log in instead of signing up. |
 | `Invalid verification code` | `verify_and_login` | Request a new code and use the latest one. |
@@ -127,7 +127,7 @@ A language that runs on Holochain was used before the conductor was running. The
 | `Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate.` | `mod.rs`, `call_tool` | Send the admin credential as `Authorization: Bearer <credential>`, or authenticate in the session. See [Run the MCP server](./mcp-server.mdx#2-authenticate). |
 | `Unknown tool: <name>. Dynamic per-class tools are not exposed on this MCP server ...` | `mod.rs`, `dispatch_non_router_tool` | Use the `instance_*` tool the message names with `class_name`, or start the executor with `--dynamic-class-tools true`. See [MCP tools](../reference/mcp-tools.mdx#per-class-tools-opt-in). |
 | `Perspective not found: <id>` | `mod.rs`, `get_readable_perspective` | Either the UUID is wrong or the token may not read that perspective; the two answers are the same by design. Check the id with `list_perspectives`. |
-| `auth_status` says `authenticated: false` while calls succeed | `auth.rs`, `auth_status_json` | Not an error: with header authentication the session stores the credential on the first protected call. |
+| `auth_status` says `authenticated: false`, `Token set but invalid - could not decode`, while other calls succeed | `auth.rs`, `auth_status`, `auth_status_json` | The session holds the admin credential. `auth_status` reports only a decodable JWT, and the admin credential is not one; the other tools accept it. Not an error. |
 
 **Connection refused from another machine.** Without an admin credential the MCP server binds `127.0.0.1` (`resolve_host` in `rust-executor/src/mcp/server.rs`). Set an admin credential (it then binds `0.0.0.0`), or set `MCP_HOST` to an IP address. The full table: [Run the MCP server](./mcp-server.mdx#where-it-binds).
 
@@ -139,6 +139,7 @@ These are reported by `docs-src/scripts/check-portability.mjs`, which `pnpm run 
 |---|---|
 | `<page>: missing frontmatter (title, description)` | Add both keys to the page's YAML frontmatter. |
 | `<page>:<line>: site-absolute link, use a file-relative path with extension: /...` | Write `../concepts/queries.mdx`, not `/concepts/queries`. |
+| `<page>:<line>: page link must carry the .mdx/.md extension: ...` | Write `./queries.mdx#where-operators`, not `./queries#where-operators`. |
 | `<page>:<line>: link target does not exist: ...` | Fix the path. For `reference/mcp-topics/*.md`, run `pnpm run check:portability`, which copies the topics from `rust-executor/src/mcp/docs/` first; plain `node scripts/check-portability.mjs` does not. |
 | `<page>:<line>: anchor #<anchor> not found in <target>` | Use the anchor of an existing heading: lowercase, spaces as hyphens, punctuation dropped. |
 | `<page>:<line>: import not in the portable component set: ...` | The only allowed import is `import { Callout, Tabs, Tab } from "nextra/components";`. |
