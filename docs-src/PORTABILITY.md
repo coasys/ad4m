@@ -70,9 +70,18 @@ the rules below and runs in CI (`.github/workflows/docs.yml`) and as part of
 7. **Navigation metadata** (`_meta.json`) is shell-specific and is not part
    of the portable content. The import manifest below carries the order.
 
-8. **Generated content** is not hand-edited: `reference/mcp-topics/*.md` is
-   copied from `rust-executor/src/mcp/docs/` by `scripts/copy-mcp-topics.mjs`
-   at build time (gitignored); `pages/jsdoc/` is typedoc output.
+8. **Generated content** is not hand-edited. `scripts/copy-generated.mjs`
+   writes it at build time (gitignored):
+   - `reference/mcp-topics/*.md`, copied from `rust-executor/src/mcp/docs/`;
+   - `reference/language-interface-spec.md`, `reference/host-contract.md` and
+     `reference/social-conventions.md`, copied from
+     `docs-src/language-interface-spec.md`, `docs-src/host-contract.md` and
+     `docs-src/ad4m-social-conventions.md` (the last one renamed), with the
+     links between them rewritten to the new names and the links to the WIT
+     and the migration plan rewritten to GitHub URLs.
+
+   Pages link to all of these, and redirects point at them, so a shell must
+   produce them. `pages/jsdoc/` is typedoc output.
 
 ## Redirects
 
@@ -109,10 +118,10 @@ reads it at the pinned SHA:
   "title": "AD4M",
   "contentRoot": "docs-src/pages",
   "include": ["index.mdx", "start/**", "tutorial/**", "concepts/**", "how-to/**", "reference/**"],
-  "exclude": ["jsdoc/**", "reference/mcp-topics/**"],
+  "exclude": ["jsdoc/**", "reference/mcp-topics/**", "reference/language-interface-spec.md", "reference/host-contract.md", "reference/social-conventions.md"],
   "generated": [
-    { "kind": "typedoc", "entry": "core/src/index.ts", "route": "reference/sdk" },
-    { "kind": "copy", "from": "rust-executor/src/mcp/docs/*.md", "route": "reference/mcp-topics" }
+    { "kind": "typedoc", "entry": "core/src/index.ts", "route": "reference/sdk", "legacyPrefix": "/jsdoc" },
+    { "kind": "script", "run": "node docs-src/scripts/copy-generated.mjs", "outputs": ["reference/mcp-topics/**", "reference/language-interface-spec.md", "reference/host-contract.md", "reference/social-conventions.md"] }
   ],
   "nav": [
     { "label": "Start", "dir": "start", "order": ["build-an-app", "connect-an-agent", "run-an-executor"] },
@@ -128,9 +137,12 @@ reads it at the pinned SHA:
 ```
 
 What the shell does with it: copies `include` minus `exclude` under
-`section`, rewrites file-relative `.mdx` links to the shell's URL scheme,
-copies images beside their pages, replaces the three components by the
-shell's equivalents from the table above, runs the generators, writes the
+`section`, rewrites file-relative `.mdx` and `.md` links to the shell's URL
+scheme, rewrites site-absolute `/jsdoc/<path>` links (the one exception in
+rule 2) to `<section>/<typedoc route>/<path>` (here
+`/ad4m/reference/sdk/<path>`), copies images beside their pages, replaces the
+three components by the shell's equivalents from the table above, runs the
+generators (typedoc, and `copy-generated.mjs` for the outputs it lists), writes the
 redirect pages, builds the sidebar from `nav` (falling back to file order),
 and records `{shell SHA, ad4m SHA}` on the deployed site. The manifest file
 itself is not yet written; this sketch is the contract for it.
