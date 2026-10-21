@@ -21,6 +21,7 @@ export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
 export * from "./perspectives/TextContent";
+export * from "./perspectives/Container";
 // Also exports FlowFireOutcome / FlowProposeResult, the result shapes of the
 // flow write API — they live beside the `proposeTransition()` surface.
 export * from "./perspectives/FlowInstance";
