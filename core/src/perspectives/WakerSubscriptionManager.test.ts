@@ -306,6 +306,111 @@ describe('WakerSubscriptionManager', () => {
     expect(queries).toHaveLength(1);
   });
 
+  /** A mention subscription whose results the test pushes by hand, with the wakes it produced. */
+  async function mentionHarness(
+    debounceMs: number,
+    onWake?: (mentions: any) => unknown,
+    // What the subscription holds when it opens (the proxy's `result`), and what a restart restored.
+    opening?: { initial?: any; previousSeen?: Record<string, string[]> },
+  ) {
+    let deliver: ((result: any) => Promise<void>) | undefined;
+    const ProxyClass = function () {
+      return {
+        initialized: Promise.resolve(true),
+        subscribe: () => Promise.resolve(),
+        dispose: () => {},
+        result: opening?.initial,
+        onResult: (cb: (result: any) => Promise<void>) => { deliver = cb; },
+      };
+    };
+    const wakes: any[] = [];
+    const persistedSeen: string[][] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {
+        querySparql: () => Promise.resolve([]),
+        modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
+      },
+      logger: noopLogger(),
+      QuerySubscriptionProxy: ProxyClass,
+      debounceMs,
+      retryPendingMs: 60_000,
+      retryWakeMs: 20,
+      onWake: (_sub, _result, mentions) => {
+        wakes.push(mentions);
+        return onWake?.(mentions);
+      },
+      onPersist: (_subs, seen) => { persistedSeen.push(seen['mention-harness'] ?? []); },
+      previousSeenMessages: opening?.previousSeen,
+    } as any);
+    await manager.subscribe({ ...sub, id: 'mention-harness' });
+    const msg = (...ids: string[]) => ({ instances: ids.map((id) => ({ id, text: 'hi bot' })) });
+    return { manager, deliver: (r: any) => deliver!(r), msg, wakes, persistedSeen };
+  }
+
+  /**
+   * Live test 2026-10-21 (T13b): a mention written while the gateway was down. The subscription
+   * opened after the restart already holds it, but the waker only listened for later changes.
+   */
+  it('wakes on a mention the restored subscription already holds when it opens', async () => {
+    const msg = (...ids: string[]) => ({ instances: ids.map((id) => ({ id, text: 'hi bot' })) });
+    const h = await mentionHarness(10, undefined, {
+      initial: msg('test://during-downtime', 'test://old'),
+      previousSeen: { 'mention-harness': ['test://old'] },
+    });
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    h.manager.disposeAll();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://during-downtime']]);
+  });
+
+  it('takes the mentions a new subscription opens on as history, and wakes only on later ones', async () => {
+    const h = await mentionHarness(10, undefined, {
+      initial: { instances: [{ id: 'test://old', text: 'hi bot' }, { id: 'test://robots', text: 'robots' }] },
+    });
+    await h.deliver({
+      instances: [
+        { id: 'test://new', text: 'hi bot' },
+        { id: 'test://old', text: 'hi bot' },
+        // Not a mention when the subscription opened, so a later edit that adds one still wakes.
+        { id: 'test://robots', text: 'robots, bot' },
+      ],
+    });
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    await new Promise((r) => setTimeout(r, 30));
+    h.manager.disposeAll();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address).sort())).toEqual([['test://new', 'test://robots']]);
+  });
+
+  it('names every mention that arrived inside one debounce window in the wake', async () => {
+    const h = await mentionHarness(100);
+    await h.deliver(h.msg('test://a'));
+    await new Promise((r) => setTimeout(r, 20));
+    await h.deliver(h.msg('test://b', 'test://a'));
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    await new Promise((r) => setTimeout(r, 150));
+    h.manager.disposeAll();
+    expect(h.wakes).toHaveLength(1);
+    expect(h.wakes[0].map((m: any) => m.address).sort()).toEqual(['test://a', 'test://b']);
+  });
+
+  /**
+   * Live test 2026-10-21 (T13): a mention reached the waker while the gateway drained for a
+   * restart; the wake POST answered 503, the mention was persisted as seen and never woke anyone.
+   */
+  it('does not persist a mention as seen when its wake was not delivered, and retries it', async () => {
+    let accept = false;
+    const h = await mentionHarness(10, () => Promise.resolve(accept));
+    await h.deliver(h.msg('test://lost'));
+    await waitUntil(() => h.wakes.length > 0, 1000);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.persistedSeen.every((seen) => !seen.includes('test://lost'))).toBe(true);
+    accept = true;
+    await waitUntil(() => h.persistedSeen.some((seen) => seen.includes('test://lost')), 5000);
+    h.manager.disposeAll();
+    expect(h.wakes.length).toBeGreaterThan(1);
+    expect(h.wakes.at(-1).map((m: any) => m.address)).toEqual(['test://lost']);
+    expect(h.persistedSeen.some((seen) => seen.includes('test://lost'))).toBe(true);
+  });
+
   /**
    * Test 11 (#1446): a mention under a message held by a We block. The block is a parent beside
    * the channel that holds the message by has_child; the chain above both comes back nearest

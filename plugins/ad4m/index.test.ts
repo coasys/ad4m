@@ -1633,7 +1633,8 @@ describe("postWake", () => {
     };
 
     const logger = makeMockLogger();
-    await postWake(config, sub, "did:key:abc", logger);
+    // The manager marks the mentions seen only on true.
+    expect(await postWake(config, sub, "did:key:abc", logger)).toBe(true);
 
     expect(fetch).toHaveBeenCalledOnce();
     const call = vi.mocked(fetch).mock.calls[0];
@@ -1666,7 +1667,7 @@ describe("postWake", () => {
     };
 
     const logger = makeMockLogger();
-    await postWake(config, sub, "did:key:x", logger);
+    expect(await postWake(config, sub, "did:key:x", logger)).toBe(false);
 
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining("Network error"),
@@ -1693,7 +1694,8 @@ describe("postWake", () => {
     };
 
     const logger = makeMockLogger();
-    await postWake(config, sub, "did:key:x", logger);
+    // A gateway draining for a restart answers 503: the wake did not land, so it is offered again.
+    expect(await postWake(config, sub, "did:key:x", logger)).toBe(false);
 
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining("wake POST failed: 403"),

@@ -178,9 +178,17 @@ export interface WakerSubscriptionManagerOptions {
    * what the levels hold. 0 reports parents only.
    */
   ancestorDepth?: number;
-  /** Called when a subscription fires (after debounce). Return value is ignored.
-   *  For mention subs, `mentions` contains per-message parent info. */
-  onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
+  /**
+   * Called when a subscription fires (after debounce). For mention subs, `mentions` holds every
+   * mention not yet delivered, with its parent info. Resolve `false` (or reject) when the wake did
+   * not reach the agent: those mentions stay out of the persisted seen set and are offered again
+   * after `retryWakeMs`, so a wake lost to a restarting gateway is not lost for good.
+   */
+  onWake: (
+    sub: WakerSubscription,
+    result: any,
+    mentions?: MentionMessage[],
+  ) => void | boolean | Promise<void | boolean>;
   /** Called when the active subscription list changes (for persistence). */
   onPersist?: (subscriptions: WakerSubscription[], seenMessages: Record<string, string[]>) => void;
   /** Previously persisted seen message IDs per subscription. Seeds seenMessages on resubscribe to avoid duplicate wakes. */
@@ -199,6 +207,9 @@ export interface WakerSubscriptionManagerOptions {
    * so the re-attempt cycle never saw it (#1016).
    */
   subscribeTimeoutMs?: number;
+  /** First delay before offering an undelivered mention wake again (default 5000); doubles per
+   *  failed attempt, up to 60000. */
+  retryWakeMs?: number;
 }
 
 /**
@@ -249,12 +260,13 @@ export class WakerSubscriptionManager {
   private logger: WakerLogger;
   private debounceMs: number;
   private ancestorDepth: number;
-  private onWake: (sub: WakerSubscription, result: any, mentions?: MentionMessage[]) => void;
+  private onWake: WakerSubscriptionManagerOptions["onWake"];
   private onPersist?: (subscriptions: WakerSubscription[], seenMessages: Record<string, string[]>) => void;
   private QuerySubscriptionProxyCtor: any;
   private previousSeenMessages: Record<string, string[]>;
   private retryPendingMs: number;
   private subscribeTimeoutMs: number;
+  private retryWakeMs: number;
 
   private proxies = new Map<string, any>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
@@ -277,6 +289,14 @@ export class WakerSubscriptionManager {
   /** Per-subscription set of already-processed message addresses (for mention subs)
    *  or serialized result hash (for channel-messages subs). */
   private seenMessages = new Map<string, Set<string>>();
+  /**
+   * Per mention subscription: mentions seen but whose wake has not been delivered yet, keyed by
+   * address. They accumulate across a debounce window, so one wake names all of them, and they
+   * are kept out of the persisted seen set until `onWake` reports delivery.
+   */
+  private undelivered = new Map<string, Map<string, MentionMessage>>();
+  /** Failed wake attempts in a row per subscription, for the retry backoff. */
+  private wakeFailures = new Map<string, number>();
 
   constructor(options: WakerSubscriptionManagerOptions) {
     this.perspectiveClient = options.perspectiveClient;
@@ -289,6 +309,7 @@ export class WakerSubscriptionManager {
     this.previousSeenMessages = options.previousSeenMessages ?? {};
     this.retryPendingMs = options.retryPendingMs ?? 30000;
     this.subscribeTimeoutMs = options.subscribeTimeoutMs ?? 15000;
+    this.retryWakeMs = options.retryWakeMs ?? 5000;
   }
 
   /** A token identifying this attempt at subscribing `id`. */
@@ -395,15 +416,18 @@ export class WakerSubscriptionManager {
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
     // Seed from persisted seen messages so we don't re-wake after restart
+    const restored = Object.prototype.hasOwnProperty.call(this.previousSeenMessages, sub.id);
     const seen = new Set<string>(this.previousSeenMessages[sub.id] ?? []);
     this.seenMessages.set(sub.id, seen);
     if (seen.size > 0) {
       this.logger.info(`[waker] ${sub.id}: seeded ${seen.size} seen message(s) from persisted state`);
     }
 
-    proxy.onResult(async (result: any) => {
+    // `opening` is the result the subscription holds when it opens (`proxy.result`): `onResult`
+    // only reports later changes, so this is the one chance to see what was written meanwhile.
+    const handleResult = async (result: any, opening = false) => {
       this.logger.info(
-        `[waker] ${sub.id}: onResult fired — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
+        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
       // A model subscription delivers `{ instances }`, SPARQL an array of
@@ -447,6 +471,15 @@ export class WakerSubscriptionManager {
           return;
         }
 
+        if (opening && !restored) {
+          // A new subscription: what it opens on is history, readable on demand, not news.
+          this.seenMessages.set(sub.id, currentSeen);
+          this.logger.info(
+            `[waker] ${sub.id}: ${newMessages.length} existing mention(s) taken as history, not woken`,
+          );
+          return;
+        }
+
         this.logger.info(
           `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${rows.length} total`,
         );
@@ -465,20 +498,14 @@ export class WakerSubscriptionManager {
         }
 
         this.seenMessages.set(sub.id, currentSeen);
+        const pending = this.undelivered.get(sub.id) ?? new Map<string, MentionMessage>();
+        for (const mention of mentions) pending.set(mention.address, mention);
+        this.undelivered.set(sub.id, pending);
 
-        // Debounce the wake callback
-        const existing = this.debounceTimers.get(sub.id);
-        if (existing) clearTimeout(existing);
-
-        this.debounceTimers.set(
-          sub.id,
-          setTimeout(() => {
-            this.onWake(sub, result, mentions);
-            this.debounceTimers.delete(sub.id);
-            this.persist();
-          }, this.debounceMs),
-        );
+        this.scheduleMentionWake(sub, result, this.debounceMs);
       } else {
+        // A container's contents when the subscription opens are not an update.
+        if (opening) return;
         // For channel-messages: always notify the agent on every subscription push.
         // No deduplication — the agent reads recent messages itself.
         this.logger.info(
@@ -496,7 +523,8 @@ export class WakerSubscriptionManager {
           }, this.debounceMs),
         );
       }
-    });
+    };
+    proxy.onResult((result: any) => handleResult(result));
 
     if (this.isStale(sub.id, token)) {
       try { proxy.dispose(); } catch {}
@@ -504,6 +532,15 @@ export class WakerSubscriptionManager {
     }
     this.proxies.set(sub.id, proxy);
     this.activeSubscriptions.set(sub.id, sub);
+    // After a restart this wakes on mentions written while the waker was down; on a new
+    // subscription it records the existing ones as history.
+    if (proxy.result !== undefined) {
+      try {
+        await handleResult(proxy.result, true);
+      } catch (e: any) {
+        this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
+      }
+    }
     this.persist();
 
     this.logger.info(
@@ -582,7 +619,55 @@ export class WakerSubscriptionManager {
     this.activeSubscriptions.delete(id);
     this.pendingSubscriptions.delete(id);
     this.seenMessages.delete(id);
+    this.undelivered.delete(id);
+    this.wakeFailures.delete(id);
     if (persist) this.persist();
+  }
+
+  /** (Re)start the timer that offers `sub`'s undelivered mentions to `onWake` after `delayMs`. */
+  private scheduleMentionWake(sub: WakerSubscription, result: any, delayMs: number): void {
+    const existing = this.debounceTimers.get(sub.id);
+    if (existing) clearTimeout(existing);
+    this.debounceTimers.set(
+      sub.id,
+      setTimeout(() => {
+        this.debounceTimers.delete(sub.id);
+        void this.deliverMentions(sub, result);
+      }, delayMs),
+    );
+  }
+
+  /**
+   * Offer every undelivered mention of `sub` in one wake. On delivery they join the persisted
+   * seen set; on failure they stay undelivered and are offered again with backoff.
+   */
+  private async deliverMentions(sub: WakerSubscription, result: any): Promise<void> {
+    const pending = this.undelivered.get(sub.id);
+    if (!pending?.size || !this.activeSubscriptions.has(sub.id)) return;
+    const mentions = Array.from(pending.values());
+    let delivered: boolean;
+    try {
+      delivered = (await this.onWake(sub, result, mentions)) !== false;
+    } catch (e: any) {
+      this.logger.warn(`[waker] ${sub.id}: wake callback threw: ${e?.message ?? e}`);
+      delivered = false;
+    }
+    // Disposed while the wake was in flight: nothing left to retry or persist.
+    if (this.undelivered.get(sub.id) !== pending) return;
+    if (!delivered) {
+      const failures = (this.wakeFailures.get(sub.id) ?? 0) + 1;
+      this.wakeFailures.set(sub.id, failures);
+      const delay = Math.min(this.retryWakeMs * 2 ** (failures - 1), 60_000);
+      this.logger.warn(
+        `[waker] ${sub.id}: wake for ${mentions.length} mention(s) not delivered, offering again in ${delay}ms`,
+      );
+      // A newer result arriving meanwhile restarts the timer and joins this wake.
+      if (!this.debounceTimers.has(sub.id)) this.scheduleMentionWake(sub, result, delay);
+      return;
+    }
+    this.wakeFailures.delete(sub.id);
+    for (const mention of mentions) pending.delete(mention.address);
+    this.persist();
   }
 
   /** Dispose all active subscriptions and drop anything still pending. */
@@ -652,7 +737,9 @@ export class WakerSubscriptionManager {
     if (this.onPersist) {
       const seen: Record<string, string[]> = {};
       for (const [id, set] of this.seenMessages) {
-        seen[id] = Array.from(set);
+        // An undelivered mention is not seen yet: after a restart it must wake again.
+        const pending = this.undelivered.get(id);
+        seen[id] = Array.from(set).filter((address) => !pending?.has(address));
       }
       this.onPersist(this.getActive(), seen);
     }
