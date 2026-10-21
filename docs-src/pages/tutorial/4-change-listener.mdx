@@ -1,3 +1,8 @@
+---
+title: Listening to Perspective changes
+description: Register link-added and link-removed listeners on a perspective proxy, and remove them again.
+---
+
 # Listening to Perspective changes
 
 Perspectives that have been turned into Neighbourhoods are like entangled particles.
@@ -10,8 +15,8 @@ Even with Perspectives that are not shared as Neighbourhood,
 a different UI could have access to the same Perspective and cause mutations
 on it.
 
-Apps/UIs can simply register a listener function on that
-[PerspectiveProxy](api.md#class-perspectiveproxy) object:
+Apps/UIs can register a listener function on that
+[PerspectiveProxy](/jsdoc/classes/PerspectiveProxy) object:
 
 ```js
 const stopAdded = myPerspective.on("link-added", ({ link }) => {
@@ -25,3 +30,6 @@ myPerspective.on("link-removed", ({ link }) => {
 
 `on()` returns a function that removes that listener. `dispose()` removes every listener this proxy registered.
 To listen on the client instead, pass the perspective: `ad4m.on("link-added", handler, { perspective: uuid })`.
+
+For live query results instead of raw link events, see
+[Subscribe to results](../how-to/subscribe.mdx).
