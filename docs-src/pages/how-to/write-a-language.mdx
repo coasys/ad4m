@@ -1,0 +1,209 @@
+---
+title: Write a Language
+description: Build a minimal expression Language in TypeScript with defineLanguage or in Rust with the ad4m_language! macro, and bundle it into the one ES module the executor loads.
+---
+
+import { Callout, Tabs, Tab } from "nextra/components";
+
+# Write a Language
+
+You want AD4M to store or fetch data through your own backend or protocol. This page builds a **note store**: an expression Language that signs each note with the calling agent's key, keeps it in the executor's key-value store, and returns its hash as the address. Background: [Language protocols](../concepts/language-protocols.mdx).
+
+What you need: a checkout of the AD4M repository (both authoring kits live there and are not yet published to npm or crates.io), [Deno](https://deno.com) for the TypeScript bundle, or a Rust toolchain with the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` for the Rust version.
+
+## 1. Write the module
+
+<Tabs items={["TypeScript", "Rust"]}>
+<Tab>
+
+```typescript
+// index.ts
+import { defineLanguage, agentCreateSignedExpression, hash, storageGet, storagePut } from "@coasys/ad4m-ldk";
+
+const language = defineLanguage({
+  name: "note-store",
+  version: "0.1.0",
+
+  async init() {
+    // Runs once when the executor loads the Language. Read settings with
+    // languageSettings() or the address with languageAddress() here.
+  },
+
+  expression: {
+    async create(content) {
+      const expression = JSON.stringify(agentCreateSignedExpression(content));
+      const address = hash(expression);
+      storagePut(address, expression);
+      return address;
+    },
+    async get(address) {
+      const raw = storageGet(address);
+      return raw ? JSON.parse(raw) : null;
+    },
+  },
+});
+
+export default language;
+export const { name, version, init, expressionCreate, expressionGet } = language;
+```
+
+`defineLanguage` (`ad4m-ldk/js/src/defineLanguage.ts`) maps the grouped spec to the flat names the executor looks for: `expression.create` becomes `expressionCreate`, `expression.get` becomes `expressionGet`, `sync.render` becomes `perspectiveSyncRender`, and so on. It also binds each method to its group, so `this` works inside them. Export the flat names (as the bootstrap Languages do) or the object as the default export; the loader accepts both (`rust-executor/src/languages/language_runtime.rs`).
+
+`agentCreateSignedExpression`, `hash`, `storageGet` and `storagePut` are synchronous host imports. You can also skip the kit and import the same functions from `"ad4m:host"` while exporting `name`, `version`, `init`, `expressionCreate` and `expressionGet` yourself; `tests/js/languages/note-store-flat/index.ts` is that version.
+
+</Tab>
+<Tab>
+
+```toml
+# Cargo.toml
+[package]
+name = "note-store"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ad4m-ldk = { path = "../ad4m/ad4m-ldk/rust" }   # path to your AD4M checkout
+wasm-bindgen = "0.2"
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+```
+
+```rust
+// src/lib.rs
+use ad4m_ldk::imports as rt;
+use ad4m_ldk::prelude::*;
+
+pub struct NoteStore;
+
+impl Language for NoteStore {
+    fn name() -> &'static str { "note-store" }
+    fn version() -> &'static str { "0.1.0" }
+
+    async fn init() -> LanguageResult<Self> {
+        Ok(NoteStore)
+    }
+}
+
+impl ExpressionCapability for NoteStore {
+    async fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address> {
+        let signed = rt::agent_create_signed_expression_typed(&content)?;
+        let signed: serde_json::Value = serde_wasm_bindgen::from_value(signed)?;
+        let expression = serde_json::to_string(&signed)?;
+        let address = rt::hash(&expression)?;
+        rt::storage_put(&address, &expression)?;
+        Ok(address)
+    }
+
+    async fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
+        match rt::storage_get(&address)?.as_string() {
+            Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+ad4m_language! {
+    language: NoteStore,
+    capabilities: [expression],
+}
+```
+
+The traits are in `ad4m-ldk/rust/src/traits.rs`, the imports in `ad4m-ldk/rust/src/imports.rs`. Use the `_typed` wrappers (`agent_create_signed_expression_typed`) when you pass Rust values to the host: they turn maps into plain JS objects. The macro (`ad4m-ldk/rust/src/macros.rs`) emits exports only for the capabilities you list: `expression`, `perspective_commit`, `perspective_sync`, `perspective_query`, `peers`, `telepresence`, `language_source`; add `holochain_signal: true` for a Language that receives Holochain signals. `tests/rust-languages/test-wasm-language/src/lib.rs` is a complete example with a query capability.
+
+</Tab>
+</Tabs>
+
+## 2. Bundle it into one ES module
+
+The executor loads a single JavaScript file. `ad4m:host` must stay an external import in that file; the executor provides it at load time.
+
+<Tabs items={["TypeScript", "Rust"]}>
+<Tab>
+
+Build the kit once (`pnpm install` at the repository root, then `pnpm --filter @coasys/ad4m-ldk build`, which runs `tsc` into `ad4m-ldk/js/lib`). Then bundle with esbuild under Deno, the way the bootstrap Languages do:
+
+```typescript
+// esbuild.ts — run with: deno run --allow-all esbuild.ts
+import * as esbuild from "https://deno.land/x/esbuild@v0.17.18/mod.js";
+import { denoPlugins } from "https://deno.land/x/esbuild_deno_loader@0.7.0/mod.ts";
+
+const ldkEntry = "/path/to/ad4m/ad4m-ldk/js/lib/index.js";
+
+const ad4mPlugin = {
+  name: "ad4m",
+  setup(build: any) {
+    build.onResolve({ filter: /^ad4m:host$/ }, () => ({ path: "ad4m:host", external: true }));
+    build.onResolve({ filter: /^@coasys\/ad4m-ldk$/ }, () => ({ path: ldkEntry, namespace: "file" }));
+  },
+};
+
+await esbuild.build({
+  plugins: [ad4mPlugin, ...denoPlugins()],
+  entryPoints: ["index.ts"],
+  outfile: "build/bundle.js",
+  bundle: true,
+  platform: "node",
+  target: "deno1.32.4",
+  format: "esm",
+  charset: "ascii",
+  legalComments: "inline",
+});
+esbuild.stop();
+```
+
+This is `bootstrap-languages/centralized-file-storage/esbuild.ts` with the paths made explicit. The `ad4m:host` rule is a plugin, not esbuild's `external` option, because the Deno loader resolves imports before `external` is consulted. `legalComments: "inline"` keeps `//!` comments, which [template variables](#make-it-a-template) depend on.
+
+</Tab>
+<Tab>
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.117
+
+cargo build --target wasm32-unknown-unknown --release
+wasm-bindgen --target deno --out-dir build-deno target/wasm32-unknown-unknown/release/note_store.wasm
+node /path/to/ad4m/tests/rust-languages/inline-wasm.mjs "$PWD"
+```
+
+`wasm-bindgen --target deno` writes a JS module plus a `.wasm` file; `inline-wasm.mjs` embeds the WebAssembly into the module and writes `build/bundle.js`, a single file the executor can load. It reads `build-deno/<name>.js` and `build-deno/<name>_bg.wasm` under the directory you pass, taking `<name>` from that directory's name with dashes turned into underscores, so the crate directory must be named after the crate (`note-store` here). Keep the `wasm-bindgen` crate version equal to the CLI version. `tests/rust-languages/build.sh` runs the same steps.
+
+</Tab>
+</Tabs>
+
+## 3. Try it
+
+Publish the bundle and create a note. The details, and the CLI equivalent, are in [Publish a Language](./publish-a-language.mdx).
+
+```typescript
+import { LanguageMetaInput } from "@coasys/ad4m";
+
+const meta = await ad4m.languages.publish(
+  "/absolute/path/to/build/bundle.js",
+  new LanguageMetaInput("note-store", "Notes in the executor's key-value store"),
+);
+const url = await ad4m.expression.create("Buy milk", meta.address);
+const note = await ad4m.expression.get(url);
+note.proof.valid; // true
+```
+
+This is the round trip `tests/js/tests/flat-language.test.ts` runs for `note-store-flat` and for the Rust test Language.
+
+If loading fails with "Language bundle does not export init()", the bundle has neither a top-level `init` export nor a default export with `init`.
+
+## Make it a template
+
+To let others clone your Language with their own parameters (each neighbourhood's link language is such a clone), mark a top-level declaration:
+
+```typescript
+//!@ad4m-template-variable
+const uid = "note-store-default";
+```
+
+`languages.applyTemplateAndPublish(address, JSON.stringify({ uid: "…" }))` replaces the value of each marked `const`, `let` or `var` whose name is a key in the JSON and publishes the result as a new Language. List the parameter names in `possibleTemplateParams` when you publish, so apps know what they can set.
+
+## Beyond expressions
+
+A link language for neighbourhoods exports the commit, sync and peers groups (`commit`, `sync`, `peers` in `defineLanguage`); a query-only Language exports `query`. The capability groups and their exports are listed in [Language protocols](../concepts/language-protocols.mdx#exports-what-the-executor-calls), and their exact semantics are in the [Language interface spec](../reference/language-interface-spec.md). Working link languages to read: `bootstrap-languages/centralized-p-diff-sync` (a central server) and `bootstrap-languages/p-diff-sync` (Holochain).

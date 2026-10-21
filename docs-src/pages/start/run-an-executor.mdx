@@ -52,7 +52,7 @@ Every flag of `run` also reads an `AD4M_<FLAG>` variable (`--mcp-port` reads `AD
 
 The complete list, with the config-file keys and the environment variables, is on [Executor config](../reference/executor-config.mdx). A systemd unit, Docker and unlocking at startup are on [Headless executor](../how-to/headless-executor.mdx).
 
-Unlock the agent after every start: `ad4m agent unlock` (the `ad4m` client prompts for the passphrase), or set `AD4M_UNLOCK_PASSPHRASE_FILE` so `run` does it itself. Until then, signing fails with a "key not found" error.
+Unlock the agent after every start: `ad4m agent unlock` (the `ad4m` client prompts for the passphrase), or set `AD4M_UNLOCK_PASSPHRASE_FILE` so `run` does it itself.
 
 ## Hosted: a multi-user node
 
@@ -65,12 +65,12 @@ Everything is under the data directory, `~/.ad4m` by default (`--app-data-path` 
 | Path | Holds |
 |---|---|
 | `~/.ad4m/ad4m_db.sqlite` | The database: perspectives, links, agent and runtime state |
-| `~/.ad4m/h/` | Holochain conductor data |
-| `~/.ad4m/ad4m.log` | The executor log (`ad4m log` prints it) |
+| `~/.ad4m/ad4m/h/` | Holochain conductor data |
+| `~/.ad4m/ad4m.log` | The executor log, written by the Launcher (`ad4m log` prints it); `ad4m-executor run` logs to stdout |
 | `~/.ad4m/ad4m/languages/` | Installed languages |
 | `~/.ad4m/mainnet_seed.seed` | The bootstrap seed `init` writes (the system languages to install) |
-| `~/.ad4m/executor-port` | The port the running executor listens on; the `ad4m` client reads it |
-| `~/.ad4m/launcher-state.json` | Launcher settings (the same keys as `--config`) |
+| `~/.ad4m/executor-port` | The port the Launcher's executor listens on, written by the Launcher; the `ad4m` client reads it |
+| `~/.ad4m/launcher-state.json` | Launcher settings (not a `--config` file) |
 
 The `ad4m` client keeps its own capability token in `~/.ad4m-cli/cap_token`.
 

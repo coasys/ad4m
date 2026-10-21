@@ -24,7 +24,7 @@ For every link the executor writes three things into the default graph (`rust-ex
                             <link:HASH>  <ad4m://ontology/status>     "Shared" .
 ```
 
-Four consequences for your queries:
+Consequences for your queries:
 
 - **Plain triple patterns work.** `?task <todo://state> ?state` matches the direct triple. You only need the reifier when you want author, timestamp, signature or status.
 - **Metadata hangs off the reifier**, reached through an RDF 1.2 triple term: `?r rdf:reifies <<( ?s ?p ?o )>>`. There is no `rdf:Statement`, `rdf:subject` or `rdf:predicate` anywhere in the store.
@@ -33,7 +33,7 @@ Four consequences for your queries:
 - **Timestamps and the author are plain string literals**, not `xsd:dateTime`. Compare them as strings; ISO-8601 sorts lexically.
 
 <Callout type="info">
-  Queries and results travel as text. `querySparql` returns the parsed JSON: for `SELECT`, an array of rows keyed by variable name, every value a string (an IRI as written, a literal by its lexical form); for `ASK`, a boolean; for `CONSTRUCT` and `DESCRIBE`, rows of `{ subject, predicate, object }`. Only `SELECT`, `ASK`, `CONSTRUCT` and `DESCRIBE` parse; any update form is refused before it runs (`validate_readonly_query`).
+  Queries and results travel as text. `querySparql` returns the parsed JSON: for `SELECT`, an array of rows keyed by variable name, every value a string (an IRI as written, a literal by its lexical form); for `ASK`, a boolean; for `CONSTRUCT` and `DESCRIBE`, rows of `{ subject, predicate, object }`, each term in N-Triples form (`<iri>`, `"text"`). Only `SELECT`, `ASK`, `CONSTRUCT` and `DESCRIBE` parse; any update form is refused before it runs (`validate_readonly_query`).
 </Callout>
 
 ## 1. Filter on a predicate

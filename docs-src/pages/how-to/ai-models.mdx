@@ -125,7 +125,7 @@ const answer = await client.ai.prompt(task.taskId, "…text to summarize…");
 
 ## Manage
 
-`client.ai.getModels()`, `updateModel(modelId, model)`, `removeModel(modelId)`. A caller needs the `artificial intelligence` capability: `READ`/`CREATE`/`PROMPT`/`TRANSCRIBE` are in a hosted user's default set, `UPDATE`/`DELETE` are the operator's.
+`client.ai.getModels()`, `updateModel(modelId, model)`, `removeModel(modelId)`. Capabilities on the `artificial intelligence` domain: `READ` to list models, tasks and loading status; `CREATE` to add, change or remove models and tasks and to set defaults; `PROMPT` for `prompt` and `embed`; `TRANSCRIBE` for streams. A hosted user's default set has `READ`, `CREATE`, `PROMPT` and `TRANSCRIBE`, but `addModel`, `updateModel`, `removeModel` and `setDefaultModel` refuse a hosted user's session: models are node-wide and the operator's.
 
 ## Next
 

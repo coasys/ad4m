@@ -20,7 +20,7 @@ The `cli/` crate builds two binaries (`cli/Cargo.toml`): `ad4m-executor`, the ru
 | `dev publish-and-test-expression-language <language_path> <data>` | Publishes an expression language to a throwaway executor and creates one expression with it. |
 | `log` | Listed, but has no handler: it prints nothing. `run` logs to stdout. |
 
-### `run` flags
+### Run flags
 
 Every flag also reads an environment variable: `AD4M_` plus the flag in upper snake case (`--mcp-port` reads `AD4M_MCP_PORT`). A flag beats its variable, and both beat the [config file](./executor-config.mdx). An empty or whitespace-only value is an error that names the flag or variable. Boolean flags take an explicit value (`--enable-mcp true`); only `--dynamic-class-tools` and `--insecure-no-admin-credential` also work bare.
 
@@ -63,7 +63,7 @@ The MCP bind address has no flag: it is the `MCP_HOST` environment variable ([Ru
 | Flag | Default | Meaning |
 |---|---|---|
 | `--run-holochain <bool>` | `true` | Start the bundled Holochain conductor. `false` means no p2p link languages and no bootstrap traffic. |
-| `--hc-app-port <u16>` | `1337` | Conductor app interface port. |
+| `--hc-app-port <u16>` | first free from `1337` | Conductor app interface port. |
 | `--hc-admin-port <u16>` | first free from `2000` | Accepted; the conductor opens no admin interface. |
 | `--hc-use-bootstrap <bool>` | `true` | Use the bootstrap service. |
 | `--hc-bootstrap-url <url>` | `http://bootstrap.ad4m.dev:4433` | Bootstrap service. |

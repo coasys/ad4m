@@ -17,7 +17,7 @@ import { getAd4mClient } from "@coasys/ad4m-connect";
 const ad4m = await getAd4mClient({
   appInfo: { name: "Team board", description: "Tasks for the team", url: "board.example.com" },
   capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
-  hosting: true,                                 // offer "Remote node" next to "Local node"
+  hosting: true,                                 // offer "Remote Node" next to "Local Node"
   remoteUrl: "https://ad4m.example.com:12001",   // pre-fills the host URL field
 });
 
@@ -25,7 +25,7 @@ const me = await ad4m.agent.me();                // this user's own DID
 const board = await ad4m.perspective.add("Board"); // owned by this user
 ```
 
-The user picks "Remote node", chooses a host from the hosting index or types its URL, enters an email address, and then either a password or a code from their inbox. From then on `ad4m` is an ordinary `Ad4mClient` on `wss://ad4m.example.com:12001/api/v1/ws` with a JWT for that user.
+The user picks "Remote Node", browses the hosting index or types a URL, enters an email address, and then either a password or a code from their inbox. From then on `ad4m` is an ordinary `Ad4mClient` on `wss://ad4m.example.com:12001/api/v1/ws` with a JWT for that user.
 
 The same steps without the dialog, in Node or a test:
 
@@ -72,7 +72,7 @@ Choose a host you trust as you would an email provider, or run your own executor
 | Is this a hosted node? | `runtime.multiUserEnabled()` | Readable without a token |
 | Sign up | `agent.createUser(email, password)` | New key and DID; a six-digit code is emailed when SMTP is configured. Returns `UserCreationResult` `{ did, success, error? }`. An existing email with the right password returns that user's DID |
 | Log in with a password | `agent.loginUser(email, password)` | Returns the JWT |
-| Log in by email code | `agent.requestLoginVerification(email, appInfo?)` then `agent.verifyEmailCode(email, code, "login")` | Sends a code if SMTP is configured; returns `{ success, message, requiresPassword, isExistingUser }`. Without SMTP it answers `requiresPassword: true` |
+| Log in by email code | `agent.requestLoginVerification(email, appInfo?)` then `agent.verifyEmailCode(email, code, "login")` | The first call sends a code to a known email if SMTP is configured and returns `{ success, message, requiresPassword, isExistingUser }`; without SMTP, or for an unknown email, it answers `requiresPassword: true`. `verifyEmailCode` returns the JWT |
 | Guest | `connectAsGuest(options, hostUrl)` from `@coasys/ad4m-connect` | Random `guest-…@flux.demo` account, credentials kept in `localStorage` for that host |
 
 `@coasys/ad4m-connect` runs this table for you: an email it does not know asks for a password and creates the account; a known email gets a code when the host has SMTP, a password field when it does not (`connect/src/core.ts`, `components/views/RemoteAuthentication.ts`). Emails are trimmed and lowercased by the executor.

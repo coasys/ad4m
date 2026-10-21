@@ -1,0 +1,150 @@
+---
+title: Include relations
+description: Load related instances with a query instead of ids - one level, nested, filtered and capped, reverse relations, polymorphic relations, and counts without loading.
+---
+
+import { Callout } from "nextra/components";
+
+# Include relations
+
+A relation field holds ids by default. `include` asks the executor to hydrate the targets in the same query, as instances of the target class. What relations are and how they are stored: [Relations](../concepts/types-and-values.mdx#relations).
+
+## Steps
+
+1. **Declare the relation** with a target class: `@HasMany(() => Comment, { through })`, `@HasOne(...)`, or the reverse forms `@BelongsToOne` / `@BelongsToMany` on the other side.
+2. **Name it in `include`**: `include: { comments: true }`.
+3. **Shape the included rows** if needed: replace `true` with a sub-query (`where`, `order`, `limit`, `offset`, `include`).
+4. **Nest** by putting `include` inside the sub-query, one object per level.
+5. **Count instead of loading** with a `$` key: `include: { $commentCount: { from: "comments", count: true } }`.
+
+```typescript
+import { Ad4mModel, Model, Flag, Property, HasMany, HasOne, BelongsToOne, HasManyMethods } from "@coasys/ad4m";
+
+@Model({ name: "Reaction" })
+class Reaction extends Ad4mModel {
+  @Flag({ through: "blog://kind", value: "blog://reaction" })
+  kind = "blog://reaction";
+
+  @Property({ through: "blog://emoji", required: true })
+  emoji: string = "";
+}
+
+@Model({ name: "Comment" })
+class Comment extends Ad4mModel {
+  @Flag({ through: "blog://kind", value: "blog://comment" })
+  kind = "blog://comment";
+
+  @Property({ through: "blog://body", required: true })
+  body: string = "";
+
+  @HasMany(() => Reaction, { through: "blog://reaction" })
+  reactions: Reaction[] = [];
+
+  // Reverse: the Post whose blog://comment link points here.
+  @BelongsToOne(() => Post, { through: "blog://comment" })
+  post: Post | null = null;
+}
+interface Comment extends HasManyMethods<"reactions"> {}
+
+@Model({ name: "Post" })
+class Post extends Ad4mModel {
+  @Flag({ through: "blog://kind", value: "blog://post" })
+  kind = "blog://post";
+
+  @Property({ through: "blog://title", required: true })
+  title: string = "";
+
+  @HasMany(() => Comment, { through: "blog://comment" })
+  comments: Comment[] = [];
+
+  @HasOne(() => Comment, { through: "blog://pinned" })
+  pinned: Comment | null = null;
+}
+interface Post extends HasManyMethods<"comments" | "pinned"> {}
+
+await Ad4mModel.registerAll(perspective, [Reaction, Comment, Post]);
+
+const post = await Post.create(perspective, { title: "Hello" });
+const c = await Comment.create(perspective, { body: "First" });
+await post.addComments(c);
+await post.addPinned(c);
+await c.addReactions(await Reaction.create(perspective, { emoji: "+1" }));
+
+// Without include: relation fields hold ids.
+const [bare] = await Post.findAll(perspective, { where: { id: post.id } });
+bare.comments; // ["ad4m://obj/…"]
+
+// One level, a sub-query, and a nested include.
+const [full] = await Post.findAll(perspective, {
+  where: { id: post.id },
+  include: {
+    pinned: true,
+    comments: {
+      order: { body: "ASC" },
+      limit: 5,
+      include: { reactions: true },
+    },
+  },
+});
+full.pinned?.body;                   // "First"
+full.comments[0].reactions[0].emoji; // "+1"
+
+// Reverse: from the comment back to its post.
+const [back] = await Comment.findAll(perspective, { where: { id: c.id }, include: { post: true } });
+back.post?.title; // "Hello"
+
+// A count without loading the comments.
+const [counted] = await Post.findAll(perspective, {
+  where: { id: post.id },
+  include: { $commentCount: { from: "comments", count: true } },
+});
+(counted as any).$commentCount; // 1
+
+// On an instance you already hold.
+const again = new Post(perspective, post.id);
+await again.get({ comments: true });
+```
+
+## What you get
+
+| Relation | Without `include` | With `include` |
+|---|---|---|
+| `@HasMany`, `@BelongsToMany` | `string[]` of ids | instances of the target class; `[]` when there are none |
+| `@HasOne`, `@BelongsToOne` | one id | one instance, or `null` |
+
+- A target that does not conform to the target class (a stray link to a literal, a node of another class) is dropped from the included list, not returned as an id.
+- An included relation inherits the query's `linkStatus` and `includeUnverified` unless its sub-query sets its own.
+- The same forms work on the builder (`.include({...})`), on `findOne`, `paginate`, `findAllAndCount`, and on an instance with `instance.get({ comments: true })`.
+
+## Depth
+
+Each nested `include` is one more level. The executor stops at 8 levels: a deeper include resolves to an empty list and logs a warning, which also cuts a cycle such as Post → Comment → Post. Leaf relations you do not name stay ids.
+
+## Polymorphic relations
+
+A relation whose members are of several classes has no single target class. Declare it `polymorphic`, and list the classes the SDK should construct:
+
+```typescript
+@HasMany({
+  through: "app://child",
+  polymorphic: true,
+  instantiateAs: () => [TextBlock, ImageBlock],
+})
+children: string[] = [];
+```
+
+`include: { children: true }` then hydrates each child as the class it actually is; you do not repeat `polymorphic` at the call site. A child whose class is not in `instantiateAs` still comes back, with its data and `__subjectClass` naming its class, but not as an instance of that class. Including an untyped relation that is not declared `polymorphic` is an error that names the relation. Details: [Polymorphic relations](../concepts/types-and-values.mdx#polymorphic-relations).
+
+## Projections: counts and short lists
+
+A key that starts with `$` adds a computed field per row without hydrating the relation: `{ from, count: true }` for a number, `{ from, limit: 1 }` for one id or `null`, `transitive: true` to count a whole thread. A projection's `where` and `order` are listed in [Include and projections](../reference/model-query.mdx#include-and-projections).
+
+<Callout type="warning">
+On this executor a projection's `order` honors only `id`. `{ from: "comments", order: { createdAt: "DESC" }, limit: 1 }` does not return the newest comment; it returns whichever member the store yields first (issue #1417). For "the newest one", include the relation with a sub-query instead: `comments: { order: { createdAt: "DESC" }, limit: 1 }`.
+</Callout>
+
+## Next
+
+- Concepts: [Eager loading with include](../concepts/queries.mdx#eager-loading-with-include), [Types and values](../concepts/types-and-values.mdx).
+- Reference: [Relation decorators](../reference/decorators.mdx#relation-decorators), [Include and projections](../reference/model-query.mdx#include-and-projections).
+- How-to: [Sparse fields](./sparse-fields.mdx), [Paginate](./paginate.mdx).

@@ -13,11 +13,14 @@ You have a perspective and want other agents to see and write the same links. Th
 
 ```typescript
 const templates = await ad4m.runtime.knownLinkLanguageTemplates();
-// ["Qm…", …] — the bootstrap seed's known link languages plus any you added
-const template = templates[0];
+// ["Qm…", …] — the bootstrap seed's known link languages plus any you added, sorted by address
+
+// Pick by meta, not by position: the Holochain template declares "uid".
+const metas = await Promise.all(templates.map((address) => ad4m.languages.meta(address)));
+const template = metas.find((m) => m.possibleTemplateParams?.includes("uid"))!.address;
 ```
 
-`knownLinkLanguageTemplates()` returns addresses (`core/src/runtime/RuntimeClient.ts`). The default seed lists the Holochain-backed perspective-diff-sync template. On an executor started with the local bootstrap languages (`--run-holochain false`, Docker, tests) the list holds that seed's link language instead.
+`knownLinkLanguageTemplates()` returns addresses, sorted and deduplicated (`core/src/runtime/RuntimeClient.ts`; `rust-executor/src/runtime_service/mod.rs`). `languages.meta(address)` returns the Language's `LanguageMeta`, including `name` and `possibleTemplateParams` (`core/src/language/LanguageClient.ts`). The mainnet seed lists two templates (`cli/seed_proto.json`): perspective-diff-sync (Holochain, parameters `uid`, `name`, `description`) and the server link language (`SERVER_URL`, `UID`). A seed generated from the local bootstrap languages (`bootstrap-languages/local/generate-seed.mjs`, for `--run-holochain false`, Docker and tests) lists its one link language.
 
 ## 2. Create this neighbourhood's own instance
 
@@ -30,7 +33,7 @@ linkLanguage.address;   // the new Language's address
 linkLanguage.name;      // "Team space sync"
 ```
 
-The second argument is a **JSON string**, not an object (`LanguageClient.applyTemplateAndPublish(sourceLanguageHash, templateData: string)`, `core/src/language/LanguageClient.ts`). `uid` must be unique per neighbourhood: it is the network seed that separates this neighbourhood from every other one made from the same template (`rust-executor/src/languages/mod.rs`). `name` is what members see as the Language's name. The integration tests build exactly this string (`tests/js/utils/linkLangConfig.ts`, `holochainLinkLang`).
+The second argument is a **JSON string**, not an object (`LanguageClient.applyTemplateAndPublish(sourceLanguageHash, templateData: string)`, `core/src/language/LanguageClient.ts`). `uid` must be unique per neighbourhood: it is the network seed that separates this neighbourhood from every other one made from the same template (`rust-executor/src/languages/mod.rs`). `name` is what members see as the Language's name. The integration tests build exactly this string (`tests/js/utils/linkLangConfig.ts`, `holochainLinkLang`); for the server link language they pass `{ SERVER_URL, UID, name }` (`serverLinkLang`). A template call that leaves one of the template's marked variables unfilled is refused (`rust-executor/src/languages/mod.rs`, `unfilled_template_variables`).
 
 <Callout type="warning">
   Reusing a `uid` puts two neighbourhoods on one network. Generate a fresh one every time.
@@ -51,18 +54,18 @@ const url = await ad4m.neighbourhood.publishFromPerspective(
 
 `publishFromPerspective(perspectiveUuid, linkLanguage, meta)` returns the neighbourhood URL (`core/src/neighbourhood/NeighbourhoodClient.ts`). `meta` is a `Perspective` whose links every joiner receives with the neighbourhood expression itself, before any sync; an empty `new Perspective()` is fine. To carry signed links in it, pass `new Perspective([linkExpression, …])` with `LinkExpression`s you read back from a perspective (`tests/js/tests/neighbourhood.ts`, "can publish and join locally").
 
-The perspective's links that were already there are committed to the link language; new shared links follow as you add them. Links added with status `"local"` stay on your executor.
+The perspective's shared links that were already there are committed to the link language (`ensure_public_links_are_shared`, `rust-executor/src/neighbourhoods.rs`); new shared links follow as you add them. Links added with status `"local"` stay on your executor.
 
 ## 4. Check the state and share the URL
 
 ```typescript
-const p = await ad4m.perspective.byUUID(perspective.uuid);
+const p = (await ad4m.perspective.byUUID(perspective.uuid))!;
 p.sharedUrl;            // the neighbourhood URL
 p.neighbourhood?.data.linkLanguage === linkLanguage.address;   // true
 p.state;                // "NEIGHBOURHOOD_CREATION_INITIATED" → "SYNCED"
 ```
 
-Give the URL to the people who should join: [Join a neighbourhood](./join-neighbourhood.mdx). Anyone who has it and whose executor trusts the template's author can join; there is no further access control at this layer. Rules about what counts inside the neighbourhood are [Social DNA](../concepts/social-dna-and-flows.mdx).
+Give the URL to the people who should join: [Join a neighbourhood](./join-neighbourhood.mdx). Anyone who has the URL can join; there is no further access control at this layer. Rules about what counts inside the neighbourhood are [Social DNA](../concepts/social-dna-and-flows.mdx).
 
 ## From the CLI
 

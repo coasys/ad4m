@@ -1,0 +1,142 @@
+---
+title: MCP tools
+description: Every tool the executor's MCP server exposes, with its parameters, what it does and the Rust file that handles it; the opt-in per-class tools; and the tools the OpenClaw plugin adds.
+---
+
+import { Callout } from "nextra/components";
+
+# MCP tools
+
+The executor's MCP server registers 44 static tools (`Ad4mMcpHandler::tool_router` in `rust-executor/src/mcp/tools/mod.rs`). The list does not change with the classes a perspective carries. Paths below are relative to `rust-executor/src/mcp/tools/`. A `?` marks an optional parameter. How to enable the server and authenticate: [Run the MCP server](../how-to/mcp-server.mdx).
+
+**Auth** column: "none" means the tool runs without a credential (`AUTH_TOOLS` in `mod.rs`); every other tool answers `Authentication required. ...` until the session is authenticated. **OpenClaw** column: whether the OpenClaw AD4M plugin bridges the tool as `ad4m_<name>` (the plugin surfaces only the names in `plugins/ad4m/staticToolDefs.ts`).
+
+## Documentation
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `get_documentation` | `topic`: `overview` \| `usage` \| `models` \| `architecture` \| `flux` | Returns one of the executor's own agent documents as markdown. The same texts: [overview](./mcp-topics/overview.md), [usage](./mcp-topics/usage.md), [models](./mcp-topics/models.md), [architecture](./mcp-topics/architecture.md), [flux](./mcp-topics/flux.md). | `docs.rs` | none | yes |
+
+## Perspectives and links
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `list_perspectives` | — | Lists the perspectives the caller may access: `uuid`, `name`, `shared_url`, `has_neighbourhood`. | `perspectives.rs` | yes | yes |
+| `add_perspective` | `name` | Creates a local perspective; returns its UUID. | `perspectives.rs` | yes | yes |
+| `add_link` | `perspective_id`, `source`, `predicate`, `target` | Adds one link. Prefer the `instance_*` tools; a link no class recognizes is not a record. | `perspectives.rs` | yes | yes |
+| `query_links` | `perspective_id`, `source?`, `predicate?`, `target?` | Returns the links matching the given fields. | `perspectives.rs` | yes | yes |
+| `add_model` | `perspective_id`, `class_name`, `shacl_json` | Registers a subject class from a SHACL JSON shape. Authoring guide: [models](./mcp-topics/models.md). | `perspectives.rs` | yes | yes |
+
+## Instances (class-agnostic)
+
+The class is a parameter, not part of the tool name. `describe_perspective` returns the class names and their properties; property values given to the write tools are validated against that schema.
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `describe_perspective` | `perspective_id` | Every registered class with its properties (name, type, required, cardinality, hints), collections and flows. | `instances/describe.rs` | yes | yes |
+| `instance_create` | `perspective_id`, `class_name`, `properties?`, `base_uri?`, `parent?` | Creates an instance; with `parent`, also puts it under that node (the parent class's own children relation, else `ad4m://has_child`). Returns the new id. | `instances/create.rs` | yes | yes |
+| `instance_query` | `perspective_id`, `class_name`, `filter?`, `parent?`, `limit?` (default 100), `offset?` | Lists instances with `id`, `author`, `timestamp` and their property values. `filter` is a model-query where clause (exact, IN, `gt`/`contains`/`not`, `AND`/`OR`/`NOT`); `parent` restricts to what one node contains. | `instances/query.rs` | yes | yes |
+| `instance_get` | `perspective_id`, `class_name`, `base_uri` | One instance with properties and collections resolved; an error if no instance of that class is at the URI. | `instances/query.rs` | yes | yes |
+| `instance_update` | `perspective_id`, `class_name`, `base_uri`, `properties` | Sets single-valued properties; unlisted ones are untouched. Collections are not set here. | `instances/update.rs` | yes | yes |
+| `instance_remove` | `perspective_id`, `class_name`, `base_uri` | Deletes the instance: its property links, type markers and every inbound link. Refuses when no instance of that class is at the URI. | `instances/update.rs` | yes | yes |
+| `instance_add_to_collection` | `perspective_id`, `class_name`, `base_uri`, `collection`, `item_uri` | Adds an item to a collection; adding an existing item is a no-op. | `instances/collections.rs` | yes | yes |
+| `instance_remove_from_collection` | `perspective_id`, `class_name`, `base_uri`, `collection`, `item_uri` | Removes the membership link only; the item stays. | `instances/collections.rs` | yes | yes |
+| `instance_transcript` | `perspective_id`, `parent`, `limit?` (default 50, max 500) | The newest children of `parent` that carry text, as a chronological transcript (timestamp, author name and DID, text). One query on the built-in abstract class `TextContent`. | `instances/transcript.rs` | yes | yes |
+| `add_child` | `perspective_id`, `parent`, `child` | Puts an existing node under a parent: the parent class's own children relation when it has one, else one `ad4m://has_child` link. | `instances/children.rs` | yes | yes |
+| `get_children` | `perspective_id`, `parent`, `limit?` (default 100, max 500) | Lists a node's children of any class: id, timestamp and author of each child link, oldest first. Works on `ad4m://self`. | `instances/children.rs` | yes | yes |
+| `execute_commands` | `perspective_id`, `commands` (JSON array of `{source, predicate, target, action}`), `expression_address`, `parameters?` | Runs raw SDNA actions on an instance. It does not go through the class's SHACL validation. | `instances/commands.rs` | yes | no |
+
+What a node's children are, and why one record can have several holders: [Containment](../concepts/containment.mdx). The two built-in classes: [Built-in interfaces](./built-in-interfaces.mdx).
+
+## Flows
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `add_flow` | `perspective_id`, `flow_name`, `shacl_json` | Registers a flow (state machine). | `flows.rs` | yes | no |
+| `get_flows` | `perspective_id` | All flow definitions in the perspective. | `flows.rs` | yes | no |
+| `flow_state` | `perspective_id`, `flow_name`, `expression_address` | The flow instance URI and current state of an expression. | `flows.rs` | yes | no |
+| `flow_actions` | `perspective_id`, `flow_name`, `expression_address` | The transitions available from the expression's current state. | `flows.rs` | yes | no |
+| `flow_proposal_accept` | `perspective_id`, `proposal_uri` | Adds this agent's DID to a transition proposal's acceptors and runs the consensus pass. | `flows.rs` | yes | no |
+| `flow_proposal_reject` | `perspective_id`, `proposal_uri` | Deletes only the links this DID signed on the proposal (its vote, or the whole proposal if it opened it). | `flows.rs` | yes | no |
+| `flow_valid_outputs` | `perspective_id`, `flow_name`, `state?` | Instances named by a verified receipt of a completed run whose content still matches. | `flows.rs` | yes | no |
+
+Proposing a transition is not an MCP tool; it is the SDK call `perspective.proposeFlowTransition`. See [Flows](../concepts/flows.mdx).
+
+## Agent profile
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `get_my_did` | — | The DID of the agent behind the session. Compare it with `author` to skip your own items. | `profiles.rs` | yes | yes |
+| `get_agent_profile` | — | The agent's public profile (username, names, bio, picture URLs). | `profiles.rs` | yes | no |
+| `set_agent_profile` | `username?`, `given_name?`, `family_name?`, `email?`, `bio?` | Updates the given profile fields; omitted fields keep their values. | `profiles.rs` | yes | yes |
+| `set_agent_profile_picture` | `image_base64`, `mime_type?` (default `image/png`) | Uploads a picture (raw base64, not a data URI) and links it in the profile. | `profiles.rs` | yes | no |
+| `get_agent_public_perspective` | `did?` | The public links an agent publishes under its DID; omit `did` for your own. | `profiles.rs` | yes | no |
+| `set_agent_public_perspective` | `links_json` | Replaces all of your public links. | `profiles.rs` | yes | no |
+
+## Neighbourhoods and languages
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `list_link_language_templates` | — | Link language templates available for publishing, with address, name and description. | `neighbourhoods.rs` | yes | yes |
+| `neighbourhood_publish_from_perspective` | `perspective_uuid`, `link_language`, `name?` (default `Neighbourhood`) | Clones the template and publishes the perspective; returns the neighbourhood URL. | `neighbourhoods.rs` | yes | yes |
+| `neighbourhood_join_from_url` | `url` | Joins a neighbourhood; returns the new local perspective's UUID. | `neighbourhoods.rs` | yes | yes |
+| `language_meta` | `address` | Name, description, author, source link and template parameters of an installed language. | `languages.rs` | yes | no |
+
+## Waker query builders
+
+These build a query; they do not subscribe. A host registers the query as a live subscription over the executor's WebSocket API (see [Agents](../concepts/agents.mdx#wakers)).
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `generate_waker_query` | `perspective_id`, `class_name`, `parent?`, `predicate?`, `target_value?` | With `parent`: a model query over the built-in `ad4m://Container` (returned in `query_class`) for that node's children. Otherwise a SPARQL query over the class's predicates, or over `predicate`/`target_value`. | `subscriptions.rs` | yes | no |
+| `get_mention_waker_config` | `perspective_id`, `name_override?` | One subscription entry matching links whose target contains the agent's profile names or DID as a whole word, case-insensitively, skipping the agent's own links. | `subscriptions.rs` | yes | no |
+
+## Authentication
+
+| Tool | Parameters | What it does | Handler | Auth | OpenClaw |
+|---|---|---|---|---|---|
+| `auth_status` | — | Whether the session holds a token, and whether the executor is locked. | `auth.rs` | none | yes |
+| `request_capability` | `app_name`, `app_desc`, `app_domain?`, `app_url?` | Creates a capability request for all capabilities. Returns `request_id`, and the `code` only when the session may permit (the admin credential or a token holding `PERMIT`, or a node without an admin credential). | `auth.rs` | none | no |
+| `generate_jwt` | `request_id`, `code` | Exchanges the permitted request for a JWT and stores it in the session. | `auth.rs` | none | no |
+| `login_email` | `email`, `password` | Multi-user login; stores the JWT in the session. | `auth.rs` | none | yes |
+| `signup` | `email`, `password` | Creates a multi-user account; sends a verification email. | `auth.rs` | none | yes |
+| `request_login_verification` | `email` | Sends a login verification code by email. | `auth.rs` | none | no |
+| `verify_email_code` | `email`, `code`, `verification_type`: `signup` \| `login` | Completes signup or login with the emailed code; returns a JWT. | `auth.rs` | none | yes |
+
+## Per-class tools (opt-in)
+
+The executor can also generate tools per registered class. They are exposed over MCP only when the executor runs with `--dynamic-class-tools true` (or `AD4M_DYNAMIC_CLASS_TOOLS=true`); there is no config-file key. Off, a call to one by name returns `Unknown tool: <name>. Dynamic per-class tools are not exposed on this MCP server ...` with the `instance_*` equivalents (`mod.rs`). The in-executor interpretation harness always sees them.
+
+Names are built from the class name in lowercase (`dynamic.rs`):
+
+| Name | Does | Same as |
+|---|---|---|
+| `<class>_create` | create an instance | `instance_create` |
+| `<class>_query` | list all instances' addresses | `instance_query` |
+| `<class>_list` | list instances under a `parent`, by timestamp | `instance_query` with `parent` |
+| `<class>_get` | read one instance | `instance_get` |
+| `<class>_set_<property>` | set one property | `instance_update` |
+| `<class>_get_<collection>` | read a collection | `instance_get` |
+| `<class>_add_<collection>` | add to a collection | `instance_add_to_collection` |
+| `<class>_remove_<collection>` | remove from a collection | `instance_remove_from_collection` |
+| `<class>_delete` | delete an instance | `instance_remove` |
+
+The OpenClaw plugin never bridges per-class tools.
+
+## Tools the OpenClaw plugin adds
+
+The plugin registers these itself; they are not executor tools (`plugins/ad4m/index.ts`).
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `ad4m_subscribe_to_mentions` | `perspective_id` | Builds a mention subscription with `get_mention_waker_config` and registers it. Called automatically after `ad4m_neighbourhood_join_from_url` and `ad4m_neighbourhood_publish_from_perspective` succeed. |
+| `ad4m_unsubscribe_from_mentions` | `perspective_id` | Removes the mention subscription. |
+| `ad4m_subscribe_to_children` | `perspective_id`, `expression_address` | Builds a children subscription with `generate_waker_query(parent=...)` and registers it. |
+| `ad4m_unsubscribe_from_children` | `perspective_id`, `expression_address` | Removes the children subscription. |
+| `ad4m_list_waker_subscriptions` | — | Active subscriptions, plus any the executor rejected or never answered that are still being re-attempted. |
+| `ad4m_set_profile_picture_from_file` | `file_path` | Reads a local image and uploads it as the profile picture. |
+| `ad4m_get_sample_config` | — | A sample plugin configuration. |
+
+<Callout type="info">
+Permission denial on a perspective reads as `Perspective not found: <id>`, the same answer as a perspective that does not exist, so a caller cannot probe for perspectives it may not read (`mod.rs`, `get_readable_perspective`).
+</Callout>

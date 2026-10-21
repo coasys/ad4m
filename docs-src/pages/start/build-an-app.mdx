@@ -13,7 +13,7 @@ An AD4M app has no server of its own. It connects to the user's executor, asks f
 
 Pick one:
 
-- **Launcher** — the desktop app that bundles the executor, a settings UI and the capability-approval dialog. Download it from the [GitHub releases](https://github.com/coasys/ad4m/releases) and start it; it generates or unlocks your agent and listens on `http://localhost:12000`.
+- **Launcher** — the desktop app that bundles the executor, a settings UI and the capability-approval dialog. Download it from the [GitHub releases](https://github.com/coasys/ad4m/releases) and start it; it generates or unlocks your agent and listens on `http://localhost:12000` (or the next free port).
 - **CLI** — `ad4m-executor run` from the `cli/` crate, for headless and scripted use. See [Run an executor](./run-an-executor.mdx).
 
 ## 2. Install the SDK
@@ -26,7 +26,7 @@ pnpm add @coasys/ad4m @coasys/ad4m-connect
 
 ## 3. Connect
 
-`@coasys/ad4m-connect` has three named exports; there is no default export.
+`@coasys/ad4m-connect` has no default export. Its three entry points (plus an `isEmbedded()` helper):
 
 | Export | Returns | Use when |
 |---|---|---|
@@ -54,7 +54,7 @@ const me = await client.agent.me();
 console.log(me.did); // did:key:z6Mk...
 ```
 
-A capability is `{ with: { domain, pointers }, can }`. `domain` is one of the executor's fixed names (`agent`, `expression`, `language`, `perspective`, `neighbourhood`, `runtime`, `runtime.friends`, …, or `"*"`), `pointers` narrows it (a perspective UUID, or `"*"`), and `can` lists uppercase verbs (`READ`, `CREATE`, `UPDATE`, `DELETE`, `SUBSCRIBE`, `PROMPT`, `TRANSCRIBE`, or `"*"`). The full list is on [Agent, executor and capabilities](../concepts/agent-executor-capabilities.mdx).
+A capability is `{ with: { domain, pointers }, can }`. `domain` is one of the executor's fixed names (`agent`, `expression`, `language`, `perspective`, `neighbourhood`, `runtime`, `runtime.friends`, …, or `"*"`), `pointers` narrows it (a perspective UUID, or `"*"`), and `can` lists uppercase verbs (`READ`, `CREATE`, `UPDATE`, `DELETE`, `SUBSCRIBE`, `PROMPT`, `TRANSCRIBE`, `VERIFY`, or `"*"`). The full list is on [Agent, executor and capabilities](../concepts/agent-executor-capabilities.mdx).
 
 What the user sees: if no executor is reachable, connect shows a screen offering the Launcher download and connection settings.
 

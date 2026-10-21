@@ -1,6 +1,6 @@
 ---
 title: "Write a flow: a role granted by a flow"
-description: Step by step from the handover test: a task flow whose final edge only a reviewer can settle, where the reviewer role is the verified output of a second flow.
+description: "Step by step from the handover test: a task flow whose final edge only a reviewer can settle, where the reviewer role is the verified output of a second flow."
 ---
 
 import { Callout } from "nextra/components";
@@ -524,7 +524,7 @@ A receipt never says "flow F completed". It says "flow F produced *this* `(class
 
 ## What each replica checks
 
-This is the part that decides what a receipt of the *gated* task flow means to someone else. It is verified against the executor on this branch (`rust-executor/src/perspectives/flow_instance/grant.rs`, `roles/mod.rs`, `read_set.rs`).
+This is the part that decides what a receipt of the *gated* task flow means to someone else. The code is in `rust-executor/src/perspectives/flow_instance/` (`grant.rs`, `roles/mod.rs`, `read_set.rs`).
 
 - **Eligibility is decided inside the neighbourhood, per replica, against its own graph.** While a replica collects the evidence for a derivation, it loads the granting flow's receipt index, verifies every receipt under its own flow catalogue, and computes, per matched role instance, the earliest `settled_at` of a verifying receipt that names it. That date is `produced_at`.
 - **Only the date travels.** The read-set carries `produced_at` for each role instance, next to the grant and revocation links. The granting receipt itself is not carried, and verifying a receipt of the gated flow never recurses into the granting flow's receipts.

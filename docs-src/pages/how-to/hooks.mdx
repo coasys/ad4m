@@ -59,7 +59,7 @@ function Messages({ perspective, channelId }) {
 | `parent` | A parent scope. `{ model: Channel, id }` resolves the predicate from `Channel`'s relation metadata; `{ id, predicate }` names it; `{ id }` alone reads what `id` contains ([Containment](../concepts/containment.mdx)). While `parent.id` is empty the hook returns no rows and does not query. |
 | `pageSize` | Load-more mode: the hook queries `pageSize × page` rows and `loadMore()` increases the page. Without it there is no limit and `loadMore` does nothing. |
 | `id` | Single-instance mode: the hook filters on `where.id` and returns one record. |
-| `preserveReferences` | Keep the existing object for a record whose `id` is still in the new result, so memoised children do not re-render. Default `false`. |
+| `preserveReferences` | Keep the existing object for a record whose `id` is still in the new result, so memoized children do not re-render. Default `false`. |
 
 What it returns:
 
@@ -98,7 +98,7 @@ const { agent, profile, error, reload } = useAgent({
 });
 ```
 
-It resolves the DID with `agent.byDID` and caches the result per DID, so many components showing the same author share one fetch.
+It resolves the DID with `agent.byDID` when the component mounts and keeps the agent in a cache keyed by DID, so every component showing the same author re-renders from the same entry. Each mounting component still fetches.
 
 ## 6. Perspectives: `usePerspectives` and `usePerspective`
 

@@ -30,12 +30,12 @@ ad4m-executor run --config executor-config.json --enable-multi-user true   # or 
 ```
 
 ```typescript
-// with the admin credential as the token
+// ad4m: an Ad4mClient on http://127.0.0.1:12000 with the admin credential as the token
 await ad4m.runtime.setMultiUserEnabled(true);
 await ad4m.runtime.multiUserEnabled();   // true
 ```
 
-The setting is stored in the executor's database. Starting with `enabled: true` turns it on; starting with `false` does not turn it off again (`rust-executor/src/lib.rs`), only `setMultiUserEnabled(false)` does. Both calls need the admin credential (`rust-executor/src/api/users_ws.rs`).
+The setting is stored in the executor's database. Starting with `enabled: true` turns it on; starting with `false` does not turn it off again (`rust-executor/src/lib.rs`), only `setMultiUserEnabled(false)` does. `setMultiUserEnabled` needs the admin credential; `multiUserEnabled()` is readable without a token (`rust-executor/src/api/users_ws.rs`; `anonymous_capabilities`, `rust-executor/src/agent/capabilities/mod.rs`).
 
 ## 2. Serve TLS
 

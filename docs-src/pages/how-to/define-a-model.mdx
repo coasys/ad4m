@@ -1,0 +1,161 @@
+---
+title: Define a model
+description: Install a subject class in a perspective three ways - TypeScript decorators, a JSON Schema, or a raw SHACL shape - then create and read instances of it.
+---
+
+import { Callout, Tabs, Tab } from "nextra/components";
+
+# Define a model
+
+A model (subject class) is a SHACL shape stored as links in a perspective. You can write it three ways; all three end in the same stored shape, so an app, another app and an MCP agent read the same records. What a model is and how a node is recognized as an instance: [Models and identity](../concepts/models-and-identity.mdx).
+
+| Way | Use it when |
+|---|---|
+| Decorators (`@Model`, `@Property`, `@HasMany`, `@Flag`) | You write the app in TypeScript and want typed instances |
+| `Ad4mModel.fromJSONSchema` | You already have a JSON Schema, or the schema arrives at runtime |
+| Raw SHACL (`perspective.addShacl`, MCP `add_model`) | You build the shape by hand, from another language, or from an agent |
+
+## Steps
+
+1. **Pick a namespace** for your predicates, such as `board://`. The decorators take the namespace from the scheme of the first property's `through`; `fromJSONSchema` takes it from `namespace`; a raw shape takes it from its target class.
+2. **Declare the class** in one of the three forms below. Give it a flag (a fixed link such as `board://type → board://task`) or at least one required property, so the executor can tell its records apart from other nodes ([recognition tiers](../concepts/models-and-identity.mdx#how-a-node-is-recognized-as-an-instance)).
+3. **Register it once per perspective**, at startup: `Task.register(perspective)`, or `Ad4mModel.registerAll(perspective, [A, B])` for several classes in one call. Registering writes the shape as links; a second `register` of the same class through the same `PerspectiveProxy` is skipped by the SDK.
+4. **Create and query instances** with `create`, `findAll` and the other static methods ([Decorators and model API](../reference/decorators.mdx#ad4mmodel-static-methods)).
+
+<Tabs items={["Decorators", "JSON Schema", "Raw SHACL"]}>
+<Tab>
+
+```typescript
+import { Ad4mModel, Model, Flag, Property, HasMany, HasManyMethods } from "@coasys/ad4m";
+
+@Model({ name: "Comment" })
+class Comment extends Ad4mModel {
+  @Flag({ through: "board://type", value: "board://comment" })
+  type = "board://comment";
+
+  @Property({ through: "board://body", required: true })
+  body: string = "";
+}
+
+@Model({ name: "Task" })
+class Task extends Ad4mModel {
+  @Flag({ through: "board://type", value: "board://task" })
+  type = "board://task";
+
+  @Property({ through: "board://title", required: true })
+  title: string = "";
+
+  @Property({ through: "board://priority" })
+  priority: number = 0;
+
+  @HasMany(() => Comment, { through: "board://comment" })
+  comments: Comment[] = [];
+}
+// Typed addComments / removeComments / setComments.
+interface Task extends HasManyMethods<"comments"> {}
+
+// Once per perspective, at startup: one RPC installs both shapes.
+await Ad4mModel.registerAll(perspective, [Comment, Task]);
+
+const task = await Task.create(perspective, { title: "Write the guide", priority: 2 });
+const comment = await Comment.create(perspective, { body: "Started" });
+await task.addComments(comment);
+
+const [found] = await Task.findAll(perspective, {
+  where: { id: task.id },
+  include: { comments: true },
+});
+found.comments[0].body; // "Started"
+```
+
+</Tab>
+<Tab>
+
+```typescript
+import { Ad4mModel } from "@coasys/ad4m";
+
+const contactSchema = {
+  $schema: "http://json-schema.org/draft-07/schema#",
+  title: "Contact",
+  type: "object",
+  properties: {
+    name: { type: "string" },
+    email: { type: "string" },
+    age: { type: "number" },
+  },
+  required: ["name"],
+};
+
+const Contact = Ad4mModel.fromJSONSchema(contactSchema, {
+  name: "Contact",          // required; an empty name throws
+  namespace: "contact://",  // predicates become contact://name, contact://email, contact://age
+});
+
+await Contact.register(perspective);
+
+await Contact.create(perspective, { name: "Alice", email: "alice@example.org", age: 30 });
+const adults = await Contact.findAll(perspective, { where: { age: { gte: 18 } } });
+```
+
+`string` becomes `xsd://string`, `number` becomes `xsd://decimal`, a property in `required` gets `minCount 1`, and an array of strings becomes a relation. Every option (`predicateTemplate`, `propertyMapping`, `propertyOptions`, ...) is in [fromJSONSchema](../reference/decorators.mdx#fromjsonschema).
+
+</Tab>
+<Tab>
+
+```typescript
+import { SHACLShape } from "@coasys/ad4m";
+
+// One argument: the target class. The shape URI is derived: memo://MemoShape.
+const shape = new SHACLShape("memo://Memo");
+shape.addProperty({
+  name: "body",
+  path: "memo://body",
+  datatype: "xsd://string",
+  maxCount: 1,
+  setter: [{ action: "setSingleTarget", source: "this", predicate: "memo://body", target: "value" }],
+});
+shape.addProperty({ name: "tags", path: "memo://tag", relationKind: "hasMany" });
+
+await perspective.addShacl("Memo", shape);
+
+await perspective.createSubject("Memo", "memo://1", { body: "hi" });
+
+const { instances, totalCount } = await perspective.modelQuery(
+  "Memo",
+  JSON.stringify({ where: { body: "hi" } }),
+);
+```
+
+A raw shape carries its own write actions (`setter`, `adder`, `remover`, constructor and destructor actions); the decorators and `fromJSONSchema` generate them for you. `shape.toJSON()` is the wire form; the MCP tool `add_model` takes the same JSON as its `shacl_json` argument, with the class name beside it ([JSON wire format](../reference/shacl-vocabulary.mdx#json-wire-format)). `perspective.addSdna(name, "", "subject_class", shaclJson)` is the untyped call underneath `addShacl`.
+
+</Tab>
+</Tabs>
+
+## The stored shape URI rule
+
+The executor stores every shape under a URI that ends in `<ClassName>Shape`:
+
+| Form | Shape URI |
+|---|---|
+| `@Model({ name: "Task" })`, first `through` is `board://title` | `board://TaskShape` |
+| `fromJSONSchema(..., { name: "Contact", namespace: "contact://" })` | `contact://ContactShape` |
+| `new SHACLShape("memo://Memo")` | `memo://MemoShape` |
+| `new SHACLShape("shapes://MemoShape", "memo://Memo")` | `shapes://MemoShape` (kept as given) |
+
+A shape URI that does not end in `<ClassName>Shape` is refused at registration: `addShacl("Note", new SHACLShape("shapes://MemoShape", "note://Note"))` fails with an error naming `NoteShape`. The executor finds a class's write actions by that suffix.
+
+## What you get
+
+- The shape as links in the perspective, readable by every client: `perspective.subjectClasses()` lists the class, `perspective.getClassShape("Task")` returns its properties, and the MCP tool `describe_perspective` shows it to an agent.
+- Instances with ids `ad4m://obj/<24 characters>` unless you pass your own URI ([Instance identity](../concepts/models-and-identity.mdx#instance-identity)).
+- With decorators: typed fields, typed `where` keys, and generated relation methods.
+
+<Callout type="info">
+Values are stored as typed literals by default (`literal:string:...`, numbers as `xsd:decimal`). Set `resolveLanguage` on a property only when you want the value stored as a signed expression in a language ([Types and values](../concepts/types-and-values.mdx)).
+</Callout>
+
+## Next
+
+- Concepts: [Models and identity](../concepts/models-and-identity.mdx), [Types and values](../concepts/types-and-values.mdx), [Abstract classes and aliases](../concepts/abstract-classes-and-aliases.mdx).
+- Reference: [Decorators and model API](../reference/decorators.mdx), [SHACL vocabulary](../reference/shacl-vocabulary.mdx).
+- How-to: [Include relations](./include-relations.mdx), [Write through an abstract class](./write-through-abstract-class.mdx).

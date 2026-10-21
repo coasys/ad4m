@@ -15,25 +15,25 @@ Someone gave you a `neighbourhood://…` URL. Joining creates a perspective on y
 const handle = await ad4m.neighbourhood.joinFromUrl(url);
 handle.uuid;        // the new perspective's id on your executor
 handle.sharedUrl;   // the URL you joined
-handle.state;       // "NEIGHBOURHOOD_JOIN_INITIATED" at first
+handle.state;       // "LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED" at first
 ```
 
-`joinFromUrl(url)` returns a `PerspectiveHandle` (`core/src/neighbourhood/NeighbourhoodClient.ts`; `core/src/perspectives/PerspectiveHandle.ts`). Behind it the executor fetches the neighbourhood expression, installs its link language (trust check included, see [Trust and templates](../concepts/neighbourhoods.mdx#trust-and-templates)) and starts syncing.
+`joinFromUrl(url)` returns a `PerspectiveHandle` (`core/src/neighbourhood/NeighbourhoodClient.ts`; `core/src/perspectives/PerspectiveHandle.ts`). Behind it the executor fetches the neighbourhood expression, installs its link language (the bundle must hash to its address, see [Trust and templates](../concepts/neighbourhoods.mdx#trust-and-templates)) and starts syncing (`install_neighbourhood_with_context`, `rust-executor/src/neighbourhoods.rs`). Joining a neighbourhood that another user of the same executor already joined adds you to that perspective's owners instead of creating a second one.
 
 ## 2. Get the perspective and wait for sync
 
 ```typescript
-const shared = await ad4m.perspective.byUUID(handle.uuid);
+const shared = (await ad4m.perspective.byUUID(handle.uuid))!;   // null only for an unknown uuid
 
 const release = shared.on("sync-state-change", ({ state }) => {
   if (state === "SYNCED") console.log("caught up");
 });
 ```
 
-`state` is one of `PRIVATE`, `NEIGHBOURHOOD_JOIN_INITIATED`, `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED`, `SYNCED`, `LINK_LANGUAGE_FAILED_TO_INSTALL`. You can read and write before `SYNCED`; links the others wrote appear as the diffs arrive. The tests poll `perspective.byUUID(uuid).state` for `SYNCED` or `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` before asserting on shared content (`tests/js/tests/neighbourhood.ts`).
+A joined perspective starts at `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` (or `LINK_LANGUAGE_FAILED_TO_INSTALL`) and reaches `SYNCED` after its first successful sync. You can read and write before `SYNCED`; links the others wrote appear as the diffs arrive. The tests poll `perspective.byUUID(uuid).state` for `SYNCED` or `LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED` before asserting on shared content (`tests/js/tests/neighbourhood.ts`).
 
 <Callout type="info">
-  `LINK_LANGUAGE_FAILED_TO_INSTALL` means your executor refused or could not fetch the link language: the template's author is not trusted, or the language-language could not serve the bundle. The `exception-occurred` event on the client carries the reason.
+  `LINK_LANGUAGE_FAILED_TO_INSTALL` means your executor could not install the link language: the language language could not serve the bundle, the bundle did not hash to its address, or it failed to load. The executor log names the reason.
 </Callout>
 
 ## 3. Read and write like any perspective

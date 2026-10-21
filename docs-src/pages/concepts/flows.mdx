@@ -1,6 +1,6 @@
 ---
 title: Flows
-description: How a group agrees on a transition: shared state machines whose state is derived from signed proposals and votes, with guards, roles, receipts and the engine's guarantees.
+description: "How a group agrees on a transition: shared state machines whose state is derived from signed proposals and votes, with guards, roles, receipts and the engine's guarantees."
 ---
 
 import { Callout } from "nextra/components";
@@ -300,7 +300,9 @@ instances, the spawn pass runs over the **created** bases
 `FlowInstance` in the initial state of every flow whose `inputTypes` names one
 of the item's classes and that has no live run on that item yet. The rule is
 deterministic, reads only the item's classes and the existing instances, and
-ignores `creationHint`. Updated items are not candidates, and zero-state
+ignores `creationHint`. A direct run considers every flow; an auto-processor
+only the flows in its `flows` list (canonical flow URIs; empty means none,
+`rust-executor/src/perspectives/auto_processor/config.rs`). Updated items are not candidates, and zero-state
 flows are skipped. The evaluator then runs over the new runs in the same pass,
 so evidence the LLM extracted can propose the first transition at once.
 
@@ -614,15 +616,15 @@ An agent connected through the executor's MCP server has seven flow tools (`rust
 
 | Tool | Does |
 | --- | --- |
-| `add_flow(perspective_id, flow_name, shacl_json)` | registers a definition; `shacl_json` is the flow as JSON, the shape `SHACLFlow.toJSON()` produces |
-| `get_flows(perspective_id)` | lists the registered flow names |
+| `add_flow(perspective_id, flow_name, shacl_json)` | parses `shacl_json` as a class shape (`parse_shacl_to_links`), not as a flow, so a definition from `SHACLFlow.toJSON()` is refused; register flows with `perspective.addFlow` |
+| `get_flows(perspective_id)` | lists the `ad4m://has_flow` targets: the registered flow names, as the literal URIs they are stored under |
 | `flow_state(perspective_id, flow_name, expression_address)` | the run on that expression: `instance`, `state`, `started_at`. `flow_name` may be the bare name or the canonical URI; a bare name that matches several flows is refused |
 | `flow_actions(…)` | the transitions leaving the run's current state |
 | `flow_proposal_accept(perspective_id, proposal_uri)` | adds this agent's vote to an open proposal and re-derives; returns the fired outcomes |
 | `flow_proposal_reject(perspective_id, proposal_uri)` | withdraws this agent's own links on a proposal |
 | `flow_valid_outputs(perspective_id, flow_name, state?)` | the verified outputs of completed runs |
 
-What MCP **cannot** do: there is no tool to open a proposal, to start a run, or to mint a receipt. An agent can register flows, read state and actions, vote on proposals that already exist and withdraw its votes. Proposing a transition, `FlowInstance.start` and `mintFlowReceipt` are SDK calls (and, for proposals, the deterministic evaluator after an interpretation pass).
+What MCP **cannot** do: there is no tool to open a proposal, to start a run, or to mint a receipt. An agent can read flows, state and actions, vote on proposals that already exist and withdraw its votes. Registering a flow (`addFlow`), proposing a transition, `FlowInstance.start` and `mintFlowReceipt` are SDK calls (and, for proposals, the deterministic evaluator after an interpretation pass).
 
 ## Errors and limits
 

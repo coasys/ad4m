@@ -42,7 +42,7 @@ There is no default path: without `--config` or `AD4M_CONFIG` no file is read. T
 | `app_data_path` | string | `~/.ad4m` | `--app-data-path` | Data directory. |
 | `port` | u16 | `12000` | `--port` | RPC port. |
 | `hc_admin_port` | u16 | first free from 2000 | `--hc-admin-port` | Accepted; the conductor opens no admin interface. |
-| `hc_app_port` | u16 | `1337` | `--hc-app-port` | Holochain conductor app interface port. |
+| `hc_app_port` | u16 | first free from 1337 | `--hc-app-port` | Holochain conductor app interface port. |
 | `localhost` | bool | `true` | `--localhost` | Bind the plain RPC port to `127.0.0.1`. With TLS on, the plain port stays on loopback either way. |
 | `run_dapp_server` | bool | `true` | `--run-dapp-server` | Serve the bundled dapp on `127.0.0.1:8080`. |
 | `auto_permit_cap_requests` | bool | `false` when a file is used | `--auto-permit-cap-requests` | Grant capability requests without the user confirming them. Without any file the CLI defaults this to `true`. |

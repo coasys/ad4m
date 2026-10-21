@@ -37,7 +37,9 @@ each arrow: { data: (source, predicate, target), author, timestamp, proof }
 You write a bare `Link`: `source`, `predicate`, `target`. The executor signs it with your agent's key and stores a `LinkExpression`: the link as `data`, plus `author`, `timestamp` and `proof` (`core/src/links/Links.ts`). Reading returns the `LinkExpression`, never the bare link.
 
 ```typescript
-import { Ad4mClient, LinkQuery, Literal } from "@coasys/ad4m";
+import { LinkQuery, Literal } from "@coasys/ad4m";
+
+// ad4m: an Ad4mClient (see Build an app)
 
 const perspective = await ad4m.perspective.add("My notes");
 
@@ -60,7 +62,7 @@ links[0];
 
 `PerspectiveProxy.add(link, status?, batchId?)` returns the stored `LinkExpression`; `get(query)` returns `LinkExpression[]` (`core/src/perspectives/PerspectiveProxy.ts`, `add` and `get`). A `LinkQuery` filters by any of `source`, `predicate`, `target`, plus `fromDate`, `untilDate` and `limit`.
 
-The `proof` carries the signature and the key path in the author's DID document. `valid` and `invalid` are not stored: the executor computes them from the signature when it writes and when it reads, so a link copied from another agent keeps the verdict its signature earns. Model queries exclude links that fail verification unless asked for them (`includeUnverified`); raw SPARQL does not filter and exposes the verdict as `<ad4m://ontology/proofValid>` (see [Query with SPARQL](../how-to/sparql.mdx#only-verified-links)).
+The `proof` carries the signature and the key path in the author's DID document. `valid` and `invalid` are never taken from the writer: the executor computes the verdict from the signature when it stores the link, records it as `<ad4m://ontology/proofValid>`, and returns it on every read (`rust-executor/src/perspectives/sparql_store.rs`, `insert_link_triples`), so a link copied from another agent keeps the verdict its signature earns. Model queries exclude links that fail verification unless asked for them (`includeUnverified`); raw SPARQL does not filter and exposes the verdict as `<ad4m://ontology/proofValid>` (see [Query with SPARQL](../how-to/sparql.mdx#only-verified-links)).
 
 `get()` returns the `target` exactly as it was signed. The store indexes `literal:*` targets as typed values so a query finds a value however it was percent-encoded, but what comes back is the signed bytes, including a `literal:string:Hello world` written with a raw space. That keeps the `proof` valid when the link is handed on, for example when the perspective is published as a neighbourhood.
 

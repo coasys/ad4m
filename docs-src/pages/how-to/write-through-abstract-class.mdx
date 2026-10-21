@@ -1,0 +1,98 @@
+---
+title: Write through an abstract class
+description: Declare an abstract class, have concrete classes conform to it by name or alias, read every record through it, and edit or delete a record without knowing its real class.
+---
+
+import { Callout } from "nextra/components";
+
+# Write through an abstract class
+
+An abstract class names fields that records of several classes share. You read through it, and an edit or delete on a row read through it is sent to the record's own class. How conformance is decided: [Abstract classes and aliases](../concepts/abstract-classes-and-aliases.mdx).
+
+## Steps
+
+1. **Declare the abstract class** with `@Model({ name, abstract: true })` and the properties and relations it promises. Its `through` predicates are never written.
+2. **Make concrete classes conform.** A class conforms when it has a property (or relation) with each of the abstract class's names, or an `alias` for it keyed by the abstract class's name: `alias: { Readable: "text" }`.
+3. **Optionally add `implements: [Readable]`** to the concrete class. This is a check in the SDK only: the decorator throws at declaration time if a name is missing (`Message implements Readable but has no property or alias named 'text'`). The executor matches by names whether or not you list it.
+4. **Register all of them**, the abstract class included.
+5. **Read through the abstract class** with `findAll`, `query` or `subscribe`. Each row carries `__subjectClass` (its real class) and `__subjectClasses`.
+6. **Write through the row**: set the abstract name and `save()`, call a relation's `addX` / `removeX` / `setX`, or `delete()`.
+
+```typescript
+import { Ad4mModel, Model, Flag, Property } from "@coasys/ad4m";
+
+@Model({ name: "Readable", abstract: true })
+class Readable extends Ad4mModel {
+  @Property({ through: "app://text" })
+  text: string = "";
+}
+
+@Model({ name: "Block", implements: [Readable] })
+class Block extends Ad4mModel {
+  @Flag({ through: "app://kind", value: "app://block" })
+  kind = "app://block";
+
+  @Property({ through: "app://block_text" })
+  text: string = "";
+}
+
+@Model({ name: "Message", implements: [Readable] })
+class Message extends Ad4mModel {
+  @Flag({ through: "app://kind", value: "app://message" })
+  kind = "app://message";
+
+  @Property({ through: "app://body", alias: { Readable: "text" } })
+  body: string = "";
+}
+
+await Ad4mModel.registerAll(perspective, [Readable, Block, Message]);
+
+await Block.create(perspective, { text: "hello" });
+const msg = await Message.create(perspective, { body: "hi @data" });
+
+const [row] = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
+(row as any).__subjectClass; // "Message"
+
+row.text = "edited";
+await row.save();            // runs Message's setter for `body`; app://text is never written
+
+const own = await Message.findOne(perspective, { where: { id: msg.id } });
+own!.body; // "edited"
+
+// The same dispatch without a row in hand:
+await perspective.updateSubject("Readable", msg.id, { text: "edited again" });
+
+await row.delete();          // runs Message's destructor
+
+try {
+  await Readable.create(perspective, { text: "nope" });
+} catch (e) {
+  // "'Readable' is an abstract class and cannot be created. ..."
+}
+```
+
+## What you get
+
+- One query over every conforming class. `Readable.findAll` returns the `Block` and the `Message`, each with `text` filled from its own field.
+- Writes that land in the record's own predicates. The abstract class's `through` (`app://text`) gets no link.
+- The same dispatch from other clients: `perspective.updateSubject("Readable", id, values)`, `perspective.removeSubject("Readable", id)`, and the MCP tools `instance_update` and `instance_remove` with `class_name: "Readable"`.
+
+## What fails
+
+| You do | Result |
+|---|---|
+| `Readable.create(...)` or `new Readable(p).save()` | Throws in the SDK: an abstract class has no class to write a new record as. Create a `Block` or a `Message`. |
+| Write through `Readable` to a node that is none of the classes `Readable` reads | Error: `'<id>' is not a record of any class 'Readable' reads (Block, Message): there is nothing to write through it.` |
+| Write a name the abstract class does not declare | Error: `'<name>' is not a name of the abstract class 'Readable' (text). Write it through the record's own class.` |
+| A conforming class has the name but no setter, adder or remover for that write | Error: `'<name>' cannot be written through 'Readable': none of the record's classes (...) has ... for it.` |
+| `implements: [X]` where `X` is not abstract | The decorator throws: declare `X` with `@Model({ abstract: true })`. |
+
+<Callout type="info">
+Values are not converted between classes. If `Message.body` stores HTML and `Block.text` stores Markdown, both receive exactly what you wrote. A record that belongs to two conforming classes gets the write in both.
+</Callout>
+
+## Next
+
+- Concepts: [Abstract classes and aliases](../concepts/abstract-classes-and-aliases.mdx), [Writing through an abstract class](../concepts/abstract-classes-and-aliases.mdx#writing-through-an-abstract-class).
+- Reference: [Built-in interfaces](../reference/built-in-interfaces.mdx) (`TextContent`, `Container`), [@Model](../reference/decorators.mdx#model).
+- How-to: [Define a model](./define-a-model.mdx).
