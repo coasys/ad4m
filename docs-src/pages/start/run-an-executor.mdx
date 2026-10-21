@@ -64,7 +64,8 @@ Everything is under the data directory, `~/.ad4m` by default (`--app-data-path` 
 
 | Path | Holds |
 |---|---|
-| `~/.ad4m/ad4m_db.sqlite` | The database: perspectives, links, agent and runtime state |
+| `~/.ad4m/ad4m_db.sqlite` | The database: perspective records, agent and runtime state |
+| `~/.ad4m/perspectives/<uuid>/sparql_store/` | The links of one perspective (an RDF store on RocksDB) |
 | `~/.ad4m/ad4m/h/` | Holochain conductor data |
 | `~/.ad4m/ad4m.log` | The executor log, written by the Launcher (`ad4m log` prints it); `ad4m-executor run` logs to stdout |
 | `~/.ad4m/ad4m/languages/` | Installed languages |

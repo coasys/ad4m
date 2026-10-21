@@ -24,7 +24,7 @@ It serves Streamable HTTP at `http://<host>:3001/mcp`. Where it binds follows fr
 - **Without one**, it defaults to `127.0.0.1` and treats every caller on loopback as the node's owner.
 - `MCP_HOST=<ip>` in the environment overrides the bind address either way (it is an IP literal, not a hostname). Credentials a caller presents are still checked. There is no `--mcp-host` flag.
 
-If the executor has TLS configured and an admin credential, MCP is also served over HTTPS on `--mcp-port + 1`. Details, authentication modes and the per-class tool option are on [Run the MCP server](../how-to/mcp-server.mdx).
+If the executor has TLS configured and an admin credential, MCP is also served over HTTPS on `--mcp-port + 1`, reachable from other machines. Once that HTTPS listener is up, the plain HTTP listener narrows to `127.0.0.1` unless `MCP_HOST` is set, so a remote client uses `https://<host>:<mcp-port + 1>/mcp`. Details, authentication modes and the per-class tool option are on [Run the MCP server](../how-to/mcp-server.mdx).
 
 ## 2. Connect a client
 

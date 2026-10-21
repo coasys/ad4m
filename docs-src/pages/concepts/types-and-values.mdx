@@ -73,7 +73,7 @@ Literal.from({ a: 1 }).toUrl();          // "literal:json:%7B%22a%22%3A1%7D"
 Literal.fromUrl("literal:string:Write%20the%20guide").get(); // "Write the guide"
 ```
 
-The payload is percent-encoded with the RFC 3986 component set (so `-_.~` stay bare and `!'()*` are escaped). The store keeps a `literal:` target as a typed RDF literal (`"Write the guide"^^xsd:string`, `42` as a decimal, and so on), which is what makes `where: { count: { gt: 5 } }` and `order` cheap. An old `literal://` form is rejected.
+The payload is percent-encoded with the RFC 3986 component set (so `-_.~` stay bare and `!'()*` are escaped). The store keeps a `literal:` target as a typed RDF literal (`"Write the guide"^^xsd:string`, `42` as an `xsd:integer`, `4.2` as an `xsd:decimal`, and so on), which is what makes `where: { count: { gt: 5 } }` and `order` cheap. An old `literal://` form is rejected.
 
 A property with unset `resolveLanguage` stores exactly this. Empty strings, `null` and `undefined` are not written at all.
 
