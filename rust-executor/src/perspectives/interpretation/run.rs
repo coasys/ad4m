@@ -1287,7 +1287,7 @@ pub async fn run_interpretation_with_harness_and_model(
 /// as the main agent, as on the RPC socket. An executor-owned pass (the auto-processor's,
 /// with no caller token) keeps the unauthenticated local path it always had: with a
 /// credential set, the handler would ask it to authenticate and hide its read tools.
-fn harness_admin_credential(auth_token: &Option<String>) -> Option<String> {
+pub(crate) fn harness_admin_credential(auth_token: &Option<String>) -> Option<String> {
     auth_token.as_ref()?;
     // An empty env credential is none, as in `Ad4mConfig::prepare`.
     crate::config::configured_admin_credential().or_else(|| {

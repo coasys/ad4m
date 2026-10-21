@@ -21,7 +21,7 @@ Persistence of models/tasks is in `db.rs` (`models`, `tasks`, `model_status`,
 
 ## `harness/`
 
-Tool-calling loop used by `perspectives/interpretation` (not by the OpenAI shim):
+Tool-calling loop used by `perspectives/interpretation` and `perspectives/agent_session` (not by the OpenAI shim):
 
 - `provider.rs`: `ToolProvider`, `ToolSchema`, `CreditGate` traits. The clean seam;
   implemented by `mcp/tools/provider_impl.rs`.

@@ -17,6 +17,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
 | `interpretation/` | LLM interpretation: text → typed subjects. `run.rs` orchestrates, `prompt.rs`, `parse.rs`, `dedup.rs`, `graph/{read,write}.rs`, `overlay/` (provenance + human accept). Depends on `ai_service::harness` |
+| `agent_session.rs` | `perspective.runAgent`: a conversation with a model in one perspective over the static MCP tools — every read, only the writes the caller names, `perspective_id` forced. Same harness as interpretation, neutral prompt. Tests with a scripted model in `agent_session_tests.rs` |
 | `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals) |
 | `ordering/` | CRDT ordering for `@HasMany`. Parsed into `ModelShape.ordering` but **not wired** into hydration/writes yet (spec D2) |
 | `hardwired_class.rs` | Registration of hard-wired subject classes (used by flows and overlay) |
