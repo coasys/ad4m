@@ -185,7 +185,7 @@ describe('WakerSubscriptionManager', () => {
   });
 
   /**
-   * Delivers one new mention and returns what it woke with, every model query the manager made
+   * Delivers one new mention (or the `delivered` rows) and returns what it woke with, every model query the manager made
    * (`[className, parsed query]`) and any warnings. `answer` gets each query's `parent` scope and
    * returns the rows' ids, or a raw result to hand back as is.
    */
@@ -193,6 +193,7 @@ describe('WakerSubscriptionManager', () => {
     answer: (scope: any) => unknown,
     ancestorDepth?: number,
     address = 'test://message',
+    delivered: any[] = [{ source: address }],
   ) {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const ProxyClass = function () {
@@ -228,7 +229,7 @@ describe('WakerSubscriptionManager', () => {
     });
 
     await manager.subscribe({ ...sub, id: 'mention-parents' });
-    await deliver!([{ source: address }]);
+    await deliver!(delivered);
     await waitUntil(() => wakes.length > 0);
     manager.disposeAll();
     return { wakes, queries, warnings };
@@ -266,6 +267,16 @@ describe('WakerSubscriptionManager', () => {
     const { wakes, warnings } = await wakeWith(() => true);
     expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [] }]]);
     expect(warnings).toEqual([]);
+  });
+
+  it('deduplicates two result rows for the same source in one mention pass', async () => {
+    const { wakes, queries } = await wakeWith(() => [], undefined, 'addr://msg-1', [
+      { source: 'addr://msg-1' },
+      { source: 'addr://msg-1' },
+    ]);
+    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [] }]]);
+    // The parent lookup runs once, not once per row.
+    expect(queries).toHaveLength(1);
   });
 
   /**

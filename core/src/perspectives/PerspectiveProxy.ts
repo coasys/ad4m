@@ -573,7 +573,7 @@ export class PerspectiveProxy {
      *
      * The state is not stored on the graph: the engine derives it from the
      * signed proposals and keeps what it derived per agent, outside the
-     * perspective. So no other agent — a co-owner on the same node included —
+     * perspective. So no other agent — a co-owner on the same executor included —
      * can read or write your entries, and a link query never sees them.
      * `FlowInstance.findAll` / `start` call this for you.
      */

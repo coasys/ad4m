@@ -307,6 +307,7 @@ export class WakerSubscriptionManager {
           // A SPARQL row names the record as `source`, a model row as `id`.
           const address = sub.className ? item?.id : item?.source;
           if (typeof address === "string" && address && !currentSeen.has(address)) {
+            currentSeen.add(address);
             newMessages.push(address);
           }
         }
@@ -335,10 +336,6 @@ export class WakerSubscriptionManager {
           mentions.push({ address: msgAddr, parents, ancestors });
         }
 
-        // Mark all new messages as seen
-        for (const addr of newMessages) {
-          currentSeen.add(addr);
-        }
         this.seenMessages.set(sub.id, currentSeen);
 
         // Debounce the wake callback

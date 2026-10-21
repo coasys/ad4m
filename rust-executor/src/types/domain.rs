@@ -9,19 +9,14 @@ use deno_core::error::AnyError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Who is calling, for one request: the caller's session and the request's cancel token.
+/// The RPC socket builds one per connection; REST and the OpenAI-compatible API extract one
+/// per request (`api::auth`).
 #[derive(Clone)]
 pub struct RequestContext {
-    pub capabilities: Result<Vec<Capability>, String>,
-    pub auto_permit_cap_requests: bool,
+    /// The token the session opened with. Read only by the interpretation pass, which
+    /// hands it to the harness's MCP client; Plan 20 PR 6 passes the `Session` instead.
     pub auth_token: String,
-    /// True when the request was authenticated with the launcher's admin_credential token.
-    /// Only the launcher (or legacy single-user empty-token) qualifies.
-    /// Regular app tokens (JWT) never have this set, regardless of which capabilities they hold.
-    pub is_admin_credential: bool,
-    /// Cached user email resolved once at connection time (multi-user mode).
-    pub user_email: Option<String>,
-    /// Cached user DID resolved once at connection time (multi-user mode).
-    pub user_did: Option<String>,
     /// Per-request cancellation token, populated by the WS RPC dispatcher
     /// when the client may send `request.cancel`.  Handlers that want to
     /// support mid-flight cancellation can clone this and pass it to
@@ -32,10 +27,108 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// The caller's session. Handlers take their identity from it.
+    pub session: std::sync::Arc<crate::agent::session::Session>,
     /// Id of the WS RPC connection the request arrived on, generated once
     /// per socket. Live queries belong to it and end when it closes. `None`
-    /// outside the WS RPC socket.
+    /// outside the WS RPC socket (REST, `/api/v1/ws/events`, internal code).
     pub connection_id: Option<String>,
+}
+
+impl RequestContext {
+    /// The context of a caller that presents `token` on a listener with this reach.
+    ///
+    /// Fails for a token that opens no session: invalid, expired, revoked, a user whose DID
+    /// does not load, or any token while the wallet is locked. The caller refuses such a
+    /// token where it arrives. An empty token opens a session (the operator or an anonymous
+    /// caller).
+    pub fn open(
+        token: &str,
+        admin_credential: &Option<String>,
+        reach: crate::agent::capabilities::ListenerReach,
+    ) -> Result<Self, crate::agent::session::AuthError> {
+        let session = crate::agent::session::Session::open(token, admin_credential, reach)?;
+        Ok(RequestContext {
+            auth_token: token.to_string(),
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+            connection_id: None,
+        })
+    }
+
+    /// `Ok` if the session may do `expected`; otherwise the error a refused call reports
+    /// (403 at every surface).
+    pub fn require(&self, expected: &Capability) -> Result<(), String> {
+        self.session.require(expected)
+    }
+
+    /// The agent a request acts as: a grant's agent, else the executor's main agent.
+    pub fn acts_as(&self) -> crate::agent::AgentContext {
+        self.session.acts_as()
+    }
+
+    /// The DID of the managed agent the session acts as, if it acts as one: the session of
+    /// a user. `None` for the main agent, the operator and anonymous callers.
+    pub fn user_did(&self) -> Option<&str> {
+        self.session.managed_did()
+    }
+
+    /// Whether the caller is the executor's operator: the admin credential, or no token on a
+    /// loopback listener of an executor without one. A grant never is, whatever its
+    /// capabilities.
+    pub fn is_operator(&self) -> bool {
+        self.session.is_operator()
+    }
+}
+
+#[cfg(test)]
+impl RequestContext {
+    /// A context for `session`, with no token.
+    pub(crate) fn for_session(session: crate::agent::session::Session) -> RequestContext {
+        RequestContext {
+            auth_token: String::new(),
+            cancel_token: None,
+            session: std::sync::Arc::new(session),
+            connection_id: None,
+        }
+    }
+
+    /// A context for `principal` (see `Session::for_test`), with no token.
+    pub(crate) fn for_test(principal: crate::agent::session::Principal) -> RequestContext {
+        Self::for_session(crate::agent::session::Session::for_test(principal))
+    }
+
+    /// The operator's context.
+    pub(crate) fn operator_for_test() -> RequestContext {
+        Self::for_test(crate::agent::session::Principal::Operator)
+    }
+
+    /// A grant on the main agent, limited to `caps`.
+    pub(crate) fn app_for_test(caps: Vec<Capability>) -> RequestContext {
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::main_agent(),
+            ))
+            .with_caps(caps),
+        )
+    }
+
+    /// A grant on the managed agent `did`, limited to `caps`.
+    pub(crate) fn user_for_test(did: &str, caps: Vec<Capability>) -> RequestContext {
+        Self::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                crate::agent::AgentContext::managed(did.to_string()),
+            ))
+            .with_caps(caps)
+            .with_did(did),
+        )
+    }
+
+    /// The same context, arriving on the RPC connection `id`.
+    pub(crate) fn on_connection(mut self, id: &str) -> RequestContext {
+        self.connection_id = Some(id.to_string());
+        self
+    }
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
@@ -675,6 +768,9 @@ pub struct ResourceInput {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
+    /// The commit the executor was built from, or nothing when the build could not tell (no git
+    /// checkout). Every build between two releases reports one version; this names the build.
+    pub ad4m_executor_commit: Option<String>,
     pub is_initialized: bool,
     pub is_unlocked: bool,
 }

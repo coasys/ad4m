@@ -14,12 +14,16 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 
 async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    let user_info = if let Some(user_email) = ctx.user_email.clone() {
+    // The account of the session's managed agent: its email is the address shown to the user.
+    let account = ctx
+        .user_did()
+        .and_then(|did| crate::agent::AgentService::email_for_did(did).ok());
+    let user_info = if let Some(user_email) = account {
         let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
         let hot_wallet_address =
             Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
@@ -56,9 +60,9 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 }
 
 async fn get_hosting_wallet(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    // The node's own ledger: reading it can also create the node's ledger key.
+    // The executor's own ledger: reading it can also create the executor's ledger key.
     refuse_user_session(&ctx, "hosting.wallet")?;
 
     let balance = match crate::unyt_service::get_ledger().await {
@@ -81,7 +85,7 @@ async fn get_hosting_wallet_history(
     _params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+    ctx.require(&RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
     refuse_user_session(&ctx, "hosting.walletHistory")?;
 
@@ -93,7 +97,7 @@ async fn get_hosting_wallet_history(
 }
 
 async fn request_payment(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: RequestPaymentRequest = serde_json::from_value(params)
@@ -106,16 +110,17 @@ async fn request_payment(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+    ctx.require(&AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let body: SetHotWalletAddressRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let email = ctx
-        .user_email
-        .clone()
+    let did = ctx
+        .user_did()
         .ok_or_else(|| WsRpcError::forbidden("User email required"))?;
+    let email = crate::agent::AgentService::email_for_did(did)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(&email, &body.address))
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
