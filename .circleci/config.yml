@@ -367,6 +367,17 @@ jobs:
       - build_adam
       - build_integration_inputs
       - run:
+          # The newest glibc symbol the executor needs decides which Linux it runs on: one built
+          # here needs at least the glibc of the machine that built it, as far as the symbols it
+          # uses go. Printed so a binary meant for other machines can be checked against them
+          # (Ubuntu 24.04 has 2.39, 22.04 has 2.35).
+          name: Report the executor's glibc floor
+          command: |
+            if ! command -v objdump >/dev/null; then echo "objdump not installed"; exit 0; fi
+            floor="$(objdump -T target/release/ad4m-executor | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+            echo "ad4m-executor needs ${floor:-no versioned glibc symbols}"
+            echo "This machine: $(ldd --version | head -1)"
+      - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
             # Write to a temp name and rename: a rerun of build for the same
@@ -380,6 +391,68 @@ jobs:
               cp "target/release/$bin" "$dst/$bin.tmp" || exit 1
               mv "$dst/$bin.tmp" "$dst/$bin"
             done
+      # The executor for this commit, for use outside this host. Written on the runner's
+      # magnetic disk and served at https://executor.ad4m.dev/<commit>/manifest.json.
+      # Not a CircleCI artifact: that storage is billed, and one file is about 90 MB per push.
+      #
+      # A consumer (coasys/we scripts/ad4m-executor-download.mjs) fetches the manifest, then the
+      # file it names, and checks the sha256. The manifest schema is unchanged: commit, platform,
+      # file, sha256, glibc, size. Directories older than 35 days are removed, which covers the
+      # month a pkg.pr.new snapshot of the commit is kept. A missing file is a reason to compile.
+      #
+      # zstd -19: about 90 MB from 370, against 130 MB with gzip. Debug symbols are kept.
+      # gzip only if zstd is missing, so a missing tool cannot fail the job every other job
+      # waits on. The directory is swapped into place, so a reader sees the previous set or the
+      # new set, never a mix (a mixed set fails the consumer's checksum instead of falling back).
+      #
+      # Linux x64 only. The binary needs the glibc the previous step reports.
+      - run:
+          name: Publish the executor on this host
+          command: |
+            set -euo pipefail
+            root="${EXECUTOR_PUBLISH_DIR:-/mnt/hdd/executor-artifacts}"
+            if ! printf '%s' "$CIRCLE_SHA1" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "refusing to publish: CIRCLE_SHA1 is not 40 hex"
+              exit 1
+            fi
+            if [ ! -d "$root" ] || [ ! -w "$root" ]; then
+              echo "publish dir $root is not writable"
+              exit 1
+            fi
+            bin=target/release/ad4m-executor
+            test -s "$bin"
+            stage=$(mktemp -d "$root/.staging.XXXXXX")
+            trap 'rm -rf "$stage"' EXIT
+            if command -v zstd >/dev/null; then
+              file=ad4m-executor.zst
+              zstd -19 -T0 -q -c "$bin" > "$stage/$file"
+            else
+              echo "zstd not installed: falling back to gzip"
+              file=ad4m-executor.gz
+              gzip -6 -c "$bin" > "$stage/$file"
+            fi
+            (cd "$stage" && sha256sum "$file" > "$file.sha256")
+            floor="$(objdump -T "$bin" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 || true)"
+            printf '{\n  "commit": "%s",\n  "platform": "linux-x64",\n  "file": "%s",\n  "sha256": "%s",\n  "glibc": "%s",\n  "size": %s\n}\n' \
+              "$CIRCLE_SHA1" "$file" "$(cut -d' ' -f1 "$stage/$file.sha256")" "${floor#GLIBC_}" \
+              "$(stat -c %s "$bin")" > "$stage/manifest.json"
+            dest="$root/$CIRCLE_SHA1"
+            if [ -e "$dest" ]; then
+              old=$(mktemp -d "$root/.old.XXXXXX")
+              mv "$dest" "$old/prev"
+              mv "$stage" "$dest"
+              rm -rf "$old"
+            else
+              mv "$stage" "$dest"
+            fi
+            trap - EXIT
+            # mktemp makes the directory 700. nginx reads it as www-data.
+            chmod 755 "$dest"
+            chmod 644 "$dest"/*
+            find "$root" -mindepth 1 -maxdepth 1 -regextype posix-extended -regex '.*/[0-9a-f]{40}' -mtime +35 -exec rm -rf {} +
+            find "$root" -mindepth 1 -maxdepth 1 \( -name '.staging.*' -o -name '.old.*' \) -mmin +60 -exec rm -rf {} +
+            echo "published https://executor.ad4m.dev/$CIRCLE_SHA1/manifest.json"
+            ls -l "$dest" && cat "$dest/manifest.json"
       - run:
           # clippy and rust-tests compile on other runners. These generated files are
           # embedded by that compile (include_bytes!/include!/include_dir!) and are
