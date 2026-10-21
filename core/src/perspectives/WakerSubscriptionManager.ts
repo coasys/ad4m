@@ -12,15 +12,123 @@ export interface WakerSubscription {
   type: "mention" | "channel-messages";
   perspective: string;
   channel: string;
+  /** SPARQL, or with `className` a model query (JSON) over that class. */
   query: string;
+  /**
+   * The class `query` reads, as a model query. A mention subscription has
+   * one, from the executor's `get_mention_waker_config`: the built-in
+   * `ad4m://TextContent` (#1446).
+   */
+  className?: string;
+  /**
+   * A mention subscription's terms (profile names and the DID), from
+   * `get_mention_waker_config`. The query matches substrings, so a record
+   * wakes only when its text holds one of these as a whole word
+   * ({@link holdsAWholeWordTerm}); without them a mention subscription is
+   * refused.
+   */
+  terms?: string[];
   neighbourhood?: string;
+}
+
+/** A letter, combining mark, digit or underscore: what a term must not touch. */
+const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
+
+/**
+ * The elements a message's HTML is made of. A `<` before any other name is text:
+ * We stores plain text, where "<hey Data> can you look" is words.
+ */
+const ELEMENT =
+  "a|abbr|b|bdi|bdo|blockquote|br|caption|center|cite|code|col|colgroup|dd|del|details|dfn|div|dl|dt|em|" +
+  "figcaption|figure|font|h[1-6]|hr|i|img|ins|kbd|label|li|mark|ol|p|pre|q|s|samp|section|article|small|" +
+  "span|strike|strong|sub|summary|sup|table|tbody|td|tfoot|th|thead|time|tr|u|ul|var|wbr|script|style";
+/** An attribute: a name, then optionally `=` and a quoted value (which may hold `>`) or an unquoted one. */
+const ATTRIBUTE = `\\s+[A-Za-z_:][-\\w:.]*(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s"'=<>\`]+))?`;
+/**
+ * Markup: a comment, a `<script>`/`<style>` element with its contents, or a tag of
+ * a known element whose rest is a valid attribute list. "a < b" and
+ * "if a <b then ask Data, else c -> d" are text: the comma is no attribute.
+ */
+const TAG = new RegExp(
+  `<!--[\\s\\S]*?-->` +
+    `|<(script|style)(?=[\\s/>])(?:${ATTRIBUTE})*\\s*>[\\s\\S]*?<\\/\\1\\s*>` +
+    `|<(?:${ELEMENT})(?=[\\s/>])(?:${ATTRIBUTE})*\\s*\\/?>` +
+    `|<\\/(?:${ELEMENT})\\s*>`,
+  "gi",
+);
+/** Tags that break a line: replaced by a space, so `<p>hi</p><p>Data</p>` keeps "Data" a word. */
+const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|th|table|section|article)\b/i;
+/**
+ * The attributes a mention puts its target's DID in: Flux's `<a data-type="mention"
+ * href="did:…">`, older Flux messages' `<span data-id="did:…">`, and We's editor chip
+ * `<span class="we-mention" data-did="did:…">`.
+ */
+const ATTRIBUTES = new RegExp(ATTRIBUTE, "g");
+const MENTION_TARGET = /^\s+(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))$/i;
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (whole, ref: string) => {
+    if (ref[0] !== "#") return ENTITIES[ref.toLowerCase()] ?? whole;
+    const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+}
+
+/**
+ * What a reader sees of `text`, and the DIDs its mentions point at. `text` may be
+ * HTML (TextContent allows it): tag names and attributes are markup, not words, so
+ * a bot named "Data" must not wake on `data-type="mention"` in a mention of
+ * someone else. Plain text passes through unchanged, apart from entities.
+ */
+function readableParts(text: string): { visible: string; targets: string[] } {
+  const targets: string[] = [];
+  const visible = text.replace(TAG, (tag, scriptOrStyle?: string) => {
+    if (scriptOrStyle) return " ";
+    if (tag.startsWith("<!--")) return "";
+    // Parse complete attributes first: a DID-shaped string inside `title`
+    // is not a target attribute and must not wake an agent.
+    for (const attribute of tag.matchAll(ATTRIBUTES)) {
+      const target = MENTION_TARGET.exec(attribute[0]);
+      if (target) targets.push(decodeEntities(target[1] ?? target[2] ?? target[3]));
+    }
+    return BREAKING_TAG.test(tag) ? " " : "";
+  });
+  return { visible: decodeEntities(visible), targets };
+}
+
+/**
+ * Whether `text` holds one of `terms` as a whole word, case-insensitively:
+ * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
+ * "database". A term is matched literally (regex characters, quotes) and must
+ * not touch a letter, mark, digit or underscore on either side, so a name
+ * that starts or ends with punctuation still matches. Same rule as #1459's
+ * SPARQL `(?:^|\W)term(?:\W|$)`.
+ *
+ * The rule runs on the visible text only: in HTML, tags and attributes are
+ * dropped and entities decoded first. A mention's target attribute
+ * (`href`, `data-id`, `data-did`) matches an exact, case-sensitive DID term, which
+ * is how a mention by DID is found when the DID is not in the visible text.
+ *
+ * The mention query's `contains` matches substrings (model query has no word
+ * match); this is the check that keeps "data" from waking on "metadata".
+ */
+export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
+  const { visible, targets } = readableParts(text);
+  return terms.some((term) => {
+    if (!term) return false;
+    if (term.startsWith("did:") && targets.includes(term)) return true;
+    const escaped = term.replace(/[\\^$.*+?()[\]{}|\/]/g, "\\$&");
+    return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(visible);
+  });
 }
 
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
-  /** The message's expression address (source of the body link). */
+  /** The mentioned record's id. */
   address: string;
-  /** All parent addresses this message belongs to (channels, conversations, etc.). */
+  /** All parent addresses this record belongs to (channels, conversations, etc.). */
   parents: string[];
   /**
    * Everything above the parents, nearest first: their parents, theirs, and so on up to the
@@ -176,7 +284,7 @@ export class WakerSubscriptionManager {
   }
 
   /**
-   * Create a live SPARQL subscription.
+   * Create a live subscription: SPARQL, or a model query when `sub.className` is set.
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
@@ -188,16 +296,24 @@ export class WakerSubscriptionManager {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
+    if (sub.type === "mention" && sub.className && !sub.terms?.length) {
+      // Without terms the whole-word check cannot run, and every substring
+      // ("metadata" for "data") would wake the agent.
+      throw new Error(
+        `Waker subscription ${sub.id}: a mention subscription needs its terms (get_mention_waker_config returns them)`,
+      );
+    }
 
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
-    this.logger.info(`[waker] ${sub.id}: SPARQL query:\n${sub.query}`);
+    this.logger.info(`[waker] ${sub.id}: query${sub.className ? ` over ${sub.className}` : ""}:\n${sub.query}`);
 
     const proxy = new QuerySubscriptionProxy(
       sub.perspective,
       sub.query,
       this.perspectiveClient,
+      sub.className,
     );
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
@@ -273,36 +389,45 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: onResult fired — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
-      // Query engine can deliver non-array values (e.g. false) on disconnect/reconnect — ignore them
-      if (!Array.isArray(result)) {
+      // A mention subscription is a model query (`{ instances }`), a
+      // channel-messages one SPARQL rows. Anything else (e.g. `false` on a
+      // disconnect/reconnect) is ignored.
+      const items: unknown = sub.type === "mention" ? result?.instances : result;
+      if (!Array.isArray(items)) {
         this.logger.warn(
-          `[waker] ${sub.id}: ignoring non-array result: ${JSON.stringify(result)}`,
+          `[waker] ${sub.id}: ignoring result without ${sub.type === "mention" ? "instances" : "rows"}: ${JSON.stringify(result)}`,
         );
         return;
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen message addresses.
-        // Only wake for messages we haven't seen before.
+        // For mention subscriptions: track seen record ids.
+        // Only wake for records we haven't seen before.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
 
-        for (const item of result) {
-          if (item && item.source && !currentSeen.has(item.source)) {
-            currentSeen.add(item.source);
-            newMessages.push(item.source);
+        const terms = sub.terms ?? [];
+        for (const item of items) {
+          if (typeof item?.id !== "string" || currentSeen.has(item.id)) continue;
+          // The query matched a substring; wake only on a whole word.
+          const text = Array.isArray(item.text) ? item.text.join(" ") : item.text;
+          if (typeof text !== "string" || !holdsAWholeWordTerm(text, terms)) {
+            this.logger.debug(`[waker] ${sub.id}: ${item.id} holds no term as a whole word, skipping`);
+            continue;
           }
+          currentSeen.add(item.id);
+          newMessages.push(item.id);
         }
 
         if (newMessages.length === 0) {
           this.logger.info(
-            `[waker] ${sub.id}: all ${result.length} items already seen, skipping`,
+            `[waker] ${sub.id}: no new whole-word mention among ${items.length} items, skipping`,
           );
           return;
         }
 
         this.logger.info(
-          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${result.length} total`,
+          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${items.length} total`,
         );
 
         // Resolve parents, and the chain above them, per new message
@@ -336,7 +461,7 @@ export class WakerSubscriptionManager {
         // For channel-messages: always notify the agent on every subscription push.
         // No deduplication — the agent reads recent messages itself.
         this.logger.info(
-          `[waker] ${sub.id}: channel update (${result.length} items)`,
+          `[waker] ${sub.id}: channel update (${items.length} items)`,
         );
 
         const existing = this.debounceTimers.get(sub.id);

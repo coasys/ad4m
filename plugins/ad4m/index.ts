@@ -766,13 +766,27 @@ Notes:
       type: "mention",
       perspective: perspectiveId,
       channel: "",
+      // A model query over the built-in TextContent (#1446).
+      className: data.class ?? data.subscription?.class,
       query: data.query ?? data.subscription?.query,
+      // The query matches substrings; the waker keeps whole-word mentions of these.
+      terms: data.terms ?? data.subscription?.terms,
       neighbourhood: data.neighbourhood,
     };
 
     if (!subscription.query) {
       throw new Error(
         "MCP tool did not return a query. Is the perspective accessible?",
+      );
+    }
+    if (!subscription.className) {
+      throw new Error(
+        "MCP tool returned a SPARQL mention query; this waker reads mentions through TextContent. Update the executor.",
+      );
+    }
+    if (!Array.isArray(subscription.terms) || subscription.terms.length === 0) {
+      throw new Error(
+        "MCP tool returned a mention query without its terms; the waker cannot tell a whole-word mention from a substring. Update the executor.",
       );
     }
 
@@ -1376,7 +1390,14 @@ Notes:
       for (const sub of saved) {
         if (stale()) return true;
         try {
-          await createLiveSubscription(sub);
+          // Saved before mentions were read through TextContent (#1446), or
+          // without the terms the whole-word check needs: ask the executor
+          // for the current subscription.
+          if (sub.type === "mention" && (!sub.className || !sub.terms?.length)) {
+            await subscribeToMentionsForPerspective(sub.perspective);
+          } else {
+            await createLiveSubscription(sub);
+          }
           if (stale()) return true;
           logger.info(
             `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,
