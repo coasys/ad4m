@@ -311,7 +311,11 @@ describe('WakerSubscriptionManager', () => {
     debounceMs: number,
     onWake?: (mentions: any) => unknown,
     // What the subscription holds when it opens (the proxy's `result`), and what a restart restored.
-    opening?: { initial?: any; previousSeen?: Record<string, string[]> },
+    opening?: {
+      initial?: any;
+      previousSeen?: Record<string, string[]>;
+      modelQuery?: (uuid: string, className: string, queryJson: string) => Promise<any>;
+    },
   ) {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const ProxyClass = function () {
@@ -328,7 +332,7 @@ describe('WakerSubscriptionManager', () => {
     const manager = new WakerSubscriptionManager({
       perspectiveClient: {
         querySparql: () => Promise.resolve([]),
-        modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
+        modelQuery: opening?.modelQuery ?? (() => Promise.resolve({ instances: [], totalCount: 0 })),
       },
       logger: noopLogger(),
       QuerySubscriptionProxy: ProxyClass,
@@ -378,6 +382,39 @@ describe('WakerSubscriptionManager', () => {
     await new Promise((r) => setTimeout(r, 30));
     h.manager.disposeAll();
     expect(h.wakes.map((w: any) => w.map((m: any) => m.address).sort())).toEqual([['test://new', 'test://robots']]);
+  });
+
+  /** Review of #1512 (Lal): B was persisted as seen while its parents were still resolving. */
+  it('does not persist a mention still resolving its parents when an earlier wake lands', async () => {
+    let landA: (delivered: boolean) => void = () => {};
+    let resolveB: () => void = () => {};
+    let bLookupStarted = false;
+    const h = await mentionHarness(
+      10,
+      () => (h.wakes.length === 1 ? new Promise((r) => { landA = r; }) : true),
+      {
+        // A's lookups answer at once; B's waits until the test lets it go.
+        modelQuery: (_uuid: string, _className: string, queryJson: string) => {
+          const empty = { instances: [], totalCount: 0 };
+          if (!JSON.parse(queryJson).parent?.ids?.includes('test://b')) return Promise.resolve(empty);
+          bLookupStarted = true;
+          return new Promise((r) => { resolveB = () => r(empty); });
+        },
+      },
+    );
+    await h.deliver(h.msg('test://a'));
+    await waitUntil(() => h.wakes.length === 1, 1000);
+    const bHandled = h.deliver(h.msg('test://b', 'test://a'));
+    await waitUntil(() => bLookupStarted, 1000);
+    expect(bLookupStarted).toBe(true);
+    landA(true);
+    await waitUntil(() => h.persistedSeen.some((seen) => seen.includes('test://a')), 1000);
+    expect(h.persistedSeen.at(-1)).toEqual(['test://a']);
+    resolveB();
+    await bHandled;
+    await waitUntil(() => h.persistedSeen.some((seen) => seen.includes('test://b')), 1000);
+    h.manager.disposeAll();
+    expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://a'], ['test://b']]);
   });
 
   it('names every mention that arrived inside one debounce window in the wake', async () => {

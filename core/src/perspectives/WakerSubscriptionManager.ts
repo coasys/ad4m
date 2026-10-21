@@ -290,9 +290,15 @@ export class WakerSubscriptionManager {
    *  or serialized result hash (for channel-messages subs). */
   private seenMessages = new Map<string, Set<string>>();
   /**
-   * Per mention subscription: mentions seen but whose wake has not been delivered yet, keyed by
-   * address. They accumulate across a debounce window, so one wake names all of them, and they
-   * are kept out of the persisted seen set until `onWake` reports delivery.
+   * Per mention subscription: the addresses whose wake was delivered, or that were history when
+   * the subscription opened. This, not `seenMessages`, is what gets persisted: an address joins
+   * `seenMessages` as soon as it is read, while its parents are still resolving and before any
+   * wake, so a restart in between must not take it as done.
+   */
+  private delivered = new Map<string, Set<string>>();
+  /**
+   * Per mention subscription: mentions read but whose wake has not been delivered yet, keyed by
+   * address. They accumulate across a debounce window, so one wake names all of them.
    */
   private undelivered = new Map<string, Map<string, MentionMessage>>();
   /** Failed wake attempts in a row per subscription, for the retry backoff. */
@@ -392,6 +398,7 @@ export class WakerSubscriptionManager {
       // reported as active or persisted as if it were.
       this.activeSubscriptions.delete(sub.id);
       this.seenMessages.delete(sub.id);
+      this.delivered.delete(sub.id);
       this.persist();
       // Keep it pending and re-attempt: the usual cause (locked wallet, executor
       // mid-restart, a handshake the executor never answered) clears on its
@@ -419,6 +426,7 @@ export class WakerSubscriptionManager {
     const restored = Object.prototype.hasOwnProperty.call(this.previousSeenMessages, sub.id);
     const seen = new Set<string>(this.previousSeenMessages[sub.id] ?? []);
     this.seenMessages.set(sub.id, seen);
+    this.delivered.set(sub.id, new Set(seen));
     if (seen.size > 0) {
       this.logger.info(`[waker] ${sub.id}: seeded ${seen.size} seen message(s) from persisted state`);
     }
@@ -474,6 +482,9 @@ export class WakerSubscriptionManager {
         if (opening && !restored) {
           // A new subscription: what it opens on is history, readable on demand, not news.
           this.seenMessages.set(sub.id, currentSeen);
+          const done = this.delivered.get(sub.id) ?? new Set<string>();
+          for (const address of newMessages) done.add(address);
+          this.delivered.set(sub.id, done);
           this.logger.info(
             `[waker] ${sub.id}: ${newMessages.length} existing mention(s) taken as history, not woken`,
           );
@@ -619,6 +630,7 @@ export class WakerSubscriptionManager {
     this.activeSubscriptions.delete(id);
     this.pendingSubscriptions.delete(id);
     this.seenMessages.delete(id);
+    this.delivered.delete(id);
     this.undelivered.delete(id);
     this.wakeFailures.delete(id);
     if (persist) this.persist();
@@ -666,7 +678,12 @@ export class WakerSubscriptionManager {
       return;
     }
     this.wakeFailures.delete(sub.id);
-    for (const mention of mentions) pending.delete(mention.address);
+    const done = this.delivered.get(sub.id) ?? new Set<string>();
+    for (const mention of mentions) {
+      pending.delete(mention.address);
+      done.add(mention.address);
+    }
+    this.delivered.set(sub.id, done);
     this.persist();
   }
 
@@ -736,10 +753,9 @@ export class WakerSubscriptionManager {
   private persist(): void {
     if (this.onPersist) {
       const seen: Record<string, string[]> = {};
-      for (const [id, set] of this.seenMessages) {
-        // An undelivered mention is not seen yet: after a restart it must wake again.
-        const pending = this.undelivered.get(id);
-        seen[id] = Array.from(set).filter((address) => !pending?.has(address));
+      // Only what was delivered: anything else must wake again after a restart.
+      for (const [id, set] of this.delivered) {
+        seen[id] = Array.from(set);
       }
       this.onPersist(this.getActive(), seen);
     }
