@@ -294,9 +294,16 @@ impl PerspectiveInstance {
         values: &Value,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
+        let mut has_child = Vec::new();
         if abstract_class == CONTAINER_URI {
-            if let Some(runs) = self.has_child_runs(base, values).await? {
-                return Ok(runs);
+            if let Some(write) = self.has_child_write(base, values).await? {
+                if !write.beside_own {
+                    return Ok(vec![Run {
+                        commands: write.commands,
+                        parameters: vec![],
+                    }]);
+                }
+                has_child = write.commands;
             }
         }
         let Value::Object(values) = values else {
@@ -388,6 +395,11 @@ impl PerspectiveInstance {
                     targets.join(", "),
                     op.what()
                 ));
+            }
+        }
+        for command in has_child {
+            if !commands.contains(&command) {
+                commands.push(command);
             }
         }
         if !commands.is_empty() {
@@ -576,7 +588,7 @@ impl PerspectiveInstance {
     /// Put `child` under `parent` through `Container` (#1446): what MCP's
     /// `add_child` and `instance_create(parent)` do, and what the SDK's
     /// `create({ parent: { id } })` asks `updateSubject` for. See
-    /// [`Self::has_child_runs`] for which link it writes.
+    /// [`Self::has_child_write`] for which link it writes.
     pub(crate) async fn add_to_container(
         &mut self,
         parent: &str,
@@ -592,18 +604,23 @@ impl PerspectiveInstance {
             .await
     }
 
-    /// An add or remove through `Container`'s `children` on a parent none of
-    /// whose classes has that action for the relation answering to
-    /// `children`: `ad4m://has_child` links, which hold on any node
-    /// (`ad4m://self`, a plain-string id, a Flux channel whose relation is
-    /// not `children`). `None` when one of its classes has the action: then
-    /// each such class runs its own (a Block's adder writes `we://child`,
-    /// open question 5), as for any abstract class.
-    async fn has_child_runs(
+    /// The `ad4m://has_child` links an add or remove through `Container`'s
+    /// `children` writes. `has_child` holds on any node (`ad4m://self`, a
+    /// plain-string id, a Flux channel whose relation is not `children`), so
+    /// on a parent none of whose classes has the action for the relation
+    /// answering to `children`, these links are the whole write.
+    ///
+    /// When one of its classes has an adder, `None`: each such class runs its
+    /// own (a Block's adder writes `we://child`, open question 5), as for any
+    /// abstract class. When one has a remover, the removals are still
+    /// returned, `beside_own`: the child may be held through `has_child` as
+    /// well as, or instead of, the class's own relation, and a remove takes
+    /// it out of every edge (#1461 review).
+    async fn has_child_write(
         &self,
         base: &str,
         values: &Value,
-    ) -> Result<Option<Vec<Run>>, AnyError> {
+    ) -> Result<Option<HasChildWrite>, AnyError> {
         let Some(children) = values.get("children") else {
             return Ok(None);
         };
@@ -625,13 +642,18 @@ impl PerspectiveInstance {
         let alias_key = builtin(CONTAINER_URI)
             .map(|b| b.name)
             .unwrap_or("Container");
+        let mut beside_own = false;
         for class in resolution.classes.iter().filter(|c| own.contains(c)) {
             let shape = self.get_shape(class)?;
             let Some(own_name) = index.own_name(class, &shape, "children", alias_key) else {
                 continue;
             };
             if self.actions_for(class, own_name, op, true).await?.is_some() {
-                return Ok(None);
+                if op == Op::Add {
+                    return Ok(None);
+                }
+                beside_own = true;
+                break;
             }
         }
         let members: Vec<String> = match value {
@@ -653,10 +675,10 @@ impl PerspectiveInstance {
                 action: action.clone(),
             })
             .collect();
-        Ok(Some(vec![Run {
+        Ok(Some(HasChildWrite {
             commands,
-            parameters: vec![],
-        }]))
+            beside_own,
+        }))
     }
 
     /// Resolve again every subscription over an abstract class, or reading
@@ -736,6 +758,15 @@ pub(super) struct Run {
     pub(super) commands: Vec<Command>,
     /// The members a `collectionSetter` sets; empty otherwise.
     pub(super) parameters: Vec<Parameter>,
+}
+
+/// The `has_child` links a `children` write through `Container` makes (see
+/// `PerspectiveInstance::has_child_write`).
+struct HasChildWrite {
+    commands: Vec<Command>,
+    /// One of the parent's classes runs its own remover too: these commands
+    /// join its run instead of being the whole write.
+    beside_own: bool,
 }
 
 /// What an update through an abstract class does to one name.

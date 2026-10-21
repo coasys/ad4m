@@ -565,6 +565,57 @@ async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
     assert!(targets(&p, block, "we://child").await.is_empty());
 }
 
+/// The `children` a `Container` read gives `holder`, sorted.
+async fn held(p: &PerspectiveInstance, holder: &str) -> Vec<String> {
+    let rows = query(p, CONTAINER_URI, json!({"where": {"id": holder}})).await;
+    let mut out: Vec<String> = rows[0]["children"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{rows:?}"))
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+/// A Block that holds `kept` through `has_child`, and `child` through each of
+/// `predicates`; then `child` removed through `Container`.
+async fn remove_under_a_block(predicates: &[&str]) -> (PerspectiveInstance, &'static str) {
+    let (mut p, ctx) = setup().await;
+    let (block, child, kept) = ("ad4m://block/rm", "ad4m://c/rm", "ad4m://c/kept");
+    create(&mut p, &ctx, "Block", block).await;
+    for predicate in predicates {
+        link(&mut p, &ctx, block, predicate, child).await;
+    }
+    link(&mut p, &ctx, block, HAS_CHILD, kept).await;
+    assert_eq!(held(&p, block).await, vec![kept, child]);
+    let remove = json!({"children": {"action": "remover", "value": [child]}});
+    p.update_subject(class(CONTAINER_URI), block.into(), remove, None, &ctx)
+        .await
+        .unwrap();
+    (p, block)
+}
+
+/// A remove through `Container` on a Block takes out a child the Block holds
+/// only through `has_child` (Lal's #1461 review). Red on e894cdd8b: Block's
+/// own remover ran alone, removed nothing on `we://child`, and succeeded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_remove_on_a_block_removes_a_has_child_child() {
+    let (p, block) = remove_under_a_block(&[HAS_CHILD]).await;
+    assert_eq!(targets(&p, block, HAS_CHILD).await, vec!["ad4m://c/kept"]);
+    assert_eq!(held(&p, block).await, vec!["ad4m://c/kept"]);
+}
+
+/// A child the Block holds through both `we://child` and `has_child` is
+/// removed from both. Red on e894cdd8b: only the `we://child` link went.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_container_remove_on_a_block_removes_every_edge() {
+    let (p, block) = remove_under_a_block(&[HAS_CHILD, "we://child"]).await;
+    assert!(targets(&p, block, "we://child").await.is_empty());
+    assert_eq!(targets(&p, block, HAS_CHILD).await, vec!["ad4m://c/kept"]);
+    assert_eq!(held(&p, block).await, vec!["ad4m://c/kept"]);
+}
+
 /// The ids of `rows`, in their order.
 fn ordered(rows: &[Value]) -> Vec<String> {
     rows.iter()
