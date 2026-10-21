@@ -62,8 +62,8 @@ export class QuerySubscriptionProxy {
     #initReject?: (reason?: any) => void;
 
     /** With `className`, `query` is a model query (JSON) over that class or
-     *  union of classes, opened with `perspective.modelSubscribe`; results
-     *  are `{ instances, totalCount }`. Without it, `query` is SPARQL. */
+     *  union of classes, opened with `modelSubscribe`; results are
+     *  `{ instances, totalCount }`. Without it, `query` is SPARQL. */
     constructor(uuid: string, query: string, client: PerspectiveClient, className?: string | string[]) {
         const open = className === undefined
             ? () => client.subscribeQuery(uuid, query)

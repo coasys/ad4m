@@ -892,10 +892,11 @@ Notes:
   api.registerTool({
     name: "ad4m_subscribe_to_children",
     description:
-      "Subscribe to new children under a specific parent — messages in a channel, or whatever " +
-      "items this space's ontology hangs under that container. " +
-      "Creates a live waker subscription that watches for new ad4m://has_child links and wakes you when detected. " +
-      "Call this to monitor one container for everything added to it.",
+      "Subscribe to new children under a specific parent — messages in a channel, blocks in a call, " +
+      "or whatever items this space's ontology hangs under that container, whatever their class. " +
+      "Creates a live waker subscription on the parent's children (the built-in Container: its " +
+      "ad4m://has_child links, and its class's own children relation such as a block's we://child) " +
+      "and wakes you when one is added. Call this to monitor one container for everything added to it.",
     parameters: {
       type: "object",
       properties: {
@@ -916,9 +917,13 @@ Notes:
     ) {
       try {
         // Call the MCP tool to generate the waker query
+        // Under a parent the executor answers with a model query over the
+        // built-in Container (`query_class`): the parent's children, whatever
+        // their class. An older executor answers with has_child SPARQL and no
+        // `query_class`, which still subscribes.
         const result = await callToolWithRetry("generate_waker_query", {
           perspective_id: params.perspective_id,
-          class_name: "Message",
+          class_name: "ad4m://Container",
           parent: params.expression_address,
         });
         const data = extractMcpResultData(result);
@@ -938,6 +943,7 @@ Notes:
           perspective: params.perspective_id,
           channel: params.expression_address,
           query: data.query ?? data.waker_config?.query,
+          ...(data.query_class ? { className: data.query_class } : {}),
         };
 
         if (!subscription.query) {

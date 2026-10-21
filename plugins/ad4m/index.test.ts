@@ -2202,6 +2202,94 @@ describe("ad4mPlugin", () => {
     expect(active).toEqual([]);
   });
 
+  // Test 12 (#1446): a container whose children are not Messages (a We call
+  // holding blocks). The tool asks for no class; the executor's answer is a
+  // model subscription over Container, and a new child of any class wakes.
+  it("ad4m_subscribe_to_children subscribes through Container and wakes on a child of any class", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    const asked: any[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { serverInfo: { name: "ad4m" } } }),
+          { status: 200, headers: { "Content-Type": "application/json", "Mcp-Session-Id": "sess-1" } },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (body.method === "tools/call" && body.params?.name === "generate_waker_query") {
+        asked.push(body.params.arguments);
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                subscription_id: "children-sub-1",
+                query: JSON.stringify({ where: { id: "we://call/1" }, properties: ["children"] }),
+                query_class: "ad4m://Container",
+              }),
+            }],
+          },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+    await ad4mPlugin({
+      pluginConfig: { mode: "external", mcpEndpoint: "http://localhost:3001/mcp", token: "test-cred" },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    });
+
+    let deliver: ((result: any) => void) | undefined;
+    const constructed: any[][] = [];
+    const wakes: any[] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { modelQuery: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
+        constructed.push(args);
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => Promise.resolve()),
+          dispose: vi.fn(),
+          onResult: vi.fn((cb: any) => { deliver = cb; }),
+        };
+      }),
+      debounceMs: 10,
+      onWake: (_sub, result) => { wakes.push(result); },
+    });
+    _setSubscriptionManagerForTests(manager);
+    try {
+      const tool = registeredTools.find((t) => t.name === "ad4m_subscribe_to_children")!;
+      const res = await tool.execute("call-1", {
+        perspective_id: "persp-uuid-1",
+        expression_address: "we://call/1",
+      });
+      expect(res.content[0].text).toContain("Subscribed to children of we://call/1");
+      // No hard-coded child class.
+      expect(asked[0].class_name).not.toBe("Message");
+      // A model subscription over Container, not has_child SPARQL.
+      expect(constructed[0][1]).toBe(JSON.stringify({ where: { id: "we://call/1" }, properties: ["children"] }));
+      expect(constructed[0][3]).toBe("ad4m://Container");
+      expect(manager.getActive()[0].className).toBe("ad4m://Container");
+
+      // A TextBlock (not a Message) lands under the call: it wakes.
+      deliver!({ instances: [{ id: "we://call/1", children: ["we://text-block/1"] }], totalCount: 1 });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0].instances[0].children).toEqual(["we://text-block/1"]);
+    } finally {
+      manager.disposeAll();
+      _setSubscriptionManagerForTests(null);
+    }
+  });
+
   it("ad4m_unsubscribe_from_mentions reports 'No mention subscription found' when nothing matches", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];
 
@@ -3429,7 +3517,7 @@ describe("WakerSubscriptionManager", () => {
   };
 
   const mockPerspectiveClientSimple = {
-    querySparql: vi.fn(() => Promise.resolve([])),
+    modelQuery: vi.fn(() => Promise.resolve({ instances: [], totalCount: 0 })),
   };
 
   it("should throw when the executor rejects the subscription, and not keep it active", async () => {
@@ -3740,18 +3828,19 @@ describe("WakerSubscriptionManager", () => {
     const mock = makeMockProxy();
     let capturedMentions: any[] | undefined;
 
-    // Mock perspectiveClient.querySparql to return has_child links for parent resolution
+    // Mock perspectiveClient.modelQuery: the executor's Container answers
+    // which containers hold each message (one step in) and what is above them.
+    const rows = (ids: string[]) => ({ instances: ids.map((id) => ({ id })), totalCount: ids.length });
     const mockPerspectiveClient = {
-      querySparql: vi.fn((_perspectiveId: string, query: string) => {
+      modelQuery: vi.fn((_perspectiveId: string, className: string, queryJson: string) => {
+        expect(className).toBe("ad4m://Container");
+        const { parent } = JSON.parse(queryJson);
+        if (parent.transitive) return Promise.resolve(rows([]));
         // msg-1 has two parents (channel + conversation thread)
-        if (query.includes("msg-1")) {
-          return Promise.resolve([{ source: "channel-abc" }, { source: "conversation-xyz" }]);
-        }
+        if (parent.ids.includes("msg-1")) return Promise.resolve(rows(["channel-abc", "conversation-xyz"]));
         // msg-2 is only in channel-abc
-        if (query.includes("msg-2")) {
-          return Promise.resolve([{ source: "channel-abc" }]);
-        }
-        return Promise.resolve([]);
+        if (parent.ids.includes("msg-2")) return Promise.resolve(rows(["channel-abc"]));
+        return Promise.resolve(rows([]));
       }),
     };
 
@@ -3779,8 +3868,8 @@ describe("WakerSubscriptionManager", () => {
     mock.deliver({ instances: [{ id: 'msg-1', text: "hi bot" }, { id: 'msg-2', text: "hi bot" }] });
     await new Promise(r => setTimeout(r, 50));
 
-    // One parent lookup per message, then one batched lookup per ancestor level.
-    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(4);
+    // Per message: one step in for its parents, one bounded walk for what is above them.
+    expect(mockPerspectiveClient.modelQuery).toHaveBeenCalledTimes(4);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
@@ -3799,7 +3888,7 @@ describe("WakerSubscriptionManager", () => {
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
-      querySparql: vi.fn(() => Promise.resolve([])),
+      modelQuery: vi.fn(() => Promise.resolve({ instances: [], totalCount: 0 })),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -3880,7 +3969,7 @@ describe("WakerSubscriptionManager disposal races", () => {
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   });
   const perspectiveClient = {
-    querySparql: vi.fn(() => Promise.resolve([])),
+    modelQuery: vi.fn(() => Promise.resolve({ instances: [], totalCount: 0 })),
   };
 
   /** A proxy whose subscribe() only settles when the test says so. */
