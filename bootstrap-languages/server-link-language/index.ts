@@ -46,7 +46,7 @@ import {
     DenoTransport,
     DenoWebSocketFactory,
 } from "./src/adapters-deno.js";
-import { commitNeedsKeyRetry, type KeyRingStatus } from "./src/key-ring-policy.js";
+import { commitNeedsKeyRetry, refreshSkippedByCooldown, type KeyRingStatus } from "./src/key-ring-policy.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables
@@ -321,12 +321,13 @@ const language = defineLanguage({
         syncModule.initSync({
             config,
             getToken: () => auth.getValidToken(),
+            invalidateToken: () => auth.invalidateSession(),
             emitDiff: (diff) => getRuntime().emitPerspectiveDiff(diff),
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
             getKeyRing: () => keyRing,
             refreshKeyRing: async () => {
                 const now = Date.now();
-                if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+                if (refreshSkippedByCooldown(keyRingStatus, now - lastKeyRingRetry, KEY_RING_RETRY_COOLDOWN_MS)) {
                     return null;
                 }
                 lastKeyRingRetry = now;
@@ -344,6 +345,7 @@ const language = defineLanguage({
         wsClient = new WsClient({
             getUrl: async () => api.wsUrl(config),
             getToken: () => auth.getValidToken(),
+            invalidateToken: () => auth.invalidateSession(),
             handlers: {
                 onDiff(msg) {
                     const result = syncModule.applyInboundWireDiff(msg.payload, msg.sequence, msg.revision);
@@ -577,20 +579,12 @@ const language = defineLanguage({
                 `${diff.removals.length} removes (keyRingStatus=${keyRingStatus})`,
             );
 
-            // 1. Store links locally (plaintext, always — see src/sync.ts module doc).
-            store.applyDiff(diff);
-
-            // 2. Push the diff to the server. Awaiting the POST ensures
-            //    the executor only clears its pending-diff DB entry AFTER
-            //    the server accepted the commit. The executor's own
-            //    batching (pending_diffs_loop: 1s inactivity / 3s max /
-            //    150 max count) handles coalescence for burst scenarios
-            //    — the language-level fire-and-forget batch is no longer
-            //    needed on this path.
+            // Push the diff to the server; syncModule.commit stores it
+            // locally only once the server accepted it, and does not echo
+            // it back (the executor committed it and already holds it).
+            // Awaiting the POST ensures the executor only clears its
+            // pending-diff DB entry AFTER the server accepted the commit.
             await syncModule.commit(diff);
-
-            // 3. Emit so local subscribers see it after the POST landed.
-            getRuntime().emitPerspectiveDiff(diff);
 
             return "";
         },

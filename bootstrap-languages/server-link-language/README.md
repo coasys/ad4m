@@ -153,7 +153,7 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 | `src/api.ts` | Typed HTTP client for every server endpoint |
 | `src/auth.ts` | DID challenge-response flow + token expiry tracking/refresh |
 | `src/ws-client.ts` | WebSocket lifecycle: connect, typed message dispatch, send queue, exponential-backoff reconnect |
-| `src/sync.ts` | Commit / catch-up sync / cold-start bootstrap; the single inbound-diff choke point |
+| `src/sync.ts` | Commit (stored locally once the server accepted it, not echoed back) / catch-up sync / cold-start bootstrap; the single inbound-diff choke point |
 | `src/telepresence.ts` | Online-agent roster + outbound signal/broadcast/status |
 | `src/encryption.ts` | X25519 key derivation, sealed room-key exchange, AES-256-GCM link encryption |
 | `index.ts` | Wires it all together behind `defineLanguage()` |
@@ -245,7 +245,9 @@ source code.
 
 E2E encryption activates automatically — the admin's language instance
 generates the initial room key during `init()` when no E2E exists yet.
-Non-admin members receive keys via the automatic `onPeerJoined` grant flow.
+Non-admin members receive keys via the admin's automatic grants (on
+`peer-joined` and after every sync); a member waiting for its first keys
+re-checks `/keys` on every sync, without the 10 s refresh cooldown.
 There is no plaintext mode.
 
 ## Publishing
