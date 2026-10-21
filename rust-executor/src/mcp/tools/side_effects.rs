@@ -90,6 +90,11 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // `execute_commands` runs SDNA-declared actions on an instance —
     // always a mutation.
     ("execute_commands", SideEffect::Write),
+    // An app's installed tools. Listing them reads nothing of the graph;
+    // a call may write, and which tools do is the app's to say, so the
+    // tool that dispatches them is a Write as a whole.
+    ("list_record_tools", SideEffect::Read),
+    ("call_record_tool", SideEffect::Write),
     // ── profiles.rs ─────────────────────────────────────────────────
     ("get_my_did", SideEffect::Read),
     ("get_agent_profile", SideEffect::Read),

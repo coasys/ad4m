@@ -375,6 +375,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::ai_ws::register_ws_handlers(&mut map);
     super::neighbourhoods_ws::register_ws_handlers(&mut map);
     super::users_ws::register_ws_handlers(&mut map);
+    super::tool_bundles_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
     super::sfu_ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.

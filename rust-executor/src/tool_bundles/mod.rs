@@ -7,9 +7,14 @@
 //! [`ToolBundleStore`] keeps bundles by content address. Nothing here knows what a bundle exports;
 //! a caller names an export path and passes JSON.
 
+mod registry;
 mod sandbox;
 mod store;
 
+pub use registry::{
+    BundleDocEntry, BundleTool, FoundTool, InstalledBundle, RegistryError, ToolBundleRegistry,
+    Toolset,
+};
 pub use sandbox::{BundleSandbox, SandboxError, SandboxLimits};
 pub use store::ToolBundleStore;
 

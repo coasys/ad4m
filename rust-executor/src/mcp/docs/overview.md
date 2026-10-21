@@ -77,6 +77,17 @@ Every write is validated against the class schema before anything is
 written; a rejection names the property, the expected type and the
 cardinality, so fix what the error says rather than guessing.
 
+### Tools apps install for their own records
+
+| Tool | What it does |
+| --- | --- |
+| `list_record_tools(class_name?)` | The tools apps have installed on this node for their kinds of record — editing an app's page layouts, say: the classes each set works on, its documentation topic to read first with `get_documentation`, and each tool's parameters |
+| `call_record_tool(perspective_id, base_uri, tool, arguments)` | Run one of them on one record. A tool that writes saves its change as you, all at once |
+
+Prefer these over `instance_update` for a class an app has tools for: the tool knows the app's
+rules for that record — what makes it valid, and what else has to change with it — where a raw
+property write does not.
+
 ### Tree and raw links
 
 | Tool | What it does |

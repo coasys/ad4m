@@ -327,6 +327,9 @@ impl Ad4mMcpHandler {
             .with_route((Self::instance_query_tool_attr(), Self::instance_query))
             .with_route((Self::instance_get_tool_attr(), Self::instance_get))
             .with_route((Self::instance_update_tool_attr(), Self::instance_update))
+            // instances/record_tools.rs
+            .with_route((Self::list_record_tools_tool_attr(), Self::list_record_tools))
+            .with_route((Self::call_record_tool_tool_attr(), Self::call_record_tool))
             .with_route((
                 Self::instance_add_to_collection_tool_attr(),
                 Self::instance_add_to_collection,

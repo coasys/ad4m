@@ -477,3 +477,181 @@ async fn a_real_bundle_loads_and_answers() {
         .unwrap_or_default()
         .starts_with("Error"));
 }
+
+// ── the registry ─────────────────────────────────────────────────────────
+
+use super::{RegistryError, ToolBundleRegistry};
+
+/// A bundle exporting one toolset, `name`, with tools named in `tools` and a start topic.
+fn toolset_bundle(name: &str, tools: &[&str], version: u32) -> String {
+    let tools: Vec<String> = tools
+        .iter()
+        .map(|t| format!(r#"{{ name: "{t}", description: "d", parameters: {{}}, writes: false }}"#))
+        .collect();
+    format!(
+        r##"
+export const toolsets = {{
+  {name}: {{
+    appliesTo: ["Thing"],
+    tools: [{}],
+    call: async (tool) => ({{ text: tool + " v{version}" }}),
+    docs: {{
+      list: async () => [{{ path: "{name}", title: "T", summary: "S" }}, {{ path: "{name}/more", title: "M", summary: "S" }}],
+      read: async (path) => "# " + path + " v{version}",
+    }},
+  }},
+}};
+"##,
+        tools.join(", ")
+    )
+}
+
+fn registry(dir: &std::path::Path) -> ToolBundleRegistry {
+    init_v8_platform();
+    ToolBundleRegistry::new(
+        ToolBundleStore::new(dir),
+        SandboxLimits::default(),
+        vec!["overview".to_string()],
+    )
+}
+
+#[tokio::test]
+async fn the_registry_installs_a_bundle_and_reads_what_it_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry(dir.path());
+    let installed = registry
+        .install(&toolset_bundle("things", &["thing_read"], 1))
+        .await
+        .unwrap();
+    assert_eq!(installed.toolsets.len(), 1);
+    let toolset = &installed.toolsets[0];
+    assert_eq!(toolset.name, "things");
+    assert_eq!(toolset.applies_to, vec!["Thing".to_string()]);
+    assert_eq!(toolset.tools[0].name, "thing_read");
+    assert_eq!(toolset.docs[0].path, "things");
+
+    assert_eq!(registry.list().await, vec![installed.clone()]);
+    assert_eq!(
+        registry
+            .install(&toolset_bundle("things", &["thing_read"], 1))
+            .await
+            .unwrap(),
+        installed,
+        "installing the same source again changes nothing"
+    );
+    assert_eq!(registry.list().await.len(), 1);
+
+    let found = registry
+        .find_tool("thing_read")
+        .await
+        .expect("found by name");
+    assert_eq!(found.toolset, "things");
+    assert_eq!(
+        found
+            .sandbox
+            .call(&["toolsets", "things", "call"], vec![json!("thing_read")])
+            .await,
+        Ok(json!({ "text": "thing_read v1" }))
+    );
+    assert_eq!(
+        registry.read_doc("things/more").await,
+        Ok(Some("# things/more v1".to_string()))
+    );
+    assert_eq!(registry.read_doc("elsewhere").await, Ok(None));
+}
+
+#[tokio::test]
+async fn a_new_release_of_a_toolset_replaces_the_old_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry(dir.path());
+    let first = registry
+        .install(&toolset_bundle("things", &["thing_read"], 1))
+        .await
+        .unwrap();
+    let second = registry
+        .install(&toolset_bundle("things", &["thing_read", "thing_write"], 2))
+        .await
+        .unwrap();
+
+    assert_eq!(registry.list().await, vec![second.clone()]);
+    let store = ToolBundleStore::new(dir.path());
+    assert_eq!(store.list().unwrap(), vec![second.address.clone()]);
+    assert_eq!(store.get(&first.address).unwrap(), None);
+    assert_eq!(
+        registry.read_doc("things").await,
+        Ok(Some("# things v2".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn the_registry_refuses_names_that_are_taken_or_reserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry(dir.path());
+    registry
+        .install(&toolset_bundle("things", &["shared_tool"], 1))
+        .await
+        .unwrap();
+
+    let clash = registry
+        .install(&toolset_bundle("others", &["shared_tool"], 1))
+        .await;
+    assert!(
+        matches!(clash, Err(RegistryError::Conflict(_))),
+        "{clash:?}"
+    );
+
+    let reserved = registry
+        .install(&toolset_bundle("overview", &["fresh_tool"], 1))
+        .await;
+    assert!(
+        matches!(reserved, Err(RegistryError::Conflict(_))),
+        "{reserved:?}"
+    );
+
+    let twice = registry
+        .install(&toolset_bundle("doubles", &["same", "same"], 1))
+        .await;
+    assert!(
+        matches!(twice, Err(RegistryError::Conflict(_))),
+        "{twice:?}"
+    );
+
+    // Nothing refused was kept.
+    assert_eq!(registry.list().await.len(), 1);
+    assert_eq!(ToolBundleStore::new(dir.path()).list().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_registry_refuses_a_bundle_it_cannot_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = registry(dir.path());
+    for source in [
+        "export const nothing = 1;",
+        "export const toolsets = {};",
+        "export const toolsets = { BadName: { appliesTo: ['T'], tools: [{ name: 'x', description: '', parameters: {}, writes: false }], docs: { list: async () => [] } } };",
+        "export const toolsets = { a: { appliesTo: [], tools: [], docs: { list: async () => [] } } };",
+        "export const toolsets = { a: { appliesTo: ['T'], tools: [{ name: 'x' }], docs: { list: async () => [] } } };",
+        "export const toolsets = { a: { appliesTo: ['T'], tools: [{ name: 'x', description: '', parameters: {}, writes: false }], docs: { list: async () => [{ path: 'b', title: '', summary: '' }] } } };",
+    ] {
+        let outcome = registry.install(source).await;
+        assert!(matches!(outcome, Err(RegistryError::Invalid(_))), "{source}: {outcome:?}");
+    }
+    assert!(registry.list().await.is_empty());
+}
+
+#[tokio::test]
+async fn the_registry_loads_what_was_installed_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let installed = registry(dir.path())
+        .install(&toolset_bundle("things", &["thing_read"], 1))
+        .await
+        .unwrap();
+
+    let after_restart = registry(dir.path());
+    after_restart.load_stored().await;
+    assert_eq!(after_restart.list().await, vec![installed.clone()]);
+
+    assert!(after_restart.remove(&installed.address).await.unwrap());
+    assert!(after_restart.list().await.is_empty());
+    assert!(!after_restart.remove(&installed.address).await.unwrap());
+}

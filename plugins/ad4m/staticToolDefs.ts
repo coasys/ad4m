@@ -701,7 +701,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_documentation",
-    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux \u2014 for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. No authentication needed.",
+    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the containment tree, and the traps that cost the most time. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks), worth reading only when the space you joined was created by Flux \u2014 for a space any other app created, describe_perspective is the authority on its classes. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. Apps can install tools for their own records on this node; each set of them serves its own topics, and list_record_tools names the one to start from. No authentication needed.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetDocumentationParams",
@@ -709,45 +709,66 @@ export const STATIC_TOOL_DEFS: McpTool[] =
       "type": "object",
       "properties": {
         "topic": {
-          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\"\nor \"architecture\"",
-          "$ref": "#/$defs/DocTopic"
+          "description": "Which document: \"overview\" (start here), \"usage\", \"flux\", \"models\"\nor \"architecture\" \u2014 or a topic an app's tools serve, as list_record_tools names them",
+          "type": "string"
         }
       },
       "required": [
         "topic"
-      ],
-      "$defs": {
-        "DocTopic": {
-          "description": "Which document to return.",
-          "oneOf": [
-            {
-              "description": "What AD4M is, the static tool surface, the workflow, and the rules\nthat keep data usable by humans and other agents. Start here.",
-              "type": "string",
-              "const": "overview"
-            },
-            {
-              "description": "Perspectives, links, languages, neighbourhoods, and the SHACL subject\nclass (social DNA) format in detail.",
-              "type": "string",
-              "const": "architecture"
-            },
-            {
-              "description": "How to actually use the tools: reading and writing instances, the\ncontainment tree, and the common traps.",
-              "type": "string",
-              "const": "usage"
-            },
-            {
-              "description": "App-specific, kept for spaces the Flux app created: its data model\n(channels, messages, posts, tasks) and the recipes for reading and\nreplying in a channel humans can see. A space made by any other app\nis described by `describe_perspective`, not by this topic.",
-              "type": "string",
-              "const": "flux"
-            },
-            {
-              "description": "Authoring subject classes: when to add one, how to write a shape that\nis writable and findable, and what changing a class does to the\ninstances that already exist.",
-              "type": "string",
-              "const": "models"
-            }
-          ]
+      ]
+    }
+  },
+  {
+    "name": "list_record_tools",
+    "description": "List the tools apps have installed on this node for their own kinds of record \u2014 editing an app's page layouts, say. Each set of tools names the subject classes it works on, its documentation topic to read first (with get_documentation), and each tool's description, parameters and whether it writes. Call one with call_record_tool. Pass class_name to see only the tools for that class.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ListRecordToolsParams",
+      "description": "Parameters for listing the tools apps have installed",
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "description": "Only the tools for this subject class. Omit for every installed tool.",
+          "type": "string",
+          "default": null,
+          "nullable": true
         }
       }
+    }
+  },
+  {
+    "name": "call_record_tool",
+    "description": "Call a tool an app installed (see list_record_tools) on one record: base_uri is the record, of a class the tool works on; arguments are the tool's own, as its parameters describe. Answers with what the tool says. A tool that writes saves its change to the record as you, in one write \u2014 read its documentation first. Example: call_record_tool(perspective_id, base_uri='<id>', tool='template_read', arguments={}).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "CallRecordToolParams",
+      "description": "Parameters for calling an installed tool on one record",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "base_uri": {
+          "description": "URI of the record the tool works on",
+          "type": "string"
+        },
+        "tool": {
+          "description": "The tool's name, as list_record_tools gives it",
+          "type": "string"
+        },
+        "arguments": {
+          "description": "The tool's own arguments, as its parameters in list_record_tools describe them",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      },
+      "required": [
+        "perspective_id",
+        "base_uri",
+        "tool"
+      ]
     }
   }
 ];

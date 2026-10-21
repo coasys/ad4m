@@ -11,6 +11,7 @@ at boot.
 | `sandbox.rs` | `BundleSandbox`: one bare `JsRuntime` per bundle on its own thread; `call(path, args)` / `read(path)`, JSON in and out; per-call time limit and heap cap |
 | `bootstrap.js` | Runs before the bundle: the only globals it gets beyond the language (`structuredClone`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto.getRandomValues`, `console`), removes `Deno`, evaluates to the invoker |
 | `store.rs` | `ToolBundleStore`: `<data>/tool_bundles/<address>.js`, addressed by `js_core::utils::content_address` |
+| `registry.rs` | `ToolBundleRegistry::global()`: install (a toolset name already taken replaces its bundle), `load_stored` at boot, `find_tool`, `read_doc`. Reached by `api/tool_bundles_ws.rs` and `mcp/tools/instances/record_tools.rs` |
 | `tests.rs` | Fixture bundles: calls, isolation, limits, store |
 
 ## Invariants
@@ -24,6 +25,10 @@ at boot.
 - A terminated isolate (time limit, heap cap) is never reused; the next call starts a new one.
 - Calls are typed: an export path and JSON arguments. Never build JS source with `format!`.
 - The store refuses any address that is not one, so a caller's string never names a path.
+- A bundle never touches a perspective. `call_record_tool` reads the record and writes what a
+  tool answers through the class setters, in one batch, as the calling agent.
+- Tool names are unique across the node; a toolset's doc topics sit under its own name and may
+  not take an executor topic. Tests get a registry over a temp-dir store, never `~/.ad4m`.
 
 ## Do not
 

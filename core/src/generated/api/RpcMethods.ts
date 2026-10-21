@@ -53,6 +53,7 @@ import type { HostingRequestPaymentResult } from "./HostingRequestPaymentResult"
 import type { HostingWalletResult } from "./HostingWalletResult";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
+import type { InstalledBundle } from "./InstalledBundle";
 import type { InteractionMeta } from "./InteractionMeta";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JsonValue } from "./serde_json/JsonValue";
@@ -164,6 +165,8 @@ import type { SfuSendDataParams } from "./SfuSendDataParams";
 import type { SfuSetConfigParams } from "./SfuSetConfigParams";
 import type { SfuStatus } from "./SfuStatus";
 import type { SignMessageRequest } from "./SignMessageRequest";
+import type { ToolBundleAddressParams } from "./ToolBundleAddressParams";
+import type { ToolBundleInstallParams } from "./ToolBundleInstallParams";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -365,6 +368,9 @@ export interface RpcMethods {
   "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
   "sfu.status": { params: Record<string, never>; result: SfuStatus };
   "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
+  "toolBundles.install": { params: ToolBundleInstallParams; result: InstalledBundle };
+  "toolBundles.list": { params: Record<string, never>; result: Array<InstalledBundle> };
+  "toolBundles.remove": { params: ToolBundleAddressParams; result: boolean };
   "user.create": { params: CreateUserRequest; result: UserCreationResult };
   "user.credits": { params: UsersSetCreditsParams; result: boolean };
   "user.emailTest": { params: UsersEmailTestParams; result: UsersEmailTestResult };
@@ -457,6 +463,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.sfuPeerForNeighbourhood",
   "sfu.sfuPeersForNeighbourhood",
   "sfu.status",
+  "toolBundles.list",
   "user.list",
   "user.multiUserEnabled",
   "user.wallet",
@@ -476,4 +483,5 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "runtime.restartHolochain",
+  "toolBundles.install",
 ]);

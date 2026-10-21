@@ -5,6 +5,7 @@ import { PerspectiveClient } from './perspectives/PerspectiveClient'
 import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
+import { ToolBundlesClient } from './toolBundles/ToolBundlesClient'
 import { ApiClient, EventFilter } from './apiClient'
 import type { EventMap, EventName } from './generated/api/Events'
 import { Ad4mModel } from './model/Ad4mModel'
@@ -31,6 +32,7 @@ export class Ad4mClient {
     #perspectiveClient: PerspectiveClient
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
+    #toolBundlesClient: ToolBundlesClient
 
     constructor(
         baseUrl: string,
@@ -50,6 +52,7 @@ export class Ad4mClient {
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
         this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
+        this.#toolBundlesClient = new ToolBundlesClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
         try {
@@ -71,6 +74,10 @@ export class Ad4mClient {
 
     get languages(): LanguageClient {
         return this.#languageClient
+    }
+
+    get toolBundles(): ToolBundlesClient {
+        return this.#toolBundlesClient
     }
 
     get neighbourhood(): NeighbourhoodClient {
