@@ -328,6 +328,7 @@ pub fn scope_subject(scope: &Scope) -> &str {
         // is what any caller reaching here would have written; a traversal with
         // no anchors has no subject at all.
         Scope::Traverse { ids, .. } => ids.first().map(|id| id.as_str()).unwrap_or(""),
+        Scope::Contained(c) => c.id.as_str(),
     }
 }
 

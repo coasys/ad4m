@@ -40,6 +40,11 @@ export interface WsClientOptions {
     /** Resolves to a fresh JWT for first-message auth. Called after
      * the socket opens, before any application-level messages. */
     getToken: () => Promise<string>;
+    /** Drops the cached token so the next getToken() re-authenticates.
+     * Called on `auth-error`: the server rejected the token (revoked
+     * session, expiry, new signing secret), and reconnecting with the
+     * same token would be rejected again, forever. */
+    invalidateToken?: () => void;
     handlers: WsClientHandlers;
     minBackoffMs?: number;
     maxBackoffMs?: number;
@@ -174,6 +179,9 @@ export class WsClient {
         if (msg.type === "auth-error") {
             console.error("[server-link-language] WS auth rejected:", msg.error);
             this.authenticating = false;
+            // Drop the token first: the reconnect scheduled by the close
+            // below must authenticate afresh, not resend the dead token.
+            this.opts.invalidateToken?.();
             this.conn?.close(4004, "auth rejected");
             return;
         }

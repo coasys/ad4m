@@ -9,7 +9,7 @@ use ts_rs::TS;
 use crate::agent::capabilities::*;
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
-use crate::globals::AD4M_VERSION;
+use crate::globals::{AD4M_COMMIT, AD4M_VERSION};
 use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::notification_access::{
     caller_may_manage, granted_after_update, owner_may_read,
@@ -40,6 +40,7 @@ async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<V
             is_initialized: agent_service.is_initialized(),
             is_unlocked: agent_service.is_unlocked(),
             ad4m_executor_version: AD4M_VERSION.clone(),
+            ad4m_executor_commit: AD4M_COMMIT.clone(),
         })
     })?;
     Ok(serde_json::to_value(info)?)

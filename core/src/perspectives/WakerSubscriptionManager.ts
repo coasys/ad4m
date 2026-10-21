@@ -12,15 +12,30 @@ export interface WakerSubscription {
   type: "mention" | "channel-messages";
   perspective: string;
   channel: string;
+  /** SPARQL, or with `className` a model query (JSON) over that class. */
   query: string;
+  /**
+   * The class `query` reads, as a model query. A children subscription has
+   * one from the executor's `generate_waker_query`: the built-in
+   * `ad4m://Container` (#1446). Without it `query` is SPARQL.
+   */
+  className?: string;
   neighbourhood?: string;
 }
+
+/** The built-in `Container` (`Container.builtinUri`; not imported, so the
+ *  plugin bundle does not pull in the model layer). */
+const CONTAINER = "ad4m://Container";
 
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
   /** The message's expression address (source of the body link). */
   address: string;
-  /** All parent addresses this message belongs to (channels, conversations, etc.). */
+  /**
+   * Every container holding it (channels, threads, calls, blocks): whatever
+   * links it with `ad4m://has_child`, and every instance of a class whose
+   * `children` relation links it. A record can sit in several.
+   */
   parents: string[];
   /**
    * Everything above the parents, nearest first: their parents, theirs, and so on up to the
@@ -176,7 +191,7 @@ export class WakerSubscriptionManager {
   }
 
   /**
-   * Create a live SPARQL subscription.
+   * Create a live subscription: SPARQL, or a model query when `sub.className` is set.
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
@@ -192,13 +207,11 @@ export class WakerSubscriptionManager {
     this.logger.info(
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
-    this.logger.info(`[waker] ${sub.id}: SPARQL query:\n${sub.query}`);
+    this.logger.info(`[waker] ${sub.id}: ${sub.className ? `model query over ${sub.className}` : "SPARQL query"}:\n${sub.query}`);
 
-    const proxy = new QuerySubscriptionProxy(
-      sub.perspective,
-      sub.query,
-      this.perspectiveClient,
-    );
+    const proxy = sub.className
+      ? new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient, sub.className)
+      : new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient);
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
     // it before the next microtask it crashes the process.
@@ -273,10 +286,13 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: onResult fired — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
-      // Query engine can deliver non-array values (e.g. false) on disconnect/reconnect — ignore them
-      if (!Array.isArray(result)) {
+      // A model subscription delivers `{ instances }`, SPARQL an array of
+      // rows. Anything else (e.g. `false` on a disconnect/reconnect) is
+      // ignored.
+      const rows: unknown = sub.className ? result?.instances : result;
+      if (!Array.isArray(rows)) {
         this.logger.warn(
-          `[waker] ${sub.id}: ignoring non-array result: ${JSON.stringify(result)}`,
+          `[waker] ${sub.id}: ignoring result without ${sub.className ? "instances" : "rows"}: ${JSON.stringify(result)}`,
         );
         return;
       }
@@ -287,22 +303,24 @@ export class WakerSubscriptionManager {
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
 
-        for (const item of result) {
-          if (item && item.source && !currentSeen.has(item.source)) {
-            currentSeen.add(item.source);
-            newMessages.push(item.source);
+        for (const item of rows as any[]) {
+          // A SPARQL row names the record as `source`, a model row as `id`.
+          const address = sub.className ? item?.id : item?.source;
+          if (typeof address === "string" && address && !currentSeen.has(address)) {
+            currentSeen.add(address);
+            newMessages.push(address);
           }
         }
 
         if (newMessages.length === 0) {
           this.logger.info(
-            `[waker] ${sub.id}: all ${result.length} items already seen, skipping`,
+            `[waker] ${sub.id}: all ${rows.length} items already seen, skipping`,
           );
           return;
         }
 
         this.logger.info(
-          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${result.length} total`,
+          `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${rows.length} total`,
         );
 
         // Resolve parents, and the chain above them, per new message
@@ -336,7 +354,7 @@ export class WakerSubscriptionManager {
         // For channel-messages: always notify the agent on every subscription push.
         // No deduplication — the agent reads recent messages itself.
         this.logger.info(
-          `[waker] ${sub.id}: channel update (${result.length} items)`,
+          `[waker] ${sub.id}: channel update (${rows.length} items)`,
         );
 
         const existing = this.debounceTimers.get(sub.id);
@@ -464,52 +482,42 @@ export class WakerSubscriptionManager {
     return this.activeSubscriptions.has(id);
   }
 
-  /** Resolve one containment level in one query; skip unsafe IRI tokens and treat failures as none. */
+  /**
+   * Everything holding any of `addresses`, in one model query: a `Container`
+   * step in (#1446). The executor follows `ad4m://has_child` on any node and
+   * each class's own `children` relation on its instances, so the waker
+   * looks up no predicate. Failures count as none.
+   */
   private async parentsOf(sub: WakerSubscription, addresses: string[]): Promise<string[]> {
-    const safe = [...new Set(addresses)].filter((address) => {
-      if (/[<>"{}|^`\\\s\x00-\x20]/.test(address)) {
-        this.logger.warn(`[waker] ${sub.id}: skipping parent lookup for unsafe address ${JSON.stringify(address)}`);
-        return false;
-      }
-      return true;
-    });
-    if (!safe.length) return [];
-    try {
-      const query = safe.length === 1
-        ? `SELECT ?source WHERE { ?source <ad4m://has_child> <${safe[0]}> . }`
-        : `SELECT ?source WHERE { VALUES ?child { ${safe.map((address) => `<${address}>`).join(" ")} } ?source <ad4m://has_child> ?child . }`;
-      const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, query);
-      if (!Array.isArray(rows)) return [];
-      // A row omits a variable left unbound in its solution.
-      return rows.map((row) => row?.source).filter((source): source is string => typeof source === "string");
-    } catch (err: any) {
-      this.logger.warn(`[waker] ${sub.id}: parent resolution failed for ${JSON.stringify(safe)} — ${err?.message ?? err}`);
-      return [];
-    }
+    if (!addresses.length) return [];
+    return this.containers(sub, { ids: [...new Set(addresses)], direction: "in" }, addresses);
   }
 
   /**
-   * The chain above an item's parents, a level at a time, nearest first, up to `ancestorDepth`.
-   *
-   * Breadth-first with a visited set: containment is a graph, not a tree — an item can sit in two
-   * places, and nothing stops a cycle — so each address is reported once and the walk always ends.
-   * Each level uses one batched parent lookup, bounded by the depth.
+   * The chain above an item's parents, nearest first, up to `ancestorDepth` levels: one
+   * transitive `Container` walk in from the parents, bounded by `maxDepth`. The executor walks
+   * containment as a graph, so each address comes once however many paths reach it, and a
+   * cycle ends. The item and its parents are never reported as ancestors.
    */
   private async ancestorsOf(sub: WakerSubscription, address: string, parents: string[]): Promise<string[]> {
+    if (!parents.length || this.ancestorDepth <= 0) return [];
+    const scope = { ids: parents, direction: "in", transitive: true, maxDepth: this.ancestorDepth };
     const seen = new Set<string>([address, ...parents]);
-    const ancestors: string[] = [];
-    let level = parents;
-    for (let depth = 0; depth < this.ancestorDepth && level.length; depth++) {
-      const next: string[] = [];
-      for (const parent of await this.parentsOf(sub, level)) {
-        if (seen.has(parent)) continue;
-        seen.add(parent);
-        next.push(parent);
-      }
-      ancestors.push(...next);
-      level = next;
+    return (await this.containers(sub, scope, parents)).filter((id) => !seen.has(id));
+  }
+
+  /** The ids of the `Container` rows `parent` scopes to, in the executor's order. */
+  private async containers(sub: WakerSubscription, parent: Record<string, unknown>, from: string[]): Promise<string[]> {
+    try {
+      const query = JSON.stringify({ parent, properties: [] });
+      const result = await this.perspectiveClient.modelQuery(sub.perspective, CONTAINER, query);
+      const instances: unknown = result?.instances;
+      if (!Array.isArray(instances)) return [];
+      return instances.map((row) => row?.id).filter((id): id is string => typeof id === "string");
+    } catch (err: any) {
+      this.logger.warn(`[waker] ${sub.id}: containment lookup failed for ${JSON.stringify(from)} — ${err?.message ?? err}`);
+      return [];
     }
-    return ancestors;
   }
 
   private persist(): void {
